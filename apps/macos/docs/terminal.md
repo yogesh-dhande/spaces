@@ -162,6 +162,7 @@ Current performance decisions:
 - Global app-toggle behavior also distinguishes the primary main window from auxiliary built-in windows. When a built-in terminal or the command palette is focused, toggling the app summons only the main Spaces window instead of unhiding or fronting every Spaces-owned window in the process. Command-palette presentation also targets only the palette panel, so built-in terminal windows stay in their existing visibility state.
 - Built-in terminal summon/focus flows keep the tracked workspace association in the `windows` table through the terminal session ID. That lets the main window restore the owning workspace detail view when the user toggles back from a focused built-in terminal, even before yabai has supplied or refreshed a native window ID.
 - The main-window hotkey path resolves the owning workspace from the focused built-in terminal session first and skips the generic focused-window workspace lookup whenever that session mapping already exists. That keeps `Cmd+Opt+=` from paying an unnecessary focused-window lookup on every `Spaces terminal -> main window` transition.
+- When `Cmd+Opt+=` brings the main window forward from a focused built-in terminal, the app remembers that terminal session and restores focus back to it when the user presses the hotkey again to hide the main window. That keeps the round-trip `terminal -> main window -> terminal` path explicit instead of leaving focus restoration to AppKit.
 - The command-palette hotkey path follows the same pattern. When a built-in terminal is focused, it resolves the palette context workspace from the terminal session first and skips the generic focused-window lookup whenever the session already maps back to a workspace.
 - Built-in terminal actions emit debug metrics through the shared `spaces: perf metric=...` format when `DEBUG=1`, including:
   - `workspace_terminal_open_ui`
@@ -185,6 +186,7 @@ Current performance decisions:
   - `toggle_window_focused_window_workspace_lookup`
   - `toggle_window_reveal_target`
   - `toggle_window_selection_refresh`
+  - `toggle_window_return_terminal_focus`
   - `toggle_window_flow`
 
 These metrics are intended to guide regressions around owner-window attach, owner-focus reassertion, session bring-up, control-plane latency, and ownership handoff.
@@ -281,17 +283,22 @@ That profiler:
 - launches a debug `SpacesApp` with `DEBUG=1`
 - focuses a tracked built-in process terminal
 - repeats `Cmd+Opt+=` to return to the main window
-- immediately refocuses the tracked process terminal through the real workspace-process focus path
-- records wall-clock toggle timing alongside app-side hotkey metrics
+- repeats `Cmd+Opt+=` again to hide the main window and return focus to the built-in terminal
+- records both wall-clock halves of the round trip alongside app-side hotkey metrics
 
 A representative isolated debug run recorded:
 - `terminal_to_main_toggle_wall`: `734-759ms`
-- `toggle_window`: `1-4ms`
+- `toggle_window_show`: `1-4ms`
 - `toggle_window_reveal_target`: `1-4ms`
 - `toggle_window_terminal_workspace_lookup`: `0ms`
 - `toggle_window_selection_refresh`: `26-32ms`
 
-That split shows the built-in hotkey handler itself is no longer the slow part of the loop. The remaining wall time lives in the broader real-system focus transition after the main-window reveal, not in the terminal-session lookup or main-window workspace-selection refresh.
+The profiler also records the return leg:
+- `main_to_terminal_toggle_wall`
+- `toggle_window_hide`
+- `toggle_window_return_terminal_focus`
+
+That split keeps the hide path measurable as a real `terminal -> main window -> terminal` round trip instead of leaving the second hotkey press to an implicit AppKit focus handoff.
 
 For repeatable performance sampling of the built-in `Spaces terminal -> command palette -> tracked process terminal` hotkey loop:
 

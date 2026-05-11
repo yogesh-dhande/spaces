@@ -18,7 +18,8 @@ PROJECT_DIR="$WORK_ROOT/repo"
 WORKSPACE_INFO_JSON="$WORK_ROOT/workspace.json"
 SUMMARY_PATH="$WORK_ROOT/summary.txt"
 METRICS_PATH="$WORK_ROOT/metrics.json"
-TOGGLE_WALL_SAMPLES="$WORK_ROOT/toggle-wall-samples.txt"
+SHOW_TOGGLE_WALL_SAMPLES="$WORK_ROOT/show-toggle-wall-samples.txt"
+HIDE_TOGGLE_WALL_SAMPLES="$WORK_ROOT/hide-toggle-wall-samples.txt"
 PROCESS_FOCUS_LOG="$WORK_ROOT/process-focus.log"
 APP_PID=""
 
@@ -206,12 +207,16 @@ env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --wo
 wait_for_spaces_frontmost_ready
 
 for iteration in $(seq 1 "$ITERATIONS"); do
-  toggle_pattern="spaces: perf metric=toggle_window target=action=show .*app_active_before=1 .*success=1 elapsed_ms="
+  toggle_show_pattern="spaces: perf metric=toggle_window target=action=show .*app_active_before=1 .*success=1 elapsed_ms="
+  toggle_hide_pattern="spaces: perf metric=toggle_window target=action=hide .*app_active_before=1 .*success=1 elapsed_ms="
   lookup_pattern="spaces: perf metric=toggle_window_terminal_workspace_lookup target=session=.* success=[01] elapsed_ms="
   refresh_pattern="spaces: perf metric=toggle_window_selection_refresh target=workspace=.* success=1 elapsed_ms="
-  toggle_baseline="$(grep -Ec "$toggle_pattern" "$APP_LOG" || true)"
+  return_pattern="spaces: perf metric=toggle_window_return_terminal_focus target=session=.* success=1 elapsed_ms="
+  toggle_show_baseline="$(grep -Ec "$toggle_show_pattern" "$APP_LOG" || true)"
+  toggle_hide_baseline="$(grep -Ec "$toggle_hide_pattern" "$APP_LOG" || true)"
   lookup_baseline="$(grep -Ec "$lookup_pattern" "$APP_LOG" || true)"
   refresh_baseline="$(grep -Ec "$refresh_pattern" "$APP_LOG" || true)"
+  return_baseline="$(grep -Ec "$return_pattern" "$APP_LOG" || true)"
 
   started_at="$(python3 - <<'PY'
 import time
@@ -219,28 +224,37 @@ print(time.time())
 PY
 )"
   send_spaces_toggle_hotkey
-  wait_for_log_pattern_count_greater_than "$toggle_pattern" "$toggle_baseline" 30
+  wait_for_log_pattern_count_greater_than "$toggle_show_pattern" "$toggle_show_baseline" 30
   wait_for_log_pattern_count_greater_than "$lookup_pattern" "$lookup_baseline" 30
   wait_for_log_pattern_count_greater_than "$refresh_pattern" "$refresh_baseline" 30
   wait_for_spaces_frontmost_ready
-  printf 'iteration=%s terminal_to_main_toggle_wall_ms=%s\n' "$iteration" "$(ms_since "$started_at")" >>"$TOGGLE_WALL_SAMPLES"
+  printf 'iteration=%s terminal_to_main_toggle_wall_ms=%s\n' "$iteration" "$(ms_since "$started_at")" >>"$SHOW_TOGGLE_WALL_SAMPLES"
 
-  env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name frontend >/dev/null 2>>"$PROCESS_FOCUS_LOG"
-  wait_for_spaces_frontmost_ready
+  hide_started_at="$(python3 - <<'PY'
+import time
+print(time.time())
+PY
+)"
+  send_spaces_toggle_hotkey
+  wait_for_log_pattern_count_greater_than "$toggle_hide_pattern" "$toggle_hide_baseline" 30
+  wait_for_log_pattern_count_greater_than "$return_pattern" "$return_baseline" 30
+  printf 'iteration=%s main_to_terminal_toggle_wall_ms=%s\n' "$iteration" "$(ms_since "$hide_started_at")" >>"$HIDE_TOGGLE_WALL_SAMPLES"
 done
 
-python3 - "$APP_LOG" "$ITERATIONS" "$TOGGLE_WALL_SAMPLES" "$METRICS_PATH" <<'PY' >"$SUMMARY_PATH"
+python3 - "$APP_LOG" "$ITERATIONS" "$SHOW_TOGGLE_WALL_SAMPLES" "$HIDE_TOGGLE_WALL_SAMPLES" "$METRICS_PATH" <<'PY' >"$SUMMARY_PATH"
 import json, math, re, statistics, sys
 
-log_path, iterations, wall_samples_path, metrics_path = sys.argv[1:5]
+log_path, iterations, show_wall_samples_path, hide_wall_samples_path, metrics_path = sys.argv[1:6]
 iterations = int(iterations)
 pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<target>.*?) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
 metrics = {
-    "toggle_window": [],
+    "toggle_window_show": [],
+    "toggle_window_hide": [],
     "toggle_window_reveal_target": [],
     "toggle_window_focused_window_workspace_lookup": [],
     "toggle_window_terminal_workspace_lookup": [],
     "toggle_window_selection_refresh": [],
+    "toggle_window_return_terminal_focus": [],
 }
 
 with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
@@ -251,16 +265,25 @@ with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
             continue
         metric = match.group("metric")
         if metric == "toggle_window" and "action=show" in match.group("target") and "app_active_before=1" in match.group("target"):
-            metrics["toggle_window"].append(int(match.group("elapsed")))
+            metrics["toggle_window_show"].append(int(match.group("elapsed")))
+        elif metric == "toggle_window" and "action=hide" in match.group("target") and "app_active_before=1" in match.group("target"):
+            metrics["toggle_window_hide"].append(int(match.group("elapsed")))
         elif metric in metrics:
             metrics[metric].append(int(match.group("elapsed")))
 
-wall_samples = []
-with open(wall_samples_path, "r", encoding="utf-8") as handle:
+show_wall_samples = []
+with open(show_wall_samples_path, "r", encoding="utf-8") as handle:
     for line in handle:
         if "terminal_to_main_toggle_wall_ms=" not in line:
             continue
-        wall_samples.append(int(line.strip().split("terminal_to_main_toggle_wall_ms=", 1)[1]))
+        show_wall_samples.append(int(line.strip().split("terminal_to_main_toggle_wall_ms=", 1)[1]))
+
+hide_wall_samples = []
+with open(hide_wall_samples_path, "r", encoding="utf-8") as handle:
+    for line in handle:
+        if "main_to_terminal_toggle_wall_ms=" not in line:
+            continue
+        hide_wall_samples.append(int(line.strip().split("main_to_terminal_toggle_wall_ms=", 1)[1]))
 
 def summarize(values):
     avg = round(statistics.mean(values), 1)
@@ -276,12 +299,15 @@ def summarize(values):
     }
 
 ordered = [
-    ("terminal_to_main_toggle_wall", wall_samples),
-    ("toggle_window", metrics["toggle_window"]),
+    ("terminal_to_main_toggle_wall", show_wall_samples),
+    ("main_to_terminal_toggle_wall", hide_wall_samples),
+    ("toggle_window_show", metrics["toggle_window_show"]),
+    ("toggle_window_hide", metrics["toggle_window_hide"]),
     ("toggle_window_reveal_target", metrics["toggle_window_reveal_target"]),
     ("toggle_window_focused_window_workspace_lookup", metrics["toggle_window_focused_window_workspace_lookup"]),
     ("toggle_window_terminal_workspace_lookup", metrics["toggle_window_terminal_workspace_lookup"]),
     ("toggle_window_selection_refresh", metrics["toggle_window_selection_refresh"]),
+    ("toggle_window_return_terminal_focus", metrics["toggle_window_return_terminal_focus"]),
 ]
 
 payload = {"iterations": iterations, "metrics": {}}

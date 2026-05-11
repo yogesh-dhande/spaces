@@ -65,6 +65,13 @@ import spacesterminalcore
             !AppKitController.shouldHideMainWindowForToggle(appIsActive: true, appIsHidden: true, mainWindowIsVisible: true, mainWindowIsKey: true))
     }
 
+    @Test func toggleHotkeyRestoresTerminalFocusOnlyWhenReturnTargetAndAuxiliaryWindowExist() {
+        #expect(AppKitController.shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: "session-1", auxiliaryTerminalWindowsVisible: true))
+        #expect(!AppKitController.shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: nil, auxiliaryTerminalWindowsVisible: true))
+        #expect(
+            !AppKitController.shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: "session-1", auxiliaryTerminalWindowsVisible: false))
+    }
+
     @Test func commandPalettePresentationCompletesOnlyAfterPaletteBecomesKey() {
         #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: false, panelIsKey: false))
         #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: true, panelIsKey: false))

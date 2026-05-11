@@ -118,7 +118,10 @@ ITERATIONS=3 apps/macos/Tests/profile_spaces_terminal_hotkeys.sh
 
 That profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, focuses a tracked built-in process terminal, repeatedly toggles back to the main window with `Cmd+Opt+=`, then refocuses the tracked terminal through the normal workspace-process path while summarizing:
 - `terminal_to_main_toggle_wall`
-- `toggle_window`
+- `main_to_terminal_toggle_wall`
+- `toggle_window_show`
+- `toggle_window_hide`
+- `toggle_window_return_terminal_focus`
 - `toggle_window_reveal_target`
 - `toggle_window_terminal_workspace_lookup`
 - `toggle_window_selection_refresh`

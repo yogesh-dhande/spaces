@@ -249,6 +249,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var recentCommandPaletteFocusIdentities: [String] = []
     private var terminalSessionWindowControllers: [String: [TerminalSessionWindowController]] = [:]
+    private var appToggleReturnTerminalSessionID: String?
 
     private struct WindowShortcutProfile {
         let index: Int
@@ -6916,6 +6917,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         -> Bool
     { appIsActive && !appIsHidden && mainWindowIsVisible && mainWindowIsKey }
 
+    nonisolated static func shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: String?, auxiliaryTerminalWindowsVisible: Bool) -> Bool {
+        auxiliaryTerminalWindowsVisible && returnTerminalSessionID != nil
+    }
+
     nonisolated static func effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: Bool, commandPaletteMainWindowVisibility: Bool?)
         -> Bool
     { commandPaletteMainWindowVisibility ?? rawMainWindowIsVisible }
@@ -7208,13 +7213,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             mainWindowIsKey: window.isKeyWindow)
         {
             logHotkeyDebug("toggle_window hide_main_only")
+            let returnTerminalSessionID = appToggleReturnTerminalSessionID
+            let shouldRestoreTerminalFocus = Self.shouldRestoreTerminalFocusAfterMainHide(
+                returnTerminalSessionID: returnTerminalSessionID, auxiliaryTerminalWindowsVisible: hasVisibleTerminalSessionWindowsForHotkeyState())
             window.orderOut(nil)
+            if shouldRestoreTerminalFocus, let returnTerminalSessionID {
+                let restoreStartedAt = Date()
+                focusTerminalSessionWindow(sessionID: returnTerminalSessionID)
+                logPerfMetric(
+                    "toggle_window_return_terminal_focus", target: "session=\(returnTerminalSessionID)",
+                    elapsedMS: windowShortcutElapsedMS(since: restoreStartedAt), success: true)
+            }
             logHotkeyPerfMetric("toggle_window", action: "hide", context: perfContext)
             return
         }
+        let focusedTerminalSessionID = focusedTerminalSessionIDForToggle()
         let focusedTerminalWorkspaceID: String?
         let selectionRefreshSource: String
-        if let terminalSessionID = focusedTerminalSessionIDForToggle() {
+        if let terminalSessionID = focusedTerminalSessionID {
             let lookupStartedAt = Date()
             focusedTerminalWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(terminalSessionID)
             logPerfMetric(
@@ -7245,6 +7261,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         logHotkeyDebug("toggle_window show_main focused_workspace=\(focusedWorkspaceID ?? "nil") \(hotkeyWindowStateSummary())")
         logPerfMetric("toggle_window_flow", target: "main", elapsedMS: windowShortcutElapsedMS(since: toggleStartedAt), success: true)
         logHotkeyPerfMetric("toggle_window", action: "show", context: perfContext)
+        appToggleReturnTerminalSessionID = focusedTerminalSessionID
         scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: focusedWorkspaceID ?? nil, source: selectionRefreshSource)
     }
 
