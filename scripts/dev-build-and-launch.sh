@@ -6,6 +6,7 @@ APP="$repo_root/apps/macos/.build/debug/SpacesApp"
 LOG_FILE="/tmp/Spaces.log"
 CRASH_DIR="$HOME/Library/Logs/DiagnosticReports"
 POST_LAUNCH_MONITOR_SECONDS="${SPACES_POST_LAUNCH_MONITOR_SECONDS:-45}"
+DEV_DB_PATH="${SPACES_DEV_DB_PATH:-$HOME/.spaces-dev/spaces.db}"
 
 print_failure_diagnostics() {
   echo "Spaces exited; last log lines:"
@@ -32,7 +33,8 @@ pkill -x Spaces 2>/dev/null || true
 
 # Relaunch in background and keep logs so launch failures are visible.
 rm -f "$LOG_FILE"
-nohup "$APP" >"$LOG_FILE" 2>&1 </dev/null &
+mkdir -p "$(dirname "$DEV_DB_PATH")"
+nohup env SPACES_DB_PATH="$DEV_DB_PATH" "$APP" >"$LOG_FILE" 2>&1 </dev/null &
 app_pid=$!
 
 # Bring app to front when possible.
@@ -52,6 +54,7 @@ fi
 osascript -e "tell application \"System Events\" to set frontmost of first process whose unix id is $app_pid to true" >/dev/null 2>&1 || true
 
 echo "Spaces relaunched (pid $app_pid)"
+echo "Using dev database: $DEV_DB_PATH"
 
 if [ "$POST_LAUNCH_MONITOR_SECONDS" -gt 0 ]; then
   echo "Monitoring launch stability for ${POST_LAUNCH_MONITOR_SECONDS}s..."

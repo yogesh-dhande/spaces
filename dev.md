@@ -47,6 +47,8 @@ apps/macos/.build/debug/spaces update --notes "Ready for review"
 apps/macos/.build/debug/spaces restart
 ```
 
+Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. The script sets `SPACES_DB_PATH` to `~/.spaces-dev/spaces.db` by default. Override it with `SPACES_DEV_DB_PATH=/custom/path/spaces.db` when you want a different isolated dev database.
+
 ## Pre-commit Hook
 
 Git commits can use the repo hook in `.githooks/pre-commit`, which auto-formats staged Swift files under `apps/macos/Sources` and `apps/macos/Tests` before running lint and coverage.

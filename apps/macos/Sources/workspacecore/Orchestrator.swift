@@ -2335,8 +2335,12 @@ public final class WorkspaceOrchestrator {
 
     private func startupFailureSummary(from paneOutput: String) -> String? {
         let lines = paneOutput.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        guard let summary = lines.last else { return nil }
-        return String(summary.prefix(240))
+        guard !lines.isEmpty else { return nil }
+
+        let selectedLines = Array(lines.suffix(3))
+        guard !selectedLines.isEmpty else { return nil }
+
+        return selectedLines.map { String($0.prefix(160)) }.joined(separator: "\n")
     }
 
     private func processStartupFailureMessage(processName: String, commandDescription: String?, exitStatus: Int?, paneOutput: String?) -> String {
@@ -2353,7 +2357,10 @@ public final class WorkspaceOrchestrator {
             label = "Process failed to start."
         }
 
-        if let paneOutput, let summary = startupFailureSummary(from: paneOutput) { return "\(label) \(summary)" }
+        if let paneOutput, let summary = startupFailureSummary(from: paneOutput) {
+            if summary.contains("\n") { return "\(label)\n\(summary)" }
+            return "\(label) \(summary)"
+        }
         if let exitStatus { return "\(label) Exit status \(exitStatus)." }
         return label
     }

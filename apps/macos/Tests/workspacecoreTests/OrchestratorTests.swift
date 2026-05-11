@@ -4109,6 +4109,105 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
     }
 
+    func testLaunchWorkspaceSurfacesInformativeNpmFailureInsteadOfWrappedLogFilename() throws {
+        final class WrappedNpmFailureTmuxAdapter: MockTmuxAdapter, @unchecked Sendable {
+            override func startSession(named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String])
+                throws -> TmuxWindowInfo
+            {
+                let window = try super.startSession(named: sessionName, windowName: windowName, cwd: cwd, env: env, command: command)
+                paneDeadByWindowID[window.id] = true
+                paneExitStatusByWindowID[window.id] = 1
+                capturedPaneByWindowID[window.id] = """
+                    npm error path /tmp/project/package.json
+                    npm error enoent Could not read package.json
+                    npm error A complete log of this run can be found in:
+                    2026-05-09T18_05_38_585Z-debug-0.log
+                    """
+                return window
+            }
+        }
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let mockTmux = WrappedNpmFailureTmuxAdapter()
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "webserver", command: "cd apps/web && npm run dev", executionMode: .shell)]
+        }
+
+        XCTAssertThrowsError(
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+        ) { error in
+            guard case WorkspaceError.invalidArgument(let message) = error else { return XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(
+                message,
+                """
+                Process 'webserver' failed to start (cd apps/web && npm run dev).
+                npm error enoent Could not read package.json
+                npm error A complete log of this run can be found in:
+                2026-05-09T18_05_38_585Z-debug-0.log
+                """)
+        }
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 0)
+        XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
+    }
+
+    func testLaunchWorkspaceSurfacesLastMeaningfulPaneLinesForWrappedGenericFailure() throws {
+        final class WrappedGenericFailureTmuxAdapter: MockTmuxAdapter, @unchecked Sendable {
+            override func startSession(named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String])
+                throws -> TmuxWindowInfo
+            {
+                let window = try super.startSession(named: sessionName, windowName: windowName, cwd: cwd, env: env, command: command)
+                paneDeadByWindowID[window.id] = true
+                paneExitStatusByWindowID[window.id] = 1
+                capturedPaneByWindowID[window.id] = """
+                    build step 1/3
+                    failed while loading config
+                    retry with --verbose for details
+                    """
+                return window
+            }
+        }
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let mockTmux = WrappedGenericFailureTmuxAdapter()
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "builder", command: "run-build", executionMode: .shell)]
+        }
+
+        XCTAssertThrowsError(
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+        ) { error in
+            guard case WorkspaceError.invalidArgument(let message) = error else { return XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(
+                message,
+                """
+                Process 'builder' failed to start (run-build).
+                build step 1/3
+                failed while loading config
+                retry with --verbose for details
+                """)
+        }
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 0)
+        XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
+    }
+
     // Tests launch workspace waits for pending setup to finish by arranging a deferred setup run and asserting launch completes afterwards.
     func testLaunchWorkspaceWaitsForPendingSetupToFinish() throws {
         let root = try makeTempDirectory()
