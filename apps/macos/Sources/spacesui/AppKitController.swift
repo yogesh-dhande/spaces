@@ -7126,9 +7126,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         returnTerminalSessionID: String?, returnApplicationProcessID: pid_t?, auxiliaryTerminalWindowsVisible: Bool
     ) -> Bool { return returnTerminalSessionID == nil && returnApplicationProcessID != nil && !auxiliaryTerminalWindowsVisible }
 
-    nonisolated static func shouldHideAppAfterMainHide(returnTerminalSessionID: String?, auxiliaryWindowsVisible: Bool) -> Bool {
-        return returnTerminalSessionID == nil && !auxiliaryWindowsVisible
-    }
+    nonisolated static func shouldMiniaturizeMainWindowAfterHide(returnTerminalSessionID: String?) -> Bool { return returnTerminalSessionID == nil }
 
     nonisolated static func returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: pid_t?, currentProcessID: pid_t) -> pid_t? {
         guard let frontmostApplicationProcessID, frontmostApplicationProcessID != currentProcessID else { return nil }
@@ -7234,14 +7232,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             logHotkeyDebug("toggle_window hide_main_only")
             let returnTerminalSessionID = appToggleReturnTerminalSessionID
             let returnApplicationProcessID = appToggleReturnApplicationProcessID
-            let auxiliaryWindowsVisible = hasVisibleAuxiliaryWindowsForHotkeyState()
             let shouldRestoreTerminalFocus = Self.shouldRestoreTerminalFocusAfterMainHide(
                 returnTerminalSessionID: returnTerminalSessionID, auxiliaryTerminalWindowsVisible: hasVisibleTerminalSessionWindowsForHotkeyState())
             let shouldRestoreReturnApplication = Self.shouldRestoreReturnApplicationAfterMainHide(
                 returnTerminalSessionID: returnTerminalSessionID, returnApplicationProcessID: returnApplicationProcessID,
                 auxiliaryTerminalWindowsVisible: hasVisibleTerminalSessionWindowsForHotkeyState())
-            if Self.shouldHideAppAfterMainHide(returnTerminalSessionID: returnTerminalSessionID, auxiliaryWindowsVisible: auxiliaryWindowsVisible) {
-                NSApp.hide(nil)
+            if Self.shouldMiniaturizeMainWindowAfterHide(returnTerminalSessionID: returnTerminalSessionID) {
+                window.miniaturize(nil)
             } else {
                 window.orderOut(nil)
             }
