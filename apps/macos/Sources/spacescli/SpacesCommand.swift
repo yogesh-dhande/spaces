@@ -460,16 +460,22 @@ func resolveAgentInvocationContext(workspaceID: String, environment: [String: St
     let focusedWindowID = context.currentYabaiWindowID()
     let adapter = terminalAdapter(for: resolvedProvider)
     let attributionIdentity = try adapter?.resolveCurrentAttributionIdentity(environment: environment, yabaiFocusedWindowID: focusedWindowID)
-    let splitIdentity = splitTrackingIdentity(attributionIdentity)
+    let spacesTrackingID = environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let fallbackTrackingIdentity: TerminalTrackingIdentity? =
+        if resolvedProvider == .spaces, let spacesTrackingID, !spacesTrackingID.isEmpty { .session(spacesTrackingID) } else { nil }
+    let trackingIdentity = attributionIdentity ?? fallbackTrackingIdentity
+    let splitIdentity = splitTrackingIdentity(trackingIdentity)
     if resolvedProvider == .ghostty, splitIdentity.sessionID?.isEmpty != false { return nil }
     if resolvedProvider == .iterm2, splitIdentity.sessionID?.isEmpty != false { return nil }
     let terminalNativeID =
         resolvedProvider == .ghostty
         ? try resolveTrackedGhosttyNativeTerminalID(workspaceID: workspaceID, terminalTrackingID: splitIdentity.sessionID, orchestrator: orchestrator)
-        : nil
+        : resolvedProvider == .spaces ? splitIdentity.sessionID : nil
     let resolvedYabaiWindowID: Int?
     if resolvedProvider == .ghostty {
         resolvedYabaiWindowID = splitIdentity.windowID
+    } else if resolvedProvider == .spaces {
+        resolvedYabaiWindowID = splitIdentity.windowID ?? focusedWindowID
     } else if splitIdentity.sessionID?.isEmpty == false {
         // iTerm session IDs are already stable terminal identities. Falling back
         // to whichever yabai window happens to be focused at event time can
@@ -501,6 +507,9 @@ private func requireWorkspace(path: String?, orchestrator: WorkspaceOrchestrator
 }
 
 private func resolveProvider(environment: [String: String]) -> AgentProvider? {
+    let spacesTerminalHost = environment["SPACES_TERMINAL_HOST"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+    if spacesTerminalHost == TerminalHost.spaces.rawValue { return .spaces }
+
     let bundleIdentifier = environment["__CFBundleIdentifier"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     if bundleIdentifier == TerminalHost.iterm2.bundleIdentifier { return .iterm2 }
     if bundleIdentifier == TerminalHost.ghostty.bundleIdentifier { return .ghostty }
@@ -563,6 +572,7 @@ private func agentProvider(for terminalApp: String?) -> AgentProvider? {
     switch terminalApp {
     case TerminalHost.iterm2.appName: return .iterm2
     case TerminalHost.ghostty.appName: return .ghostty
+    case TerminalHost.spaces.appName: return .spaces
     default: return nil
     }
 }
@@ -571,6 +581,7 @@ private func terminalAdapter(for provider: AgentProvider) -> (any TerminalAdapte
     switch provider {
     case .iterm2: return Iterm2Adapter()
     case .ghostty: return GhosttyAdapter()
+    case .spaces: return nil
     }
 }
 

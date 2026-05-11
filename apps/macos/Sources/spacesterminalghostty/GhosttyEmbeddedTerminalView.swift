@@ -3,6 +3,8 @@ import Foundation
 import GhosttyKit
 import spacesterminalcore
 
+@MainActor private final class GhosttyEmbeddedSurfaceHostView: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
+
 @MainActor public final class GhosttyEmbeddedTerminalView: NSView {
     public typealias SurfaceReadyHandler = @MainActor (ghostty_surface_t?) -> Void
 
@@ -35,17 +37,31 @@ import spacesterminalcore
     private var nextSurfaceCreationRetryAt: Date?
     private var lastSurfaceCreationFailureMessage: String?
     private var refreshScheduled = false
+    private var surfaceCreationRetryWorkItem: DispatchWorkItem?
+    private var hiddenHostWindow: NSWindow?
+    private weak var hiddenHostContainerView: NSView?
+    private let surfaceHostView = GhosttyEmbeddedSurfaceHostView(frame: .zero)
 
     public init(launchConfiguration: TerminalSessionLaunchConfiguration) {
         self.launchConfiguration = launchConfiguration
         super.init(frame: .zero)
         wantsLayer = true
+        surfaceHostView.translatesAutoresizingMaskIntoConstraints = false
+        surfaceHostView.wantsLayer = true
+        addSubview(surfaceHostView, positioned: .below, relativeTo: nil)
+        NSLayoutConstraint.activate([
+            surfaceHostView.topAnchor.constraint(equalTo: topAnchor), surfaceHostView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            surfaceHostView.trailingAnchor.constraint(equalTo: trailingAnchor), surfaceHostView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     deinit {
-        MainActor.assumeIsolated { teardownWindowObservation() }
+        MainActor.assumeIsolated {
+            teardownWindowObservation()
+            surfaceCreationRetryWorkItem?.cancel()
+        }
         if let surface { ghostty_surface_free(surface) }
     }
 
@@ -265,8 +281,30 @@ import spacesterminalcore
 
     public func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { outputHandler = handler }
     public func setFocused(_ focused: Bool) { setSurfaceFocus(focused) }
+
+    public func ensureHostingWindowForSurface() {
+        if window == nil { parkInHiddenHostWindowIfNeeded() }
+        createSurfaceIfNeeded()
+    }
+
+    public func parkInHiddenHostWindowIfNeeded() {
+        let hostWindow = ensureHiddenHostWindow()
+        guard let hostContainerView = hiddenHostContainerView else { return }
+        if superview !== hostContainerView {
+            removeFromSuperview()
+            frame = hostContainerView.bounds
+            autoresizingMask = [.width, .height]
+            hostContainerView.addSubview(self)
+            hiddenHostWindow?.layoutIfNeeded()
+        }
+        if hostWindow.isVisible { hostWindow.orderOut(nil) }
+    }
+
     public func requestSurfaceRefresh() {
-        guard surface != nil else { return }
+        guard surface != nil else {
+            createSurfaceIfNeeded()
+            return
+        }
         guard !refreshScheduled else { return }
         refreshScheduled = true
         DispatchQueue.main.async { [weak self] in
@@ -278,12 +316,14 @@ import spacesterminalcore
     func handleSurfaceClosed() { destroySurface() }
 
     private func createSurfaceIfNeeded() {
+        if window == nil { parkInHiddenHostWindowIfNeeded() }
         guard surface == nil else { return }
         if let nextSurfaceCreationRetryAt, Date() < nextSurfaceCreationRetryAt { return }
         let startedAt = Date()
 
         guard let backingSize = backingPixelSize() else {
             pendingSurfaceCreation = true
+            scheduleSurfaceCreationRetry(after: 0.05)
             return
         }
         pendingSurfaceCreation = false
@@ -294,7 +334,7 @@ import spacesterminalcore
 
             var surfaceConfig = ghostty_surface_config_new()
             surfaceConfig.platform_tag = GHOSTTY_PLATFORM_MACOS
-            surfaceConfig.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(nsview: Unmanaged.passUnretained(self).toOpaque()))
+            surfaceConfig.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(nsview: Unmanaged.passUnretained(surfaceHostView).toOpaque()))
             surfaceConfig.userdata = Unmanaged.passUnretained(self).toOpaque()
             surfaceConfig.scale_factor = Double(window?.backingScaleFactor ?? 2.0)
             surfaceConfig.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
@@ -319,6 +359,8 @@ import spacesterminalcore
             guard let createdSurface else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_surface_new failed") }
 
             surface = createdSurface
+            surfaceCreationRetryWorkItem?.cancel()
+            surfaceCreationRetryWorkItem = nil
             nextSurfaceCreationRetryAt = nil
             lastSurfaceCreationFailureMessage = nil
             lastGeometry = nil
@@ -344,12 +386,26 @@ import spacesterminalcore
                 elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
             pendingSurfaceCreation = true
             nextSurfaceCreationRetryAt = Date().addingTimeInterval(1)
+            scheduleSurfaceCreationRetry(after: 1)
             let message = String(describing: error)
             if lastSurfaceCreationFailureMessage != message {
                 lastSurfaceCreationFailureMessage = message
                 fputs("spaces: ghostty surface creation failed: \(message)\n", stderr)
             }
         }
+    }
+
+    private func scheduleSurfaceCreationRetry(after delay: TimeInterval) {
+        surfaceCreationRetryWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                self.surfaceCreationRetryWorkItem = nil
+                self.createSurfaceIfNeeded()
+            }
+        }
+        surfaceCreationRetryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func destroySurface() {
@@ -362,6 +418,23 @@ import spacesterminalcore
         lastGeometry = nil
         lastFocused = nil
         lastOccluded = nil
+    }
+
+    private func ensureHiddenHostWindow() -> NSWindow {
+        if let hiddenHostWindow { return hiddenHostWindow }
+        let frame = NSRect(x: 0, y: 0, width: 960, height: 640)
+        let hostWindow = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        hostWindow.isReleasedWhenClosed = false
+        hostWindow.alphaValue = 0
+        hostWindow.ignoresMouseEvents = true
+        hostWindow.backgroundColor = .clear
+        let hostContainerView = NSView(frame: frame)
+        hostContainerView.wantsLayer = true
+        hostWindow.contentView = hostContainerView
+        hostWindow.orderOut(nil)
+        hiddenHostWindow = hostWindow
+        hiddenHostContainerView = hostContainerView
+        return hostWindow
     }
 
     private func updateSurfaceGeometry() {

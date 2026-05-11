@@ -69,6 +69,7 @@ extension Notification.Name {
                     self?.appendOutput(data)
                 }
             }
+            terminalView.ensureHostingWindowForSurface()
             try startControlServer()
             startRuntimeStateTimer()
             refreshRuntimeState(force: true)
@@ -130,6 +131,7 @@ extension Notification.Name {
     public func detach(clientID: String) throws {
         try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
         if !isOwner(clientID: clientID) { terminalView.setFocused(false) }
+        if activeOwnerClientID() == nil { terminalView.parkInHiddenHostWindowIfNeeded() }
         postAttachmentStateDidChange()
         refreshRuntimeState(force: true)
     }
@@ -247,9 +249,12 @@ extension Notification.Name {
 
     private func refreshRuntimeState(force: Bool) {
         let now = Date()
+        let observedChildPID = observedChildPID()
+        let runtimeState: TerminalSessionState = observedChildPID == nil && hasExitedChildProcess() ? .exited : .running
         let state = TerminalSessionRuntimeState(
-            sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
-            state: .running, updatedAt: ISO8601DateFormatter().string(from: now))
+            sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
+            childPID: observedChildPID ?? (runtimeState == .exited ? lastKnownChildPID : nil), state: runtimeState,
+            updatedAt: ISO8601DateFormatter().string(from: now), exitedAt: runtimeState == .exited ? ISO8601DateFormatter().string(from: now) : nil)
         let shouldPersist = force || shouldPersistRuntimeState(state, now: now)
         guard shouldPersist else { return }
         let previousSignature = lastPersistedRuntimeState.map(runtimeStateSignature(for:))
@@ -304,7 +309,13 @@ extension Notification.Name {
             lastKnownChildPID = foregroundPID
             return foregroundPID
         }
+        if hasExitedChildProcess() { return nil }
         return lastKnownChildPID
+    }
+
+    private func hasExitedChildProcess() -> Bool {
+        guard let childPID = lastKnownChildPID else { return false }
+        return kill(childPID, 0) != 0 && errno == ESRCH
     }
 
     private func postAttachmentStateDidChange() {
@@ -338,4 +349,6 @@ extension Notification.Name {
         requestSurfaceRefreshAction()
         appendOutput(data)
     }
+    func debugPersistRuntimeState(force: Bool = true) { refreshRuntimeState(force: force) }
+    func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
 }

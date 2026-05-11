@@ -36,6 +36,7 @@ open class Iterm2Adapter: @unchecked Sendable {
         let windowID = Int(parts.first ?? trimmed) ?? -1
         let sessionID = parts.count > 1 && !parts[1].isEmpty ? parts[1] : nil
         let tabIndex = parts.count > 2 ? Int(parts[2]) : nil
+        if shouldVerifyTmuxAttach(command: command), windowID > 0 { scheduleTmuxAttachVerification(windowID: windowID, command: command) }
         return ItermWindowInfo(id: windowID, sessionID: sessionID, tabIndex: tabIndex)
     }
 
@@ -75,7 +76,42 @@ open class Iterm2Adapter: @unchecked Sendable {
         let resolvedWindowID = Int(parts.first ?? trimmed) ?? windowID
         let sessionID = parts.count > 1 && !parts[1].isEmpty ? parts[1] : nil
         let tabIndex = parts.count > 2 ? Int(parts[2]) : nil
+        if shouldVerifyTmuxAttach(command: command), resolvedWindowID > 0 {
+            scheduleTmuxAttachVerification(windowID: resolvedWindowID, command: command)
+        }
         return ItermWindowInfo(id: resolvedWindowID, sessionID: sessionID, tabIndex: tabIndex)
+    }
+
+    private func shouldVerifyTmuxAttach(command: String) -> Bool { command.contains("tmux attach-session -t") }
+
+    private func scheduleTmuxAttachVerification(windowID: Int, command: String) {
+        scheduleVerificationWork { [weak self] in
+            guard let self else { return }
+            for _ in 0..<10 {
+                do { if try self.windowAppearsAttachedToTmux(id: windowID) { return } } catch { return }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            try? self.runInWindow(id: windowID, command: command)
+        }
+    }
+
+    private func windowAppearsAttachedToTmux(id windowID: Int) throws -> Bool {
+        let script = """
+            tell application "iTerm2"
+              repeat with w in windows
+                if id of w is \(windowID) then
+                  if (name of w as string) is "tmux" then return "1"
+                  tell current session of w
+                    set sessionText to contents
+                  end tell
+                  if sessionText contains "[spaces-" then return "1"
+                  return "0"
+                end if
+              end repeat
+              return "0"
+            end tell
+            """
+        return try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines) == "1"
     }
 
     open func runInWindow(id: Int, command: String) throws {

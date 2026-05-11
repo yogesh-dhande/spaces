@@ -83,10 +83,11 @@ Spaces focuses those windows; it does not decide their geometry.
 
 ## Onboarding
 - On launch, the main window should immediately show a neutral loading state while Spaces checks prerequisites and loads workspace data, so startup never presents a blank window.
-- On launch, Spaces blocks only on the cheap prerequisite checks needed for its default runtime path: tmux installed and yabai installed.
+- On launch, Spaces blocks only on the cheap prerequisite checks needed for its default runtime path: yabai installed.
 - Startup prerequisite checks may enrich command lookup from the user's login-shell PATH, but that lookup must stay bounded and fall back automatically to the inherited PATH plus standard package-manager locations so shell startup files cannot stall app launch indefinitely.
 - When command lookup is enriched from the login-shell PATH, the app's inherited `PATH` remains authoritative. Login-shell entries should only fill gaps that are missing from the launch environment, and built-in package-manager fallbacks should remain last.
 - During first-run setup, Spaces should default the terminal host preference to its built-in terminal. External hosts such as `iTerm2` and `Ghostty` remain optional overrides rather than setup prerequisites.
+- When the configured terminal host is the built-in `Spaces` terminal, workspace processes should launch, stop, recover, and reopen without requiring tmux to be installed.
 - The slower yabai readiness step, including service-running and Accessibility validation, should be deferred until the setup flow is actually shown or another yabai-backed action needs it.
 - If a deferred yabai readiness check fails during startup, Spaces should switch into the setup flow at the yabai step instead of surfacing a raw shell error dialog.
 - If a blocking launch prerequisite fails, the main window shows a guided setup flow starting at the first failing step.

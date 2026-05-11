@@ -65,14 +65,15 @@ Coding agents emit `spaces signal` events from their terminals so the GUI knows 
 ## How it works
 
 - [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
-- Process terminals run under [tmux](https://github.com/tmux/tmux) so closing a terminal window does not kill the process; Spaces reattaches on demand when you need to look at the process output.
+- External-host process terminals run under [tmux](https://github.com/tmux/tmux) so closing an iTerm2 or Ghostty terminal window does not kill the process; built-in `Spaces` terminal sessions keep their own session runtime and reattach without tmux.
 - The built-in Spaces terminal is the default host. [iTerm2](https://iterm2.com) and [Ghostty](https://ghostty.org) remain optional host overrides.
 - Browser sessions automate Google Chrome so you can quickly switch to view output without typing the URL or clicking through tabs.
 
 ## Requirements
 
 - macOS 14+
-- [`yabai`](https://github.com/koekeishiya/yabai), [`tmux`](https://github.com/tmux/tmux)
+- [`yabai`](https://github.com/koekeishiya/yabai)
+- [`tmux`](https://github.com/tmux/tmux) only when using external process hosts such as iTerm2 or Ghostty
 - Google Chrome (for browser-session focus)
 - Accessibility permission, granted via the in-app setup flow on first launch
 

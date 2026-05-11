@@ -24,14 +24,26 @@ open class TmuxAdapter: @unchecked Sendable {
 
     open func listWindows(sessionName: String) throws -> [TmuxWindowInfo] {
         guard hasSession(named: sessionName) else { return [] }
-        let output = try runAndCapture(["list-windows", "-t", sessionName, "-F", windowFormat])
+        let output: String
+        do { output = try runAndCapture(["list-windows", "-t", sessionName, "-F", windowFormat]) } catch {
+            if isMissingTmuxTargetError(error) { return [] }
+            throw error
+        }
         return output.split(separator: "\n", omittingEmptySubsequences: true).compactMap { parseWindow(line: String($0)) }
     }
 
     open func currentWindow(sessionName: String) throws -> TmuxWindowInfo? {
         guard hasSession(named: sessionName) else { return nil }
-        guard let windowID = parseWindowID(output: try displayMessage(target: sessionName, format: windowIDFormat)) else { return nil }
-        return try windowInfo(target: windowID)
+        let windowIDOutput: String
+        do { windowIDOutput = try displayMessage(target: sessionName, format: windowIDFormat) } catch {
+            if isMissingTmuxTargetError(error) { return nil }
+            throw error
+        }
+        guard let windowID = parseWindowID(output: windowIDOutput) else { return nil }
+        do { return try windowInfo(target: windowID) } catch {
+            if isMissingTmuxTargetError(error) { return nil }
+            throw error
+        }
     }
 
     open func currentWindow() throws -> TmuxWindowInfo? {
@@ -137,6 +149,11 @@ open class TmuxAdapter: @unchecked Sendable {
         if let window = parseWindow(parts: parts) { return window }
         let underscoreSeparated = line.components(separatedBy: "_")
         return parseWindow(parts: underscoreSeparated)
+    }
+
+    func isMissingTmuxTargetError(_ error: Error) -> Bool {
+        let description = (error as NSError).localizedDescription.lowercased()
+        return description.contains("can't find session") || description.contains("can't find window")
     }
 
     private func parseWindow(parts: [String]) -> TmuxWindowInfo? {

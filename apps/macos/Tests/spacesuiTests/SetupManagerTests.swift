@@ -46,9 +46,9 @@ import systembridge
     @Test func startupBlockingFailureShowsSetupScreenWithCheckingStatus() {
         let manager = SetupManager(
             checker: MockSetupChecker(
-                startupBlockingResults: [.init(id: .tmuxInstalled, passed: false), .init(id: .yabaiInstalled, passed: true)],
+                startupBlockingResults: [.init(id: .yabaiInstalled, passed: false)],
                 allResults: [
-                    .init(id: .terminalInstalled, passed: false), .init(id: .tmuxInstalled, passed: false), .init(id: .yabaiInstalled, passed: true),
+                    .init(id: .terminalInstalled, passed: false), .init(id: .tmuxInstalled, passed: false), .init(id: .yabaiInstalled, passed: false),
                     .init(id: .yabaiServiceRunning, passed: true), .init(id: .yabaiAccessibility, passed: true),
                 ]))
 
@@ -56,8 +56,8 @@ import systembridge
 
         #expect(view != nil)
         #expect(manager.isShowingSetupFlow)
-        #expect(manager.currentStepTitleForTesting == "Install tmux")
-        #expect(viewTextContent(view).contains("Install tmux"))
+        #expect(manager.currentStepTitleForTesting == "Install yabai")
+        #expect(viewTextContent(view).contains("Install yabai"))
         #expect(viewTextContent(view).contains("Checking..."))
     }
 }

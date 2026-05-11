@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import spacesterminalcore
 import systembridge
 import workspacecore
 
@@ -10,12 +11,33 @@ struct MXE2ECommand: ParsableCommand {
         commandName: "spacese2e", abstract: "Manual real-system test helpers for Spaces.",
         subcommands: [
             SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
-            SelectWorkspaceDetailCommand.self, OpenWorkspaceTerminalCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self,
-            ArchiveWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self,
-            SetWorkspaceAgentLaunchersCommand.self, SetWorkspaceStopScriptCommand.self, SetTerminalHostCommand.self,
-            TerminalHostAvailableCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
+            ShowMainWindowCommand.self, HideMainWindowCommand.self, SelectWorkspaceDetailCommand.self, OpenWorkspaceTerminalCommand.self,
+            DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self, StopWorkspaceCommand.self,
+            StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
+            SetWorkspaceStopScriptCommand.self, SetTerminalHostCommand.self, TerminalHostAvailableCommand.self, FocusWorkspaceWindowIndexCommand.self,
+            CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
             CloseWorkspaceProcessWindowCommand.self, RecordScreenCommand.self,
         ])
+}
+
+private struct ShowMainWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "show-main-window")
+
+    func run() throws {
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.showMainWindow, object: nil, userInfo: nil, options: [.deliverImmediately])
+        try emitJSON(["success": true])
+    }
+}
+
+private struct HideMainWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "hide-main-window")
+
+    func run() throws {
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.hideMainWindow, object: nil, userInfo: nil, options: [.deliverImmediately])
+        try emitJSON(["success": true])
+    }
 }
 
 private struct SelectWorkspaceDetailCommand: ParsableCommand {
@@ -156,15 +178,21 @@ private struct SeedFixtureCommand: ParsableCommand {
         let normalizedProjectDir = normalizePath(projectDir)
         try materializeDemoFixtureIfNeeded(projectDir: normalizedProjectDir, variant: "beacon")
         let project = try orchestrator.project(dir: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
-        let uvExecutable = try resolveExecutablePath(named: "uv")
-        let frontendCommand =
-            "\(uvExecutable) run --project .spaces-e2e-demo spaces-e2e-demo frontend --port $APP_PORT --site-dir .spaces-e2e-demo/site --backend-url http://127.0.0.1:$API_PORT"
-        let backendCommand = "\(uvExecutable) run --project .spaces-e2e-demo spaces-e2e-demo backend --port $API_PORT --data-dir .spaces-e2e-demo/api"
+        let pythonExecutable = try resolveExecutablePath(named: "python3")
+        let frontendCommand = fixtureServiceCommand(
+            pythonExecutable: pythonExecutable,
+            arguments: [
+                "-m", "spaces_e2e_demo", "frontend", "--port", "$APP_PORT", "--site-dir", ".spaces-e2e-demo/site", "--backend-url",
+                "http://127.0.0.1:$API_PORT",
+            ])
+        let backendCommand = fixtureServiceCommand(
+            pythonExecutable: pythonExecutable,
+            arguments: ["-m", "spaces_e2e_demo", "backend", "--port", "$API_PORT", "--data-dir", ".spaces-e2e-demo/api"])
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.ports = [.init(name: "APP_PORT"), .init(name: "API_PORT")]
             config.stopScript =
-                #"bash -lc 'printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
+                #"bash -lc 'for port in "$APP_PORT" "$API_PORT"; do if [ -n "$port" ]; then pids=(); while IFS= read -r pid; do [ -n "$pid" ] && pids+=("$pid"); done < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true); for pid in "${pids[@]}"; do kill "$pid" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in "${pids[@]}"; do kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true; done; fi; done; printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
             config.processes = [
                 .init(name: "frontend", command: frontendCommand, executionMode: .shell),
                 .init(name: "backend", command: backendCommand, executionMode: .shell),
@@ -210,6 +238,15 @@ private struct SeedFixtureCommand: ParsableCommand {
         let path = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard process.terminationStatus == 0, let path, !path.isEmpty else { throw ValidationError("Required executable not found in PATH: \(name)") }
         return path
+    }
+
+    private func shellQuoted(_ raw: String) -> String { "'\(raw.replacingOccurrences(of: "'", with: "'\\''"))'" }
+
+    private func shellToken(_ raw: String) -> String { raw.contains("$") ? raw : shellQuoted(raw) }
+
+    private func fixtureServiceCommand(pythonExecutable: String, arguments: [String]) -> String {
+        let joinedArguments = ([shellQuoted(pythonExecutable)] + arguments.map(shellToken)).joined(separator: " ")
+        return "export PYTHONPATH=.spaces-e2e-demo/src; exec \(joinedArguments)"
     }
 
     private func materializeDemoFixtureIfNeeded(projectDir: String, variant: String) throws {
@@ -351,7 +388,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             },
             runningProcesses: try orchestrator.runningProcesses(workspaceID: workspace.id).map {
                 RunningProcessPayload(
-                    id: $0.id, name: $0.templateName, pid: $0.pid, status: $0.status.rawValue, terminalApp: $0.terminalApp,
+                    id: $0.id, name: $0.templateName, pid: try resolvedPID(for: $0), status: $0.status.rawValue, terminalApp: $0.terminalApp,
                     terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID, tmuxWindowID: $0.tmuxWindowID,
                     windowID: $0.windowID)
             },
@@ -367,6 +404,14 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             })
         try emitJSON(payload)
     }
+
+    private func resolvedPID(for process: RunningProcessRecord) throws -> Int? {
+        if let pid = process.pid { return pid }
+        guard process.terminalApp == TerminalHost.spaces.appName else { return nil }
+        guard let sessionID = process.terminalTrackingID ?? process.terminalNativeID, !sessionID.isEmpty else { return nil }
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        return try TerminalSessionPersistence.readRuntimeState(paths: paths).childPID.map(Int.init)
+    }
 }
 
 private struct FocusWorkspaceProcessCommand: ParsableCommand {
@@ -374,6 +419,7 @@ private struct FocusWorkspaceProcessCommand: ParsableCommand {
 
     @Option(name: .long) var workspaceDir: String
     @Option(name: .long) var processName: String
+    @Option(name: .long) var requestID: String?
 
     func run() throws {
         let orchestrator = try makeOrchestrator()
@@ -384,8 +430,49 @@ private struct FocusWorkspaceProcessCommand: ParsableCommand {
         guard let process = try orchestrator.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == processName }) else {
             throw ValidationError("Running process not found: \(processName)")
         }
-        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
-        try emitJSON(["workspaceID": workspace.id, "processID": process.id, "processName": process.templateName])
+        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id, requestID: requestID)
+        try emitJSON(["workspaceID": workspace.id, "processID": process.id, "processName": process.templateName, "requestID": requestID ?? ""])
+    }
+}
+
+private struct FocusWorkspaceWindowIndexCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "focus-workspace-window-index")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var index: Int
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: index)
+        try emitJSON(["workspaceID": workspace.id, "index": String(index)])
+    }
+}
+
+private struct CycleWorkspaceWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "cycle-workspace-window")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var direction: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        switch direction {
+        case "next", "previous":
+            DistributedNotificationCenter.default().postNotificationName(
+                IPCNotification.cycleWorkspaceWindow, object: nil,
+                userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.cycleDirectionUserInfoKey: direction],
+                options: [.deliverImmediately])
+        default: throw ValidationError("Unsupported direction: \(direction)")
+        }
+        try emitJSON(["workspaceID": workspace.id, "direction": direction])
     }
 }
 

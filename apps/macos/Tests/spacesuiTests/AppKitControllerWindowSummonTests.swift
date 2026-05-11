@@ -99,6 +99,21 @@ import spacesterminalcore
         #expect(!AppKitController.shouldMiniaturizeMainWindowAfterHide(returnTerminalSessionID: "session-1"))
     }
 
+    @Test func toggleHotkeyHidesAppWhenReturningToExternalApplicationWithoutAuxiliaryWindows() {
+        #expect(
+            AppKitController.shouldHideAppAfterMainHide(
+                returnTerminalSessionID: nil, returnApplicationProcessID: 123, auxiliaryTerminalWindowsVisible: false))
+        #expect(
+            AppKitController.shouldHideAppAfterMainHide(
+                returnTerminalSessionID: nil, returnApplicationProcessID: nil, auxiliaryTerminalWindowsVisible: false))
+        #expect(
+            !AppKitController.shouldHideAppAfterMainHide(
+                returnTerminalSessionID: "session-1", returnApplicationProcessID: 123, auxiliaryTerminalWindowsVisible: false))
+        #expect(
+            !AppKitController.shouldHideAppAfterMainHide(
+                returnTerminalSessionID: nil, returnApplicationProcessID: 123, auxiliaryTerminalWindowsVisible: true))
+    }
+
     @Test func commandPalettePresentationCompletesOnlyAfterPaletteBecomesKey() {
         #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: false, panelIsKey: false))
         #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: true, panelIsKey: false))

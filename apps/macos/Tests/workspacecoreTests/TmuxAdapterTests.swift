@@ -89,4 +89,25 @@ final class TmuxAdapterTests: XCTestCase {
         XCTAssertEqual(window?.isActive, true)
         XCTAssertEqual(window?.panePID, 4242)
     }
+
+    func testIsMissingTmuxTargetErrorMatchesMissingSession() {
+        let adapter = TmuxAdapter()
+        let error = NSError(domain: "spaces.shell", code: 1, userInfo: [NSLocalizedDescriptionKey: "can't find session: spaces-demo-backend"])
+
+        XCTAssertTrue(adapter.isMissingTmuxTargetError(error))
+    }
+
+    func testIsMissingTmuxTargetErrorMatchesMissingWindow() {
+        let adapter = TmuxAdapter()
+        let error = NSError(domain: "spaces.shell", code: 1, userInfo: [NSLocalizedDescriptionKey: "can't find window: @12"])
+
+        XCTAssertTrue(adapter.isMissingTmuxTargetError(error))
+    }
+
+    func testIsMissingTmuxTargetErrorIgnoresOtherFailures() {
+        let adapter = TmuxAdapter()
+        let error = NSError(domain: "spaces.shell", code: 1, userInfo: [NSLocalizedDescriptionKey: "permission denied"])
+
+        XCTAssertFalse(adapter.isMissingTmuxTargetError(error))
+    }
 }

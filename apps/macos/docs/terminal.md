@@ -8,6 +8,7 @@ This document captures the current libghostty-backed terminal integration in Spa
   - `ghostty-embedded`
 - `ghostty-embedded` is the native terminal path for Spaces-owned windows.
 - iTerm2 and Ghostty external-host integrations still exist on this branch and remain selectable overrides.
+- When the configured terminal host is `Spaces`, tracked workspace processes use the built-in session backend directly and do not require tmux.
 
 ## Why libghostty Owns the Session
 - A built-in owner window cannot be just a renderer wrapped around an unrelated PTY daemon.

@@ -59,7 +59,7 @@ extension AgentWindowRecord {
     /// Identity used to associate coding-agent state with an existing tracked terminal row.
     public var terminalTrackingIdentity: TerminalTrackingIdentity? {
         if let tmuxWindowID, !tmuxWindowID.isEmpty { return .tmux(tmuxWindowID) }
-        if provider == .ghostty, let terminalNativeID, !terminalNativeID.isEmpty { return .session(terminalNativeID) }
+        if [.ghostty, .spaces].contains(provider), let terminalNativeID, !terminalNativeID.isEmpty { return .session(terminalNativeID) }
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
         if let windowID = yabaiWindowID ?? windowID { return .window(windowID) }
         return nil
@@ -67,7 +67,7 @@ extension AgentWindowRecord {
 
     /// Identity used when focusing a coding-agent row back to its terminal.
     public var terminalFocusIdentity: TerminalTrackingIdentity? {
-        if provider == .ghostty, let terminalNativeID, !terminalNativeID.isEmpty { return .session(terminalNativeID) }
+        if [.ghostty, .spaces].contains(provider), let terminalNativeID, !terminalNativeID.isEmpty { return .session(terminalNativeID) }
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
         if let windowID = yabaiWindowID ?? windowID { return .window(windowID) }
         if let tmuxWindowID, !tmuxWindowID.isEmpty { return .tmux(tmuxWindowID) }

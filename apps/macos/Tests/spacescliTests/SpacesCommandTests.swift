@@ -317,6 +317,27 @@ final class MXCommandTests: XCTestCase {
         }
     }
 
+    func testResolveAgentInvocationContextUsesSpacesTrackingTokenForBuiltInTerminal() throws {
+        let store = try makeTemporaryStore()
+        let workspace = try makeWorkspace(store: store)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+            let context = CLIContext()
+            let agentContext = try resolveAgentInvocationContext(
+                workspaceID: workspace.id,
+                environment: [
+                    "SPACES_TERMINAL_HOST": TerminalHost.spaces.rawValue, WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1",
+                    "CLAUDE_CODE_ENTRYPOINT": "1",
+                ], orchestrator: orchestrator, context: context)
+
+            XCTAssertEqual(agentContext?.provider, .spaces)
+            XCTAssertEqual(agentContext?.terminalTrackingID, "spaces-session-token-1")
+            XCTAssertEqual(agentContext?.terminalNativeID, "spaces-session-token-1")
+            XCTAssertEqual(agentContext?.yabaiWindowID, 106482)
+        }
+    }
+
     func testResolveAgentInvocationContextDropsItermEventWithoutSessionIdentifier() throws {
         let store = try makeTemporaryStore()
         let workspace = try makeWorkspace(store: store)

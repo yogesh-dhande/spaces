@@ -330,8 +330,9 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Named port definitions are allocated per workspace and exposed as environment variables. Workspace-settings saves preserve existing allocations where possible, allocate newly added definitions immediately, and release removed definitions without waiting for the next launch.
 - Workspace processes also receive stable environment variables such as project and workspace directories.
 - Setup scripts, stop scripts, and process commands all execute against the workspace-specific environment.
-- Process launch and terminal recovery use tmux so the process lifetime can outlive a missing terminal window and be reattached later.
-- Immediate process-start failures should be surfaced from the recent tmux pane output itself so launch errors report the real command failure instead of a follow-on tmux attach error.
+- External-host process launch and terminal recovery use tmux so the process lifetime can outlive a missing terminal window and be reattached later.
+- Built-in `Spaces` terminal sessions own their process lifetime directly through the session backend, so `TerminalHost.spaces` launch, stop, and recovery paths must not depend on tmux availability.
+- Immediate external-host process-start failures should be surfaced from the recent tmux pane output itself so launch errors report the real command failure instead of a follow-on tmux attach error.
 - Core external dependencies that the GUI invokes directly, such as `tmux`, `yabai`, and `git`, are resolved through a shared executable-locator path instead of relying on the Finder app environment to provide a complete `PATH`.
 - Global app settings include the selected terminal host, defaulting to `Spaces`, and the GUI is the configuration surface for that value.
 - App-level settings such as terminal host and shell-mode process shell are persisted in the shared store but are configured through the app rather than through `spaces`.

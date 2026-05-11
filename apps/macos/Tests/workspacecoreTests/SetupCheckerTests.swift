@@ -221,7 +221,22 @@ final class SetupCheckerTests: XCTestCase {
             tmux.availableResult = true
             let checker = SetupChecker(iterm2: MockAvailableIterm2(), ghostty: MockAvailableGhostty(), tmux: tmux)
             let results = checker.runStartupBlockingChecks()
-            XCTAssertEqual(results.map(\.id), [.tmuxInstalled, .yabaiInstalled])
+            XCTAssertEqual(results.map(\.id), [.yabaiInstalled])
+            XCTAssertTrue(results.allSatisfy(\.passed))
+        }
+    }
+
+    func testRunStartupBlockingChecksDoesNotRequireTmux() throws {
+        let yabaiScript = """
+            #!/bin/bash
+            if [[ "$*" == *"--version"* ]]; then echo 'yabai 7.0.0'; exit 0; fi
+            """
+        try withMockCommands(["yabai": yabaiScript]) {
+            let tmux = MockAvailableTmux()
+            tmux.availableResult = false
+            let checker = SetupChecker(iterm2: MockAvailableIterm2(), ghostty: MockAvailableGhostty(), tmux: tmux)
+            let results = checker.runStartupBlockingChecks()
+            XCTAssertEqual(results.map(\.id), [.yabaiInstalled])
             XCTAssertTrue(results.allSatisfy(\.passed))
         }
     }

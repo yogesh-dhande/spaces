@@ -25,7 +25,7 @@ public struct SetupCheckResult {
 /// Runs prerequisite checks for Spaces dependencies and optional external hosts.
 /// Injecting custom adapter subclasses enables unit testing without real apps.
 public final class SetupChecker {
-    public static var startupBlockingCheckIDs: [SetupCheckID] { [.tmuxInstalled, .yabaiInstalled] }
+    public static var startupBlockingCheckIDs: [SetupCheckID] { [.yabaiInstalled] }
 
     private let iterm2: Iterm2Adapter
     private let ghostty: GhosttyAdapter
