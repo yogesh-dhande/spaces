@@ -93,6 +93,12 @@ import spacesterminalcore
         #expect(AppKitController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: nil, currentProcessID: 456) == nil)
     }
 
+    @Test func toggleHotkeyHidesAppOnlyWhenNoTerminalOrAuxiliaryWindowNeedsToStayVisible() {
+        #expect(AppKitController.shouldHideAppAfterMainHide(returnTerminalSessionID: nil, auxiliaryWindowsVisible: false))
+        #expect(!AppKitController.shouldHideAppAfterMainHide(returnTerminalSessionID: "session-1", auxiliaryWindowsVisible: false))
+        #expect(!AppKitController.shouldHideAppAfterMainHide(returnTerminalSessionID: nil, auxiliaryWindowsVisible: true))
+    }
+
     @Test func commandPalettePresentationCompletesOnlyAfterPaletteBecomesKey() {
         #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: false, panelIsKey: false))
         #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: true, panelIsKey: false))

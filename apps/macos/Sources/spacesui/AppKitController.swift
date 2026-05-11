@@ -7126,6 +7126,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         returnTerminalSessionID: String?, returnApplicationProcessID: pid_t?, auxiliaryTerminalWindowsVisible: Bool
     ) -> Bool { return returnTerminalSessionID == nil && returnApplicationProcessID != nil && !auxiliaryTerminalWindowsVisible }
 
+    nonisolated static func shouldHideAppAfterMainHide(returnTerminalSessionID: String?, auxiliaryWindowsVisible: Bool) -> Bool {
+        return returnTerminalSessionID == nil && !auxiliaryWindowsVisible
+    }
+
     nonisolated static func returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: pid_t?, currentProcessID: pid_t) -> pid_t? {
         guard let frontmostApplicationProcessID, frontmostApplicationProcessID != currentProcessID else { return nil }
         return frontmostApplicationProcessID
@@ -7230,12 +7234,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             logHotkeyDebug("toggle_window hide_main_only")
             let returnTerminalSessionID = appToggleReturnTerminalSessionID
             let returnApplicationProcessID = appToggleReturnApplicationProcessID
+            let auxiliaryWindowsVisible = hasVisibleAuxiliaryWindowsForHotkeyState()
             let shouldRestoreTerminalFocus = Self.shouldRestoreTerminalFocusAfterMainHide(
                 returnTerminalSessionID: returnTerminalSessionID, auxiliaryTerminalWindowsVisible: hasVisibleTerminalSessionWindowsForHotkeyState())
             let shouldRestoreReturnApplication = Self.shouldRestoreReturnApplicationAfterMainHide(
                 returnTerminalSessionID: returnTerminalSessionID, returnApplicationProcessID: returnApplicationProcessID,
                 auxiliaryTerminalWindowsVisible: hasVisibleTerminalSessionWindowsForHotkeyState())
-            window.orderOut(nil)
+            if Self.shouldHideAppAfterMainHide(returnTerminalSessionID: returnTerminalSessionID, auxiliaryWindowsVisible: auxiliaryWindowsVisible) {
+                NSApp.hide(nil)
+            } else {
+                window.orderOut(nil)
+            }
             if shouldRestoreTerminalFocus, let returnTerminalSessionID {
                 let restoreStartedAt = Date()
                 focusTerminalSessionWindow(sessionID: returnTerminalSessionID)
