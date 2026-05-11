@@ -30,34 +30,29 @@ public enum TerminalTrackingIdentity: Hashable, Sendable {
 }
 
 public struct TerminalLaunchResult: Sendable {
-    /// Stable identity for later focus/reconciliation.
-    public let trackingIdentity: TerminalTrackingIdentity?
-    /// Shell-emitted hook identity when the launched terminal cannot rediscover its stable native identity itself.
-    public let hookSessionID: String?
-    public let containerID: String?
+    /// Stable terminal-provider identity for later focus/reconciliation.
+    public let providerIdentity: TerminalTrackingIdentity?
+    /// Shell-emitted identity used to attribute later hook events to this launched terminal.
+    public let hookAttributionID: String?
+    public let containerIdentity: String?
     public let fallbackWindowID: Int?
-    public let tabIndex: Int?
 
-    public init(
-        trackingIdentity: TerminalTrackingIdentity?, hookSessionID: String? = nil, containerID: String?, fallbackWindowID: Int?, tabIndex: Int? = nil
-    ) {
-        self.trackingIdentity = trackingIdentity
-        self.hookSessionID = hookSessionID
-        self.containerID = containerID
+    public init(providerIdentity: TerminalTrackingIdentity?, hookAttributionID: String? = nil, containerIdentity: String?, fallbackWindowID: Int?) {
+        self.providerIdentity = providerIdentity
+        self.hookAttributionID = hookAttributionID
+        self.containerIdentity = containerIdentity
         self.fallbackWindowID = fallbackWindowID
-        self.tabIndex = tabIndex
     }
 }
 
 public struct TerminalFocusTarget: Sendable {
-    public let trackingIdentity: TerminalTrackingIdentity?
+    /// Stable terminal-provider identity used for direct terminal focus when available.
+    public let providerIdentity: TerminalTrackingIdentity?
     public let windowID: Int?
-    public let tabIndex: Int?
 
-    public init(trackingIdentity: TerminalTrackingIdentity?, windowID: Int?, tabIndex: Int? = nil) {
-        self.trackingIdentity = trackingIdentity
+    public init(providerIdentity: TerminalTrackingIdentity?, windowID: Int?) {
+        self.providerIdentity = providerIdentity
         self.windowID = windowID
-        self.tabIndex = tabIndex
     }
 }
 
@@ -69,7 +64,9 @@ public protocol TerminalAdapter: Sendable {
     /// Opens a terminal and runs `command` from `cwd`, ensuring `environment` is present in the
     /// launched shell process so later hooks can rely on those values for identity.
     func openWindowAndRun(command: String, cwd: String, environment: [String: String], background: Bool) throws -> TerminalLaunchResult
-    func resolveCurrentTrackingIdentity(environment: [String: String], yabaiFocusedWindowID: Int?) throws -> TerminalTrackingIdentity?
+    /// Resolves the identity emitted by the current shell/hook process for event attribution.
+    func resolveCurrentAttributionIdentity(environment: [String: String], yabaiFocusedWindowID: Int?) throws -> TerminalTrackingIdentity?
     func focusTrackedTerminal(_ target: TerminalFocusTarget) throws -> Bool
-    func listLiveTrackingIdentities() throws -> Set<TerminalTrackingIdentity>
+    /// Lists currently live terminal-provider identities for reconciliation and liveness checks.
+    func listLiveProviderIdentities() throws -> Set<TerminalTrackingIdentity>
 }

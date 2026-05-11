@@ -318,7 +318,8 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(process.terminalTrackingID, "session-web")
         XCTAssertEqual(process.tmuxWindowID, "@2")
 
-        let trackedTerminal = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.id == "window-web" }))
+        let trackedTerminal = try XCTUnwrap(
+            store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" && $0.terminalTrackingID == "session-web" }))
         XCTAssertEqual(trackedTerminal.terminalTrackingID, "session-web")
         XCTAssertEqual(trackedTerminal.tmuxWindowID, "@2")
     }

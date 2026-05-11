@@ -34,6 +34,23 @@ final class SetupCheckerTests: XCTestCase {
         XCTAssertTrue(checker.run(.terminalInstalled))
     }
 
+    // Tests host-specific availability uses the same shared setup-check path as terminalInstalled.
+    func testIsTerminalHostAvailable_namedIterm2() {
+        let iterm = MockAvailableIterm2()
+        iterm.availableResult = true
+        let ghostty = MockAvailableGhostty()
+        ghostty.availableResult = false
+        let checker = SetupChecker(iterm2: iterm, ghostty: ghostty)
+        XCTAssertTrue(checker.isTerminalHostAvailable(named: "iterm2"))
+        XCTAssertFalse(checker.isTerminalHostAvailable(named: "ghostty"))
+    }
+
+    // Tests unknown host names fail closed.
+    func testIsTerminalHostAvailable_unknownHost() {
+        let checker = SetupChecker(iterm2: MockAvailableIterm2(), ghostty: MockAvailableGhostty())
+        XCTAssertFalse(checker.isTerminalHostAvailable(named: "alacritty"))
+    }
+
     // MARK: - tmux check
 
     // Tests isTmuxInstalled returns true when the tmux adapter reports availability.

@@ -45,21 +45,155 @@ flowchart LR
 - Path: `~/.spaces/spaces.db`
 - SQLite stores projects, workspaces, runtime state, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` is the authoritative forward-only schema marker. The release baseline schema starts at version `1`.
+- `migration_state.current_version` records the canonical schema version. The active schema is version `1`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
-- Migration safety snapshots are stored in `~/.spaces/backups/` and retained as a rolling set of the newest 10 migration backups.
 
 ### Migration Rules
-- Migrations must preserve existing user data.
 - Fresh installs create the latest schema directly and record the current schema version.
-- Existing installs migrate in ordered `N -> N+1` steps until they reach the current schema version.
-- Each migration step runs inside `BEGIN IMMEDIATE ... COMMIT`, updates `migration_state` in the same transaction, and rolls back on failure.
-- Additive and compatible schema changes should use `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, backfills, indexes, and table rebuilds with copy when SQLite requires them.
-- Before the first migration step for an open, Spaces creates a SQLite-safe backup snapshot in `~/.spaces/backups/`.
-- After migrations finish, Spaces runs `PRAGMA integrity_check` and fails startup if validation does not return `ok`.
-- Compatible changes must not require destructive resets, and startup errors must not instruct users to delete `~/.spaces/spaces.db`.
+- Existing installs should migrate in ordered `N -> N+1` steps until they reach the current schema version.
+- Each migration step should run inside `BEGIN IMMEDIATE ... COMMIT`, update `migration_state` in the same transaction, and roll back on failure.
+- Compatible schema changes should use additive techniques such as `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, backfills, indexes, and table rebuilds with copy when SQLite requires them.
+- Store startup validates `migration_state.current_version` against the canonical schema version and fails closed when they do not match.
+- Startup runs `PRAGMA integrity_check` and fails if validation does not return `ok`.
 
 ## Data Model
+
+```mermaid
+classDiagram
+  class Project {
+    +id
+    +name
+    +dir
+    +is_git
+    +default_branch
+    +is_collapsed
+    +setup_script
+    +stop_script
+  }
+
+  class Workspace {
+    +id
+    +project_id
+    +title
+    +dir
+    +dirname
+    +branch
+    +target_branch
+    +is_default
+    +is_archived
+    +is_hidden
+    +is_running
+    +last_launched_at
+    +notes
+  }
+
+  class WorkspaceSettings {
+    +workspace_id
+    +stop_script
+    +setup_status
+    +setup_error
+    +setup_started_at
+    +setup_finished_at
+  }
+
+  class WorkspacePort {
+    +workspace_id
+    +port_index
+    +port_number
+    +port_name
+    +definition_id
+  }
+
+  class RunningProcess {
+    +id
+    +workspace_id
+    +template_name
+    +command
+    +runtime_target_id
+    +pid
+    +status
+    +log_path
+    +last_output_at
+    +started_at
+    +exited_at
+  }
+
+  class RuntimeTarget {
+    +id
+    +workspace_id
+    +type
+    +name
+    +detail
+    +app
+    +window_id
+    +order_index
+    +created_at
+    +updated_at
+  }
+
+  class TerminalTarget {
+    +runtime_target_id
+    +provider
+    +tracking_id
+    +native_id
+    +container_id
+    +iterm_tab_index
+    +tmux_window_id
+  }
+
+  class BrowserTarget {
+    +runtime_target_id
+    +target_url
+    +resolved_url
+  }
+
+  class AgentSession {
+    +id
+    +workspace_id
+    +provider
+    +label
+    +status
+    +runtime_target_id
+    +session_key
+    +claimed_launcher_name
+    +created_at
+    +updated_at
+  }
+
+  class RuntimeTargetEvent {
+    +id
+    +runtime_target_id
+    +event_type
+    +source
+    +message
+    +window_id
+    +created_at
+  }
+
+  class AgentSessionEvent {
+    +id
+    +agent_session_id
+    +event_type
+    +source
+    +message
+    +runtime_target_id
+    +created_at
+  }
+
+  Project "1" --> "*" Workspace
+  Workspace "1" --> "0..1" WorkspaceSettings
+  Workspace "1" --> "*" WorkspacePort
+  Workspace "1" --> "*" RunningProcess
+  Workspace "1" --> "*" RuntimeTarget
+  Workspace "1" --> "*" AgentSession
+  RunningProcess "*" --> "0..1" RuntimeTarget : runtime_target_id
+  RuntimeTarget "1" --> "0..1" TerminalTarget
+  RuntimeTarget "1" --> "0..1" BrowserTarget
+  RuntimeTarget "1" --> "*" RuntimeTargetEvent
+  AgentSession "*" --> "0..1" RuntimeTarget : runtime_target_id
+  AgentSession "1" --> "*" AgentSessionEvent
+  AgentSessionEvent "*" --> "0..1" RuntimeTarget : runtime_target_id
+```
 
 ### Projects
 Projects persist:
@@ -87,11 +221,33 @@ Workspaces persist:
 Runtime state persists separately from project and workspace templates:
 - allocated ports
 - running processes
-- tracked windows
-- tracked agent windows
+- runtime targets
+- terminal target details
+- browser target details
+- agent sessions
 
 This separation lets template edits coexist with current runtime state and per-workspace overrides.
 It also lets lifecycle state stay explicit while runtime health is derived from the current runtime records.
+
+### Runtime Target Model
+- `runtime_targets` is the canonical inventory of focusable runtime items for a workspace. Each row stores only shared fields such as `type`, host app, current yabai `window_id`, ordering, and display metadata.
+- `terminal_targets` extends terminal runtime targets with terminal-host identity. Current fields are the terminal provider, the hook attribution ID, the provider-native terminal ID, the provider container ID, optional iTerm tab index, and tmux window ID.
+- `browser_targets` extends browser runtime targets with the configured target URL and the last resolved URL.
+- `agent_sessions` models logical coding-agent sessions separately from focusable windows. Each row links to a `runtime_target` and stores only agent-session state: provider, display label, status, provider session key, claimed launcher name, and timestamps.
+- `agent_session_events` records signal-driven lifecycle updates and launcher-driven agent transitions. Each event keeps the resolved runtime-target link plus a compact message containing the provider, label, tracking token, native terminal ID, provider session key, yabai window ID, and the full set of environment key names seen by `spaces signal` for that event.
+- `running_processes` is the canonical process-status record. Each row links to a `runtime_target` and stores only process runtime state such as command, PID, status, log path, and timestamps.
+- Runtime targets are seeded as soon as a process or agent terminal is known, even before a separate window-reconciliation pass fills in a live yabai `window_id`. That keeps process and agent rows linked to a single canonical target instead of caching terminal identity on the base row.
+
+### Data Modeling Guidelines
+- Base tables should stay generic. If a field only makes sense for one target type or one provider, it should live on a subtype table or adapter-specific runtime path rather than on a cross-cutting base record.
+- `runtime_targets` is the shared focus inventory. New target kinds should extend it through subtype tables rather than by adding more nullable type-specific columns to the base row.
+- Agent-session records should describe logical session state, not terminal implementation details. Terminal identity belongs on `terminal_targets`, and agent sessions should relate to that state through `runtime_targets` instead of copying terminal fields onto the session row.
+- Running-process records should describe process runtime, not terminal identity. Terminal identity belongs on `terminal_targets`, and process rows should link to the relevant runtime target instead of owning terminal-specific fields.
+- When a process or agent needs terminal identity before yabai has reconciled a live window, seed or reuse a `runtime_target` plus `terminal_target` record rather than persisting terminal identity on the base process or session row.
+- Provider-specific naming should be avoided in shared schema. Generic fields such as `provider` and `session_key` are acceptable when the same concept exists across providers; fields named for one product should be treated as transitional and refactored away.
+- Add abstractions only when current behavior needs them. Extensibility matters, but speculative tables or fields should not be added before a real workflow requires them.
+- Prefer event history for debugging destructive transitions over piling more `last_*` and `*_reason` fields onto canonical state rows. When a target or session is rebound, detached, or pruned, the system should leave an inspectable event trail.
+- Distinguish hook attribution identity from provider-native identity. Some hosts use one value for both, while others need separate identities for “which shell emitted this event?” and “which live host object should be focused or checked for liveness?”
 
 ### Referential Integrity
 - SQLite foreign keys stay enabled for persisted parent-child relationships.
@@ -181,12 +337,12 @@ protocol TerminalAdapter: Sendable {
         environment: [String: String],
         background: Bool
     ) throws -> TerminalLaunchResult
-    func resolveCurrentTrackingIdentity(
+    func resolveCurrentAttributionIdentity(
         environment: [String: String],
         yabaiFocusedWindowID: Int?
     ) throws -> TerminalTrackingIdentity?
     func focusTrackedTerminal(_ target: TerminalFocusTarget) throws -> Bool
-    func listLiveTrackingIdentities() throws -> Set<TerminalTrackingIdentity>
+    func listLiveProviderIdentities() throws -> Set<TerminalTrackingIdentity>
 }
 
 enum TerminalTrackingIdentity: Hashable, Sendable {
@@ -196,36 +352,34 @@ enum TerminalTrackingIdentity: Hashable, Sendable {
 }
 
 struct TerminalLaunchResult: Sendable {
-    let trackingIdentity: TerminalTrackingIdentity?
-    let hookSessionID: String?
-    let containerID: String?
+    let providerIdentity: TerminalTrackingIdentity?
+    let hookAttributionID: String?
+    let containerIdentity: String?
     let fallbackWindowID: Int?
-    let tabIndex: Int?
 }
 
 struct TerminalFocusTarget: Sendable {
-    let trackingIdentity: TerminalTrackingIdentity?
+    let providerIdentity: TerminalTrackingIdentity?
     let windowID: Int?
-    let tabIndex: Int?
 }
 ```
 
 Required behavior:
 - Availability: expose a cheap `isAvailable()` check so setup validation and host selection can reject unsupported terminals early.
 - Launch: create a new dedicated terminal context, inject the requested environment into the child shell, and run the provided command without requiring Spaces to synthesize host-specific shell glue outside the adapter.
-- Identity: return a stable `TerminalTrackingIdentity` that Spaces can persist on `RunningProcessRecord`, `WindowRecord`, and `AgentWindowRecord`.
-- Current-context resolution: turn the current hook process environment plus the current yabai focus into a `TerminalTrackingIdentity` so CLI agent events do not need host-specific matching logic.
+- Identity: return a stable provider identity that Spaces can persist on runtime targets and process records, plus a separate hook attribution identity when the provider needs one.
+- Current-context resolution: turn the current hook process environment into the attribution identity that the CLI should use for agent-event matching.
 - Focus: refocus the tracked terminal target, not just the containing yabai window, so tabbed terminals reopen the exact tracked session or surface when possible.
-- Reconciliation: enumerate live tracking identities so Spaces can detect stale runtime records after users close windows manually.
+- Reconciliation: enumerate live provider identities so Spaces can detect stale runtime records after users close windows manually.
 
 Identity rules:
 - yabai remains the source of truth for window IDs and cross-app focus.
 - The terminal adapter may use a richer native identity for tracking, but that identity must be stable enough to survive normal reconciliation and refocus flows.
 - If the terminal cannot provide a durable session identifier, the integration must still provide a deterministic fallback that maps back to the yabai-managed window.
 - Current examples:
-  `iTerm2` tracks sessions by `ITERM_SESSION_ID` and drops hook events that cannot prove that session identity.
-  `Ghostty` tracks by the real Ghostty terminal ID for focus/liveness plus a separate Spaces-issued hook token for event attribution.
-- `WindowRecord` stores a stable `name` for focus identity separately from a display `detail`, so CLI focus targets can stay deterministic while GUI rows still show live browser URLs, process commands, or terminal window titles.
+  `iTerm2` uses session identity for both attribution and focus, so the same provider identity usually satisfies both needs.
+  `Ghostty` uses the real Ghostty terminal ID for focus and liveness, plus a separate Spaces-issued hook token for event attribution.
+- Runtime target rows store a stable `name` for focus identity separately from a display `detail`, so CLI focus targets can stay deterministic while GUI rows still show live browser URLs, process commands, or terminal window titles.
 
 Operational requirements:
 - Workspace shell launch and process launch must both work through the same adapter surface.
@@ -235,7 +389,7 @@ Operational requirements:
 
 Implementation note:
 - The shared launch and discovery contract now lives in `systembridge` as `TerminalAdapter`, and `WorkspaceOrchestrator` resolves `TerminalHost` to a concrete adapter through one registry.
-- `TerminalAdapter.openWindowAndRun(...)` must inject any requested launch environment into the child shell process and return the stable tracking identity that later hooks and focus flows should use.
+- `TerminalAdapter.openWindowAndRun(...)` must inject any requested launch environment into the child shell process and return both the provider identity and the hook attribution identity needed by later reconciliation, focus, and agent-event flows.
 - The shared focus contract now also requires host-specific refocus by typed tracking identity. iTerm2 implements that with session/tab selection, while Ghostty refocuses the tracked terminal by Ghostty terminal ID and only falls back to the yabai window when direct terminal focus fails.
 - Richer iTerm2-only helpers can still exist outside the shared interface, but a new terminal should first conform to `TerminalAdapter` so launch, focus, and discovery all follow one path.
 

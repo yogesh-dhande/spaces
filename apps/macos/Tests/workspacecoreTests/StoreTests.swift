@@ -30,7 +30,6 @@ final class StoreTests: XCTestCase {
         let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
         let projectColumns = try readTableColumns(dbURL: dbURL, table: "projects")
         let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
-        let windowColumns = try readTableColumns(dbURL: dbURL, table: "windows")
         let workspacePortColumns = try readTableColumns(dbURL: dbURL, table: "workspace_ports")
         let workspacePortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_port_definitions")
         let projectPortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "project_port_definitions")
@@ -40,6 +39,10 @@ final class StoreTests: XCTestCase {
         let projectBrowserSessionColumns = try readTableColumns(dbURL: dbURL, table: "project_browser_sessions")
         let workspaceAgentLauncherColumns = try readTableColumns(dbURL: dbURL, table: "workspace_agent_launchers")
         let projectAgentLauncherColumns = try readTableColumns(dbURL: dbURL, table: "project_agent_launchers")
+        let runtimeTargetColumns = try readTableColumns(dbURL: dbURL, table: "runtime_targets")
+        let terminalTargetColumns = try readTableColumns(dbURL: dbURL, table: "terminal_targets")
+        let browserTargetColumns = try readTableColumns(dbURL: dbURL, table: "browser_targets")
+        let agentSessionColumns = try readTableColumns(dbURL: dbURL, table: "agent_sessions")
         let workspaceForeignKeys = try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspaces')")
         XCTAssertEqual(version, 1)
         XCTAssertTrue(workspaceColumns.contains("title"))
@@ -49,9 +52,6 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(workspaceProcessColumns.contains("execution_mode"))
         XCTAssertTrue(projectProcessColumns.contains("execution_mode"))
         XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
-        XCTAssertTrue(windowColumns.contains("name"))
-        XCTAssertTrue(windowColumns.contains("detail"))
-        XCTAssertTrue(windowColumns.contains("terminal_container_id"))
         XCTAssertTrue(workspacePortColumns.contains("definition_id"))
         XCTAssertTrue(workspacePortDefinitionColumns.contains("id"))
         XCTAssertTrue(projectPortDefinitionColumns.contains("id"))
@@ -59,7 +59,22 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(projectBrowserSessionColumns.contains("id"))
         XCTAssertFalse(workspaceAgentLauncherColumns.contains("id"))
         XCTAssertFalse(projectAgentLauncherColumns.contains("id"))
+        XCTAssertTrue(runtimeTargetColumns.contains("type"))
+        XCTAssertTrue(runtimeTargetColumns.contains("updated_at"))
+        XCTAssertTrue(terminalTargetColumns.contains("native_id"))
+        XCTAssertTrue(terminalTargetColumns.contains("tracking_id"))
+        XCTAssertTrue(browserTargetColumns.contains("resolved_url"))
+        XCTAssertTrue(agentSessionColumns.contains("runtime_target_id"))
+        XCTAssertTrue(agentSessionColumns.contains("session_key"))
+        XCTAssertTrue(agentSessionColumns.contains("claimed_launcher_name"))
+        XCTAssertFalse(agentSessionColumns.contains("terminal_target_id"))
+        XCTAssertFalse(agentSessionColumns.contains("terminal_tracking_id"))
+        XCTAssertFalse(agentSessionColumns.contains("terminal_native_id"))
+        XCTAssertFalse(agentSessionColumns.contains("tmux_window_id"))
+        XCTAssertFalse(agentSessionColumns.contains("yabai_window_id"))
         XCTAssertEqual(workspaceForeignKeys, 1)
+        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "windows"))
+        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "agent_windows"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "project_status_checks"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "workspace_status_checks"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "status_results"))
@@ -144,13 +159,16 @@ final class StoreTests: XCTestCase {
         defer { sqlite3_close(handle) }
 
         let migrator = DatabaseMigrator(
-            currentSchemaVersion: 3,
+            currentSchemaVersion: 4,
             steps: [
                 DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "one", requiresBackup: true) { db in
                     _ = sqlite3_exec(db, "INSERT INTO migration_log(entry) VALUES ('1-2');", nil, nil, nil)
                 },
                 DatabaseMigrationStep(fromVersion: 2, toVersion: 3, description: "two", requiresBackup: true) { db in
                     _ = sqlite3_exec(db, "INSERT INTO migration_log(entry) VALUES ('2-3');", nil, nil, nil)
+                },
+                DatabaseMigrationStep(fromVersion: 3, toVersion: 4, description: "three", requiresBackup: true) { db in
+                    _ = sqlite3_exec(db, "INSERT INTO migration_log(entry) VALUES ('3-4');", nil, nil, nil)
                 },
             ],
             backupManager: DatabaseBackupManager(
@@ -175,9 +193,9 @@ final class StoreTests: XCTestCase {
                 }
             }, validateIntegrity: { XCTAssertEqual(try self.readSingleText(dbURL: dbURL, sql: "PRAGMA integrity_check"), "ok") })
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 3)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
         XCTAssertEqual(
-            try readRows(dbURL: dbURL, sql: "SELECT entry FROM migration_log ORDER BY rowid").compactMap { $0.first ?? nil }, ["1-2", "2-3"])
+            try readRows(dbURL: dbURL, sql: "SELECT entry FROM migration_log ORDER BY rowid").compactMap { $0.first ?? nil }, ["1-2", "2-3", "3-4"])
     }
 
     // Tests migration failure rolls back the in-flight step by arranging a failing step and asserting schema state and pre-migration backup both remain.
@@ -462,12 +480,12 @@ final class StoreTests: XCTestCase {
 
         XCTAssertEqual(try store.workspaceID(windowID: 42), workspace.id)
         let storedWindows = try store.windows(workspaceID: workspace.id)
-        XCTAssertEqual(storedWindows.count, 2)
+        XCTAssertEqual(storedWindows.count, 3)
         XCTAssertEqual(storedWindows[0].name, "Browser")
         XCTAssertEqual(storedWindows[0].detail, nil)
-        XCTAssertEqual(storedWindows[1].name, "Terminal")
+        XCTAssertTrue(storedWindows.contains(where: { $0.name == "Terminal" }))
         try store.deleteWindow(id: firstWindow.id)
-        XCTAssertEqual(try store.windows(workspaceID: workspace.id).count, 1)
+        XCTAssertEqual(try store.windows(workspaceID: workspace.id).count, 2)
         try store.deleteWindows(workspaceID: workspace.id)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }

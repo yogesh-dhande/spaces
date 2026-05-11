@@ -450,11 +450,7 @@ private struct TerminalHostAvailableCommand: ParsableCommand {
     /// adapter-level availability checks the app relies on for setup/runtime.
     func run() throws {
         guard let terminalHost = TerminalHost(rawValue: host.lowercased()) else { throw ValidationError("Unsupported terminal host: \(host)") }
-        let available: Bool =
-            switch terminalHost {
-            case .iterm2: Iterm2Adapter().isAvailable()
-            case .ghostty: GhosttyAdapter().isAvailable()
-            }
+        let available = SetupChecker().isTerminalHostAvailable(named: terminalHost.rawValue)
         try emitJSON(TerminalHostAvailabilityPayload(host: terminalHost.rawValue, available: available))
     }
 }

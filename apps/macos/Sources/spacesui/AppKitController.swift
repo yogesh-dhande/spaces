@@ -1242,6 +1242,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let browserSessionsByURL: [String: Int]
         let processesByName: [String: Int]
         let codingAgentsByName: [String: Int]
+        let codingAgentsByIdentity: [String: Int]
     }
 
     struct ResolvedCodingAgentRunEntry: Sendable {
@@ -1319,6 +1320,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         return entries
+    }
+
+    nonisolated static func codingAgentShortcutIdentity(launcherName: String) -> String { "launcher:\(normalizedRunRowName(launcherName))" }
+
+    nonisolated static func codingAgentShortcutIdentity(agentWindowID: String) -> String { "agent:\(agentWindowID)" }
+
+    nonisolated static func codingAgentDisplayName(label: String?, runtimeWindowTitle: String?) -> String {
+        if let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty { return label }
+        if let runtimeWindowTitle = runtimeWindowTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !runtimeWindowTitle.isEmpty {
+            return "Coding Agent \(runtimeWindowTitle)"
+        }
+        return "Coding Agent"
     }
 
     nonisolated static func agentTerminalTrackingKeys(for record: AgentWindowRecord) -> Set<String> {
@@ -1495,6 +1508,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var browserSessionsByURL: [String: Int] = [:]
         var processesByName: [String: Int] = [:]
         var codingAgentsByName: [String: Int] = [:]
+        var codingAgentsByIdentity: [String: Int] = [:]
 
         for (offset, target) in targets.enumerated() {
             let index = offset + 1
@@ -1503,14 +1517,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             case .process:
                 if let processID = target.processID, let process = processesByID[processID] { processesByName[process.templateName] = index }
             case .missingConfiguredProcess: if let processKey = target.processKey, !processKey.isEmpty { processesByName[processKey] = index }
-            case .agentLauncher: if let launcherName = target.launcherName, !launcherName.isEmpty { codingAgentsByName[launcherName] = index }
-            case .agent: if let label = target.agentWindow?.label, !label.isEmpty { codingAgentsByName[label] = index }
+            case .agentLauncher:
+                if let launcherName = target.launcherName, !launcherName.isEmpty {
+                    codingAgentsByName[launcherName] = index
+                    codingAgentsByIdentity[codingAgentShortcutIdentity(launcherName: launcherName)] = index
+                }
+            case .agent:
+                if let agentWindow = target.agentWindow {
+                    if let label = agentWindow.label, !label.isEmpty { codingAgentsByName[label] = index }
+                    codingAgentsByIdentity[codingAgentShortcutIdentity(agentWindowID: agentWindow.id)] = index
+                }
             case .window: break
             }
         }
 
         return WorkspaceDetailShortcutIndices(
-            browserSessionsByURL: browserSessionsByURL, processesByName: processesByName, codingAgentsByName: codingAgentsByName)
+            browserSessionsByURL: browserSessionsByURL, processesByName: processesByName, codingAgentsByName: codingAgentsByName,
+            codingAgentsByIdentity: codingAgentsByIdentity)
     }
 
     nonisolated static func workspaceProcessStatusByName(_ processes: [RunningProcessRecord]) -> [String: RowPrimitives.StatusKind] {
@@ -3799,7 +3822,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             workspace: workspace, trackedWindows: trackedWindows, processEntries: processEntries, shortcutTargets: shortcutTargets,
             shortcutIndicesByName: shortcutIndices.processesByName, statusByName: processStatusByName)
         let agentLaunchersSection = workspaceAgentLaunchersSection(
-            workspace: workspace, shortcutIndicesByName: shortcutIndices.codingAgentsByName, agentWindows: agentWindows,
+            workspace: workspace, shortcutIndicesByIdentity: shortcutIndices.codingAgentsByIdentity, agentWindows: agentWindows,
             trackedWindows: trackedWindows)
         let browserSessionsSection = workspaceBrowserSessionsSection(workspace: workspace, shortcutIndicesByURL: shortcutIndices.browserSessionsByURL)
         let portsSection = workspacePortsSection(workspace: workspace)
@@ -3993,7 +4016,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func workspaceAgentLaunchersSection(
-        workspace: WorkspaceSummary, shortcutIndicesByName: [String: Int], agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord]
+        workspace: WorkspaceSummary, shortcutIndicesByIdentity: [String: Int], agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord]
     ) -> NSView? {
         guard let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) else { return nil }
         let section = AgentLaunchersSection(launchers: config.agentLaunchers)
@@ -4006,19 +4029,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 reloadData()
             } catch { showError(error) }
         }
-        var nameToIndex: [String: Int] = [:]
+        var identityToIndex: [String: Int] = [:]
         var shortcutMap: [String: String] = [:]
         for entry in Self.resolvedCodingAgentRunEntries(configuredAgentLaunchers: config.agentLaunchers, agentWindows: agentWindows) {
-            guard let name = entry.launcher?.name ?? entry.agentWindow?.label, !name.isEmpty else { continue }
-            guard let index = shortcutIndicesByName[name] else { continue }
-            shortcutMap[name] = windowShortcutBadgeText(index: index)
-            nameToIndex[name] = index
+            let identity: String
+            if let agentWindow = entry.agentWindow {
+                identity = Self.codingAgentShortcutIdentity(agentWindowID: agentWindow.id)
+            } else if let launcherName = entry.launcherName, !launcherName.isEmpty {
+                identity = Self.codingAgentShortcutIdentity(launcherName: launcherName)
+            } else {
+                continue
+            }
+            guard let index = shortcutIndicesByIdentity[identity] else { continue }
+            shortcutMap[identity] = windowShortcutBadgeText(index: index)
+            identityToIndex[identity] = index
         }
-        section.onFocus = { [weak self] launcher in
-            guard let self, !launcher.name.isEmpty, let index = nameToIndex[launcher.name] else { return }
+        section.onFocusLauncher = { [weak self] launcher in
+            let identity = Self.codingAgentShortcutIdentity(launcherName: launcher.name)
+            guard let self, let index = identityToIndex[identity] else { return }
             Task { @MainActor [weak self] in await self?.runWindowShortcut(index: index, startedAt: Date()) }
         }
-        section.shortcutsByName = shortcutMap
+        section.onFocusAgentWindow = { [weak self] agentWindow in
+            let identity = Self.codingAgentShortcutIdentity(agentWindowID: agentWindow.id)
+            guard let self, let index = identityToIndex[identity] else { return }
+            Task { @MainActor [weak self] in await self?.runWindowShortcut(index: index, startedAt: Date()) }
+        }
+        section.shortcutsByIdentity = shortcutMap
         return section.view
     }
 

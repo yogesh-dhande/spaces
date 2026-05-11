@@ -18,8 +18,8 @@ import workspacecore
     private var agentWindows: [AgentWindowRecord] = []
     private var runtimeWindowTitleByAgentID: [String: String] = [:]
 
-    /// Map from launcher name → shortcut display text (e.g. "⌘5").
-    var shortcutsByName: [String: String] = [:] { didSet { refreshRows(animated: false) } }
+    /// Map from entry identity → shortcut display text (e.g. "⌘5").
+    var shortcutsByIdentity: [String: String] = [:] { didSet { refreshRows(animated: false) } }
 
     /// Live coding-agent windows currently associated with the workspace.
     var runtimeAgentWindows: [AgentWindowRecord] = [] {
@@ -38,9 +38,11 @@ import workspacecore
         }
     }
 
-    /// Called when a collapsed row is clicked. Receives the launcher so the
-    /// host can dispatch the appropriate focus or launch action.
-    var onFocus: ((AgentLauncher) -> Void)?
+    /// Called when a configured launcher row is clicked.
+    var onFocusLauncher: ((AgentLauncher) -> Void)?
+
+    /// Called when a live runtime agent row is clicked.
+    var onFocusAgentWindow: ((AgentWindowRecord) -> Void)?
 
     // MARK: Init
 
@@ -103,16 +105,17 @@ import workspacecore
 
         var displayLauncher: AgentLauncher {
             if let launcher { return launcher }
-            let label = agentWindow?.label?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let name = (label?.isEmpty == false ? label : nil) ?? "Coding Agent"
+            let name = AppKitController.codingAgentDisplayName(label: agentWindow?.label, runtimeWindowTitle: runtimeWindowTitle)
             let detail = runtimeWindowTitle ?? ""
             return AgentLauncher(name: name, command: detail)
         }
 
-        var shortcutName: String? {
-            let value = launcher?.name ?? agentWindow?.label
-            guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-            return value
+        var identity: String? {
+            if let agentWindow { return AppKitController.codingAgentShortcutIdentity(agentWindowID: agentWindow.id) }
+            if let launcher, !launcher.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return AppKitController.codingAgentShortcutIdentity(launcherName: launcher.name)
+            }
+            return nil
         }
 
         var status: AgentWindowStatus? { agentWindow?.status }
@@ -220,8 +223,13 @@ import workspacecore
         let entries = displayEntries()
         for (_, entry) in entries.enumerated() {
             let launcher = entry.displayLauncher
-            let shortcut = entry.shortcutName.flatMap { shortcutsByName[$0] }
-            let focusAction: (() -> Void)? = onFocus.map { handler in { handler(launcher) } }
+            let shortcut = entry.identity.flatMap { shortcutsByIdentity[$0] }
+            let focusAction: (() -> Void)?
+            if let agentWindow = entry.agentWindow {
+                focusAction = onFocusAgentWindow.map { handler in { handler(agentWindow) } }
+            } else {
+                focusAction = onFocusLauncher.map { handler in { handler(launcher) } }
+            }
             let row = AgentLauncherRowView(
                 launcher: launcher, shortcut: shortcut, status: entry.status, isEditable: entry.isEditable, onFocus: focusAction)
             row.onBeginEdit = { [weak self] in self?.handleBeginEdit(row: row) }

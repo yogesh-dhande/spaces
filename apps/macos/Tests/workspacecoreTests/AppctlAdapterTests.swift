@@ -94,14 +94,12 @@ final class AppctlAdapterTests: XCTestCase {
             let itermLaunch = try itermTerminalAdapter.openWindowAndRun(
                 command: "echo \"hi\"", cwd: "/tmp", environment: ["SPACES_TERMINAL_TRACKING_ID": "tracking-1"], background: false)
             XCTAssertEqual(itermLaunch.fallbackWindowID, 77)
-            XCTAssertEqual(itermLaunch.trackingIdentity, .session("session-77"))
-            XCTAssertEqual(itermLaunch.containerID, "77")
-            XCTAssertEqual(itermLaunch.tabIndex, 2)
+            XCTAssertEqual(itermLaunch.providerIdentity, .session("session-77"))
+            XCTAssertEqual(itermLaunch.hookAttributionID, "session-77")
+            XCTAssertEqual(itermLaunch.containerIdentity, "77")
             XCTAssertTrue(iterm.launchedCommands.last?.contains("cd '/tmp' &&") == true)
             XCTAssertTrue(iterm.launchedCommands.last?.contains("export SPACES_TERMINAL_TRACKING_ID='tracking-1'; echo \"hi\"") == true)
-            XCTAssertTrue(
-                try itermTerminalAdapter.focusTrackedTerminal(
-                    TerminalFocusTarget(trackingIdentity: .session("session-77"), windowID: 77, tabIndex: 2)))
+            XCTAssertTrue(try itermTerminalAdapter.focusTrackedTerminal(TerminalFocusTarget(providerIdentity: .session("session-77"), windowID: 77)))
             XCTAssertNoThrow(try iterm.runInWindow(id: 77, command: "pwd"))
             XCTAssertNoThrow(try iterm.closeWindow(id: 77))
             XCTAssertTrue(try iterm.closeSessionOrTab(preferredSessionID: "session-77", tabIndex: 2, windowID: 77))
@@ -117,13 +115,12 @@ final class AppctlAdapterTests: XCTestCase {
             let ghosttyLaunch = try ghosttyTerminalAdapter.openWindowAndRun(
                 command: "echo hi", cwd: "/tmp", environment: ["SPACES_TERMINAL_TRACKING_ID": "tracking-ghostty-1"], background: false)
             XCTAssertNil(ghosttyLaunch.fallbackWindowID)
-            XCTAssertEqual(ghosttyLaunch.trackingIdentity, .session("ghostty-terminal-1"))
-            XCTAssertEqual(ghosttyLaunch.hookSessionID, "tracking-ghostty-1")
-            XCTAssertEqual(ghosttyLaunch.containerID, "ghostty-tab-1")
+            XCTAssertEqual(ghosttyLaunch.providerIdentity, .session("ghostty-terminal-1"))
+            XCTAssertEqual(ghosttyLaunch.hookAttributionID, "tracking-ghostty-1")
+            XCTAssertEqual(ghosttyLaunch.containerIdentity, "ghostty-tab-1")
             XCTAssertTrue(
-                try ghosttyTerminalAdapter.focusTrackedTerminal(
-                    TerminalFocusTarget(trackingIdentity: .session("ghostty-terminal-1"), windowID: nil, tabIndex: nil)))
-            XCTAssertEqual(try ghosttyTerminalAdapter.listLiveTrackingIdentities(), [.session("ghostty-terminal-1"), .session("ghostty-terminal-2")])
+                try ghosttyTerminalAdapter.focusTrackedTerminal(TerminalFocusTarget(providerIdentity: .session("ghostty-terminal-1"), windowID: nil)))
+            XCTAssertEqual(try ghosttyTerminalAdapter.listLiveProviderIdentities(), [.session("ghostty-terminal-1"), .session("ghostty-terminal-2")])
             XCTAssertEqual(try ghostty.focusTerminal(id: "ghostty-terminal-1"), "ghostty-window-1")
             XCTAssertNoThrow(try ghostty.closeTab(id: "ghostty-tab-1"))
             XCTAssertEqual(try ghostty.listWindowTabAndTerminalIDs().count, 2)
