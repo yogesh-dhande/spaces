@@ -212,6 +212,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - The app should expose a separate global command-palette shortcut that opens a lightweight palette without unhiding or fronting built-in terminal windows.
 - The command palette should default to `Cmd+Opt+-`.
 - Summoning Spaces from the global app-toggle shortcut should raise only the main window above other apps and onto the active space.
+- The global app-toggle shortcut should depend only on whether the main Spaces window is visible. Built-in terminal windows and the command palette must not change whether `Cmd+Opt+=` shows or hides the main window.
 - When Spaces is summoned, it should select the workspace for the window that was focused immediately before activation when that window belongs to a tracked workspace; otherwise it should show Alerts.
 - The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, Alerts, editor, terminal, and Finder.
 - The command palette should draw from every navigable workspace target that can appear in workspace detail rows: browser sessions, processes, ad-hoc windows, configured coding-agent launchers, and live coding-agent terminals.

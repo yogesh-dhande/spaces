@@ -6919,12 +6919,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         !mainWindowIsVisible && !auxiliarySessionWindowsVisible
     }
 
-    nonisolated static func shouldHideMainWindowForToggle(
-        appIsActive: Bool, appIsHidden: Bool, mainWindowIsVisible: Bool, mainWindowIsKey: Bool, hasReturnTarget: Bool
-    ) -> Bool {
-        guard !appIsHidden, mainWindowIsVisible else { return false }
-        if hasReturnTarget { return true }
-        return appIsActive && mainWindowIsKey
+    nonisolated static func shouldHideMainWindowForToggle(appIsHidden: Bool, mainWindowIsVisible: Bool) -> Bool {
+        !appIsHidden && mainWindowIsVisible
     }
 
     nonisolated static func shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: String?, auxiliaryTerminalWindowsVisible: Bool) -> Bool {
@@ -7229,11 +7225,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let perfContext = captureHotkeyPerfContext()
         logHotkeyDebug("toggle_window begin \(hotkeyWindowStateSummary())")
         if commandPalettePanel?.isVisible == true { dismissCommandPalette() }
-        if Self.shouldHideMainWindowForToggle(
-            appIsActive: NSApp.isActive, appIsHidden: NSApp.isHidden, mainWindowIsVisible: rawMainWindowVisibility(),
-            mainWindowIsKey: window.isKeyWindow,
-            hasReturnTarget: appToggleReturnTerminalSessionID != nil || appToggleReturnApplicationProcessID != nil)
-        {
+        if Self.shouldHideMainWindowForToggle(appIsHidden: NSApp.isHidden, mainWindowIsVisible: rawMainWindowVisibility()) {
             logHotkeyDebug("toggle_window hide_main_only")
             let returnTerminalSessionID = appToggleReturnTerminalSessionID
             let returnApplicationProcessID = appToggleReturnApplicationProcessID
@@ -7320,10 +7312,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             window.makeKeyAndOrderFront(nil)
             return
         }
+        if Self.shouldActivateAppForTargetedHotkeyReveal(appIsActive: NSApp.isActive) { NSApp.activate(ignoringOtherApps: true) }
         prepareWindowForActiveSpaceSummon(window)
+        window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
-        window.makeKey()
-        window.orderFrontRegardless()
+        Task { @MainActor [weak window] in
+            await Task.yield()
+            guard let window, window.isVisible, !window.isMiniaturized else { return }
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 
     private func prepareWindowForActiveSpaceSummon(_ window: NSWindow) {
@@ -7350,6 +7347,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     nonisolated static func shouldUseDirectTargetedHotkeyReveal(appIsActive: Bool) -> Bool { appIsActive }
+
+    nonisolated static func shouldActivateAppForTargetedHotkeyReveal(appIsActive: Bool) -> Bool { !appIsActive }
 
     nonisolated static func shouldFocusVisibleTargetedHotkeyWindow(appIsActive: Bool, windowIsVisible: Bool, windowIsMiniaturized: Bool) -> Bool {
         appIsActive && windowIsVisible && !windowIsMiniaturized

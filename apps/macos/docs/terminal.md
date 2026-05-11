@@ -159,15 +159,15 @@ Current performance decisions:
 - Owner-surface attach forces one immediate layout + surface refresh, and later PTY output or local input coalesces explicit surface refresh requests. That keeps first-open prompts and command output visible on live `ghostty-embedded` process windows instead of relying on a close/reopen cycle to reveal buffered content.
 - Ghostty owner windows suppress inline non-error send-status text because the live terminal surface is the interactive input path. The inline status area stays available for real errors and for fallback/viewer flows.
 - App-side open/focus actions distinguish built-in `Spaces` terminal windows from external apps. Built-in terminal windows stay visible with the main app, while external terminal/browser/editor actions still use the hide-after-success behavior.
-- Global app-toggle behavior also distinguishes the primary main window from auxiliary built-in windows. When a built-in terminal or the command palette is focused, toggling the app summons only the main Spaces window instead of unhiding or fronting every Spaces-owned window in the process. Command-palette presentation also targets only the palette panel, so built-in terminal windows stay in their existing visibility state.
+- Global app-toggle behavior also distinguishes the primary main window from auxiliary built-in windows. `Cmd+Opt+=` depends only on the main window's visible state, not on whether a built-in terminal or the command palette is focused. Toggling the app summons or hides only the main Spaces window instead of unhiding or fronting every Spaces-owned window in the process. Command-palette presentation also targets only the palette panel, so built-in terminal windows stay in their existing visibility state.
 - Built-in terminal summon/focus flows keep the tracked workspace association in the `windows` table through the terminal session ID. That lets the main window restore the owning workspace detail view when the user toggles back from a focused built-in terminal, even before yabai has supplied or refreshed a native window ID.
 - The main-window hotkey path resolves the owning workspace from the focused built-in terminal session first and skips the generic focused-window workspace lookup whenever that session mapping already exists. That keeps `Cmd+Opt+=` from paying an unnecessary focused-window lookup on every `Spaces terminal -> main window` transition.
 - When `Cmd+Opt+=` brings the main window forward from a focused built-in terminal, the app remembers that terminal session and restores focus back to it when the user presses the hotkey again to hide the main window. That keeps the round-trip `terminal -> main window -> terminal` path explicit instead of leaving focus restoration to AppKit.
 - When `Cmd+Opt+=` brings the main window forward from an untracked external app, the app remembers that frontmost non-Spaces process and reactivates it when the user presses the hotkey again to hide the main window. That keeps the `external app -> main window -> external app` round trip explicit instead of leaving Spaces frontmost after `orderOut(nil)`.
 - The command-palette hotkey path follows the same pattern. When a built-in terminal is focused, it resolves the palette context workspace from the terminal session first and skips the generic focused-window lookup whenever the session already maps back to a workspace.
 - Built-in terminal actions emit debug metrics through the shared `spaces: perf metric=...` format when `DEBUG=1`, including:
-  - `workspace_terminal_open_ui`
-  - `terminal_session_start`
+- `workspace_terminal_open_ui`
+- `terminal_session_start`
   - `terminal_first_output`
   - `terminal_session_wait_ready`
   - `terminal_surface_create`
@@ -339,6 +339,11 @@ With the lighter built-in process readiness policy, a representative isolated de
 - `workspace_process_focus_wall`: `164ms`
 
 That profile shows the dominant process-launch overhead has moved off the built-in terminal bootstrap path. Remaining steady-state process-window work is now mostly in the workspace-level focus and reopen flow rather than the initial session bring-up.
+
+The real-system E2E harness also asserts the macOS window-manager behavior behind those hotkeys. `apps/macos/Tests/e2e_real_system.sh` now checks that:
+- a built-in terminal can hide and reshow the main window without changing the toggle semantics
+- an untracked external app such as Ghostty or Chrome can summon the main window directly
+- the second `Cmd+Opt+=` hides only the main window and returns focus to that external app
 
 ## What This Branch Does Not Decide
 - whether external hosts are removed in a later PR

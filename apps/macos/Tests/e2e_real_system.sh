@@ -1334,6 +1334,44 @@ end tell
 APPLESCRIPT
 }
 
+spaces_front_window_title() {
+  osascript <<'APPLESCRIPT'
+tell application "System Events"
+  if not (exists process "SpacesApp") then return ""
+  tell process "SpacesApp"
+    if (count of windows) is 0 then return ""
+    try
+      return name of front window
+    on error
+      return ""
+    end try
+  end tell
+end tell
+APPLESCRIPT
+}
+
+spaces_main_window_visible() {
+  osascript <<'APPLESCRIPT'
+tell application "System Events"
+  if not (exists process "SpacesApp") then return "0"
+  tell process "SpacesApp"
+    repeat with targetWindow in windows
+      try
+        if (name of targetWindow) is "Spaces" then return "1"
+      end try
+    end repeat
+  end tell
+end tell
+return "0"
+APPLESCRIPT
+}
+
+activate_ghostty() {
+  osascript <<'APPLESCRIPT'
+tell application id "com.mitchellh.ghostty" to activate
+APPLESCRIPT
+}
+
 activate_google_chrome() {
   osascript <<'APPLESCRIPT'
 tell application "Google Chrome" to activate
@@ -2559,6 +2597,47 @@ run_hotkey_visibility_profiling() {
   pass_case
 
   if [[ "$host" == "spaces" ]]; then
+    begin_case "$host: toggle main window independently of auxiliary terminal windows"
+    ensure_single_spaces_instance "$SPACES_PID"
+    reset_fixture_runtime "$workspace_dir"
+    run_spaces_logged /tmp/spaces-e2e-profile-terminal-toggle-visibility-start.log start "$workspace_dir"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend >/dev/null
+    transition_pause "$host seed frontend terminal focus for main window toggle assertions"
+    wait_for_spaces_frontmost_ready
+    wait_for_condition "spaces_main_window_visible" "1"
+    wait_for_condition "frontmost_app" "SpacesApp"
+    send_spaces_toggle_hotkey_with_ack
+    wait_for_condition "spaces_main_window_visible" "0"
+    wait_for_condition "frontmost_app" "SpacesApp"
+    send_spaces_toggle_hotkey_with_ack
+    wait_for_spaces_frontmost_ready
+    wait_for_condition "spaces_front_window_title" "Spaces"
+    wait_for_condition "spaces_main_window_visible" "1"
+    if host_available ghostty; then
+      activate_ghostty
+      transition_pause "$host seed untracked ghostty focus for main window toggle assertions"
+      wait_for_condition "frontmost_app" "ghostty"
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_spaces_frontmost_ready
+      wait_for_condition "spaces_front_window_title" "Spaces"
+      wait_for_condition "spaces_main_window_visible" "1"
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_condition "frontmost_app" "ghostty"
+      wait_for_condition "spaces_main_window_visible" "0"
+    else
+      activate_google_chrome
+      transition_pause "$host seed chrome focus for main window toggle assertions"
+      wait_for_condition "frontmost_app" "Google Chrome"
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_spaces_frontmost_ready
+      wait_for_condition "spaces_front_window_title" "Spaces"
+      wait_for_condition "spaces_main_window_visible" "1"
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_condition "frontmost_app" "Google Chrome"
+      wait_for_condition "spaces_main_window_visible" "0"
+    fi
+    pass_case
+
     begin_case "$host: profile repeated terminal to main window toggle"
     ensure_single_spaces_instance "$SPACES_PID"
     reset_fixture_runtime "$workspace_dir"
