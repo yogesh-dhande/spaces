@@ -6919,9 +6919,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         !mainWindowIsVisible && !auxiliarySessionWindowsVisible
     }
 
-    nonisolated static func shouldHideMainWindowForToggle(appIsActive: Bool, appIsHidden: Bool, mainWindowIsVisible: Bool, mainWindowIsKey: Bool)
-        -> Bool
-    { appIsActive && !appIsHidden && mainWindowIsVisible && mainWindowIsKey }
+    nonisolated static func shouldHideMainWindowForToggle(
+        appIsActive: Bool, appIsHidden: Bool, mainWindowIsVisible: Bool, mainWindowIsKey: Bool, hasReturnTarget: Bool
+    ) -> Bool {
+        guard !appIsHidden, mainWindowIsVisible else { return false }
+        if hasReturnTarget { return true }
+        return appIsActive && mainWindowIsKey
+    }
 
     nonisolated static func shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: String?, auxiliaryTerminalWindowsVisible: Bool) -> Bool {
         auxiliaryTerminalWindowsVisible && returnTerminalSessionID != nil
@@ -7227,7 +7231,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if commandPalettePanel?.isVisible == true { dismissCommandPalette() }
         if Self.shouldHideMainWindowForToggle(
             appIsActive: NSApp.isActive, appIsHidden: NSApp.isHidden, mainWindowIsVisible: rawMainWindowVisibility(),
-            mainWindowIsKey: window.isKeyWindow)
+            mainWindowIsKey: window.isKeyWindow,
+            hasReturnTarget: appToggleReturnTerminalSessionID != nil || appToggleReturnApplicationProcessID != nil)
         {
             logHotkeyDebug("toggle_window hide_main_only")
             let returnTerminalSessionID = appToggleReturnTerminalSessionID

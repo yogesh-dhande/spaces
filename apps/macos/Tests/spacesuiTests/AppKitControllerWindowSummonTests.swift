@@ -54,15 +54,34 @@ import spacesterminalcore
         #expect(!AppKitController.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: true, auxiliarySessionWindowsVisible: false))
     }
 
-    @Test func toggleHotkeyOnlyHidesWhenMainWindowIsActuallyKey() {
+    @Test func toggleHotkeyHidesKeyMainWindowWithoutStoredReturnTarget() {
         #expect(
-            AppKitController.shouldHideMainWindowForToggle(appIsActive: true, appIsHidden: false, mainWindowIsVisible: true, mainWindowIsKey: true))
+            AppKitController.shouldHideMainWindowForToggle(
+                appIsActive: true, appIsHidden: false, mainWindowIsVisible: true, mainWindowIsKey: true, hasReturnTarget: false))
         #expect(
-            !AppKitController.shouldHideMainWindowForToggle(appIsActive: true, appIsHidden: false, mainWindowIsVisible: true, mainWindowIsKey: false))
+            !AppKitController.shouldHideMainWindowForToggle(
+                appIsActive: true, appIsHidden: false, mainWindowIsVisible: true, mainWindowIsKey: false, hasReturnTarget: false))
         #expect(
-            !AppKitController.shouldHideMainWindowForToggle(appIsActive: false, appIsHidden: false, mainWindowIsVisible: true, mainWindowIsKey: true))
+            !AppKitController.shouldHideMainWindowForToggle(
+                appIsActive: false, appIsHidden: false, mainWindowIsVisible: true, mainWindowIsKey: true, hasReturnTarget: false))
         #expect(
-            !AppKitController.shouldHideMainWindowForToggle(appIsActive: true, appIsHidden: true, mainWindowIsVisible: true, mainWindowIsKey: true))
+            !AppKitController.shouldHideMainWindowForToggle(
+                appIsActive: true, appIsHidden: true, mainWindowIsVisible: true, mainWindowIsKey: true, hasReturnTarget: false))
+    }
+
+    @Test func toggleHotkeyHidesVisibleMainWindowWhenReturnTargetExists() {
+        #expect(
+            AppKitController.shouldHideMainWindowForToggle(
+                appIsActive: false, appIsHidden: false, mainWindowIsVisible: true, mainWindowIsKey: false, hasReturnTarget: true))
+        #expect(
+            AppKitController.shouldHideMainWindowForToggle(
+                appIsActive: true, appIsHidden: false, mainWindowIsVisible: true, mainWindowIsKey: false, hasReturnTarget: true))
+        #expect(
+            !AppKitController.shouldHideMainWindowForToggle(
+                appIsActive: false, appIsHidden: true, mainWindowIsVisible: true, mainWindowIsKey: false, hasReturnTarget: true))
+        #expect(
+            !AppKitController.shouldHideMainWindowForToggle(
+                appIsActive: false, appIsHidden: false, mainWindowIsVisible: false, mainWindowIsKey: false, hasReturnTarget: true))
     }
 
     @Test func toggleHotkeyRestoresTerminalFocusOnlyWhenReturnTargetAndAuxiliaryWindowExist() {
