@@ -298,6 +298,7 @@ import spacesterminalcore
 
     public func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { outputHandler = handler }
     public func setFocused(_ focused: Bool) { setSurfaceFocus(focused) }
+    public func snapshot() -> GhosttyTerminalSnapshot? { GhosttyTerminalSnapshotCapture.capture(from: surface) }
 
     public func ensureHostingWindowForSurface() {
         if window == nil { parkInHiddenHostWindowIfNeeded() }

@@ -269,7 +269,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.debugRendererSummary.contains("Renderer:"))
     }
 
-    @MainActor func testViewerWindowShowsViewerTitleAndOwnerLabel() throws {
+    @MainActor func testViewerWindowKeepsMetadataInStateButHidesDiagnosticHeader() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -304,6 +304,11 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.debugRendererSummary.contains("viewer"))
         XCTAssertFalse(controller.debugShowsInlineControls)
         XCTAssertTrue(controller.debugShowsTakeoverButton)
+        XCTAssertFalse(controller.debugShowsTitleLabel)
+        XCTAssertFalse(controller.debugShowsSummaryLabel)
+        XCTAssertFalse(controller.debugShowsStateLabel)
+        XCTAssertFalse(controller.debugShowsRendererLabel)
+        XCTAssertFalse(controller.debugShowsHeader)
     }
 
     @MainActor func testGhosttyOwnerWindowHidesInlineControls() throws {
@@ -905,7 +910,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.debugOutputDisablesSmartSubstitutions)
     }
 
-    @MainActor func testViewerTailShowPrefersTranscriptAsFirstResponder() throws {
+    @MainActor func testGhosttyViewerShowPrefersPassiveTranscriptAndUsesSnapshotWhenSurfaceExists() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -927,6 +932,12 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertTrue(controller.debugFirstResponderTargetsOutputView)
         XCTAssertFalse(controller.debugFirstResponderTargetsInputField)
+        if controller.debugGhosttyHasRenderableSurface {
+            XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty snapshot (viewer)")
+        } else {
+            XCTAssertEqual(controller.debugRendererSummary, "Renderer: viewer tail")
+        }
+        XCTAssertGreaterThan(controller.debugTakeoverContainerWidth, 120)
     }
 
     @MainActor func testWindowCloseInvokesCleanupCallback() throws {

@@ -26,6 +26,7 @@ import spacesterminalghostty
 
     private enum VisibleRenderer {
         case ghosttyOwner
+        case ghosttyViewerSnapshot
         case outputFallback
     }
 
@@ -56,6 +57,7 @@ import spacesterminalghostty
     private let inputRowStackView = NSStackView()
     private let actionButtonStackView = NSStackView()
     private let takeoverRowStackView = NSStackView()
+    private let takeoverContainerView = NSView()
     private let outputView = NSTextView(frame: NSRect(x: 0, y: 0, width: 880, height: 400))
     private let outputScrollView = NSScrollView()
     private let terminalContainer = NSView()
@@ -63,6 +65,8 @@ import spacesterminalghostty
     private let bodyStackView = NSStackView()
     private var bodyTopToHeaderConstraint: NSLayoutConstraint?
     private var bodyTopToContentConstraint: NSLayoutConstraint?
+    private var bodyBottomToContentConstraint: NSLayoutConstraint?
+    private var bodyBottomToTakeoverConstraint: NSLayoutConstraint?
     private let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse
     private let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
@@ -240,14 +244,16 @@ import spacesterminalghostty
         case #selector(NSText.copy(_:)):
             switch visibleRenderer {
             case .ghosttyOwner: return preferredAttachmentMode == .owner
+            case .ghosttyViewerSnapshot: return true
             case .outputFallback: return true
             }
         case #selector(NSText.paste(_:)):
             switch visibleRenderer {
             case .ghosttyOwner: return preferredAttachmentMode == .owner && isInteractiveRuntimeState(lastObservedRuntimeState)
+            case .ghosttyViewerSnapshot: return false
             case .outputFallback: return !inputRowStackView.isHidden && inputField.isEnabled
             }
-        case #selector(selectAll(_:)): return visibleRenderer == .outputFallback
+        case #selector(selectAll(_:)): return visibleRenderer != .ghosttyOwner
         default: return true
         }
     }
@@ -264,7 +270,7 @@ import spacesterminalghostty
                 NSSound.beep()
                 return
             }
-        case .outputFallback: outputView.copy(sender)
+        case .ghosttyViewerSnapshot, .outputFallback: outputView.copy(sender)
         }
     }
 
@@ -285,6 +291,10 @@ import spacesterminalghostty
                 NSSound.beep()
                 return
             }
+        case .ghosttyViewerSnapshot:
+            updateInputStatus(message: "Viewer windows cannot paste into the terminal. Take over ownership first.", isError: true)
+            NSSound.beep()
+            return
         case .outputFallback:
             guard !inputRowStackView.isHidden, inputField.isEnabled else {
                 NSSound.beep()
@@ -300,7 +310,7 @@ import spacesterminalghostty
     }
 
     public override func selectAll(_ sender: Any?) {
-        guard visibleRenderer == .outputFallback else {
+        guard visibleRenderer != .ghosttyOwner else {
             NSSound.beep()
             return
         }
@@ -313,17 +323,36 @@ import spacesterminalghostty
             updateInputStatus(message: "Session is not running.", isError: true)
             return
         }
+        let startedAt = Date()
         do {
+            let controlStartedAt = Date()
             let response = try takeoverAction(client.id)
             guard response.ok else {
+                GhosttyEmbeddedPerformance.logMetric(
+                    "terminal_viewer_takeover", target: "session=\(sessionID) client=\(client.id)",
+                    elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=control_response")
                 updateInputStatus(message: response.message, isError: true)
                 return
             }
             preferredAttachmentMode = .owner
+            let attachStartedAt = Date()
             ensureGhosttyHostAttached()
+            let attachElapsedMS = GhosttyEmbeddedPerformance.elapsedMS(since: attachStartedAt)
+            let refreshStartedAt = Date()
             updateInputStatus(message: response.message, isError: false)
             refreshNow()
-        } catch { updateInputStatus(message: String(describing: error), isError: true) }
+            GhosttyEmbeddedPerformance.logMetric(
+                "terminal_viewer_takeover", target: "session=\(sessionID) client=\(client.id)",
+                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true,
+                detail:
+                    "control_ms=\(GhosttyEmbeddedPerformance.elapsedMS(since: controlStartedAt)) attach_ms=\(attachElapsedMS) refresh_ms=\(GhosttyEmbeddedPerformance.elapsedMS(since: refreshStartedAt))"
+            )
+        } catch {
+            GhosttyEmbeddedPerformance.logMetric(
+                "terminal_viewer_takeover", target: "session=\(sessionID) client=\(client.id)",
+                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=exception")
+            updateInputStatus(message: String(describing: error), isError: true)
+        }
     }
 
     private func buildUI() {
@@ -415,6 +444,7 @@ import spacesterminalghostty
         outputScrollView.autohidesScrollers = true
         outputScrollView.drawsBackground = false
         outputScrollView.documentView = outputView
+        outputScrollView.borderType = .bezelBorder
 
         actionButtonStackView.translatesAutoresizingMaskIntoConstraints = false
         actionButtonStackView.orientation = .horizontal
@@ -434,17 +464,25 @@ import spacesterminalghostty
 
         takeoverRowStackView.translatesAutoresizingMaskIntoConstraints = false
         takeoverRowStackView.orientation = .horizontal
-        takeoverRowStackView.alignment = .leading
+        takeoverRowStackView.alignment = .centerY
         takeoverRowStackView.spacing = 8
         takeoverRowStackView.addArrangedSubview(takeoverButton)
         takeoverButton.widthAnchor.constraint(equalToConstant: 92).isActive = true
+
+        takeoverContainerView.translatesAutoresizingMaskIntoConstraints = false
+        takeoverContainerView.addSubview(takeoverRowStackView)
+        NSLayoutConstraint.activate([
+            takeoverRowStackView.centerXAnchor.constraint(equalTo: takeoverContainerView.centerXAnchor),
+            takeoverRowStackView.topAnchor.constraint(equalTo: takeoverContainerView.topAnchor),
+            takeoverRowStackView.bottomAnchor.constraint(equalTo: takeoverContainerView.bottomAnchor),
+        ])
 
         headerStackView.translatesAutoresizingMaskIntoConstraints = false
         headerStackView.orientation = .vertical
         headerStackView.alignment = .leading
         headerStackView.distribution = .fill
         headerStackView.spacing = 6
-        for view in [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, takeoverRowStackView, inputStatusLabel] {
+        for view in [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel] {
             headerStackView.addArrangedSubview(view)
         }
 
@@ -462,10 +500,12 @@ import spacesterminalghostty
         bodyStackView.addArrangedSubview(outputScrollView)
         outputScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
 
-        [headerStackView, bodyStackView].forEach(contentView.addSubview)
+        [headerStackView, bodyStackView, takeoverContainerView].forEach(contentView.addSubview)
 
         bodyTopToHeaderConstraint = bodyStackView.topAnchor.constraint(equalTo: headerStackView.bottomAnchor, constant: 12)
         bodyTopToContentConstraint = bodyStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12)
+        bodyBottomToContentConstraint = bodyStackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16)
+        bodyBottomToTakeoverConstraint = bodyStackView.bottomAnchor.constraint(equalTo: takeoverContainerView.topAnchor, constant: -12)
 
         NSLayoutConstraint.activate([
             headerStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
@@ -474,7 +514,10 @@ import spacesterminalghostty
 
             bodyStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
             bodyStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-            bodyStackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
+            takeoverContainerView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            takeoverContainerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            takeoverContainerView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            takeoverContainerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
         ])
 
         updateRendererVisibility()
@@ -580,14 +623,28 @@ import spacesterminalghostty
                 rendererLabel.stringValue = rendererMode.statusSummary
             }
             guard visibleRenderer != .ghosttyOwner else { return }
-            let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 200)) ?? ""
-            if output != lastRenderedOutput {
-                let viewportState = captureOutputViewportState()
-                outputView.string = output
-                if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
-                outputView.sizeToFit()
-                lastRenderedOutput = output
+            let viewportState = captureOutputViewportState()
+            switch visibleRenderer {
+            case .ghosttyViewerSnapshot:
+                if let snapshot = ghosttySessionHost?.snapshot() {
+                    outputView.textStorage?.setAttributedString(GhosttyTerminalSnapshotRenderer.render(snapshot))
+                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
+                    outputView.sizeToFit()
+                    lastRenderedOutput = outputView.string
+                    restoreOutputViewportState(viewportState)
+                    return
+                }
+                fallthrough
+            case .outputFallback:
+                let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 200)) ?? ""
+                if output != lastRenderedOutput {
+                    outputView.string = output
+                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
+                    outputView.sizeToFit()
+                    lastRenderedOutput = output
+                }
                 restoreOutputViewportState(viewportState)
+            case .ghosttyOwner: break
             }
         } catch {
             summaryLabel.stringValue = "Unable to load terminal session metadata."
@@ -735,23 +792,27 @@ import spacesterminalghostty
         case .ghosttyOwner:
             terminalContainer.isHidden = false
             outputScrollView.isHidden = true
-        case .outputFallback:
+        case .ghosttyViewerSnapshot, .outputFallback:
             outputScrollView.isHidden = false
             terminalContainer.isHidden = true
         }
         let isGhosttyOwner = visibleRenderer == .ghosttyOwner && preferredAttachmentMode == .owner
+        let isGhosttyViewer = backend == .ghosttyEmbedded && preferredAttachmentMode != .owner
         let shouldCollapseOwnerChrome = isGhosttyOwner && !shouldShowOwnerStateLabel
-        titleLabel.isHidden = isGhosttyOwner
-        summaryLabel.isHidden = shouldCollapseOwnerChrome
-        rendererLabel.isHidden = isGhosttyOwner
-        stateLabel.isHidden = shouldCollapseOwnerChrome
+        let shouldCollapseViewerChrome = isGhosttyViewer && inputStatusLabel.isHidden
+        titleLabel.isHidden = isGhosttyOwner || shouldCollapseViewerChrome
+        summaryLabel.isHidden = shouldCollapseOwnerChrome || shouldCollapseViewerChrome
+        rendererLabel.isHidden = isGhosttyOwner || shouldCollapseViewerChrome
+        stateLabel.isHidden = shouldCollapseOwnerChrome || shouldCollapseViewerChrome
+        outputScrollView.borderType = isGhosttyViewer ? .noBorder : .bezelBorder
         updateHeaderLayoutVisibility()
     }
 
     private func updateInputOwnershipUI(isOwner: Bool, isInteractive: Bool) {
         let usesInlineControls = backend != .ghosttyEmbedded
         inputRowStackView.isHidden = !usesInlineControls
-        takeoverRowStackView.isHidden = !(backend == .ghosttyEmbedded && !isOwner && isInteractive)
+        takeoverContainerView.isHidden = !(backend == .ghosttyEmbedded && !isOwner && isInteractive)
+        takeoverRowStackView.isHidden = takeoverContainerView.isHidden
         inputField.isEnabled = usesInlineControls && isOwner && isInteractive
         sendButton.isEnabled = usesInlineControls && isOwner && isInteractive
         interruptButton.isEnabled = usesInlineControls && isOwner && isInteractive
@@ -772,19 +833,21 @@ import spacesterminalghostty
     }
 
     private func updateHeaderLayoutVisibility() {
-        let hasVisibleHeaderContent = [
-            titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, takeoverRowStackView, inputStatusLabel,
-        ].contains { !$0.isHidden }
+        let hasVisibleHeaderContent = [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel].contains {
+            !$0.isHidden
+        }
         headerStackView.isHidden = !hasVisibleHeaderContent
         bodyTopToHeaderConstraint?.isActive = hasVisibleHeaderContent
         bodyTopToContentConstraint?.isActive = !hasVisibleHeaderContent
+        bodyBottomToTakeoverConstraint?.isActive = !takeoverContainerView.isHidden
+        bodyBottomToContentConstraint?.isActive = takeoverContainerView.isHidden
     }
 
     private func assignPreferredFirstResponder() {
         guard let window else { return }
         switch visibleRenderer {
         case .ghosttyOwner: break
-        case .outputFallback:
+        case .ghosttyViewerSnapshot, .outputFallback:
             if !inputRowStackView.isHidden, inputField.isEnabled {
                 window.makeFirstResponder(inputField)
             } else {
@@ -873,8 +936,10 @@ import spacesterminalghostty
     }
 
     private func resolveVisibleRenderer(isOwner: Bool?) -> VisibleRenderer {
-        guard backend == .ghosttyEmbedded, isOwner == true else { return .outputFallback }
-        return .ghosttyOwner
+        guard backend == .ghosttyEmbedded else { return .outputFallback }
+        if isOwner == true { return .ghosttyOwner }
+        if ghosttySessionHost?.hasRenderableSurface() == true { return .ghosttyViewerSnapshot }
+        return .outputFallback
     }
 
     private func currentRefreshInterval() -> Duration {
@@ -882,9 +947,16 @@ import spacesterminalghostty
     }
 
     private func rendererSummary(isOwner: Bool?) -> String {
-        guard isOwner == true else { return "Renderer: viewer tail" }
+        guard isOwner == true else {
+            switch visibleRenderer {
+            case .ghosttyViewerSnapshot: return "Renderer: libghostty snapshot (viewer)"
+            case .outputFallback: return "Renderer: viewer tail"
+            case .ghosttyOwner: return "Renderer: libghostty (owner)"
+            }
+        }
         switch visibleRenderer {
         case .ghosttyOwner: return "Renderer: libghostty (owner)"
+        case .ghosttyViewerSnapshot: return "Renderer: libghostty snapshot (viewer)"
         case .outputFallback: return "Renderer: output tail (owner fallback)"
         }
     }
@@ -1033,6 +1105,7 @@ import spacesterminalghostty
     var debugOutputHorizontalOffset: CGFloat { outputScrollView.contentView.documentVisibleRect.minX }
     var debugTerminalContainerWidth: CGFloat { terminalContainer.frame.width }
     var debugBodyWidth: CGFloat { bodyStackView.frame.width }
+    var debugTakeoverContainerWidth: CGFloat { takeoverContainerView.frame.width }
     var debugFirstResponderTypeName: String? {
         guard let firstResponder = window?.firstResponder else { return nil }
         return String(describing: type(of: firstResponder))

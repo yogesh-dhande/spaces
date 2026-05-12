@@ -115,7 +115,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - `script-pty` terminal sessions should open in a lightweight native Spaces window that shows recent output and supports text send through the session control socket.
 - `ghostty-embedded` terminal sessions should open in a native Spaces window backed by libghostty while preserving the same per-session `send`, `key`, and `tail` control behavior through the CLI.
 - Built-in process windows should keep a compact metadata header instead of expanding to fit full exported environment wrappers.
-- `ghostty-embedded` owner windows should stay on the libghostty render path. Passive viewer windows may use recent tailed output, but the owner path should not switch renderers behind the user's back.
+- `ghostty-embedded` owner windows should stay on the libghostty render path. Passive viewer windows should prefer a read-only snapshot of the shared libghostty surface when it is available and fall back to recent tailed output only when the live surface cannot be inspected; the owner path should not switch renderers behind the user's back.
 - `ghostty-embedded` owner windows should follow live terminal metadata where possible, including title and working directory updates emitted by the session backend instead of staying frozen at launch-time values.
 - `ghostty-embedded` owner windows should accept direct keyboard input in the terminal surface itself rather than relying on a separate send-input form.
 - `ghostty-embedded` owner windows should prioritize the terminal surface over diagnostic chrome. Backend or attachment details may remain visible in viewer or fallback states, but the active owner window should keep the live terminal as the primary experience.
@@ -128,7 +128,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - When Spaces focuses an already-open built-in process window from the normal workspace flow, the owner terminal surface should be ready for immediate typing without requiring an extra click inside the window.
 - A terminal session may have one active owner client and one or more passive viewer clients attached at the same time.
 - Only the active owner client may send input or control PTY size.
-- Viewer windows should remain readable, identify the current owner, and be able to take over ownership without restarting the underlying shell session.
+- Viewer windows should remain readable, be able to take over ownership without restarting the underlying shell session, and keep passive chrome minimal: the native titlebar may identify the session, but the in-window experience should prioritize the terminal content plus a clear takeover action.
 - For git projects, new workspaces are branch-oriented and should support an existing-branch picker, a new-branch entry path, target branch, directory name, title, and notes inputs.
 - Git workspace creation must require an explicit branch choice. `Create branch` must reject any branch name that already exists, while `Use existing` is the only path allowed to attach or revive a workspace on an existing branch.
 - Workspace titles are display labels and may repeat within a project. Git branch identity, rather than title text, determines whether a workspace is revived or conflicts with an existing archived record.

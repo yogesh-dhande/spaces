@@ -182,6 +182,7 @@ extension Notification.Name {
     }
 
     public func hasRenderableSurface() -> Bool { terminalView.surface != nil }
+    public func snapshot() -> GhosttyTerminalSnapshot? { terminalView.snapshot() }
     public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
     public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
     @discardableResult public func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
