@@ -1618,6 +1618,75 @@ end run
 APPLESCRIPT
 }
 
+spaces_front_window_kind() {
+  osascript - "$SPACES_PID" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      if (count of windows of proc) is 0 then return "none"
+      set targetWindow to front window of proc
+      set windowTitle to ""
+      set subroleValue to ""
+      try
+        set windowTitle to (name of targetWindow) as text
+      end try
+      try
+        set subroleValue to (value of attribute "AXSubrole" of targetWindow) as text
+      end try
+      if subroleValue is "AXDialog" then return "modal"
+      try
+        repeat with targetElement in entire contents of targetWindow
+          try
+            if (value of attribute "AXIdentifier" of targetElement) is "command-palette-search" then return "palette"
+          end try
+        end repeat
+      end try
+      if windowTitle is "Spaces" then return "main"
+      if windowTitle ends with " (viewer)" then return "terminal_viewer"
+      if windowTitle is not "" then return "terminal_owner"
+      return "other"
+    end repeat
+  end tell
+  return "none"
+end run
+APPLESCRIPT
+}
+
+spaces_main_window_key() {
+  if [[ "$(frontmost_pid)" == "$SPACES_PID" && "$(spaces_front_window_kind)" == "main" ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
+  fi
+}
+
+spaces_command_palette_key() {
+  if [[ "$(frontmost_pid)" == "$SPACES_PID" && "$(spaces_front_window_kind)" == "palette" ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
+  fi
+}
+
+spaces_built_in_terminal_focus_state() {
+  if [[ "$(frontmost_pid)" != "$SPACES_PID" ]]; then
+    printf 'none\n'
+    return 0
+  fi
+  case "$(spaces_front_window_kind)" in
+    terminal_owner)
+      printf 'owner\n'
+      ;;
+    terminal_viewer)
+      printf 'viewer\n'
+      ;;
+    *)
+      printf 'none\n'
+      ;;
+  esac
+}
+
 spaces_main_window_visible() {
   osascript - "$SPACES_PID" <<'APPLESCRIPT'
 on run argv
@@ -3027,6 +3096,8 @@ PY
     env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_terminal_focus_request_id" >"$spaces_terminal_focus_log" 2>&1
     transition_pause "$host refocus frontend terminal"
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single" "$spaces_terminal_focus_request_id" "$spaces_terminal_focus_log"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
     pass_case
 
     begin_case "$host: closing ad hoc Spaces terminal removes runtime row"
@@ -3105,6 +3176,23 @@ PY
     transition_pause "$host refocus frontend after close"
     record_process_focus_metric "terminal_close_recover.cli_window_focus.process_tracked_tab" "frontend" "$host" "single" "$spaces_reopen_request_id" "$spaces_reopen_log"
     wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
+    pass_case
+
+    begin_case "$host: toggle main window round-trips back to Spaces terminal viewer"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_BIN" terminal show "$frontend_session_before_close" --viewer >/tmp/spaces-e2e-open-frontend-viewer.log 2>&1
+    transition_pause "$host open frontend viewer window"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "viewer"
+    wait_for_condition "spaces_front_window_title" "frontend (viewer)"
+    send_spaces_toggle_hotkey_with_ack
+    wait_for_condition "spaces_main_window_visible" "1"
+    wait_for_condition "spaces_main_window_key" "1"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "none"
+    send_spaces_toggle_hotkey_with_ack
+    wait_for_condition "spaces_main_window_visible" "0"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "viewer"
+    wait_for_condition "spaces_front_window_title" "frontend (viewer)"
     pass_case
   fi
 
@@ -3372,52 +3460,70 @@ run_hotkey_visibility_profiling() {
     record_process_focus_metric "terminal_toggle.hotkey.process_tracked_tab" "frontend" "$host" "single" "$spaces_toggle_focus_request_id" "$spaces_toggle_focus_log"
     wait_for_spaces_frontmost_ready
     wait_for_condition "spaces_main_window_visible" "1"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
     wait_for_spaces_frontmost_ready
     send_spaces_toggle_hotkey_with_ack
     wait_for_condition "spaces_main_window_visible" "0"
+    wait_for_condition "spaces_main_window_key" "0"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
     wait_for_spaces_frontmost_ready
     send_spaces_toggle_hotkey_with_ack
     wait_for_spaces_frontmost_ready
     wait_for_condition "spaces_front_window_title" "Spaces"
     wait_for_condition "spaces_main_window_visible" "1"
+    wait_for_condition "spaces_main_window_key" "1"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "none"
     if host_available ghostty; then
       activate_ghostty
       transition_pause "$host seed untracked ghostty focus for main window toggle assertions"
       wait_for_condition "frontmost_app" "ghostty"
+      wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "0"
       send_spaces_toggle_hotkey_with_ack
       wait_for_spaces_frontmost_ready
       wait_for_condition "spaces_front_window_title" "Spaces"
       wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "1"
       activate_ghostty
       transition_pause "$host keep ghostty focused while main window remains visible"
       wait_for_condition "frontmost_app" "ghostty"
       wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "0"
       send_spaces_toggle_hotkey_with_ack
       wait_for_spaces_frontmost_ready
       wait_for_condition "spaces_front_window_title" "Spaces"
       wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "1"
       send_spaces_toggle_hotkey_with_ack
       wait_for_condition "frontmost_app" "ghostty"
       wait_for_condition "spaces_main_window_visible" "0"
+      wait_for_condition "spaces_main_window_key" "0"
     else
       activate_google_chrome
       transition_pause "$host seed chrome focus for main window toggle assertions"
       wait_for_condition "frontmost_app" "Google Chrome"
+      wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "0"
       send_spaces_toggle_hotkey_with_ack
       wait_for_spaces_frontmost_ready
       wait_for_condition "spaces_front_window_title" "Spaces"
       wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "1"
       activate_google_chrome
       transition_pause "$host keep chrome focused while main window remains visible"
       wait_for_condition "frontmost_app" "Google Chrome"
       wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "0"
       send_spaces_toggle_hotkey_with_ack
       wait_for_spaces_frontmost_ready
       wait_for_condition "spaces_front_window_title" "Spaces"
       wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "1"
       send_spaces_toggle_hotkey_with_ack
       wait_for_condition "frontmost_app" "Google Chrome"
       wait_for_condition "spaces_main_window_visible" "0"
+      wait_for_condition "spaces_main_window_key" "0"
     fi
     pass_case
 
@@ -3431,19 +3537,31 @@ run_hotkey_visibility_profiling() {
     env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_palette_focus_request_id" >"$spaces_palette_focus_log" 2>&1
     transition_pause "$host seed frontend terminal focus for palette toggle assertions"
     record_process_focus_metric "terminal_toggle_palette.hotkey.process_tracked_tab" "frontend" "$host" "single" "$spaces_palette_focus_request_id" "$spaces_palette_focus_log"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_presented "1"
     wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_condition "spaces_command_palette_key" "1"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "none"
     env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$(uuidgen)" >/tmp/spaces-e2e-toggle-palette-refocus-frontend.log 2>&1
     transition_pause "$host keep frontend terminal focused while palette remains visible"
     wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_condition "spaces_command_palette_key" "0"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_presented "1"
     wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_condition "spaces_command_palette_key" "1"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "none"
     wait_for_spaces_frontmost_ready
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_dismissed "1"
     wait_for_condition "spaces_command_palette_visible" "0"
+    wait_for_condition "spaces_command_palette_key" "0"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
     pass_case
 
     # Repeated built-in hotkey timing loops live in the dedicated
