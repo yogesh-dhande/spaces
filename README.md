@@ -36,7 +36,7 @@ spaces open <name>         # focus a tracked window by name
 spaces signal <event>      # coding-agent lifecycle: init|start|waiting|done|exit
 spaces update --notes "…"  # edit workspace metadata
 spaces terminal command --command "cat"   # start a tmux-free PTY session
-spaces terminal list                      # inspect session state and attached clients
+spaces terminal list                      # inspect live sessions or report when none are available
 spaces terminal send <session> "hello"    # write input to a session
 spaces terminal key <session> ctrl+c      # send a named key or control chord
 spaces terminal tail <session> --lines 20 # read recent output

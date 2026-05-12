@@ -1,4 +1,5 @@
 import ArgumentParser
+import Darwin
 import Foundation
 import spacesterminalcore
 import spacesterminalruntime
@@ -40,26 +41,39 @@ struct TerminalCommand: ParsableCommand {
 }
 
 struct TerminalListCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "list", abstract: "List known Spaces terminal sessions.")
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List available Spaces terminal sessions.")
 
     func run() throws {
-        let sessions = try TerminalSessionPersistence.listKnownSessions()
-        if sessions.isEmpty {
-            print("terminal\t-")
+        let rows = try availableTerminalSessionRows()
+        if rows.isEmpty {
+            print("No terminal sessions.")
             return
         }
 
-        for session in sessions {
-            let paths = try TerminalSessionPaths.forSession(id: session.sessionID)
-            let state = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
-            let attachments = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
-            let ownerClientID = attachments.first(where: { $0.mode == .owner })?.clientID ?? "-"
-            let viewerCount = attachments.filter { $0.mode == .viewer }.count
-            print(
-                "terminal\t\(session.sessionID)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tstate=\(state?.state.rawValue ?? "unknown")\tcwd=\(session.workingDirectory)\tcommand=\(session.command ?? "-")\towner=\(ownerClientID)\tclients=\(attachments.count)\tviewers=\(viewerCount)"
-            )
-        }
+        for row in rows { print(row) }
     }
+}
+
+func availableTerminalSessionRows(fileManager: FileManager = .default) throws -> [String] {
+    try TerminalSessionPersistence.listKnownSessions(fileManager: fileManager).compactMap { session in
+        let paths = try TerminalSessionPaths.forSession(id: session.sessionID)
+        guard fileManager.fileExists(atPath: paths.controlSocketPath), fileManager.fileExists(atPath: paths.statePath) else { return nil }
+        guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
+        guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }
+        guard isProcessAlive(pid: runtimeState.servicePID) else { return nil }
+
+        let attachments = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
+        let ownerClientID = attachments.first(where: { $0.mode == .owner })?.clientID ?? "-"
+        let viewerCount = attachments.filter { $0.mode == .viewer }.count
+        return
+            "terminal\t\(session.sessionID)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tstate=\(runtimeState.state.rawValue)\tcwd=\(session.workingDirectory)\tcommand=\(session.command ?? "-")\towner=\(ownerClientID)\tclients=\(attachments.count)\tviewers=\(viewerCount)"
+    }
+}
+
+private func isProcessAlive(pid: Int32) -> Bool {
+    guard pid > 0 else { return false }
+    if kill(pid, 0) == 0 { return true }
+    return errno == EPERM
 }
 
 struct TerminalCommandCommand: ParsableCommand {

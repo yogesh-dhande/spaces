@@ -111,7 +111,7 @@ Spaces focuses those windows; it does not decide their geometry.
 
 ### Creation
 - Users can create, update, focus, stop, restart, and archive workspaces from the GUI.
-- The CLI should stay minimal and support `import`, `update`, `start`, `restart`, `open`, `signal`, and low-level `terminal` session commands for tmux-free PTY sessions, including listing sessions with active client ownership and backend identity, sending text, sending named keys, opening native Spaces-owned session windows as an owner or viewer, and transferring input ownership between attached clients.
+- The CLI should stay minimal and support `import`, `update`, `start`, `restart`, `open`, `signal`, and low-level `terminal` session commands for tmux-free PTY sessions, including listing available sessions with active client ownership and backend identity and printing a clear empty-state message when none are available, sending text, sending named keys, opening native Spaces-owned session windows as an owner or viewer, and transferring input ownership between attached clients.
 - `script-pty` terminal sessions should open in a lightweight native Spaces window that shows recent output and supports text send through the session control socket.
 - `ghostty-embedded` terminal sessions should open in a native Spaces window backed by libghostty while preserving the same per-session `send`, `key`, and `tail` control behavior through the CLI.
 - Built-in process windows should keep a compact metadata header instead of expanding to fit full exported environment wrappers.

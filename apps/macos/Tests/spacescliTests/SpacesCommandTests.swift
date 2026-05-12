@@ -1,6 +1,8 @@
 import ArgumentParser
+import Darwin
 import Foundation
 import XCTest
+import spacesterminalcore
 import spacesterminalruntime
 import systembridge
 import workspacecore
@@ -62,6 +64,71 @@ final class MXCommandTests: XCTestCase {
     }
 
     func testTerminalListParses() throws { XCTAssertNoThrow(try TerminalListCommand.parse([])) }
+
+    func testTerminalListPrintsClearMessageWhenNoSessionsExist() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let output = try captureStandardOutput {
+            let command = TerminalListCommand()
+            try command.run()
+        }
+
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "No terminal sessions.")
+    }
+
+    func testAvailableTerminalSessionRowsSkipsMetadataOnlySessions() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let paths = try TerminalSessionPaths.forSession(id: "session-stale")
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: "session-stale", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-12T00:00:00Z"), paths: paths)
+
+        XCTAssertEqual(try availableTerminalSessionRows(), [])
+    }
+
+    func testAvailableTerminalSessionRowsIncludesLiveSessions() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let paths = try TerminalSessionPaths.forSession(id: "session-live")
+        let configuration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-live", backend: .scriptPTY, title: "shell", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+            createdAt: "2026-05-12T00:00:00Z")
+        try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: "session-live", backend: .scriptPTY, servicePID: getpid(), childPID: nil, state: .running,
+                updatedAt: "2026-05-12T00:00:01Z"), paths: paths)
+        FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+
+        let rows = try availableTerminalSessionRows()
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertTrue(rows[0].contains("terminal\tsession-live"))
+        XCTAssertTrue(rows[0].contains("state=running"))
+    }
 
     func testTerminalCommandParsesOptions() throws {
         let command = try TerminalCommandCommand.parse(["--command", "cat", "--title", "session", "--cwd", "/tmp", "--backend", "script-pty"])
@@ -128,6 +195,30 @@ final class MXCommandTests: XCTestCase {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
         XCTAssertEqual(
             subcommands, ["ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "SignalCommand", "TerminalCommand"])
+    }
+
+    private func captureStandardOutput(_ body: () throws -> Void) throws -> String {
+        let pipe = Pipe()
+        let originalDescriptor = dup(STDOUT_FILENO)
+        XCTAssertGreaterThanOrEqual(originalDescriptor, 0)
+        fflush(stdout)
+        dup2(pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
+
+        do {
+            try body()
+            fflush(stdout)
+            pipe.fileHandleForWriting.closeFile()
+            dup2(originalDescriptor, STDOUT_FILENO)
+            close(originalDescriptor)
+            return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        } catch {
+            fflush(stdout)
+            pipe.fileHandleForWriting.closeFile()
+            dup2(originalDescriptor, STDOUT_FILENO)
+            close(originalDescriptor)
+            _ = pipe.fileHandleForReading.readDataToEndOfFile()
+            throw error
+        }
     }
 
     func testSignalRejectsUnknownEnumValue() {
