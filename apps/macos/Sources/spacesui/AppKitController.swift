@@ -7446,28 +7446,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func revealTargetedHotkeyWindow(_ window: NSWindow) {
         if window.isMiniaturized { window.deminiaturize(nil) }
-        prepareWindowForActiveSpaceSummon(window)
         if Self.shouldFocusVisibleTargetedHotkeyWindow(
             appIsActive: NSApp.isActive, windowIsVisible: window.isVisible, windowIsMiniaturized: window.isMiniaturized)
         {
-            window.orderFrontRegardless()
+            window.orderFront(nil)
             window.makeKey()
             return
         }
         if Self.shouldUseDirectTargetedHotkeyReveal(appIsActive: NSApp.isActive) {
             window.makeKeyAndOrderFront(nil)
-            window.orderFrontRegardless()
             return
         }
-        window.orderFrontRegardless()
         if Self.shouldActivateAppForTargetedHotkeyReveal(appIsActive: NSApp.isActive) { activateCurrentApplicationForTargetedReveal() }
-        window.makeKey()
+        prepareWindowForActiveSpaceSummon(window)
+        window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
         Task { @MainActor [weak window] in
             await Task.yield()
             guard let window, window.isVisible, !window.isMiniaturized else { return }
             window.makeKeyAndOrderFront(nil)
-            window.orderFrontRegardless()
         }
     }
 
