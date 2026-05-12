@@ -729,9 +729,10 @@ import spacesterminalghostty
         } else {
             inputField.placeholderString = isOwner ? "Send input to the session" : "Viewer window"
         }
-        if !usesInlineControls && isOwner && !inputStatusIsError {
+        if !usesInlineControls && isOwner && (isInteractive || (!inputStatusIsError && inputStatusLabel.stringValue.isEmpty == false)) {
             inputStatusLabel.stringValue = ""
             inputStatusLabel.isHidden = true
+            inputStatusIsError = false
         }
         updateHeaderLayoutVisibility()
     }
