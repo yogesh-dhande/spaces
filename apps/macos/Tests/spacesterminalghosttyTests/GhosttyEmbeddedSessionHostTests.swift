@@ -1,3 +1,4 @@
+import AppKit
 import Carbon
 import Foundation
 import XCTest
@@ -6,6 +7,58 @@ import spacesterminalcore
 @testable import spacesterminalghostty
 
 final class GhosttyEmbeddedSessionHostTests: XCTestCase {
+    @MainActor func testEmbeddedViewSuppressesFunctionKeyPrivateUseText() {
+        let event = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F700}",
+                charactersIgnoringModifiers: "\u{F700}", isARepeat: false, keyCode: UInt16(kVK_UpArrow)))
+
+        XCTAssertNil(GhosttyEmbeddedTerminalView.ghosttyText(for: event))
+        XCTAssertEqual(GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: event), "up")
+    }
+
+    @MainActor func testEmbeddedViewMapsCommonNavigationAndFunctionFallbackKeys() {
+        let homeEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F729}",
+                charactersIgnoringModifiers: "\u{F729}", isARepeat: false, keyCode: UInt16(kVK_Home)))
+        let pageDownEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F72D}",
+                charactersIgnoringModifiers: "\u{F72D}", isARepeat: false, keyCode: UInt16(kVK_PageDown)))
+        let backtabEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.shift], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{19}",
+                charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: UInt16(kVK_Tab)))
+        let f5Event = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F708}",
+                charactersIgnoringModifiers: "\u{F708}", isARepeat: false, keyCode: UInt16(kVK_F5)))
+
+        XCTAssertEqual(GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: homeEvent), "home")
+        XCTAssertEqual(GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: pageDownEvent), "pagedown")
+        XCTAssertEqual(GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: backtabEvent), "backtab")
+        XCTAssertEqual(GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: f5Event), "f5")
+    }
+
+    @MainActor func testEmbeddedViewDoesNotInventModifiedNavigationFallbacks() {
+        let optionLeftEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.option], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F702}",
+                charactersIgnoringModifiers: "\u{F702}", isARepeat: false, keyCode: UInt16(kVK_LeftArrow)))
+
+        XCTAssertNil(GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: optionLeftEvent))
+    }
+
+    @MainActor func testEmbeddedViewUsesPrintableTextForControlKeyEvents() {
+        let event = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.control], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{1F}",
+                charactersIgnoringModifiers: "_", isARepeat: false, keyCode: UInt16(kVK_ANSI_U)))
+
+        XCTAssertEqual(GhosttyEmbeddedTerminalView.ghosttyText(for: event), "u")
+    }
+
     @MainActor func testEmbeddedViewDefersStandardWindowManagementShortcutsToSystem() {
         XCTAssertTrue(GhosttyEmbeddedTerminalView.shouldDeferToSystemShortcut(keyCode: UInt16(kVK_ANSI_W), modifierFlags: [.command]))
         XCTAssertTrue(GhosttyEmbeddedTerminalView.shouldDeferToSystemShortcut(keyCode: UInt16(kVK_ANSI_M), modifierFlags: [.command]))

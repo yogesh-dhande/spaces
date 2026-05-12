@@ -219,7 +219,11 @@ import spacesterminalcore
             super.keyDown(with: event)
             return
         }
-        if let characters = event.characters, !characters.isEmpty { sendRawBytes(Data(characters.utf8)) }
+        if let fallbackKey = Self.rawKeyFallbackSpecifier(for: event), let bytes = TerminalKeyInput.bytes(for: fallbackKey) {
+            sendRawBytes(Data(bytes))
+            return
+        }
+        if let characters = Self.ghosttyText(for: event), !characters.isEmpty { sendRawBytes(Data(characters.utf8)) }
     }
 
     public override func keyUp(with event: NSEvent) {
@@ -508,7 +512,7 @@ import spacesterminalcore
         guard let surface else { return false }
         var input = makeGhosttyKeyEvent(for: event, action: action)
 
-        if let characters = event.characters, !characters.isEmpty {
+        if let characters = Self.ghosttyText(for: event), !characters.isEmpty {
             return characters.withCString { charactersPointer in
                 input.text = charactersPointer
                 return ghostty_surface_key(surface, input)
@@ -522,10 +526,11 @@ import spacesterminalcore
     private func makeGhosttyKeyEvent(for event: NSEvent, action: ghostty_input_action_e) -> ghostty_input_key_s {
         var input = ghostty_input_key_s()
         input.action = action
+        let translationModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         input.mods = ghostty_surface_key_translation_mods(surface, ghosttyModifiers(from: event.modifierFlags))
-        input.consumed_mods = GHOSTTY_MODS_NONE
+        input.consumed_mods = ghosttyModifiers(from: translationModifiers.subtracting([.control, .command]))
         input.keycode = UInt32(event.keyCode)
-        input.unshifted_codepoint = event.charactersIgnoringModifiers?.unicodeScalars.first.map(\.value) ?? 0
+        input.unshifted_codepoint = Self.unshiftedCodepoint(for: event)
         input.composing = false
         input.text = nil
         return input
@@ -571,6 +576,55 @@ import spacesterminalcore
         default: UInt8(GHOSTTY_MOUSE_MOMENTUM_NONE.rawValue)
         }
     }
+
+    static func ghosttyText(for event: NSEvent) -> String? {
+        guard let characters = event.characters else { return nil }
+        guard characters.count == 1, let scalar = characters.unicodeScalars.first else { return characters }
+
+        if scalar.value < 0x20 { return event.characters(byApplyingModifiers: event.modifierFlags.subtracting(.control)) }
+
+        if isPrivateUseFunctionKeyScalar(scalar.value) { return nil }
+        return characters
+    }
+
+    static func unshiftedCodepoint(for event: NSEvent) -> UInt32 {
+        guard event.type == .keyDown || event.type == .keyUp, let characters = event.characters(byApplyingModifiers: []),
+            let scalar = characters.unicodeScalars.first
+        else { return 0 }
+        return scalar.value
+    }
+
+    static func rawKeyFallbackSpecifier(for event: NSEvent) -> String? {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        switch Int(event.keyCode) {
+        case kVK_UpArrow where flags.isSubset(of: [.numericPad]): return "up"
+        case kVK_DownArrow where flags.isSubset(of: [.numericPad]): return "down"
+        case kVK_LeftArrow where flags.isSubset(of: [.numericPad]): return "left"
+        case kVK_RightArrow where flags.isSubset(of: [.numericPad]): return "right"
+        case kVK_Home where flags.isSubset(of: [.numericPad]): return "home"
+        case kVK_End where flags.isSubset(of: [.numericPad]): return "end"
+        case kVK_PageUp where flags.isSubset(of: [.numericPad]): return "pageup"
+        case kVK_PageDown where flags.isSubset(of: [.numericPad]): return "pagedown"
+        case kVK_ForwardDelete where flags.isSubset(of: [.numericPad]): return "forwarddelete"
+        case kVK_Help where flags.isSubset(of: [.numericPad]): return "insert"
+        case kVK_Tab where flags == [.shift]: return "backtab"
+        case kVK_F1 where flags.isEmpty: return "f1"
+        case kVK_F2 where flags.isEmpty: return "f2"
+        case kVK_F3 where flags.isEmpty: return "f3"
+        case kVK_F4 where flags.isEmpty: return "f4"
+        case kVK_F5 where flags.isEmpty: return "f5"
+        case kVK_F6 where flags.isEmpty: return "f6"
+        case kVK_F7 where flags.isEmpty: return "f7"
+        case kVK_F8 where flags.isEmpty: return "f8"
+        case kVK_F9 where flags.isEmpty: return "f9"
+        case kVK_F10 where flags.isEmpty: return "f10"
+        case kVK_F11 where flags.isEmpty: return "f11"
+        case kVK_F12 where flags.isEmpty: return "f12"
+        default: return nil
+        }
+    }
+
+    static func isPrivateUseFunctionKeyScalar(_ value: UInt32) -> Bool { (0xF700...0xF8FF).contains(value) }
 
     private func modifierFlag(for keyCode: UInt16) -> NSEvent.ModifierFlags {
         switch keyCode {
