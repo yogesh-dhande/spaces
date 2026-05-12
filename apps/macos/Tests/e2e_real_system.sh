@@ -1517,6 +1517,56 @@ end run
 APPLESCRIPT
 }
 
+spaces_modal_dialog_visible() {
+  local modal_text=""
+  modal_text="$(spaces_modal_dialog_text || true)"
+  if [[ -n "$modal_text" ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
+  fi
+}
+
+dismiss_spaces_modal_dialog() {
+  osascript - "$SPACES_PID" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetWindow in windows of proc
+        try
+          set subroleValue to ""
+          try
+            set subroleValue to (value of attribute "AXSubrole" of targetWindow) as text
+          end try
+          if subroleValue is "AXDialog" then
+            if exists button "Cancel (Esc)" of targetWindow then
+              click button "Cancel (Esc)" of targetWindow
+              return
+            else if exists button "OK" of targetWindow then
+              click button "OK" of targetWindow
+              return
+            end if
+          end if
+          if exists sheet 1 of targetWindow then
+            repeat with targetSheet in sheets of targetWindow
+              if exists button "Cancel (Esc)" of targetSheet then
+                click button "Cancel (Esc)" of targetSheet
+                return
+              else if exists button "OK" of targetSheet then
+                click button "OK" of targetSheet
+                return
+              end if
+            end repeat
+          end if
+        end try
+      end repeat
+    end repeat
+  end tell
+end run
+APPLESCRIPT
+}
+
 assert_no_spaces_modal_dialog() {
   local modal_text=""
   modal_text="$(spaces_modal_dialog_text || true)"
@@ -1524,6 +1574,17 @@ assert_no_spaces_modal_dialog() {
     log_debug "spaces modal dialog detected: $modal_text"
     fail "Spaces modal dialog visible: $modal_text"
   fi
+}
+
+wait_for_spaces_modal_dialog_frontmost() {
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$(frontmost_pid)" == "$SPACES_PID" && "$(spaces_modal_dialog_visible)" == "1" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for Spaces modal dialog to become frontmost (frontmost_pid=$(frontmost_pid) spaces_pid=$SPACES_PID visible=$(spaces_modal_dialog_visible))"
 }
 
 frontmost_pid() {
@@ -2947,6 +3008,18 @@ PY
     wait_for_condition "ghostty_focused_terminal" "$frontend_terminal_id"
     pass_case
   else
+    begin_case "$host: window issue modal comes frontmost from external app"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" hide-main-window >/tmp/spaces-e2e-hide-main-before-recovery-modal.json
+    activate_google_chrome
+    transition_pause "$host seed chrome focus for window issue modal"
+    wait_for_condition "frontmost_app" "Google Chrome"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" show-window-issue-modal --title "Process window not found" --detail "frontend is no longer open." >/tmp/spaces-e2e-show-window-issue-modal.json
+    wait_for_spaces_modal_dialog_frontmost
+    dismiss_spaces_modal_dialog
+    transition_pause "$host dismiss window issue modal"
+    wait_for_condition "spaces_modal_dialog_visible" "0"
+    pass_case
+
     begin_case "$host: focus tracked Spaces terminal window"
     local spaces_terminal_focus_request_id
     local spaces_terminal_focus_log=/tmp/spaces-e2e-focus-frontend.log
@@ -3173,6 +3246,15 @@ run_hotkey_visibility_profiling() {
     wait_for_condition "spaces_main_window_visible" "0"
     record_toggle_palette_metric "external_app.keyboard_toggle_palette.palette" "show" "0" "$host" "single"
 
+    activate_google_chrome
+    transition_pause "$host keep chrome focused while palette remains visible"
+    wait_for_condition "frontmost_app" "Google Chrome"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    send_spaces_command_palette_hotkey_with_ack
+    wait_for_spaces_command_palette_presented "0"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_spaces_frontmost_ready
+
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_dismissed
     wait_for_condition "spaces_command_palette_visible" "0"
@@ -3228,6 +3310,14 @@ run_hotkey_visibility_profiling() {
       wait_for_spaces_frontmost_ready
       wait_for_condition "spaces_front_window_title" "Spaces"
       wait_for_condition "spaces_main_window_visible" "1"
+      activate_ghostty
+      transition_pause "$host keep ghostty focused while main window remains visible"
+      wait_for_condition "frontmost_app" "ghostty"
+      wait_for_condition "spaces_main_window_visible" "1"
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_spaces_frontmost_ready
+      wait_for_condition "spaces_front_window_title" "Spaces"
+      wait_for_condition "spaces_main_window_visible" "1"
       send_spaces_toggle_hotkey_with_ack
       wait_for_condition "frontmost_app" "ghostty"
       wait_for_condition "spaces_main_window_visible" "0"
@@ -3239,10 +3329,43 @@ run_hotkey_visibility_profiling() {
       wait_for_spaces_frontmost_ready
       wait_for_condition "spaces_front_window_title" "Spaces"
       wait_for_condition "spaces_main_window_visible" "1"
+      activate_google_chrome
+      transition_pause "$host keep chrome focused while main window remains visible"
+      wait_for_condition "frontmost_app" "Google Chrome"
+      wait_for_condition "spaces_main_window_visible" "1"
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_spaces_frontmost_ready
+      wait_for_condition "spaces_front_window_title" "Spaces"
+      wait_for_condition "spaces_main_window_visible" "1"
       send_spaces_toggle_hotkey_with_ack
       wait_for_condition "frontmost_app" "Google Chrome"
       wait_for_condition "spaces_main_window_visible" "0"
     fi
+    pass_case
+
+    begin_case "$host: toggle command palette independently of auxiliary terminal windows"
+    ensure_single_spaces_instance "$SPACES_PID"
+    reset_fixture_runtime "$workspace_dir"
+    run_spaces_logged /tmp/spaces-e2e-profile-terminal-toggle-palette-start.log start "$workspace_dir"
+    local spaces_palette_focus_request_id
+    local spaces_palette_focus_log=/tmp/spaces-e2e-toggle-palette-focus-frontend.log
+    spaces_palette_focus_request_id="$(uuidgen)"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_palette_focus_request_id" >"$spaces_palette_focus_log" 2>&1
+    transition_pause "$host seed frontend terminal focus for palette toggle assertions"
+    record_process_focus_metric "terminal_toggle_palette.hotkey.process_tracked_tab" "frontend" "$host" "single" "$spaces_palette_focus_request_id" "$spaces_palette_focus_log"
+    send_spaces_command_palette_hotkey_with_ack
+    wait_for_spaces_command_palette_presented "1"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$(uuidgen)" >/tmp/spaces-e2e-toggle-palette-refocus-frontend.log 2>&1
+    transition_pause "$host keep frontend terminal focused while palette remains visible"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    send_spaces_command_palette_hotkey_with_ack
+    wait_for_spaces_command_palette_presented "1"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_spaces_frontmost_ready
+    send_spaces_command_palette_hotkey_with_ack
+    wait_for_spaces_command_palette_dismissed "1"
+    wait_for_condition "spaces_command_palette_visible" "0"
     pass_case
 
     # Repeated built-in hotkey timing loops live in the dedicated

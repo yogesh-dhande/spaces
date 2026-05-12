@@ -1342,7 +1342,7 @@ public final class WorkspaceOrchestrator {
             if let sessionID = process.terminalNativeID ?? process.terminalTrackingID, !sessionID.isEmpty { builtInTerminalWindowCloser(sessionID) }
             let command = try spacesTerminalCommand(template: template, env: env, processShell: try store.appConfig().processShell)
             let session = try launchSpacesTerminalSession(
-                title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner, backend: .scriptPTY,
+                title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner, backend: .ghosttyEmbedded,
                 readinessPolicy: .sessionReady)
             let now = nowISO8601()
             let restartedProcess = RunningProcessRecord(
@@ -4571,7 +4571,7 @@ public final class WorkspaceOrchestrator {
                 let name = template.name ?? template.command
                 let sessionCommand = try spacesTerminalCommand(template: template, env: env, processShell: processShell)
                 let session = try launchSpacesTerminalSession(
-                    title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .scriptPTY,
+                    title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
                     readinessPolicy: .sessionReady)
                 let now = nowISO8601()
                 let running = RunningProcessRecord(
@@ -5559,7 +5559,7 @@ public final class WorkspaceOrchestrator {
             let sessionCommand = commandPrefixedWithShellEnvironment(
                 wrappedAgentLauncherCommand(name: launcher.name, command: applyEnvVars(launcher.command, env: env)), env: launchEnv)
             let session = try launchSpacesTerminalSession(
-                title: launcher.name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .scriptPTY,
+                title: launcher.name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
                 readinessPolicy: .sessionReady, sessionID: agentSessionID)
             terminalHandle = ManagedTerminalHandle(
                 fallbackWindowID: session.windowID, providerIdentity: .session(session.sessionID), hookAttributionID: session.sessionID,
@@ -5759,7 +5759,7 @@ public final class WorkspaceOrchestrator {
             let name = processKey(for: template)
             let sessionCommand = try spacesTerminalCommand(template: template, env: env, processShell: try store.appConfig().processShell)
             let session = try launchSpacesTerminalSession(
-                title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .scriptPTY,
+                title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
                 readinessPolicy: .sessionReady)
             let now = nowISO8601()
             let record = RunningProcessRecord(

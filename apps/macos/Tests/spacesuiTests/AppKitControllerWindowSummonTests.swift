@@ -60,10 +60,18 @@ import spacesterminalcore
         #expect(!AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: nil, returnApplicationProcessID: nil))
     }
 
-    @Test func toggleHotkeyDependsOnlyOnMainWindowVisibility() {
-        #expect(AppKitController.shouldHideMainWindowForToggle(appIsHidden: false, mainWindowIsVisible: true))
-        #expect(!AppKitController.shouldHideMainWindowForToggle(appIsHidden: true, mainWindowIsVisible: true))
-        #expect(!AppKitController.shouldHideMainWindowForToggle(appIsHidden: false, mainWindowIsVisible: false))
+    @Test func toggleHotkeyHidesOnlyWhenMainWindowIsFocused() {
+        #expect(AppKitController.shouldHideMainWindowForToggle(appIsHidden: false, mainWindowIsFocused: true))
+        #expect(!AppKitController.shouldHideMainWindowForToggle(appIsHidden: true, mainWindowIsFocused: true))
+        #expect(!AppKitController.shouldHideMainWindowForToggle(appIsHidden: false, mainWindowIsFocused: false))
+    }
+
+    @Test func toggleHotkeyVisibilityMatrix() {
+        let cases: [(Bool, Bool, Bool)] = [(true, true, false), (true, false, false), (false, true, true), (false, false, false)]
+        for (appIsHidden, mainWindowIsFocused, expectedHide) in cases {
+            #expect(
+                AppKitController.shouldHideMainWindowForToggle(appIsHidden: appIsHidden, mainWindowIsFocused: mainWindowIsFocused) == expectedHide)
+        }
     }
 
     @Test func toggleHotkeyRestoresTerminalFocusOnlyWhenReturnTargetAndAuxiliaryWindowExist() {
@@ -118,6 +126,21 @@ import spacesterminalcore
         #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: false, panelIsKey: false))
         #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: true, panelIsKey: false))
         #expect(AppKitController.commandPalettePresentationIsComplete(panelIsVisible: true, panelIsKey: true))
+    }
+
+    @Test func commandPaletteToggleDismissesOnlyWhenPaletteIsFocused() {
+        #expect(AppKitController.shouldDismissCommandPaletteForToggle(panelIsVisible: true, panelIsFocused: true))
+        #expect(!AppKitController.shouldDismissCommandPaletteForToggle(panelIsVisible: true, panelIsFocused: false))
+        #expect(!AppKitController.shouldDismissCommandPaletteForToggle(panelIsVisible: false, panelIsFocused: true))
+    }
+
+    @Test func commandPaletteToggleVisibilityMatrix() {
+        let cases: [(Bool, Bool, Bool)] = [(true, true, true), (true, false, false), (false, true, false), (false, false, false)]
+        for (panelIsVisible, panelIsFocused, expectedDismiss) in cases {
+            #expect(
+                AppKitController.shouldDismissCommandPaletteForToggle(panelIsVisible: panelIsVisible, panelIsFocused: panelIsFocused)
+                    == expectedDismiss)
+        }
     }
 
     @Test func commandPaletteSessionUsesCapturedMainWindowVisibilityForHotkeyState() {

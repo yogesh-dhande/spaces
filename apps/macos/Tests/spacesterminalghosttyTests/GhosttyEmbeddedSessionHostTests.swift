@@ -67,7 +67,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(output, "echo hello\n")
     }
 
-    @MainActor func testRuntimeStateMarksExitedWhenCachedChildPIDHasDied() throws {
+    @MainActor func testRuntimeStateRemainsRunningWhenCachedChildPIDHasDied() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -90,8 +90,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         host.debugPersistRuntimeState()
 
         let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
-        XCTAssertEqual(runtimeState.state, .exited)
+        XCTAssertEqual(runtimeState.state, .running)
         XCTAssertEqual(runtimeState.childPID, childPID)
-        XCTAssertNotNil(runtimeState.exitedAt)
+        XCTAssertNil(runtimeState.exitedAt)
     }
 }

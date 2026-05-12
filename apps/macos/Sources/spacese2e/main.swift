@@ -11,9 +11,9 @@ struct MXE2ECommand: ParsableCommand {
         commandName: "spacese2e", abstract: "Manual real-system test helpers for Spaces.",
         subcommands: [
             SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
-            ShowMainWindowCommand.self, HideMainWindowCommand.self, SelectWorkspaceDetailCommand.self, OpenWorkspaceTerminalCommand.self,
-            DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self, StopWorkspaceCommand.self,
-            StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
+            ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, SelectWorkspaceDetailCommand.self,
+            OpenWorkspaceTerminalCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
+            StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
             SetWorkspaceStopScriptCommand.self, SetTerminalHostCommand.self, TerminalHostAvailableCommand.self, FocusWorkspaceWindowIndexCommand.self,
             CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
             CloseWorkspaceProcessWindowCommand.self, RecordScreenCommand.self,
@@ -36,6 +36,20 @@ private struct HideMainWindowCommand: ParsableCommand {
     func run() throws {
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.hideMainWindow, object: nil, userInfo: nil, options: [.deliverImmediately])
+        try emitJSON(["success": true])
+    }
+}
+
+private struct ShowWindowIssueModalCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "show-window-issue-modal")
+
+    @Option(name: .long) var title: String
+    @Option(name: .long) var detail: String
+
+    func run() throws {
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.showWindowIssueModal, object: nil,
+            userInfo: [IPCNotification.titleUserInfoKey: title, IPCNotification.detailUserInfoKey: detail], options: [.deliverImmediately])
         try emitJSON(["success": true])
     }
 }

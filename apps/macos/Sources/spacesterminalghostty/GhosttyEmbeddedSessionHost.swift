@@ -90,15 +90,6 @@ extension Notification.Name {
     public func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
         let startedAt = Date()
         do {
-            try startIfNeeded()
-            let activeAttachments = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
-            let currentAttachment = activeAttachments.first { $0.clientID == client.id }
-            if currentAttachment?.mode != mode {
-                try TerminalSessionPersistence.attachClient(
-                    sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths,
-                    attachedAt: ISO8601DateFormatter().string(from: Date()))
-                postAttachmentStateDidChange()
-            }
             if mode == .owner, let container {
                 if terminalView.superview !== container {
                     terminalView.removeFromSuperview()
@@ -113,6 +104,17 @@ extension Notification.Name {
                 }
                 container.needsLayout = true
                 container.layoutSubtreeIfNeeded()
+            }
+            try startIfNeeded()
+            let activeAttachments = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
+            let currentAttachment = activeAttachments.first { $0.clientID == client.id }
+            if currentAttachment?.mode != mode {
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths,
+                    attachedAt: ISO8601DateFormatter().string(from: Date()))
+                postAttachmentStateDidChange()
+            }
+            if mode == .owner, let container {
                 terminalView.requestSurfaceRefresh()
                 focusWindow(container.window)
             }
@@ -254,12 +256,9 @@ extension Notification.Name {
 
     private func refreshRuntimeState(force: Bool) {
         let now = Date()
-        let observedChildPID = observedChildPID()
-        let runtimeState: TerminalSessionState = observedChildPID == nil && hasExitedChildProcess() ? .exited : .running
         let state = TerminalSessionRuntimeState(
-            sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
-            childPID: observedChildPID ?? (runtimeState == .exited ? lastKnownChildPID : nil), state: runtimeState,
-            updatedAt: ISO8601DateFormatter().string(from: now), exitedAt: runtimeState == .exited ? ISO8601DateFormatter().string(from: now) : nil)
+            sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
+            state: .running, updatedAt: ISO8601DateFormatter().string(from: now))
         let shouldPersist = force || shouldPersistRuntimeState(state, now: now)
         guard shouldPersist else { return }
         let previousSignature = lastPersistedRuntimeState.map(runtimeStateSignature(for:))
@@ -314,13 +313,7 @@ extension Notification.Name {
             lastKnownChildPID = foregroundPID
             return foregroundPID
         }
-        if hasExitedChildProcess() { return nil }
         return lastKnownChildPID
-    }
-
-    private func hasExitedChildProcess() -> Bool {
-        guard let childPID = lastKnownChildPID else { return false }
-        return kill(childPID, 0) != 0 && errno == ESRCH
     }
 
     private func postAttachmentStateDidChange() {

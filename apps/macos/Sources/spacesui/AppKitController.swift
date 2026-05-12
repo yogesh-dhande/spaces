@@ -205,6 +205,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var selectWorkspaceDetailIPCObserver: NSObjectProtocol?
     private var showMainWindowIPCObserver: NSObjectProtocol?
     private var hideMainWindowIPCObserver: NSObjectProtocol?
+    private var showWindowIssueModalIPCObserver: NSObjectProtocol?
     private var cycleWorkspaceWindowIPCObserver: NSObjectProtocol?
     private var openWorkspaceTerminalIPCObserver: NSObjectProtocol?
     private var openTerminalSessionWindowIPCObserver: NSObjectProtocol?
@@ -335,6 +336,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupAgentEventIPCObserver()
         setupShowMainWindowIPCObserver()
         setupHideMainWindowIPCObserver()
+        setupShowWindowIssueModalIPCObserver()
         setupCycleWorkspaceWindowIPCObserver()
         setupSelectWorkspaceDetailIPCObserver()
         setupOpenWorkspaceTerminalIPCObserver()
@@ -381,6 +383,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let hideMainWindowIPCObserver {
             DistributedNotificationCenter.default().removeObserver(hideMainWindowIPCObserver)
             self.hideMainWindowIPCObserver = nil
+        }
+        if let showWindowIssueModalIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(showWindowIssueModalIPCObserver)
+            self.showWindowIssueModalIPCObserver = nil
         }
         if let cycleWorkspaceWindowIPCObserver {
             DistributedNotificationCenter.default().removeObserver(cycleWorkspaceWindowIPCObserver)
@@ -448,6 +454,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 // profiling external-app -> main-window hotkey flows.
                 window.orderOut(nil)
                 NSApp.hide(nil)
+            }
+        }
+    }
+
+    private func setupShowWindowIssueModalIPCObserver() {
+        showWindowIssueModalIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.showWindowIssueModal, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let title = notification.userInfo?[IPCNotification.titleUserInfoKey] as? String else { return }
+            guard let detail = notification.userInfo?[IPCNotification.detailUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, title, detail] in
+                guard let self else { return }
+                self.showWindowIssueModal(title: title, detail: detail)
             }
         }
     }
@@ -950,9 +969,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         application.activate(options: [])
     }
 
-    private func activateCurrentApplicationForTargetedReveal() {
-        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-    }
+    private func activateCurrentApplicationForTargetedReveal() { NSApp.activate(ignoringOtherApps: true) }
 
     private func effectiveMainWindowVisibilityForHotkeyState() -> Bool {
         Self.effectiveMainWindowVisibilityForHotkeyState(
@@ -2996,6 +3013,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showWindowIssueModal(title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
         hideWindowIssueToast()
+        if commandPalettePanel?.isVisible == true {
+            commandPaletteReturnTerminalSessionID = nil
+            commandPaletteReturnApplicationProcessID = nil
+            dismissCommandPalette()
+        }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = title
@@ -3014,13 +3036,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             okButton.keyEquivalentModifierMask = []
         }
 
-        guard let window else {
+        if let window {
+            prepareWindowForActiveSpaceSummon(window)
+            NSApp.unhide(nil)
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+        }
+        Task { @MainActor in
+            await Task.yield()
+            if let window {
+                prepareWindowForActiveSpaceSummon(window)
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeKeyAndOrderFront(nil)
+                window.orderFrontRegardless()
+            }
             let response = alert.runModal()
             if actionTitle != nil, response == .alertFirstButtonReturn { action?() }
-            return
         }
-
-        alert.beginSheetModal(for: window) { response in if actionTitle != nil, response == .alertFirstButtonReturn { action?() } }
     }
 
     private func showSettingsDetail() {
@@ -7013,8 +7045,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     nonisolated static func commandPalettePresentationIsComplete(panelIsVisible: Bool, panelIsKey: Bool) -> Bool { panelIsVisible && panelIsKey }
 
-    nonisolated static func shouldHideMainWindowForToggle(appIsHidden: Bool, mainWindowIsVisible: Bool) -> Bool {
-        !appIsHidden && mainWindowIsVisible
+    nonisolated static func shouldDismissCommandPaletteForToggle(panelIsVisible: Bool, panelIsFocused: Bool) -> Bool {
+        panelIsVisible && panelIsFocused
+    }
+
+    nonisolated static func shouldHideMainWindowForToggle(appIsHidden: Bool, mainWindowIsFocused: Bool) -> Bool {
+        !appIsHidden && mainWindowIsFocused
     }
 
     nonisolated static func shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: String?, auxiliaryTerminalWindowsVisible: Bool) -> Bool {
@@ -7328,7 +7364,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let toggleStartedAt = Date()
         let perfContext = captureHotkeyPerfContext()
         logHotkeyDebug("toggle_window begin \(hotkeyWindowStateSummary())")
-        if Self.shouldHideMainWindowForToggle(appIsHidden: NSApp.isHidden, mainWindowIsVisible: rawMainWindowVisibility()) {
+        if Self.shouldHideMainWindowForToggle(appIsHidden: NSApp.isHidden, mainWindowIsFocused: window.isKeyWindow) {
             logHotkeyDebug("toggle_window hide_main_only")
             let returnTerminalSessionID = appToggleReturnTerminalSessionID
             let returnApplicationProcessID = appToggleReturnApplicationProcessID
@@ -7410,25 +7446,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func revealTargetedHotkeyWindow(_ window: NSWindow) {
         if window.isMiniaturized { window.deminiaturize(nil) }
+        prepareWindowForActiveSpaceSummon(window)
         if Self.shouldFocusVisibleTargetedHotkeyWindow(
             appIsActive: NSApp.isActive, windowIsVisible: window.isVisible, windowIsMiniaturized: window.isMiniaturized)
         {
-            window.orderFront(nil)
+            window.orderFrontRegardless()
             window.makeKey()
             return
         }
         if Self.shouldUseDirectTargetedHotkeyReveal(appIsActive: NSApp.isActive) {
             window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
             return
         }
+        window.orderFrontRegardless()
         if Self.shouldActivateAppForTargetedHotkeyReveal(appIsActive: NSApp.isActive) { activateCurrentApplicationForTargetedReveal() }
-        prepareWindowForActiveSpaceSummon(window)
-        window.makeKeyAndOrderFront(nil)
+        window.makeKey()
         window.orderFrontRegardless()
         Task { @MainActor [weak window] in
             await Task.yield()
             guard let window, window.isVisible, !window.isMiniaturized else { return }
             window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
         }
     }
 
@@ -8837,9 +8876,20 @@ extension AppKitController {
             toggleWindowFromHotkey()
             return
         }
-        if commandPalettePanel?.isVisible == true {
+        if let panel = commandPalettePanel,
+            Self.shouldDismissCommandPaletteForToggle(panelIsVisible: panel.isVisible, panelIsFocused: panel.isKeyWindow)
+        {
             logHotkeyDebug("toggle_palette dismiss_visible_panel")
             dismissCommandPalette(perfContext: perfContext)
+            return
+        }
+        if let panel = commandPalettePanel, panel.isVisible {
+            logHotkeyDebug("toggle_palette refocus_visible_panel")
+            revealTargetedHotkeyWindow(panel)
+            if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
+            pendingCommandPalettePresentation = PendingCommandPalettePresentation(
+                perfContext: perfContext, mainWindowWasVisible: rawMainWindowVisibility())
+            completePendingCommandPalettePresentationIfNeeded()
             return
         }
         presentCommandPalette(perfContext: perfContext)

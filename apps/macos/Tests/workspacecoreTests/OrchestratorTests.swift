@@ -3153,7 +3153,7 @@ final class OrchestratorTests: XCTestCase {
                     FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
                     try? TerminalSessionPersistence.writeRuntimeState(
                         .init(
-                            sessionID: sessionID, backend: .scriptPTY, servicePID: getpid(), childPID: 4321, state: .running,
+                            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
                             updatedAt: "2026-05-11T09:00:00Z"), paths: paths)
                     try? "process restarted\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
                 }

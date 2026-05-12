@@ -590,13 +590,13 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         controller.windowDidBecomeMain(Notification(name: NSWindow.didBecomeMainNotification))
         controller.windowDidResize(Notification(name: NSWindow.didResizeNotification))
         controller.windowDidEndLiveResize(Notification(name: NSWindow.didEndLiveResizeNotification))
-        let focusCallsBeforeAppActive = focusWindowCalls
+        let focusWindowCallsBeforeAppActive = focusWindowCalls
         controller.debugSimulateApplicationDidBecomeActive()
         controller.windowDidResignMain(Notification(name: NSWindow.didResignMainNotification))
         controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification))
         controller.debugSimulateApplicationDidResignActive()
 
-        XCTAssertEqual(focusWindowCalls, focusCallsBeforeAppActive)
+        XCTAssertEqual(focusWindowCalls, focusWindowCallsBeforeAppActive)
         XCTAssertGreaterThanOrEqual(focusWindowCalls, 4)
         XCTAssertTrue(focusedStates.contains(false))
     }
