@@ -80,6 +80,7 @@ import spacesterminalghostty
     private let loadWindowFrameAction: (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?
     private let saveWindowFrameAction: (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void
     private var refreshTask: Task<Void, Never>?
+    private var takeoverTask: Task<Void, Never>?
     private var pendingWindowFramePersistTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
     private var isClientAttached = false
@@ -323,35 +324,52 @@ import spacesterminalghostty
             updateInputStatus(message: "Session is not running.", isError: true)
             return
         }
+        guard takeoverTask == nil else { return }
         let startedAt = Date()
-        do {
+        let clientID = client.id
+        takeoverButton.isEnabled = false
+        takeoverTask = Task.detached(priority: .userInitiated) { [takeoverAction] in
             let controlStartedAt = Date()
-            let response = try takeoverAction(client.id)
-            guard response.ok else {
-                GhosttyEmbeddedPerformance.logMetric(
-                    "terminal_viewer_takeover", target: "session=\(sessionID) client=\(client.id)",
-                    elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=control_response")
-                updateInputStatus(message: response.message, isError: true)
-                return
+            do {
+                let response = try takeoverAction(clientID)
+                await MainActor.run {
+                    defer {
+                        self.takeoverTask = nil
+                        self.takeoverButton.isEnabled =
+                            self.preferredAttachmentMode != .owner && self.isInteractiveRuntimeState(self.lastObservedRuntimeState)
+                    }
+                    guard response.ok else {
+                        GhosttyEmbeddedPerformance.logMetric(
+                            "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
+                            elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=control_response")
+                        self.updateInputStatus(message: response.message, isError: true)
+                        return
+                    }
+                    self.preferredAttachmentMode = .owner
+                    let attachStartedAt = Date()
+                    self.ensureGhosttyHostAttached()
+                    let attachElapsedMS = GhosttyEmbeddedPerformance.elapsedMS(since: attachStartedAt)
+                    let refreshStartedAt = Date()
+                    self.updateInputStatus(message: response.message, isError: false)
+                    self.refreshNow()
+                    GhosttyEmbeddedPerformance.logMetric(
+                        "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
+                        elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true,
+                        detail:
+                            "control_ms=\(GhosttyEmbeddedPerformance.elapsedMS(since: controlStartedAt)) attach_ms=\(attachElapsedMS) refresh_ms=\(GhosttyEmbeddedPerformance.elapsedMS(since: refreshStartedAt))"
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    self.takeoverTask = nil
+                    self.takeoverButton.isEnabled =
+                        self.preferredAttachmentMode != .owner && self.isInteractiveRuntimeState(self.lastObservedRuntimeState)
+                    GhosttyEmbeddedPerformance.logMetric(
+                        "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
+                        elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=exception")
+                    self.updateInputStatus(message: String(describing: error), isError: true)
+                }
             }
-            preferredAttachmentMode = .owner
-            let attachStartedAt = Date()
-            ensureGhosttyHostAttached()
-            let attachElapsedMS = GhosttyEmbeddedPerformance.elapsedMS(since: attachStartedAt)
-            let refreshStartedAt = Date()
-            updateInputStatus(message: response.message, isError: false)
-            refreshNow()
-            GhosttyEmbeddedPerformance.logMetric(
-                "terminal_viewer_takeover", target: "session=\(sessionID) client=\(client.id)",
-                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true,
-                detail:
-                    "control_ms=\(GhosttyEmbeddedPerformance.elapsedMS(since: controlStartedAt)) attach_ms=\(attachElapsedMS) refresh_ms=\(GhosttyEmbeddedPerformance.elapsedMS(since: refreshStartedAt))"
-            )
-        } catch {
-            GhosttyEmbeddedPerformance.logMetric(
-                "terminal_viewer_takeover", target: "session=\(sessionID) client=\(client.id)",
-                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=exception")
-            updateInputStatus(message: String(describing: error), isError: true)
         }
     }
 
