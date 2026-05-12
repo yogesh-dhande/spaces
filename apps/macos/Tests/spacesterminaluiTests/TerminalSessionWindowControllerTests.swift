@@ -1,3 +1,4 @@
+import Carbon
 import XCTest
 import spacesterminalcore
 
@@ -49,6 +50,40 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))
         XCTAssertEqual(capture.detachedClientID, capture.attachedClientID)
+    }
+
+    @MainActor func testCommandWClosesOnlyTerminalWindow() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let controller = TerminalSessionWindowController(sessionID: "session-close-w", paths: .init(rootDirectory: root.path))
+        controller.show()
+
+        let event = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: controller.window?.windowNumber ?? 0,
+                context: nil, characters: "w", charactersIgnoringModifiers: "w", isARepeat: false, keyCode: UInt16(kVK_ANSI_W)))
+
+        XCTAssertTrue(controller.window?.performKeyEquivalent(with: event) == true)
+        XCTAssertTrue(controller.debugDidCloseWindow)
+    }
+
+    @MainActor func testCommandQClosesOnlyTerminalWindow() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let controller = TerminalSessionWindowController(sessionID: "session-close-q", paths: .init(rootDirectory: root.path))
+        controller.show()
+
+        let event = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: controller.window?.windowNumber ?? 0,
+                context: nil, characters: "q", charactersIgnoringModifiers: "q", isARepeat: false, keyCode: UInt16(kVK_ANSI_Q)))
+
+        XCTAssertTrue(controller.window?.performKeyEquivalent(with: event) == true)
+        XCTAssertTrue(controller.debugDidCloseWindow)
     }
 
     @MainActor func testViewerShowAttachesClientAsViewer() throws {

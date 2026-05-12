@@ -1,7 +1,23 @@
 import AppKit
+import Carbon
 import Foundation
 import spacesterminalcore
 import spacesterminalghostty
+
+@MainActor private final class TerminalSessionWindow: NSWindow {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.type == .keyDown else { return super.performKeyEquivalent(with: event) }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags == [.command] else { return super.performKeyEquivalent(with: event) }
+
+        switch Int(event.keyCode) {
+        case kVK_ANSI_Q, kVK_ANSI_W:
+            performClose(nil)
+            return true
+        default: return super.performKeyEquivalent(with: event)
+        }
+    }
+}
 
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
     private static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
@@ -138,7 +154,7 @@ import spacesterminalghostty
 
         let contentRect = NSRect(x: 0, y: 0, width: 980, height: 640)
         let styleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
-        let window = NSWindow(contentRect: contentRect, styleMask: styleMask, backing: .buffered, defer: false)
+        let window = TerminalSessionWindow(contentRect: contentRect, styleMask: styleMask, backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.title = "Terminal \(sessionID)"
         window.tabbingMode = .disallowed
