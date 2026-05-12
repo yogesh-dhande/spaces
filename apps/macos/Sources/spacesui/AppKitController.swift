@@ -3,6 +3,7 @@ import Carbon
 import Foundation
 import Sparkle
 import spacesterminalcore
+import spacesterminalghostty
 import spacesterminalui
 import systembridge
 import workspacecore
@@ -694,9 +695,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         controllers.removeAll { $0.clientID == clientID }
         if controllers.isEmpty {
             terminalSessionWindowControllers.removeValue(forKey: sessionID)
+            terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
         } else {
             terminalSessionWindowControllers[sessionID] = controllers
         }
+    }
+
+    private func terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: String) {
+        let workspaceID = try? orchestrator.workspaceIDForTerminalSession(sessionID)
+        guard let workspaceID else { return }
+        let isConfiguredProcessSession = ((try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? []).contains {
+            ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
+        }
+        guard !isConfiguredProcessSession else { return }
+        GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
+        if (try? orchestrator.removeAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
     }
 
     private func logWorkspaceDetailIPC(_ message: String) {

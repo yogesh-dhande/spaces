@@ -16,7 +16,7 @@ struct MXE2ECommand: ParsableCommand {
             StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
             SetWorkspaceStopScriptCommand.self, SetTerminalHostCommand.self, TerminalHostAvailableCommand.self, FocusWorkspaceWindowIndexCommand.self,
             CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
-            CloseWorkspaceProcessWindowCommand.self, RecordScreenCommand.self,
+            CloseWorkspaceProcessWindowCommand.self, CloseTerminalSessionWindowCommand.self, RecordScreenCommand.self,
         ])
 }
 
@@ -529,6 +529,21 @@ private struct CloseWorkspaceProcessWindowCommand: ParsableCommand {
             IPCNotification.closeTerminalSessionWindow, object: nil, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID],
             options: [.deliverImmediately])
         try emitJSON(["workspaceID": workspace.id, "processName": processName, "sessionID": sessionID])
+    }
+}
+
+private struct CloseTerminalSessionWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "close-terminal-session-window")
+
+    @Option(name: .long) var sessionID: String
+
+    func run() throws {
+        let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session id.") }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.closeTerminalSessionWindow, object: nil, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID],
+            options: [.deliverImmediately])
+        try emitJSON(["sessionID": trimmedSessionID])
     }
 }
 

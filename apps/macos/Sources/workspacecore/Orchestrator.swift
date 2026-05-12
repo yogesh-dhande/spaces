@@ -1668,6 +1668,19 @@ public final class WorkspaceOrchestrator {
     }
 
     public func workspaceIDForTerminalSession(_ sessionID: String) throws -> String? { try store.workspaceIDForTerminalSession(sessionID) }
+    @discardableResult public func removeAdHocBuiltInTerminalSession(sessionID: String) throws -> Bool {
+        guard let workspaceID = try store.workspaceIDForTerminalSession(sessionID) else { return false }
+        let runningProcessOwnsSession = try store.runningProcesses(workspaceID: workspaceID).contains {
+            ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
+        }
+        guard !runningProcessOwnsSession else { return false }
+        let matchingWindowIDs = try store.windows(workspaceID: workspaceID).filter {
+            $0.role == "terminal" && terminalHost(for: $0.app) == .spaces && ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
+        }.map(\.id)
+        guard !matchingWindowIDs.isEmpty else { return false }
+        for windowID in matchingWindowIDs { try store.deleteWindow(id: windowID) }
+        return true
+    }
 
     private func focusedChromeWorkspaceID(windowID: Int) throws -> String? {
         if chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil {
@@ -4459,7 +4472,10 @@ public final class WorkspaceOrchestrator {
     private func builtInTrackedWindowIsStillLive(window: WindowRecord) -> Bool {
         guard window.role == "terminal", terminalHost(for: window.app) == .spaces else { return false }
         guard let sessionID = window.terminalNativeID ?? window.terminalTrackingID, !sessionID.isEmpty else { return false }
-        return builtInSessionIsStillLive(sessionID: sessionID)
+        if builtInSessionBelongsToRunningProcess(sessionID: sessionID, workspaceID: window.workspaceID) {
+            return builtInSessionIsStillLive(sessionID: sessionID)
+        }
+        return builtInSessionIsStillLive(sessionID: sessionID) && builtInSessionHasActiveAttachments(sessionID: sessionID)
     }
 
     private func builtInSessionIsStillLive(sessionID: String) -> Bool {
@@ -4476,6 +4492,15 @@ public final class WorkspaceOrchestrator {
         guard record.provider == .spaces else { return false }
         guard let sessionID = record.terminalNativeID ?? record.terminalTrackingID, !sessionID.isEmpty else { return false }
         return builtInSessionIsStillLive(sessionID: sessionID)
+    }
+
+    private func builtInSessionBelongsToRunningProcess(sessionID: String, workspaceID: String) -> Bool {
+        ((try? store.runningProcesses(workspaceID: workspaceID)) ?? []).contains { ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID }
+    }
+
+    private func builtInSessionHasActiveAttachments(sessionID: String) -> Bool {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
+        return ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).isEmpty == false
     }
 
     @discardableResult private func pruneOrphanedAgentWindows(

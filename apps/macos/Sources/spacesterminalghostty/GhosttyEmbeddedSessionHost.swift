@@ -23,6 +23,11 @@ extension Notification.Name {
     }
 
     public func existingHost(sessionID: String) -> GhosttyEmbeddedSessionHost? { hosts[sessionID] }
+
+    public func terminate(sessionID: String) {
+        guard let host = hosts.removeValue(forKey: sessionID) else { return }
+        host.terminate()
+    }
 }
 
 @MainActor public final class GhosttyEmbeddedSessionHost {
@@ -172,6 +177,25 @@ extension Notification.Name {
     public func hasRenderableSurface() -> Bool { terminalView.surface != nil }
     public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
     public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
+    public func terminate() {
+        let now = ISO8601DateFormatter().string(from: Date())
+        let childPID = observedChildPID()
+        runtimeStateTimer?.invalidate()
+        runtimeStateTimer = nil
+        controlServer?.stop()
+        controlServer = nil
+        started = false
+        terminalView.terminateSession()
+        try? outputHandle?.close()
+        outputHandle = nil
+        let exitedState = TerminalSessionRuntimeState(
+            sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: childPID, state: .exited,
+            updatedAt: now, exitedAt: now)
+        try? TerminalSessionPersistence.writeRuntimeState(exitedState, paths: paths)
+        lastPersistedRuntimeState = exitedState
+        postRuntimeStateDidChange()
+        postAttachmentStateDidChange()
+    }
 
     public func childPID() -> Int32? { observedChildPID() }
     public var effectiveTitle: String { currentTitle ?? launchConfiguration.title }

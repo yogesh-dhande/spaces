@@ -313,6 +313,14 @@ import spacesterminalcore
         }
     }
 
+    public func terminateSession() {
+        surfaceCreationRetryWorkItem?.cancel()
+        surfaceCreationRetryWorkItem = nil
+        destroySurface()
+        if superview === hiddenHostContainerView { removeFromSuperview() }
+        hiddenHostWindow?.orderOut(nil)
+    }
+
     func handleSurfaceClosed() { destroySurface() }
 
     private func createSurfaceIfNeeded() {

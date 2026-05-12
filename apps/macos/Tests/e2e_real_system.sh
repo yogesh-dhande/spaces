@@ -3028,6 +3028,84 @@ PY
     transition_pause "$host refocus frontend terminal"
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single" "$spaces_terminal_focus_request_id" "$spaces_terminal_focus_log"
     pass_case
+
+    begin_case "$host: closing ad hoc Spaces terminal removes runtime row"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" open-workspace-terminal --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-open-adhoc-terminal.json
+    transition_pause "$host open ad hoc Spaces terminal"
+    dump_workspace "$workspace_dir" "$dump_file"
+    local adhoc_session_id
+    adhoc_session_id="$(python3 - "$dump_file" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for window in data["windows"]:
+    if window.get("app") == "Spaces" and window.get("role") == "terminal" and (window.get("name") or "").startswith("shell-"):
+        print(window.get("terminalTrackingID") or window.get("terminalNativeID") or "")
+        break
+PY
+)"
+    [[ -n "$adhoc_session_id" ]] || fail "expected ad hoc Spaces terminal session"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" close-terminal-session-window --session-id "$adhoc_session_id" >/tmp/spaces-e2e-close-adhoc-terminal.json
+    transition_pause "$host close ad hoc Spaces terminal"
+    local adhoc_closed_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+    local adhoc_row_present=1
+    while (( SECONDS < adhoc_closed_deadline )); do
+      dump_workspace "$workspace_dir" "$dump_file"
+      adhoc_row_present="$(python3 - "$dump_file" "$adhoc_session_id" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+session_id = sys.argv[2]
+for window in data["windows"]:
+    if (window.get("terminalTrackingID") or window.get("terminalNativeID") or "") == session_id:
+        print("1")
+        break
+else:
+    print("0")
+PY
+)"
+      [[ "$adhoc_row_present" == "0" ]] && break
+      sleep 0.2
+    done
+    [[ "$adhoc_row_present" == "0" ]] || fail "expected ad hoc Spaces terminal row to disappear after close"
+    pass_case
+
+    begin_case "$host: closing process Spaces terminal keeps process running and focus recovers"
+    dump_workspace "$workspace_dir" "$dump_file"
+    local frontend_session_before_close
+    frontend_session_before_close="$(python3 - "$dump_file" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for process in data["runningProcesses"]:
+    if process["name"] == "frontend":
+        print(process.get("terminalTrackingID") or process.get("terminalNativeID") or "")
+        break
+PY
+)"
+    [[ -n "$frontend_session_before_close" ]] || fail "expected frontend Spaces terminal session"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" close-terminal-session-window --session-id "$frontend_session_before_close" >/tmp/spaces-e2e-close-frontend-session.json
+    transition_pause "$host close frontend Spaces terminal"
+    wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
+    dump_workspace "$workspace_dir" "$dump_file"
+    assert_equals "$frontend_session_before_close" "$(python3 - "$dump_file" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for process in data["runningProcesses"]:
+    if process["name"] == "frontend":
+        print(process.get("terminalTrackingID") or process.get("terminalNativeID") or "")
+        break
+PY
+)" "frontend session stable after closing process terminal window"
+    local spaces_reopen_request_id spaces_reopen_log
+    spaces_reopen_request_id="$(uuidgen)"
+    spaces_reopen_log=/tmp/spaces-e2e-refocus-frontend-after-close.log
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_reopen_request_id" >"$spaces_reopen_log" 2>&1
+    transition_pause "$host refocus frontend after close"
+    record_process_focus_metric "terminal_close_recover.cli_window_focus.process_tracked_tab" "frontend" "$host" "single" "$spaces_reopen_request_id" "$spaces_reopen_log"
+    wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
+    pass_case
   fi
 
   # The Run tab numbers shortcuts in on-screen order:
