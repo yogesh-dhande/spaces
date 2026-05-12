@@ -61,12 +61,7 @@ func availableTerminalSessionRows(fileManager: FileManager = .default) throws ->
         guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
         guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }
         guard isProcessAlive(pid: runtimeState.servicePID) else { return nil }
-
-        let attachments = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
-        let ownerClientID = attachments.first(where: { $0.mode == .owner })?.clientID ?? "-"
-        let viewerCount = attachments.filter { $0.mode == .viewer }.count
-        return
-            "terminal\t\(session.sessionID)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tstate=\(runtimeState.state.rawValue)\tcwd=\(session.workingDirectory)\tcommand=\(session.command ?? "-")\towner=\(ownerClientID)\tclients=\(attachments.count)\tviewers=\(viewerCount)"
+        return "\(session.sessionID)\tstate=\(runtimeState.state.rawValue)\tcwd=\(session.workingDirectory)"
     }
 }
 

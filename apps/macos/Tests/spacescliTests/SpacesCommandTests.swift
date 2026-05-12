@@ -126,8 +126,16 @@ final class MXCommandTests: XCTestCase {
         let rows = try availableTerminalSessionRows()
 
         XCTAssertEqual(rows.count, 1)
-        XCTAssertTrue(rows[0].contains("terminal\tsession-live"))
+        XCTAssertTrue(rows[0].hasPrefix("session-live\t"))
         XCTAssertTrue(rows[0].contains("state=running"))
+        XCTAssertTrue(rows[0].contains("cwd=/tmp/work"))
+        XCTAssertFalse(rows[0].contains("terminal\t"))
+        XCTAssertFalse(rows[0].contains("title="))
+        XCTAssertFalse(rows[0].contains("backend="))
+        XCTAssertFalse(rows[0].contains("command="))
+        XCTAssertFalse(rows[0].contains("owner="))
+        XCTAssertFalse(rows[0].contains("clients="))
+        XCTAssertFalse(rows[0].contains("viewers="))
     }
 
     func testTerminalCommandParsesOptions() throws {
