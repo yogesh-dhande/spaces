@@ -496,6 +496,30 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(controller.debugTerminalContainerWidth, controller.debugBodyWidth - 2)
     }
 
+    @MainActor func testGhosttyOwnerShowPrefersLiveTerminalViewAsFirstResponder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-owner-first-responder", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work",
+                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-12T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-owner-first-responder", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-12T00:00:01Z"), paths: paths)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-owner-first-responder", paths: paths)
+        controller.show()
+
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty (owner)")
+        XCTAssertEqual(controller.debugFirstResponderTypeName, "GhosttyEmbeddedTerminalView")
+        XCTAssertFalse(controller.debugFirstResponderTargetsInputField)
+        XCTAssertFalse(controller.debugFirstResponderTargetsOutputView)
+    }
+
     @MainActor func testGhosttyOwnerRoutesCopyAndPasteThroughSessionHostActions() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -628,6 +652,56 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertGreaterThan(focusWindowCalls, initialWindowFocusCalls)
         XCTAssertGreaterThan(focusedStates.count, initialFocusedStateCount)
+    }
+
+    @MainActor func testGhosttyOwnerMetadataRefreshCanSkipLiveAttachUntilShow() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-show-focus", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-12T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-show-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-12T00:00:01Z"), paths: paths)
+
+        var focusVisibilityStates: [Bool] = []
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-show-focus", paths: paths,
+            ownerWindowFocusAction: { window in focusVisibilityStates.append(window?.isVisible == true) })
+
+        controller.debugForceRefreshSkippingOwnerAttach()
+
+        XCTAssertTrue(focusVisibilityStates.isEmpty)
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty (owner)")
+    }
+
+    @MainActor func testGhosttyOwnerScrollRequestsSurfaceRefresh() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-scroll-refresh", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "printf 'one\\ntwo\\nthree\\n'", createdAt: "2026-05-12T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-scroll-refresh", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-12T00:00:01Z"), paths: paths)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-scroll-refresh", paths: paths)
+        controller.show()
+        if !controller.debugGhosttyHasRenderableSurface { throw XCTSkip("Ghostty surface is unavailable in this test environment.") }
+        let initialRefreshCount = controller.debugGhosttySurfaceRefreshRequestCount
+
+        XCTAssertTrue(controller.debugSendGhosttyScroll(vertical: 24))
+        XCTAssertGreaterThan(controller.debugGhosttySurfaceRefreshRequestCount, initialRefreshCount)
     }
 
     @MainActor func testFallbackWindowPasteTargetsInlineInputAndSelectAllStaysEnabled() throws {

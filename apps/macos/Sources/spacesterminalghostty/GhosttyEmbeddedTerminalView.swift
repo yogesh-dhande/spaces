@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import Foundation
 import GhosttyKit
 import spacesterminalcore
@@ -41,6 +42,7 @@ import spacesterminalcore
     private var hiddenHostWindow: NSWindow?
     private weak var hiddenHostContainerView: NSView?
     private let surfaceHostView = GhosttyEmbeddedSurfaceHostView(frame: .zero)
+    private var debugSurfaceRefreshRequestCountValue = 0
 
     public init(launchConfiguration: TerminalSessionLaunchConfiguration) {
         self.launchConfiguration = launchConfiguration
@@ -186,17 +188,27 @@ import spacesterminalcore
     }
 
     public override func scrollWheel(with event: NSEvent) {
-        guard let surface else {
+        _ = sendMousePosition(for: event)
+        var horizontal = event.scrollingDeltaX
+        var vertical = event.scrollingDeltaY
+        let scrollMods = Self.makeScrollMods(hasPreciseDeltas: event.hasPreciseScrollingDeltas, momentumPhase: event.momentumPhase)
+        if event.hasPreciseScrollingDeltas {
+            // Match Ghostty's native macOS frontend, which applies a small
+            // subjective boost to high-precision trackpad-style scroll input.
+            horizontal *= 2
+            vertical *= 2
+        }
+        guard sendScroll(horizontal: horizontal, vertical: vertical, mods: scrollMods) else {
             super.scrollWheel(with: event)
             return
         }
-        _ = sendMousePosition(for: event)
-        let horizontal = event.hasPreciseScrollingDeltas ? event.scrollingDeltaX : (event.scrollingDeltaX * 12)
-        let vertical = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : (event.scrollingDeltaY * 12)
-        ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), 0)
     }
 
     public override func keyDown(with event: NSEvent) {
+        if Self.shouldDeferToSystemShortcut(keyCode: event.keyCode, modifierFlags: event.modifierFlags) {
+            super.keyDown(with: event)
+            return
+        }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         if sendGhosttyKey(event: event, action: event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS) {
@@ -227,6 +239,7 @@ import spacesterminalcore
     }
 
     public override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if Self.shouldDeferToSystemShortcut(keyCode: event.keyCode, modifierFlags: event.modifierFlags) { return false }
         guard event.type == .keyDown, let surface else { return false }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let hasActionModifier = flags.contains(.command) || flags.contains(.control) || flags.contains(.option)
@@ -301,6 +314,7 @@ import spacesterminalcore
     }
 
     public func requestSurfaceRefresh() {
+        debugSurfaceRefreshRequestCountValue += 1
         guard surface != nil else {
             createSurfaceIfNeeded()
             return
@@ -401,6 +415,14 @@ import spacesterminalcore
                 fputs("spaces: ghostty surface creation failed: \(message)\n", stderr)
             }
         }
+    }
+
+    @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, mods: ghostty_input_scroll_mods_t = 0) -> Bool {
+        guard let surface else { return false }
+        focusWindow()
+        ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), mods)
+        requestSurfaceRefresh()
+        return true
     }
 
     private func scheduleSurfaceCreationRetry(after delay: TimeInterval) {
@@ -515,6 +537,41 @@ import spacesterminalcore
         return GHOSTTY_ACTION_RELEASE
     }
 
+    static func shouldDeferToSystemShortcut(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
+        let flags = modifierFlags.intersection([.command, .shift, .option, .control, .function])
+        let isPlainCommandShortcut = flags == .command
+        if isPlainCommandShortcut {
+            switch Int(keyCode) {
+            case kVK_ANSI_W, kVK_ANSI_M, kVK_ANSI_H, kVK_ANSI_Q, kVK_ANSI_Comma: return true
+            default: break
+            }
+        }
+
+        let isWindowTilingShortcut =
+            flags == [.control, .function]
+            && (keyCode == UInt16(kVK_LeftArrow) || keyCode == UInt16(kVK_RightArrow) || keyCode == UInt16(kVK_UpArrow)
+                || keyCode == UInt16(kVK_DownArrow))
+        return isWindowTilingShortcut
+    }
+
+    static func makeScrollMods(hasPreciseDeltas: Bool, momentumPhase: NSEvent.Phase) -> ghostty_input_scroll_mods_t {
+        var mods: Int32 = hasPreciseDeltas ? 0b0000_0001 : 0
+        mods |= Int32(momentumRawValue(for: momentumPhase)) << 1
+        return mods
+    }
+
+    static func momentumRawValue(for phase: NSEvent.Phase) -> UInt8 {
+        switch phase {
+        case .began: UInt8(GHOSTTY_MOUSE_MOMENTUM_BEGAN.rawValue)
+        case .stationary: UInt8(GHOSTTY_MOUSE_MOMENTUM_STATIONARY.rawValue)
+        case .changed: UInt8(GHOSTTY_MOUSE_MOMENTUM_CHANGED.rawValue)
+        case .ended: UInt8(GHOSTTY_MOUSE_MOMENTUM_ENDED.rawValue)
+        case .cancelled: UInt8(GHOSTTY_MOUSE_MOMENTUM_CANCELLED.rawValue)
+        case .mayBegin: UInt8(GHOSTTY_MOUSE_MOMENTUM_MAY_BEGIN.rawValue)
+        default: UInt8(GHOSTTY_MOUSE_MOMENTUM_NONE.rawValue)
+        }
+    }
+
     private func modifierFlag(for keyCode: UInt16) -> NSEvent.ModifierFlags {
         switch keyCode {
         case 54, 55: .command
@@ -586,11 +643,15 @@ import spacesterminalcore
         refreshScheduled = false
         guard let surface else { return }
         superview?.layoutSubtreeIfNeeded()
+        surfaceHostView.layoutSubtreeIfNeeded()
         window?.contentView?.layoutSubtreeIfNeeded()
         GhosttyEmbeddedAppService.shared.tick()
         ghostty_surface_refresh(surface)
+        surfaceHostView.needsDisplay = true
+        surfaceHostView.layer?.setNeedsDisplay()
         needsDisplay = true
         layer?.setNeedsDisplay()
+        surfaceHostView.displayIfNeeded()
         displayIfNeeded()
         superview?.displayIfNeeded()
         window?.contentView?.displayIfNeeded()
@@ -624,4 +685,6 @@ import spacesterminalcore
         let data = Data(bytes: bytes, count: Int(len))
         Task { @MainActor in view.outputHandler?(data) }
     }
+
+    var debugSurfaceRefreshRequestCount: Int { debugSurfaceRefreshRequestCountValue }
 }

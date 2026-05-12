@@ -157,6 +157,7 @@ import spacesterminalghostty
         let wasVisible = window.isVisible && !didCloseWindow
         didCloseWindow = false
         attachLocalClientIfNeeded()
+        refreshNow(allowGhosttyOwnerAttach: false)
         if !wasVisible {
             restorePersistedWindowFrame(window)
             constrainWindowToVisibleFrame(window)
@@ -465,6 +466,8 @@ import spacesterminalghostty
     private func ensureGhosttyHostAttached() {
         guard backend == .ghosttyEmbedded, let launchConfiguration else { return }
         do {
+            window?.contentView?.layoutSubtreeIfNeeded()
+            terminalContainer.layoutSubtreeIfNeeded()
             let host = GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths)
             ghosttySessionHost = host
             try host.attach(client: client, mode: preferredAttachmentMode, into: preferredAttachmentMode == .owner ? terminalContainer : nil)
@@ -486,7 +489,7 @@ import spacesterminalghostty
         }
     }
 
-    private func refreshNow() {
+    private func refreshNow(allowGhosttyOwnerAttach: Bool = true) {
         do {
             let currentLaunchConfiguration: TerminalSessionLaunchConfiguration
             if let launchConfiguration {
@@ -523,7 +526,7 @@ import spacesterminalghostty
                     if lastObservedAttachmentMode != activeAttachment.mode {
                         lastObservedAttachmentMode = activeAttachment.mode
                         if activeAttachment.mode == .owner {
-                            ensureGhosttyHostAttached()
+                            if allowGhosttyOwnerAttach { ensureGhosttyHostAttached() }
                         } else {
                             syncGhosttyOwnerFocus(reason: "ownership_demoted", requestWindowFocus: false, focused: false)
                         }
@@ -949,6 +952,7 @@ import spacesterminalghostty
     public var didClose: Bool { didCloseWindow }
     var debugDidCloseWindow: Bool { didCloseWindow }
     func debugForceRefresh() { refreshNow() }
+    func debugForceRefreshSkippingOwnerAttach() { refreshNow(allowGhosttyOwnerAttach: false) }
     public var clientID: String { client.id }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
     var debugShowsTakeoverButton: Bool { !takeoverRowStackView.isHidden }
@@ -1013,6 +1017,11 @@ import spacesterminalghostty
         default: 500
         }
     }
+    @discardableResult func debugSendGhosttyScroll(horizontal: CGFloat = 0, vertical: CGFloat) -> Bool {
+        ghosttySessionHost?.debugSendScroll(horizontal: horizontal, vertical: vertical) ?? false
+    }
+    var debugGhosttyHasRenderableSurface: Bool { ghosttySessionHost?.hasRenderableSurface() ?? false }
+    var debugGhosttySurfaceRefreshRequestCount: Int { ghosttySessionHost?.debugSurfaceRefreshRequestCount ?? 0 }
     var debugOutputDisablesSmartSubstitutions: Bool {
         !outputView.isAutomaticQuoteSubstitutionEnabled && !outputView.isAutomaticDashSubstitutionEnabled
             && !outputView.isAutomaticTextReplacementEnabled && !outputView.isAutomaticSpellingCorrectionEnabled

@@ -177,6 +177,10 @@ extension Notification.Name {
     public func hasRenderableSurface() -> Bool { terminalView.surface != nil }
     public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
     public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
+    @discardableResult public func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+        terminalView.sendScroll(horizontal: horizontal, vertical: vertical)
+    }
+    public var debugSurfaceRefreshRequestCount: Int { terminalView.debugSurfaceRefreshRequestCount }
     public func terminate() {
         let now = ISO8601DateFormatter().string(from: Date())
         let childPID = observedChildPID()

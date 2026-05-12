@@ -102,6 +102,18 @@ import spacesterminalcore
         #expect(AppKitController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: nil, currentProcessID: 456) == nil)
     }
 
+    @MainActor @Test func localShortcutMonitorBypassesFocusedTerminalWindow() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let controller = TerminalSessionWindowController(sessionID: "session-shortcuts", paths: .init(rootDirectory: root.path))
+
+        #expect(AppKitController.shouldBypassLocalShortcutMonitor(for: controller.window))
+        #expect(!AppKitController.shouldBypassLocalShortcutMonitor(for: NSWindow()))
+        #expect(!AppKitController.shouldBypassLocalShortcutMonitor(for: nil))
+    }
+
     @Test func toggleHotkeyMiniaturizesMainWindowOnlyWhenNoTerminalReturnTargetExists() {
         #expect(AppKitController.shouldMiniaturizeMainWindowAfterHide(returnTerminalSessionID: nil))
         #expect(!AppKitController.shouldMiniaturizeMainWindowAfterHide(returnTerminalSessionID: "session-1"))

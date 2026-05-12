@@ -6580,6 +6580,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
             if event.type == .flagsChanged { return self.handleLeaderShortcutCaptureFlagsChanged(event: event) ? nil : event }
+            if Self.shouldBypassLocalShortcutMonitor(for: NSApp.keyWindow) { return event }
             self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
@@ -6623,6 +6624,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             return event
         }
+    }
+
+    static func shouldBypassLocalShortcutMonitor(for keyWindow: NSWindow?) -> Bool {
+        (keyWindow?.windowController as? TerminalSessionWindowController) != nil
     }
 
     private func handleLeaderShortcutCaptureFlagsChanged(event: NSEvent) -> Bool {
