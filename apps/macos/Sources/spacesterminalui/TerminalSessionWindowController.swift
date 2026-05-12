@@ -183,7 +183,10 @@ import spacesterminalghostty
     public func windowWillClose(_ notification: Notification) {
         didCloseWindow = true
         persistCurrentWindowFrame(immediately: true)
-        if backend == .ghosttyEmbedded { syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false) }
+        if backend == .ghosttyEmbedded {
+            syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false)
+            ghosttySessionHost?.parkSurfaceInHiddenHostWindow()
+        }
         detachLocalClientIfNeeded()
         refreshTask?.cancel()
         refreshTask = nil

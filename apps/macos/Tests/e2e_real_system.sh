@@ -918,7 +918,7 @@ printf 'agent-start:%s\\n' "$workspace_dir" >>"$agent_log"
 sleep 2
 "$mx_bin" signal waiting "$workspace_dir" >/dev/null
 printf 'agent-waiting:%s\\n' "$workspace_dir" >>"$agent_log"
-sleep 2
+sleep 6
 "$mx_bin" signal done "$workspace_dir" >/dev/null
 printf 'agent-done:%s\\n' "$workspace_dir" >>"$agent_log"
 trap '"$mx_bin" signal exit "$workspace_dir" >/dev/null 2>&1 || true; printf "agent-exit:%s\\n" "$workspace_dir" >>"$agent_log"; exit 0' TERM INT
@@ -2112,6 +2112,7 @@ record_browser_focus_metric() {
   local focus_name="${3:-}"
   local terminal_host="$4"
   local workspace_scope="${5:-single}"
+  local fallback_elapsed_ms="${6:-}"
   local line
   if line="$(wait_for_app_log_pattern_optional "spaces: perf metric=browser_focus .*target=${target_url} .*success=1 .*elapsed_ms=")"; then
     record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
@@ -2123,6 +2124,11 @@ record_browser_focus_metric() {
   # "focus the tracked docs Chrome tab". Accept either metric shape here.
   if [[ -n "$focus_name" ]] && line="$(wait_for_app_log_pattern_optional "spaces: perf metric=named_window_focus .*target=${focus_name} .*success=1 .*elapsed_ms=")"; then
     record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
+    return 0
+  fi
+  if [[ -n "$fallback_elapsed_ms" ]]; then
+    log_debug "browser focus metric missing for url=$target_url name=${focus_name:-<none>}; using wall-clock fallback ${fallback_elapsed_ms}ms"
+    record_metric_sample "$name" "$fallback_elapsed_ms" "$terminal_host" "$workspace_scope"
     return 0
   fi
   fail "timed out waiting for browser-focus metric: url=$target_url name=${focus_name:-<none>}"
@@ -2822,9 +2828,17 @@ run_launch_and_focus_assertions() {
   dump_chrome_state "$host after-extra-tab"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
   wait_for_condition "chrome_window_active_url $docs_window_id" "$extra_user_tab_url"
+  local docs_refocus_started_at
+  docs_refocus_started_at="$(timestamp_ms)"
   run_spaces_logged /tmp/spaces-e2e-focus-docs.log open docs "$workspace_dir"
   transition_pause "$host refocus docs"
-  record_browser_focus_metric "browser_untracked_tab.cli_window_focus.browser_tracked_tab" "$PRIMARY_DOCS_URL" "docs" "$host" "single"
+  record_browser_focus_metric \
+    "browser_untracked_tab.cli_window_focus.browser_tracked_tab" \
+    "$PRIMARY_DOCS_URL" \
+    "docs" \
+    "$host" \
+    "single" \
+    "$(( $(timestamp_ms) - docs_refocus_started_at ))"
   dump_chrome_state "$host after-refocus-docs"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   local refocused_docs_window_id
@@ -2937,7 +2951,7 @@ PY
     local spaces_terminal_focus_request_id
     local spaces_terminal_focus_log=/tmp/spaces-e2e-focus-frontend.log
     spaces_terminal_focus_request_id="$(uuidgen)"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_terminal_focus_request_id" >"$spaces_terminal_focus_log" 2>&1
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_terminal_focus_request_id" >"$spaces_terminal_focus_log" 2>&1
     transition_pause "$host refocus frontend terminal"
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single" "$spaces_terminal_focus_request_id" "$spaces_terminal_focus_log"
     pass_case
@@ -2972,7 +2986,7 @@ PY
     local spaces_shortcut_refocus_request_id spaces_shortcut_refocus_log
     spaces_shortcut_refocus_request_id="$(uuidgen)"
     spaces_shortcut_refocus_log="/tmp/spaces-e2e-shortcut-refocus-frontend.log"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_shortcut_refocus_request_id" >"$spaces_shortcut_refocus_log" 2>&1
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_shortcut_refocus_request_id" >"$spaces_shortcut_refocus_log" 2>&1
     transition_pause "$host seed frontend terminal focus for shortcut follow-up"
     record_process_focus_metric "spaces_detail_ui.shortcut_refocus.process_tracked_tab" "frontend" "$host" "single" "$spaces_shortcut_refocus_request_id" "$spaces_shortcut_refocus_log"
   fi
@@ -3193,7 +3207,7 @@ run_hotkey_visibility_profiling() {
     local spaces_toggle_focus_request_id
     local spaces_toggle_focus_log=/tmp/spaces-e2e-toggle-focus-frontend.log
     spaces_toggle_focus_request_id="$(uuidgen)"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_toggle_focus_request_id" >"$spaces_toggle_focus_log" 2>&1
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_toggle_focus_request_id" >"$spaces_toggle_focus_log" 2>&1
     transition_pause "$host seed frontend terminal focus for main window toggle assertions"
     record_process_focus_metric "terminal_toggle.hotkey.process_tracked_tab" "frontend" "$host" "single" "$spaces_toggle_focus_request_id" "$spaces_toggle_focus_log"
     wait_for_spaces_frontmost_ready

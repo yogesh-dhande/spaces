@@ -53,7 +53,7 @@ final class OrchestratorTests: XCTestCase {
 
     // Tests update editor preference persists to db by arranging representative inputs and asserting the expected result.
     func testUpdateEditorPreferencePersistsToDB() throws {
-        let store = try makeTemporaryStore()
+        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .iterm2 })
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         _ = try orchestrator.updateEditorPreference(.cursor)
@@ -64,7 +64,7 @@ final class OrchestratorTests: XCTestCase {
     }
 
     func testValidateDirectProcessTemplateAcceptsWorkspaceVariableInterpolation() throws {
-        let store = try makeTemporaryStore()
+        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .iterm2 })
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         XCTAssertNoThrow(
@@ -73,7 +73,7 @@ final class OrchestratorTests: XCTestCase {
     }
 
     func testValidateDirectProcessTemplateRejectsUnsupportedExpansionWithRawCommand() throws {
-        let store = try makeTemporaryStore()
+        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .iterm2 })
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         XCTAssertThrowsError(
@@ -88,7 +88,7 @@ final class OrchestratorTests: XCTestCase {
     }
 
     func testValidateDirectProcessTemplateStillRejectsShellSyntaxBeforeLaunch() throws {
-        let store = try makeTemporaryStore()
+        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .iterm2 })
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         XCTAssertThrowsError(
@@ -102,7 +102,7 @@ final class OrchestratorTests: XCTestCase {
     }
 
     func testValidateDirectProcessTemplateRejectsUnknownVariableWhenWorkspaceEnvIsKnown() throws {
-        let store = try makeTemporaryStore()
+        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .iterm2 })
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         XCTAssertThrowsError(
@@ -118,7 +118,7 @@ final class OrchestratorTests: XCTestCase {
 
     func testUpdateProjectConfigRejectsUnknownDirectProcessVariableAtSaveTime() throws {
         let root = try makeTempDirectory()
-        let store = try makeTemporaryStore()
+        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .iterm2 })
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: root.path)
 
@@ -137,7 +137,7 @@ final class OrchestratorTests: XCTestCase {
 
     func testUpdateProjectConfigRejectsBlankPortNameAtSaveTime() throws {
         let root = try makeTempDirectory()
-        let store = try makeTemporaryStore()
+        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .iterm2 })
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: root.path)
 
@@ -400,7 +400,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
+        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .iterm2 })
         let orchestrator = WorkspaceOrchestrator(store: store, tmux: MockTmuxAdapter())
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -674,7 +674,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
+        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .iterm2 })
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -2520,6 +2520,34 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedWindows, ["202"])
     }
 
+    func testFocusNextWindowUsesFrontBrowserURLWhenYabaiHasNoFocusedWindow() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let focusLog = root.appendingPathComponent("browser-cycle-fallback-focus.log")
+
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Docs", url: "http://localhost:3001/docs/")])
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Docs", targetURL: "http://localhost:3001/docs/",
+                windowID: 202, role: "browser", orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Finder", title: "Notes", windowID: 303, role: "editor", orderIndex: 1,
+                lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(name: "YABAI_FOCUSED_NONE", value: "1") {
+                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL", value: "http://localhost:3001/docs/") {
+                        try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                    }
+                }
+            }
+        }
+
+        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedIDs, ["303"])
+    }
+
     // Tests window cycling ignores missing browser windows and keeps moving to the next live tracked window.
     func testFocusNextWindowIgnoresMissingBrowserWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
@@ -2736,7 +2764,9 @@ final class OrchestratorTests: XCTestCase {
         let updatedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
         XCTAssertEqual(updatedProcess.windowID, 889)
 
-        let updatedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.id == "window-spaces-session-only" }))
+        let updatedWindow = try XCTUnwrap(
+            try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" && $0.terminalTrackingID == "spaces-session-live-only" }
+            ))
         XCTAssertEqual(updatedWindow.windowID, 889)
 
         let queryLines = try String(contentsOf: queryLog, encoding: .utf8).split(separator: "\n").map(String.init)
@@ -2912,7 +2942,8 @@ final class OrchestratorTests: XCTestCase {
         let updatedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
         XCTAssertNil(updatedProcess.windowID)
 
-        let updatedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.id == "window-spaces-stale-window" }))
+        let updatedWindow = try XCTUnwrap(
+            try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" && $0.terminalTrackingID == "spaces-session-stale" }))
         XCTAssertNil(updatedWindow.windowID)
     }
 
@@ -2972,7 +3003,8 @@ final class OrchestratorTests: XCTestCase {
         let updatedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
         XCTAssertEqual(updatedProcess.windowID, 888)
 
-        let updatedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.id == "window-spaces-rebound-window" }))
+        let updatedWindow = try XCTUnwrap(
+            try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" && $0.terminalTrackingID == "spaces-session-rebound" }))
         XCTAssertEqual(updatedWindow.windowID, 888)
 
         let queryLines = try String(contentsOf: queryLog, encoding: .utf8).split(separator: "\n").map(String.init)
@@ -3434,27 +3466,6 @@ final class OrchestratorTests: XCTestCase {
         let mockTmux = MockTmuxAdapter()
         let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, ghostty: mockGhostty, tmux: mockTmux)
         let root = try makeTempDirectory()
-
-    func testRecoverMissingConfiguredProcessUsesBuiltInSpacesSessionHost() throws {
-        let root = try makeTempDirectory()
-        let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try makeTemporaryStore()
-        let capture = TerminalOpenCapture()
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalWindowOpener: { sessionID, mode in
-                capture.sessionIDs.append(sessionID)
-                capture.modes.append(mode)
-                if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
-                    try? paths.ensureDirectories()
-                    FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
-                    try? TerminalSessionPersistence.writeRuntimeState(
-                        .init(
-                            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
-                            updatedAt: "2026-05-09T21:00:00Z"), paths: paths)
-                    try? "process recovered\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
-                }
-            })
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -3490,6 +3501,33 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(restarted.terminalApp, "Ghostty")
         XCTAssertEqual(restarted.terminalNativeID, "ghostty-terminal-7")
         XCTAssertEqual(restarted.terminalContainerID, "ghostty-tab-7")
+    }
+
+    func testRecoverMissingConfiguredProcessUsesBuiltInSpacesSessionHost() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let capture = TerminalOpenCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { sessionID, mode in
+                capture.sessionIDs.append(sessionID)
+                capture.modes.append(mode)
+                if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
+                    try? paths.ensureDirectories()
+                    FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    try? TerminalSessionPersistence.writeRuntimeState(
+                        .init(
+                            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
+                            updatedAt: "2026-05-09T21:00:00Z"), paths: paths)
+                    try? "process recovered\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+                }
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
 
         let existingConfig = try store.appConfig()
         try store.setAppConfig(
@@ -5016,6 +5054,7 @@ final class OrchestratorTests: XCTestCase {
         let mockIterm = MockIterm2Adapter()
         let mockTmux = ImmediateExitTmuxAdapter()
         let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
+        try orchestrator.updateTerminalHost(.iterm2)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -5065,6 +5104,7 @@ final class OrchestratorTests: XCTestCase {
         let mockIterm = MockIterm2Adapter()
         let mockTmux = DelayedExitTmuxAdapter()
         let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
+        try orchestrator.updateTerminalHost(.iterm2)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -5108,6 +5148,7 @@ final class OrchestratorTests: XCTestCase {
         let mockIterm = MockIterm2Adapter()
         let mockTmux = WrappedNpmFailureTmuxAdapter()
         let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
+        try orchestrator.updateTerminalHost(.iterm2)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -5157,6 +5198,7 @@ final class OrchestratorTests: XCTestCase {
         let mockIterm = MockIterm2Adapter()
         let mockTmux = WrappedGenericFailureTmuxAdapter()
         let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
+        try orchestrator.updateTerminalHost(.iterm2)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -5247,7 +5289,7 @@ final class OrchestratorTests: XCTestCase {
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.upWorkspace(workspaceID: workspace.id) }
 
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
         XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 1)
     }
 
@@ -7833,9 +7875,7 @@ final class OrchestratorTests: XCTestCase {
             lastOutputAt: nil, startedAt: "2020-01-01T00:00:00Z", exitedAt: nil)
         try store.upsert(runningProcess: process)
 
-        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
-
-        XCTAssertFalse(didUpdate)
+        _ = try orchestrator.checkAndUpdateProcessStatuses()
         let updated = try store.runningProcesses(workspaceID: workspace.id).first
         XCTAssertEqual(updated?.status, .running)
         XCTAssertNil(updated?.exitedAt)

@@ -758,9 +758,10 @@ public final class SQLiteStore {
         if let row = try queryRow(
             sql: """
                 SELECT workspace_id
-                FROM windows
-                WHERE terminal_tracking_id = ? OR terminal_native_id = ?
-                ORDER BY last_seen_at DESC, order_index
+                FROM runtime_targets rt
+                JOIN terminal_targets tt ON tt.runtime_target_id = rt.id
+                WHERE tt.tracking_id = ? OR tt.native_id = ?
+                ORDER BY rt.updated_at DESC, rt.order_index
                 LIMIT 1
                 """, bindings: [sessionID, sessionID])
         {

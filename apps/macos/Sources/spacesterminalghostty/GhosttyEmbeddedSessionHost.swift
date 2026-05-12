@@ -131,12 +131,17 @@ extension Notification.Name {
     public func detach(clientID: String) throws {
         try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
         if !isOwner(clientID: clientID) { terminalView.setFocused(false) }
-        if activeOwnerClientID() == nil { terminalView.parkInHiddenHostWindowIfNeeded() }
+        if activeOwnerClientID() == nil, hasRenderableSurface() { terminalView.parkInHiddenHostWindowIfNeeded() }
         postAttachmentStateDidChange()
         refreshRuntimeState(force: true)
     }
 
     public func takeover(client: TerminalClient, into container: NSView?) throws { try attach(client: client, mode: .owner, into: container) }
+
+    public func parkSurfaceInHiddenHostWindow() {
+        guard hasRenderableSurface() else { return }
+        terminalView.parkInHiddenHostWindowIfNeeded()
+    }
 
     public func setFocused(_ focused: Bool, for clientID: String) {
         guard isOwner(clientID: clientID) else {
