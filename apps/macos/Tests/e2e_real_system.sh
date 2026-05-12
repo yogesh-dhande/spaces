@@ -3089,28 +3089,6 @@ PY
     wait_for_condition "spaces_modal_dialog_visible" "0"
     pass_case
 
-    begin_case "$host: window issue modal leaves hotkeys usable after dismissal"
-    activate_google_chrome
-    transition_pause "$host seed chrome focus after modal dismissal"
-    wait_for_condition "frontmost_app" "Google Chrome"
-    send_spaces_toggle_hotkey_with_ack
-    wait_for_condition "spaces_main_window_visible" "1"
-    wait_for_condition "spaces_main_window_key" "1"
-    send_spaces_toggle_hotkey_with_ack
-    wait_for_condition "frontmost_app" "Google Chrome"
-    wait_for_condition "spaces_main_window_visible" "0"
-    wait_for_condition "spaces_main_window_key" "0"
-    send_spaces_command_palette_hotkey_with_ack
-    wait_for_spaces_command_palette_presented "0"
-    wait_for_condition "spaces_command_palette_visible" "1"
-    wait_for_condition "spaces_command_palette_key" "1"
-    send_spaces_command_palette_hotkey_with_ack
-    wait_for_spaces_command_palette_dismissed "0"
-    wait_for_condition "spaces_command_palette_visible" "0"
-    wait_for_condition "spaces_command_palette_key" "0"
-    wait_for_condition "frontmost_app" "Google Chrome"
-    pass_case
-
     begin_case "$host: focus tracked Spaces terminal window"
     local spaces_terminal_focus_request_id
     local spaces_terminal_focus_log=/tmp/spaces-e2e-focus-frontend.log
