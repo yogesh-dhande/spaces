@@ -50,6 +50,8 @@ private final class CommandPalettePanel: NSPanel {
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate,
     NSWindowDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSComboBoxDelegate, NSTableViewDelegate, NSTableViewDataSource
 {
+    private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
     private enum AlertsIconTint: Sendable {
         case browser
         case terminal
@@ -2002,15 +2004,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         window.titlebarAppearsTransparent = true
         window.center()
         window.delegate = self
-        window.makeKeyAndOrderFront(nil)
+        presentWindowIfAllowed(window)
     }
 
     private func ensureMainWindowVisibleOnLaunch() {
         guard let window else { return }
-        NSApp.activate(ignoringOtherApps: true)
         if window.isMiniaturized { window.deminiaturize(nil) }
         prepareWindowForActiveSpaceSummon(window)
-        window.orderFrontRegardless()
+        presentWindowIfAllowed(window, forceOrderFront: true)
+    }
+
+    private func presentWindowIfAllowed(_ window: NSWindow, forceOrderFront: Bool = false) {
+        if Self.isRunningUnderXCTest { return }
+        NSApp.activate(ignoringOtherApps: true)
+        if forceOrderFront { window.orderFrontRegardless() }
         window.makeKeyAndOrderFront(nil)
     }
 

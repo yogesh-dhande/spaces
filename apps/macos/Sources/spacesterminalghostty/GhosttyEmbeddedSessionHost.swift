@@ -31,6 +31,8 @@ extension Notification.Name {
 }
 
 @MainActor public final class GhosttyEmbeddedSessionHost {
+    private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
     public let launchConfiguration: TerminalSessionLaunchConfiguration
     public let paths: TerminalSessionPaths
 
@@ -160,6 +162,11 @@ extension Notification.Name {
 
     public func focusWindow(_ window: NSWindow?) {
         guard let window else { return }
+        if Self.isRunningUnderXCTest {
+            window.makeFirstResponder(terminalView)
+            terminalView.setFocused(true)
+            return
+        }
         if !window.isVisible { window.orderFront(nil) }
         if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
         window.makeFirstResponder(terminalView)
