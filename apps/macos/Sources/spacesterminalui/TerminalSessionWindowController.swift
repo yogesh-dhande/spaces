@@ -6,6 +6,7 @@ import spacesterminalghostty
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
     private static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
     private static let fallbackRefreshInterval: Duration = .milliseconds(500)
+    private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     private enum VisibleRenderer {
         case ghosttyOwner
@@ -75,6 +76,7 @@ import spacesterminalghostty
     private var attachmentStateDidChangeObserver: NSObjectProtocol?
     private var sessionMetadataDidChangeObserver: NSObjectProtocol?
     private var runtimeStateDidChangeObserver: NSObjectProtocol?
+    private var hasHeadlessPresentation = false
 
     public init(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
@@ -154,7 +156,7 @@ import spacesterminalghostty
 
     public func show() {
         guard let window else { return }
-        let wasVisible = window.isVisible && !didCloseWindow
+        let wasVisible = isWindowPresented(window) && !didCloseWindow
         didCloseWindow = false
         attachLocalClientIfNeeded()
         refreshNow(allowGhosttyOwnerAttach: false)
@@ -162,8 +164,7 @@ import spacesterminalghostty
             restorePersistedWindowFrame(window)
             constrainWindowToVisibleFrame(window)
         }
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        presentWindow(window)
         if backend == .ghosttyEmbedded { ensureGhosttyHostAttached() }
         refreshNow()
         startRefreshing()
@@ -173,8 +174,7 @@ import spacesterminalghostty
     public func focusWindow() {
         guard let window else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentWindow(window)
         if backend == .ghosttyEmbedded {
             ensureGhosttyHostAttached()
             syncGhosttyOwnerFocus(reason: "window_focus_ipc", requestWindowFocus: true)
@@ -183,6 +183,7 @@ import spacesterminalghostty
 
     public func windowWillClose(_ notification: Notification) {
         didCloseWindow = true
+        hasHeadlessPresentation = false
         persistCurrentWindowFrame(immediately: true)
         if backend == .ghosttyEmbedded {
             syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false)
@@ -476,6 +477,20 @@ import spacesterminalghostty
             syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: preferredAttachmentMode == .owner)
             updateRendererVisibility()
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
+    }
+
+    private func isWindowPresented(_ window: NSWindow) -> Bool {
+        if Self.isRunningUnderXCTest { return hasHeadlessPresentation }
+        return window.isVisible
+    }
+
+    private func presentWindow(_ window: NSWindow) {
+        if Self.isRunningUnderXCTest {
+            hasHeadlessPresentation = true
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 
     private func startRefreshing() {
