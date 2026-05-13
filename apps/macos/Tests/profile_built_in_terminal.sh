@@ -107,6 +107,10 @@ for iteration in $(seq 1 "$ITERATIONS"); do
   env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal show "$session_id" --viewer
   wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=viewer"
 
+  viewer_payload="viewer-ping-$iteration"
+  env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal send "$session_id" "$viewer_payload" --newline >/dev/null
+  wait_for_log_pattern "spaces: perf metric=terminal_viewer_output_present .*target=session=${session_id} .*success=1"
+
   viewer_client_id="$(active_viewer_client_id "$session_id")"
   env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal takeover "$session_id" "$viewer_client_id" >/dev/null
   wait_for_log_pattern "spaces: perf metric=terminal_control_takeover .*target=session=${session_id} client=${viewer_client_id} .*success=1"
@@ -162,6 +166,7 @@ ordered_metrics = [
     "terminal_window_summon",
     "terminal_owner_focus_sync",
     "terminal_control_send",
+    "terminal_viewer_output_present",
     "terminal_control_takeover",
 ]
 

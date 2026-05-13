@@ -6,6 +6,7 @@ extension Notification.Name {
     public static let spacesTerminalAttachmentStateDidChange = Notification.Name("spaces.terminal.attachment-state-did-change")
     public static let spacesTerminalSessionMetadataDidChange = Notification.Name("spaces.terminal.session-metadata-did-change")
     public static let spacesTerminalRuntimeStateDidChange = Notification.Name("spaces.terminal.runtime-state-did-change")
+    public static let spacesTerminalOutputDidChange = Notification.Name("spaces.terminal.output-did-change")
 }
 
 @MainActor public final class GhosttyEmbeddedSessionRegistry {
@@ -312,6 +313,7 @@ extension Notification.Name {
             let outputHandle = try ensureOutputHandle()
             try outputHandle.write(contentsOf: data)
             try outputHandle.synchronize()
+            postOutputDidChange(byteCount: data.count)
             TerminalPerformance.logMetric(
                 "terminal_output_write", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(data.count)")
@@ -375,6 +377,11 @@ extension Notification.Name {
     private func postRuntimeStateDidChange() {
         NotificationCenter.default.post(
             name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+    }
+
+    private func postOutputDidChange(byteCount: Int) {
+        NotificationCenter.default.post(
+            name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID, "byteCount": byteCount])
     }
 
     private func shouldPersistRuntimeState(_ state: TerminalSessionRuntimeState, now: Date) -> Bool {

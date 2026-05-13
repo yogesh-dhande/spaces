@@ -78,6 +78,7 @@ Local macOS windows also react to ownership changes immediately through an in-pr
 Live libghostty title and working-directory updates also propagate through an in-process metadata notification so the owner window title and summary stay in sync without waiting for the refresh loop.
 Live runtime-state changes also propagate through an in-process notification so owner windows update compact state text, including the visible child PID, as soon as the session host persists a new runtime signature.
 Active owner windows keep a slower two-second safety poll because the libghostty path already delivers direct attachment, metadata, and runtime-state notifications. Viewer and fallback windows stay on the faster 500 ms poll because they still depend on tailed output refresh.
+Passive viewers also listen for output-change notifications from the session host and coalesce refreshes onto a short timer, so visible output no longer waits for the 500 ms poll in the normal case. The poll remains as a safety fallback when notifications are missed or the host is not live in-process.
 
 ## Native Window Behavior
 - Active owner windows keep the libghostty surface as the primary experience.
@@ -198,6 +199,7 @@ The current branch also emits per-operation stress metrics for sustained output 
 - `terminal_output_write`
 - `terminal_surface_refresh`
 - `terminal_tail_read`
+- `terminal_viewer_output_present`
 
 These metrics are intentionally noisy and are meant for isolated benchmark or soak runs with `DEBUG=1`, not for routine interactive use.
 
@@ -228,11 +230,11 @@ The current branch has verified:
 - built-in process recovery when only the process row remains
 - built-in process focus and reopen when stale yabai window IDs must be cleared or replaced
 - high-volume ordered output tails through unit coverage for large transcript suffixes and repaint-heavy transcript rendering
-- stress and soak harnesses for append-only, repaint-heavy, and mixed-output sessions
+- stress and soak harnesses for append-only, repaint-heavy, mixed-output, and live passive-viewer repaint sessions
 
 ## Known Constraints
 - Passive viewer windows still use tailed output rather than a second live libghostty surface.
-- Passive viewer windows still refresh on the fallback 500 ms poll cadence even though the underlying tail and snapshot paths are much faster than that. Viewer responsiveness is currently bounded more by polling cadence than by transcript processing cost.
+- Passive viewer windows still keep the 500 ms poll as a safety fallback, but normal live-session updates now arrive through coalesced output notifications. Remaining viewer latency work is mostly about tuning refresh cadence and measuring end-to-end presentation timing rather than transcript rendering throughput.
 - iPhone or VPN clients are intentionally out of scope for this branch.
 - External iTerm2 and Ghostty hosts remain supported overrides on this branch.
 - The Ghostty static archive still emits non-fatal linker warnings about ImGui-related symbols during build.
@@ -279,18 +281,26 @@ For repeatable performance sampling of the app-triggered workspace-terminal open
 ITERATIONS=3 apps/macos/Tests/profile_workspace_terminal_open.sh
 ```
 
+For long-running output, memory, and passive-viewer latency sampling:
+
+```bash
+apps/macos/Tests/soak_built_in_terminal.sh
+SOAK_MODE=mixed apps/macos/Tests/soak_built_in_terminal.sh
+```
+
+The soak summary reports aggregate viewer latency plus early-phase and late-phase slices so long-run drift is visible without manually diffing separate runs.
+
 ## Outstanding Work
 The remaining work on this branch is narrower than the original integration work.
 
 ### Viewer Refresh Responsiveness
-- TODO: replace or supplement the 500 ms viewer polling cadence with a faster or event-driven refresh path.
-- The current viewer refresh work is already cheap enough for near-live updates in the common case:
-  - append-only tail work is typically `1-2 ms`
-  - repaint-heavy partial replay is typically `2-3 ms`
-- The remaining latency is mostly scheduling:
-  - passive viewers poll every 500 ms
-  - active owner windows already rely primarily on direct in-process notifications plus the live surface
-- The next improvement should target viewer wake-up behavior rather than transcript-render throughput.
+- Passive viewers now wake up from session output notifications instead of waiting for the 500 ms poll in the normal case.
+- Direct `output written -> viewer presented` latency is emitted as `terminal_viewer_output_present`.
+- The remaining work is to tune and validate that path under heavier load:
+- validate coalescing behavior under repaint storms and very high chunk rates
+- keep the stress harness pointed at repaint-heavy live-viewer sessions so `terminal_viewer_output_present` regressions are visible in the same benchmark loop as tail regressions
+- keep the soak harness pointed at repaint-heavy live-viewer sessions by default so long-run `terminal_viewer_output_present` drift is visible without giving up the older mixed-session path
+- decide whether the 500 ms safety poll should stay as-is, become adaptive, or be reduced further
 
 ### Real-System Validation Depth
 - Keep real-system E2E as the source of truth for macOS focus, visibility, and modal behavior.

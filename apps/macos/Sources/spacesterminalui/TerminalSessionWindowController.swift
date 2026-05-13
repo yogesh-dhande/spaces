@@ -22,6 +22,7 @@ import spacesterminalghostty
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
     private static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
     private static let fallbackRefreshInterval: Duration = .milliseconds(500)
+    private static let passiveOutputRefreshCoalescingInterval: Duration = .milliseconds(16)
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     private enum VisibleRenderer {
@@ -101,7 +102,12 @@ import spacesterminalghostty
     private var attachmentStateDidChangeObserver: NSObjectProtocol?
     private var sessionMetadataDidChangeObserver: NSObjectProtocol?
     private var runtimeStateDidChangeObserver: NSObjectProtocol?
+    private var outputDidChangeObserver: NSObjectProtocol?
     private var hasHeadlessPresentation = false
+    private var pendingPassiveOutputRefreshTask: Task<Void, Never>?
+    private var pendingPassiveOutputStartedAt: Date?
+    private var pendingPassiveOutputByteCount = 0
+    private var pendingPassiveOutputNotificationCount = 0
 
     public init(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
@@ -648,6 +654,7 @@ import spacesterminalghostty
             }
             guard visibleRenderer != .ghosttyOwner else { return }
             let viewportState = captureOutputViewportState()
+            var didUpdatePassivePresentation = false
             switch visibleRenderer {
             case .ghosttyViewerSnapshot:
                 if let snapshot = ghosttySessionHost?.snapshot() {
@@ -657,6 +664,8 @@ import spacesterminalghostty
                     outputView.sizeToFit()
                     lastRenderedOutput = outputView.string
                     restoreOutputViewportState(viewportState)
+                    didUpdatePassivePresentation = true
+                    completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
                     return
                 }
                 fallthrough
@@ -667,8 +676,10 @@ import spacesterminalghostty
                     if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
                     outputView.sizeToFit()
                     lastRenderedOutput = output
+                    didUpdatePassivePresentation = true
                 }
                 restoreOutputViewportState(viewportState)
+                completePendingPassiveOutputMeasurement(renderer: "output_tail", changedOutput: didUpdatePassivePresentation)
             case .ghosttyOwner: break
             }
         } catch {
@@ -786,6 +797,16 @@ import spacesterminalghostty
                 self.refreshNow()
             }
         }
+        outputDidChangeObserver = NotificationCenter.default.addObserver(forName: .spacesTerminalOutputDidChange, object: nil, queue: .main) {
+            [weak self] notification in
+            let changedSessionID = notification.userInfo?["sessionID"] as? String
+            let byteCount = notification.userInfo?["byteCount"] as? Int ?? 0
+            MainActor.assumeIsolated {
+                guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                self.recordPassiveOutputNotification(byteCount: byteCount)
+                self.schedulePassiveOutputRefresh()
+            }
+        }
     }
 
     private func stopObservingApplicationActivation() {
@@ -799,6 +820,40 @@ import spacesterminalghostty
         sessionMetadataDidChangeObserver = nil
         runtimeStateDidChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
         runtimeStateDidChangeObserver = nil
+        outputDidChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
+        outputDidChangeObserver = nil
+        pendingPassiveOutputRefreshTask?.cancel()
+        pendingPassiveOutputRefreshTask = nil
+    }
+
+    private func schedulePassiveOutputRefresh() {
+        guard backend == .ghosttyEmbedded else { return }
+        guard visibleRenderer != .ghosttyOwner else { return }
+        guard pendingPassiveOutputRefreshTask == nil else { return }
+        pendingPassiveOutputRefreshTask = Task { @MainActor [weak self] in
+            defer { self?.pendingPassiveOutputRefreshTask = nil }
+            do { try await Task.sleep(for: Self.passiveOutputRefreshCoalescingInterval) } catch { return }
+            self?.refreshNow()
+        }
+    }
+
+    private func recordPassiveOutputNotification(byteCount: Int) {
+        guard visibleRenderer != .ghosttyOwner else { return }
+        if pendingPassiveOutputStartedAt == nil { pendingPassiveOutputStartedAt = Date() }
+        pendingPassiveOutputByteCount += byteCount
+        pendingPassiveOutputNotificationCount += 1
+    }
+
+    private func completePendingPassiveOutputMeasurement(renderer: String, changedOutput: Bool) {
+        guard let startedAt = pendingPassiveOutputStartedAt else { return }
+        let byteCount = pendingPassiveOutputByteCount
+        let notificationCount = pendingPassiveOutputNotificationCount
+        pendingPassiveOutputStartedAt = nil
+        pendingPassiveOutputByteCount = 0
+        pendingPassiveOutputNotificationCount = 0
+        TerminalPerformance.logMetric(
+            "terminal_viewer_output_present", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            success: true, detail: "renderer=\(renderer) bytes=\(byteCount) notifications=\(notificationCount) changed=\(changedOutput ? 1 : 0)")
     }
 
     private func syncGhosttyOwnerFocus(reason: String, requestWindowFocus: Bool, focused explicitFocused: Bool? = nil) {
@@ -1112,6 +1167,9 @@ import spacesterminalghostty
     }
     func debugSimulateRuntimeStateDidChange() {
         NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+    }
+    func debugSimulateOutputDidChange() {
+        NotificationCenter.default.post(name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": sessionID, "byteCount": 1])
     }
     func debugSelectRenderedRange(_ range: NSRange) { outputView.setSelectedRange(range) }
     var debugSelectedRange: NSRange { outputView.selectedRange() }
