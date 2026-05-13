@@ -67,6 +67,10 @@ import spacesterminalghostty
     private var bodyTopToContentConstraint: NSLayoutConstraint?
     private var bodyBottomToContentConstraint: NSLayoutConstraint?
     private var bodyBottomToTakeoverConstraint: NSLayoutConstraint?
+    private var bodyLeadingConstraint: NSLayoutConstraint?
+    private var bodyTrailingConstraint: NSLayoutConstraint?
+    private var takeoverLeadingConstraint: NSLayoutConstraint?
+    private var takeoverTrailingConstraint: NSLayoutConstraint?
     private let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse
     private let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
@@ -454,6 +458,7 @@ import spacesterminalghostty
         outputView.textContainer?.heightTracksTextView = false
         outputView.textContainer?.lineBreakMode = .byClipping
         outputView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        outputView.enclosingScrollView?.drawsBackground = false
 
         outputScrollView.translatesAutoresizingMaskIntoConstraints = false
         outputScrollView.borderType = .bezelBorder
@@ -524,16 +529,17 @@ import spacesterminalghostty
         bodyTopToContentConstraint = bodyStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12)
         bodyBottomToContentConstraint = bodyStackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16)
         bodyBottomToTakeoverConstraint = bodyStackView.bottomAnchor.constraint(equalTo: takeoverContainerView.topAnchor, constant: -12)
+        bodyLeadingConstraint = bodyStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16)
+        bodyTrailingConstraint = bodyStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16)
+        takeoverLeadingConstraint = takeoverContainerView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16)
+        takeoverTrailingConstraint = takeoverContainerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16)
 
         NSLayoutConstraint.activate([
             headerStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
             headerStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
             headerStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
 
-            bodyStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            bodyStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-            takeoverContainerView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            takeoverContainerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            bodyLeadingConstraint!, bodyTrailingConstraint!, takeoverLeadingConstraint!, takeoverTrailingConstraint!,
             takeoverContainerView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             takeoverContainerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
         ])
@@ -823,6 +829,13 @@ import spacesterminalghostty
         rendererLabel.isHidden = isGhosttyOwner || shouldCollapseViewerChrome
         stateLabel.isHidden = shouldCollapseOwnerChrome || shouldCollapseViewerChrome
         outputScrollView.borderType = isGhosttyViewer ? .noBorder : .bezelBorder
+        bodyStackView.spacing = isGhosttyOwner ? 0 : 12
+        bodyLeadingConstraint?.constant = isGhosttyOwner ? 0 : 16
+        bodyTrailingConstraint?.constant = isGhosttyOwner ? 0 : -16
+        bodyTopToContentConstraint?.constant = isGhosttyOwner ? 0 : 12
+        bodyBottomToContentConstraint?.constant = isGhosttyOwner ? 0 : -16
+        outputView.textContainerInset = isGhosttyViewer ? .zero : NSSize(width: 8, height: 10)
+        outputView.textContainer?.lineFragmentPadding = isGhosttyViewer ? 0 : 5
         updateHeaderLayoutVisibility()
     }
 
@@ -1121,6 +1134,7 @@ import spacesterminalghostty
         outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
     }
     var debugOutputHorizontalOffset: CGFloat { outputScrollView.contentView.documentVisibleRect.minX }
+    var debugContentWidth: CGFloat { window?.contentView?.frame.width ?? 0 }
     var debugTerminalContainerWidth: CGFloat { terminalContainer.frame.width }
     var debugBodyWidth: CGFloat { bodyStackView.frame.width }
     var debugTakeoverContainerWidth: CGFloat { takeoverContainerView.frame.width }

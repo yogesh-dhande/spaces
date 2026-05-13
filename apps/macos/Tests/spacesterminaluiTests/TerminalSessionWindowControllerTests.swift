@@ -534,6 +534,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugRenderedOutput, "")
         XCTAssertGreaterThan(controller.debugTerminalContainerWidth, 0)
         XCTAssertGreaterThanOrEqual(controller.debugTerminalContainerWidth, controller.debugBodyWidth - 2)
+        XCTAssertGreaterThanOrEqual(controller.debugTerminalContainerWidth, controller.debugContentWidth - 2)
     }
 
     @MainActor func testGhosttyOwnerShowPrefersLiveTerminalViewAsFirstResponder() throws {
