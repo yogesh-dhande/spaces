@@ -1,6 +1,6 @@
 import Foundation
 
-public enum GhosttyEmbeddedPerformance {
+public enum TerminalPerformance {
     public static func elapsedMS(since startedAt: Date) -> Int { max(Int(Date().timeIntervalSince(startedAt) * 1000), 0) }
 
     public static func logMetric(_ metric: String, target: String, elapsedMS: Int, success: Bool, detail: String = "") {

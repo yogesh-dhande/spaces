@@ -38,4 +38,34 @@ final class TerminalOutputTailTests: XCTestCase {
         XCTAssertTrue(tailed.contains("No, and tell Codex what to do differently (esc)"))
         XCTAssertTrue(tailed.contains("Press enter to confirm or esc to cancel"))
     }
+
+    func testTailPreservesOrderedSuffixForLargeTranscript() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let text = (1...10000).map { String(format: "SEQ %05d", $0) }.joined(separator: "\n") + "\n"
+        try text.data(using: .utf8)?.write(to: url)
+
+        let tailed = try TerminalOutputTail.tail(path: url.path, lineCount: 4)
+
+        XCTAssertEqual(tailed, "SEQ 09997\nSEQ 09998\nSEQ 09999\nSEQ 10000")
+    }
+
+    func testTailKeepsPlainTextFastPathForCarriageReturnFreeLogs() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let text = (1...2000).map { "plain-\($0)" }.joined(separator: "\n") + "\n"
+        try text.data(using: .utf8)?.write(to: url)
+
+        let tailed = try TerminalOutputTail.tail(path: url.path, lineCount: 2)
+
+        XCTAssertEqual(tailed, "plain-1999\nplain-2000")
+    }
+
+    func testTailFallsBackToRenderedTranscriptWhenCarriageReturnsRewriteLine() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let text = "progress 10%\rprogress 100%\ncomplete\n"
+        try text.data(using: .utf8)?.write(to: url)
+
+        let tailed = try TerminalOutputTail.tail(path: url.path, lineCount: 2)
+
+        XCTAssertEqual(tailed, "progress 100%\ncomplete")
+    }
 }

@@ -99,6 +99,37 @@ ITERATIONS=3 apps/macos/Tests/profile_built_in_terminal.sh
 The profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, exercises owner attach, viewer attach, send, `tail`, and takeover, then summarizes the built-in terminal perf metrics captured from the app log.
 It also writes `summary.txt` and `metrics.json` under its temp work root so baseline metric snapshots can be compared across terminal-window parity changes.
 
+For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
+
+```bash
+apps/macos/Tests/profile_built_in_terminal_stress.sh
+```
+
+That profiler runs three isolated scenarios against the embedded Ghostty backend:
+- `lines`: high-volume append-only output
+- `repaint`: full-screen ANSI clears and redraws
+- `mixed`: status repaints plus ordered line emission
+
+Each scenario verifies ordered `SEQ` markers in `output.log`, records repeated `spaces terminal tail` wall times, and summarizes terminal metrics such as:
+- `terminal_output_write`
+- `terminal_surface_refresh`
+- `terminal_tail_read`
+
+The stress summary prints per-scenario `tail_min`, `tail_median`, `tail_avg`, `tail_p95`, and `tail_max` values so one slow sample does not hide the typical case.
+It also records CLI-side tail metrics for each scenario:
+- `terminal_tail_read`
+- `terminal_tail_command`
+
+Those CLI metrics make it easier to distinguish the internal tail implementation cost from the full `spaces terminal tail` wall time.
+
+For longer-running stability sampling of the same built-in terminal path:
+
+```bash
+DURATION_SECONDS=300 apps/macos/Tests/soak_built_in_terminal.sh
+```
+
+That soak harness runs a repaint-heavy mixed workload for the configured duration, samples `SpacesApp` RSS, CPU, output growth, and `terminal tail` latency at a fixed interval, then verifies that the emitted sequence numbers and final frame count stayed complete.
+
 For repeatable profiling of the app-triggered built-in workspace-terminal open path:
 
 ```bash

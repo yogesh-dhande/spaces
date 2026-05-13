@@ -83,13 +83,13 @@ extension Notification.Name {
             started = true
             sessionStartedAt = startedAt
             didLogFirstOutput = false
-            GhosttyEmbeddedPerformance.logMetric(
+            TerminalPerformance.logMetric(
                 "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
-                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true)
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
         } catch {
-            GhosttyEmbeddedPerformance.logMetric(
+            TerminalPerformance.logMetric(
                 "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
-                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
             throw error
         }
     }
@@ -126,13 +126,13 @@ extension Notification.Name {
                 focusWindow(container.window)
             }
             refreshRuntimeState(force: true)
-            GhosttyEmbeddedPerformance.logMetric(
+            TerminalPerformance.logMetric(
                 "terminal_window_attach", target: "session=\(launchConfiguration.sessionID) client=\(client.id)",
-                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true, detail: "mode=\(mode.rawValue)")
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "mode=\(mode.rawValue)")
         } catch {
-            GhosttyEmbeddedPerformance.logMetric(
+            TerminalPerformance.logMetric(
                 "terminal_window_attach", target: "session=\(launchConfiguration.sessionID) client=\(client.id)",
-                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false, detail: "mode=\(mode.rawValue)")
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "mode=\(mode.rawValue)")
             throw error
         }
     }
@@ -198,6 +198,7 @@ extension Notification.Name {
         controlServer = nil
         started = false
         terminalView.terminateSession()
+        try? outputHandle?.synchronize()
         try? outputHandle?.close()
         outputHandle = nil
         let exitedState = TerminalSessionRuntimeState(
@@ -222,36 +223,36 @@ extension Notification.Name {
                     case "send":
                         let startedAt = Date()
                         if let clientID = request.clientID, !self.isOwner(clientID: clientID) {
-                            GhosttyEmbeddedPerformance.logMetric(
+                            TerminalPerformance.logMetric(
                                 "terminal_control_send", target: "session=\(self.launchConfiguration.sessionID)",
-                                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
+                                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
                             return TerminalControlResponse(ok: false, message: "Only the active owner can send input.")
                         }
                         guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
                         let payload = text + (request.appendNewline ? "\n" : "")
                         self.terminalView.sendRawBytes(Data(payload.utf8))
-                        GhosttyEmbeddedPerformance.logMetric(
+                        TerminalPerformance.logMetric(
                             "terminal_control_send", target: "session=\(self.launchConfiguration.sessionID)",
-                            elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.utf8.count)")
+                            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.utf8.count)")
                         return TerminalControlResponse(ok: true, message: "Sent input.")
                     case "key":
                         let startedAt = Date()
                         if let clientID = request.clientID, !self.isOwner(clientID: clientID) {
-                            GhosttyEmbeddedPerformance.logMetric(
+                            TerminalPerformance.logMetric(
                                 "terminal_control_key", target: "session=\(self.launchConfiguration.sessionID)",
-                                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
+                                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
                             return TerminalControlResponse(ok: false, message: "Only the active owner can send keys.")
                         }
                         guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
-                            GhosttyEmbeddedPerformance.logMetric(
+                            TerminalPerformance.logMetric(
                                 "terminal_control_key", target: "session=\(self.launchConfiguration.sessionID)",
-                                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
+                                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
                             return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
                         }
                         self.terminalView.sendRawBytes(Data(bytes))
-                        GhosttyEmbeddedPerformance.logMetric(
+                        TerminalPerformance.logMetric(
                             "terminal_control_key", target: "session=\(self.launchConfiguration.sessionID)",
-                            elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true, detail: "key=\(key)")
+                            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "key=\(key)")
                         return TerminalControlResponse(ok: true, message: "Sent key.")
                     case "takeover":
                         let startedAt = Date()
@@ -262,14 +263,14 @@ extension Notification.Name {
                                 transferredAt: ISO8601DateFormatter().string(from: Date()))
                             self.postAttachmentStateDidChange()
                             self.refreshRuntimeState(force: true)
-                            GhosttyEmbeddedPerformance.logMetric(
+                            TerminalPerformance.logMetric(
                                 "terminal_control_takeover", target: "session=\(self.launchConfiguration.sessionID) client=\(clientID)",
-                                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true)
+                                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
                             return TerminalControlResponse(ok: true, message: "Transferred terminal ownership.")
                         } catch {
-                            GhosttyEmbeddedPerformance.logMetric(
+                            TerminalPerformance.logMetric(
                                 "terminal_control_takeover", target: "session=\(self.launchConfiguration.sessionID) client=\(clientID)",
-                                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
+                                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
                             return TerminalControlResponse(ok: false, message: String(describing: error))
                         }
                     default: return TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
@@ -306,19 +307,28 @@ extension Notification.Name {
     }
 
     private func appendOutput(_ data: Data) {
+        let startedAt = Date()
         do {
             let outputHandle = try ensureOutputHandle()
             try outputHandle.write(contentsOf: data)
             try outputHandle.synchronize()
+            TerminalPerformance.logMetric(
+                "terminal_output_write", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(data.count)")
             if !didLogFirstOutput, !data.isEmpty {
                 didLogFirstOutput = true
                 if let sessionStartedAt {
-                    GhosttyEmbeddedPerformance.logMetric(
+                    TerminalPerformance.logMetric(
                         "terminal_first_output", target: "session=\(launchConfiguration.sessionID)",
-                        elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: sessionStartedAt), success: true, detail: "bytes=\(data.count)")
+                        elapsedMS: TerminalPerformance.elapsedMS(since: sessionStartedAt), success: true, detail: "bytes=\(data.count)")
                 }
             }
-        } catch { fputs("spaces: ghostty output write failed: \(error)\n", stderr) }
+        } catch {
+            TerminalPerformance.logMetric(
+                "terminal_output_write", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "bytes=\(data.count)")
+            fputs("spaces: ghostty output write failed: \(error)\n", stderr)
+        }
     }
 
     @discardableResult private func ensureOutputHandle() throws -> FileHandle {

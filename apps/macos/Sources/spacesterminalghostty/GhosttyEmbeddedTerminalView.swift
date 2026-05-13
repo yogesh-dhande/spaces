@@ -43,6 +43,7 @@ import spacesterminalcore
     private weak var hiddenHostContainerView: NSView?
     private let surfaceHostView = GhosttyEmbeddedSurfaceHostView(frame: .zero)
     private var debugSurfaceRefreshRequestCountValue = 0
+    private var debugSurfaceRefreshPerformedCountValue = 0
 
     public init(launchConfiguration: TerminalSessionLaunchConfiguration) {
         self.launchConfiguration = launchConfiguration
@@ -402,15 +403,15 @@ import spacesterminalcore
             updateWindowVisibility()
             setSurfaceFocus(window?.isKeyWindow == true && window?.firstResponder === self)
             ghostty_surface_refresh(createdSurface)
-            GhosttyEmbeddedPerformance.logMetric(
+            TerminalPerformance.logMetric(
                 "terminal_surface_create", target: "session=\(launchConfiguration.sessionID)",
-                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true,
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
                 detail: "width=\(backingSize.width) height=\(backingSize.height)")
             onSurfaceReady?(createdSurface)
         } catch {
-            GhosttyEmbeddedPerformance.logMetric(
+            TerminalPerformance.logMetric(
                 "terminal_surface_create", target: "session=\(launchConfiguration.sessionID)",
-                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
             pendingSurfaceCreation = true
             nextSurfaceCreationRetryAt = Date().addingTimeInterval(1)
             scheduleSurfaceCreationRetry(after: 1)
@@ -695,8 +696,10 @@ import spacesterminalcore
     }
 
     private func performSurfaceRefresh() {
+        let startedAt = Date()
         refreshScheduled = false
         guard let surface else { return }
+        debugSurfaceRefreshPerformedCountValue += 1
         superview?.layoutSubtreeIfNeeded()
         surfaceHostView.layoutSubtreeIfNeeded()
         window?.contentView?.layoutSubtreeIfNeeded()
@@ -711,6 +714,10 @@ import spacesterminalcore
         superview?.displayIfNeeded()
         window?.contentView?.displayIfNeeded()
         window?.displayIfNeeded()
+        TerminalPerformance.logMetric(
+            "terminal_surface_refresh", target: "session=\(launchConfiguration.sessionID)",
+            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
+            detail: "requests=\(debugSurfaceRefreshRequestCountValue) performed=\(debugSurfaceRefreshPerformedCountValue)")
     }
 
     private func teardownWindowObservation() {
@@ -742,4 +749,5 @@ import spacesterminalcore
     }
 
     var debugSurfaceRefreshRequestCount: Int { debugSurfaceRefreshRequestCountValue }
+    var debugSurfaceRefreshPerformedCount: Int { debugSurfaceRefreshPerformedCountValue }
 }

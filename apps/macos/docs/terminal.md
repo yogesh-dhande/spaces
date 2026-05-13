@@ -194,6 +194,24 @@ Current performance decisions:
   - `toggle_window_flow`
 
 These metrics are intended to guide regressions around owner-window attach, owner-focus reassertion, session bring-up, control-plane latency, and ownership handoff.
+The current branch also emits per-operation stress metrics for sustained output analysis:
+- `terminal_output_write`
+- `terminal_surface_refresh`
+- `terminal_tail_read`
+
+These metrics are intentionally noisy and are meant for isolated benchmark or soak runs with `DEBUG=1`, not for routine interactive use.
+
+Current stress baselines on this branch:
+- append-only `lines` output around `950 KB` tails in roughly `23-31 ms` wall time per CLI invocation, with the internal tail path around `1-2 ms`
+- repaint-heavy output around `262 KB` tails in roughly `27-33 ms` wall time per CLI invocation, with the internal partial-render tail path around `2-3 ms`
+- repaint-heavy output around `2.6 MB` still tails in roughly `27-28 ms` wall time per CLI invocation because the recent clear-screen boundary keeps replay bounded to the visible frame suffix rather than the full transcript
+
+Those numbers matter differently depending on the caller:
+- `terminal_tail_read` measures only the transcript read and render path
+- `terminal_tail_command` measures the CLI command body once the `spaces` process is already running
+- the outer stress-harness wall time also includes process startup, argument parsing, stdout capture, and process exit
+
+That split means the current tail implementation is no longer the dominant cost for normal append-only or repaint-heavy tails. A fresh CLI invocation still pays process-launch overhead even when the underlying tail logic is only a few milliseconds.
 
 ## Current Verification Baseline
 The current branch has verified:
@@ -209,9 +227,12 @@ The current branch has verified:
 - workspace-process launch into `Spaces` terminal sessions
 - built-in process recovery when only the process row remains
 - built-in process focus and reopen when stale yabai window IDs must be cleared or replaced
+- high-volume ordered output tails through unit coverage for large transcript suffixes and repaint-heavy transcript rendering
+- stress and soak harnesses for append-only, repaint-heavy, and mixed-output sessions
 
 ## Known Constraints
 - Passive viewer windows still use tailed output rather than a second live libghostty surface.
+- Passive viewer windows still refresh on the fallback 500 ms poll cadence even though the underlying tail and snapshot paths are much faster than that. Viewer responsiveness is currently bounded more by polling cadence than by transcript processing cost.
 - iPhone or VPN clients are intentionally out of scope for this branch.
 - External iTerm2 and Ghostty hosts remain supported overrides on this branch.
 - The Ghostty static archive still emits non-fatal linker warnings about ImGui-related symbols during build.
@@ -257,6 +278,30 @@ For repeatable performance sampling of the app-triggered workspace-terminal open
 ```bash
 ITERATIONS=3 apps/macos/Tests/profile_workspace_terminal_open.sh
 ```
+
+## Outstanding Work
+The remaining work on this branch is narrower than the original integration work.
+
+### Viewer Refresh Responsiveness
+- TODO: replace or supplement the 500 ms viewer polling cadence with a faster or event-driven refresh path.
+- The current viewer refresh work is already cheap enough for near-live updates in the common case:
+  - append-only tail work is typically `1-2 ms`
+  - repaint-heavy partial replay is typically `2-3 ms`
+- The remaining latency is mostly scheduling:
+  - passive viewers poll every 500 ms
+  - active owner windows already rely primarily on direct in-process notifications plus the live surface
+- The next improvement should target viewer wake-up behavior rather than transcript-render throughput.
+
+### Real-System Validation Depth
+- Keep real-system E2E as the source of truth for macOS focus, visibility, and modal behavior.
+- Expand the long-run verification matrix for:
+  - repeated hotkey toggles over long sessions
+  - prolonged owner or viewer sessions with heavy output
+  - modal and recovery UI interaction while built-in terminal windows are active
+- Keep manual validation focused on live shell behavior that is still awkward to assert mechanically:
+  - prompt redraw and cursor placement during long interactive sessions
+  - rapid resize and maximize or restore behavior
+  - selection and paste behavior on the live owner surface under sustained output
 
 The workspace-terminal-open profiler:
 - seeds an isolated fixture workspace with terminal host `spaces`

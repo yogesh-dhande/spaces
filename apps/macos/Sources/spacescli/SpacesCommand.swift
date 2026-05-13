@@ -186,11 +186,15 @@ struct TerminalTailCommand: ParsableCommand {
     @Option(name: .long, help: "Number of lines to print.") var lines: Int = 20
 
     func run() throws {
+        let startedAt = Date()
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         guard FileManager.default.fileExists(atPath: paths.outputPath) else {
             throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' has no output yet.")
         }
         let tailed = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: lines)
+        TerminalPerformance.logMetric(
+            "terminal_tail_command", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
+            detail: "lines=\(lines) output_chars=\(tailed.count)")
         print(tailed)
     }
 }

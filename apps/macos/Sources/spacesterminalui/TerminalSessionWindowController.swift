@@ -343,24 +343,24 @@ import spacesterminalghostty
                             self.preferredAttachmentMode != .owner && self.isInteractiveRuntimeState(self.lastObservedRuntimeState)
                     }
                     guard response.ok else {
-                        GhosttyEmbeddedPerformance.logMetric(
+                        TerminalPerformance.logMetric(
                             "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
-                            elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=control_response")
+                            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=control_response")
                         self.updateInputStatus(message: response.message, isError: true)
                         return
                     }
                     self.preferredAttachmentMode = .owner
                     let attachStartedAt = Date()
                     self.ensureGhosttyHostAttached()
-                    let attachElapsedMS = GhosttyEmbeddedPerformance.elapsedMS(since: attachStartedAt)
+                    let attachElapsedMS = TerminalPerformance.elapsedMS(since: attachStartedAt)
                     let refreshStartedAt = Date()
                     self.updateInputStatus(message: response.message, isError: false)
                     self.refreshNow()
-                    GhosttyEmbeddedPerformance.logMetric(
+                    TerminalPerformance.logMetric(
                         "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
-                        elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true,
+                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
                         detail:
-                            "control_ms=\(GhosttyEmbeddedPerformance.elapsedMS(since: controlStartedAt)) attach_ms=\(attachElapsedMS) refresh_ms=\(GhosttyEmbeddedPerformance.elapsedMS(since: refreshStartedAt))"
+                            "control_ms=\(TerminalPerformance.elapsedMS(since: controlStartedAt)) attach_ms=\(attachElapsedMS) refresh_ms=\(TerminalPerformance.elapsedMS(since: refreshStartedAt))"
                     )
                 }
             } catch {
@@ -368,9 +368,9 @@ import spacesterminalghostty
                     self.takeoverTask = nil
                     self.takeoverButton.isEnabled =
                         self.preferredAttachmentMode != .owner && self.isInteractiveRuntimeState(self.lastObservedRuntimeState)
-                    GhosttyEmbeddedPerformance.logMetric(
+                    TerminalPerformance.logMetric(
                         "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
-                        elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=exception")
+                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=exception")
                     self.updateInputStatus(message: String(describing: error), isError: true)
                 }
             }
@@ -807,9 +807,9 @@ import spacesterminalghostty
         let focused = explicitFocused ?? (NSApp.isActive && window?.isMainWindow == true && window?.isKeyWindow == true)
         if requestWindowFocus { if let ownerWindowFocusAction { ownerWindowFocusAction(window) } else { ghosttySessionHost?.focusWindow(window) } }
         if let ownerSurfaceFocusAction { ownerSurfaceFocusAction(focused) } else { ghosttySessionHost?.setFocused(focused, for: client.id) }
-        GhosttyEmbeddedPerformance.logMetric(
-            "terminal_owner_focus_sync", target: "session=\(sessionID)", elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt),
-            success: true, detail: "reason=\(reason) focused=\(focused ? 1 : 0) request_window_focus=\(requestWindowFocus ? 1 : 0)")
+        TerminalPerformance.logMetric(
+            "terminal_owner_focus_sync", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
+            detail: "reason=\(reason) focused=\(focused ? 1 : 0) request_window_focus=\(requestWindowFocus ? 1 : 0)")
     }
 
     private func updateRendererVisibility() {

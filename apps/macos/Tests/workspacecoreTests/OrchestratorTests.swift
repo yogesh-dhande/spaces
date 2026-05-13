@@ -2045,6 +2045,7 @@ final class OrchestratorTests: XCTestCase {
     // Tests open workspace terminal throws when i term is unavailable by arranging representative inputs and asserting the expected result.
     func testOpenWorkspaceTerminalThrowsWhenITermIsUnavailable() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try orchestrator.updateTerminalHost(.iterm2)
 
         // Mocked dependency: iTerm availability probe through `osascript`.
         // Why: force deterministic dependency-missing behavior.
