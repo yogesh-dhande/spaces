@@ -71,7 +71,7 @@ public enum GhosttyTerminalSnapshotRenderer {
     private static let underlineFlag: UInt16 = 1 << 7
     private static let spacerFlag: UInt16 = 1 << 10
 
-    public static func render(_ snapshot: GhosttyTerminalSnapshot) -> NSAttributedString {
+    public static func render(_ snapshot: GhosttyTerminalSnapshot, defaultBackgroundOverride: NSColor? = nil) -> NSAttributedString {
         let rendered = NSMutableAttributedString()
         let columns = max(0, snapshot.columns)
         let rows = max(0, snapshot.rows)
@@ -79,7 +79,7 @@ public enum GhosttyTerminalSnapshotRenderer {
 
         let baseFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let defaultForeground = color(rgb: snapshot.defaultForegroundRGB)
-        let defaultBackground = color(rgb: snapshot.defaultBackgroundRGB)
+        let defaultBackground = defaultBackgroundOverride ?? color(rgb: snapshot.defaultBackgroundRGB)
 
         for row in 0..<rows {
             let rowStart = row * columns
@@ -92,8 +92,8 @@ public enum GhosttyTerminalSnapshotRenderer {
                     let character = displayCharacter(for: cell)
                     let isCursor = snapshot.cursorVisible && row == snapshot.cursorRow && column == snapshot.cursorColumn
                     let attributes = textAttributes(
-                        for: cell, baseFont: baseFont, defaultForeground: defaultForeground, defaultBackground: defaultBackground,
-                        invertForCursor: isCursor)
+                        for: cell, defaultBackgroundRGB: snapshot.defaultBackgroundRGB, baseFont: baseFont, defaultForeground: defaultForeground,
+                        defaultBackground: defaultBackground, invertForCursor: isCursor)
                     rendered.append(NSAttributedString(string: character, attributes: attributes))
                 }
             }
@@ -130,10 +130,11 @@ public enum GhosttyTerminalSnapshotRenderer {
     }
 
     private static func textAttributes(
-        for cell: GhosttyTerminalSnapshot.Cell, baseFont: NSFont, defaultForeground: NSColor, defaultBackground: NSColor, invertForCursor: Bool
+        for cell: GhosttyTerminalSnapshot.Cell, defaultBackgroundRGB: UInt32, baseFont: NSFont, defaultForeground: NSColor,
+        defaultBackground: NSColor, invertForCursor: Bool
     ) -> [NSAttributedString.Key: Any] {
         var foreground = color(rgb: cell.foregroundRGB)
-        var background = color(rgb: cell.backgroundRGB)
+        var background = cell.backgroundRGB == defaultBackgroundRGB ? defaultBackground : color(rgb: cell.backgroundRGB)
         if cell.codepoint == 0 {
             foreground = defaultForeground
             background = defaultBackground

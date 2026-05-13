@@ -651,7 +651,8 @@ import spacesterminalghostty
             switch visibleRenderer {
             case .ghosttyViewerSnapshot:
                 if let snapshot = ghosttySessionHost?.snapshot() {
-                    outputView.textStorage?.setAttributedString(GhosttyTerminalSnapshotRenderer.render(snapshot))
+                    outputView.textStorage?.setAttributedString(
+                        GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
                     if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
                     outputView.sizeToFit()
                     lastRenderedOutput = outputView.string

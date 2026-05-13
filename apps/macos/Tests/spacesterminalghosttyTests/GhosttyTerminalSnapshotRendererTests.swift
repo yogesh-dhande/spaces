@@ -47,4 +47,21 @@ final class GhosttyTerminalSnapshotRendererTests: XCTestCase {
         let attributes = rendered.attributes(at: 0, effectiveRange: nil)
         XCTAssertEqual(attributes[.underlineStyle] as? Int, NSUnderlineStyle.single.rawValue)
     }
+
+    func testRendererCanRemapDefaultCellBackgroundToViewerBackground() {
+        let snapshot = GhosttyTerminalSnapshot(
+            columns: 2, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xEEEEEE, defaultBackgroundRGB: 0x101010,
+            cells: [
+                .init(codepoint: 65, foregroundRGB: 0xEEEEEE, backgroundRGB: 0x101010, flags: 0),
+                .init(codepoint: 66, foregroundRGB: 0xEEEEEE, backgroundRGB: 0x202020, flags: 0),
+            ])
+
+        let viewerBackground = NSColor(calibratedRed: 0.2, green: 0.22, blue: 0.25, alpha: 1)
+        let rendered = GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: viewerBackground)
+
+        let firstAttributes = rendered.attributes(at: 0, effectiveRange: nil)
+        let secondAttributes = rendered.attributes(at: 1, effectiveRange: nil)
+        XCTAssertEqual((firstAttributes[.backgroundColor] as? NSColor)?.usingColorSpace(.deviceRGB), viewerBackground.usingColorSpace(.deviceRGB))
+        XCTAssertNotEqual((secondAttributes[.backgroundColor] as? NSColor)?.usingColorSpace(.deviceRGB), viewerBackground.usingColorSpace(.deviceRGB))
+    }
 }
