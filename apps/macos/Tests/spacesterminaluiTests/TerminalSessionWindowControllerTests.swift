@@ -11,6 +11,14 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         var detachedClientID: String?
     }
 
+    private final class InputCapture: @unchecked Sendable {
+        var text: String?
+        var appendNewline: Bool?
+        var key: String?
+        var columns: Int?
+        var rows: Int?
+    }
+
     private final class ValidatedItem: NSObject, NSValidatedUserInterfaceItem {
         let action: Selector?
 
@@ -165,6 +173,37 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(writes.count, 1)
     }
 
+    @MainActor func testFallbackOwnerWindowResizeSendsTranscriptGeometryOverTransport() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-resize", title: "session-resize", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-13T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-resize", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-13T00:00:01Z"), paths: paths)
+        let capture = InputCapture()
+
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-resize", paths: paths,
+            resizeAction: { columns, rows, _ in
+                capture.columns = columns
+                capture.rows = rows
+                return .init(ok: true, message: "Resized terminal session.")
+            })
+
+        controller.show()
+        controller.windowDidResize(Notification(name: NSWindow.didResizeNotification))
+
+        XCTAssertNotNil(capture.columns)
+        XCTAssertNotNil(capture.rows)
+        XCTAssertGreaterThan(capture.columns ?? 0, 0)
+        XCTAssertGreaterThan(capture.rows ?? 0, 0)
+    }
+
     @MainActor func testControllerLoadsRecentOutputIntoTextView() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -219,7 +258,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         let controller = TerminalSessionWindowController(sessionID: "session-upgrade", paths: paths, performInitialRefresh: false)
 
-        XCTAssertTrue(controller.debugShowsInlineControls)
+        XCTAssertFalse(controller.debugShowsInlineControls)
 
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
@@ -417,7 +456,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         let controller = TerminalSessionWindowController(sessionID: "session-owner-exited-refresh", paths: paths)
 
-        XCTAssertEqual(controller.debugRefreshIntervalMS, 500)
+        XCTAssertEqual(controller.debugRefreshIntervalMS, 100)
     }
 
     @MainActor func testViewerFallbackKeepsFastRefreshInterval() throws {
@@ -451,7 +490,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             sessionID: "session-viewer-refresh", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in },
             detachClientAction: { _ in })
 
-        XCTAssertEqual(controller.debugRefreshIntervalMS, 500)
+        XCTAssertEqual(controller.debugRefreshIntervalMS, 100)
     }
 
     @MainActor func testGhosttyViewerHidesTakeoverWhenSessionIsNotRunning() throws {
@@ -504,7 +543,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         let controller = TerminalSessionWindowController(sessionID: "session-script-exited", paths: paths)
 
-        XCTAssertTrue(controller.debugShowsInlineControls)
+        XCTAssertFalse(controller.debugShowsInlineControls)
         XCTAssertFalse(controller.debugInlineInputEnabled)
     }
 
@@ -745,7 +784,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertGreaterThan(controller.debugGhosttySurfaceRefreshRequestCount, initialRefreshCount)
     }
 
-    @MainActor func testFallbackWindowPasteTargetsInlineInputAndSelectAllStaysEnabled() throws {
+    @MainActor func testFallbackWindowPasteSendsClipboardThroughTransportAndSelectAllStaysEnabled() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -759,18 +798,26 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             .init(sessionID: "session-fallback", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString("paste-from-test", forType: .string)
+        let capture = InputCapture()
 
-        let controller = TerminalSessionWindowController(sessionID: "session-fallback", paths: paths)
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-fallback", paths: paths,
+            sendInputAction: { text, newline in
+                capture.text = text
+                capture.appendNewline = newline
+                return .init(ok: true, message: "Sent input.")
+            })
 
         controller.paste(nil)
 
-        XCTAssertEqual(controller.debugInputFieldValue, "paste-from-test")
+        XCTAssertEqual(capture.text, "paste-from-test")
+        XCTAssertEqual(capture.appendNewline, false)
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.copy(_:)))))
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
     }
 
-    @MainActor func testFallbackWindowShowPrefersInteractiveInputFieldAsFirstResponder() throws {
+    @MainActor func testFallbackWindowShowPrefersTranscriptAsFirstResponder() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -786,8 +833,95 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         let controller = TerminalSessionWindowController(sessionID: "session-fallback-focus", paths: paths)
         controller.show()
 
-        XCTAssertTrue(controller.debugFirstResponderTargetsInputField)
-        XCTAssertFalse(controller.debugFirstResponderTargetsOutputView)
+        XCTAssertFalse(controller.debugFirstResponderTargetsInputField)
+        XCTAssertTrue(controller.debugFirstResponderTargetsOutputView)
+    }
+
+    @MainActor func testFallbackTranscriptTypingSendsTransportInputWithoutNewline() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-fallback-type", title: "fallback-type", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-13T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-fallback-type", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-13T00:00:01Z"), paths: paths)
+        let capture = InputCapture()
+
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-fallback-type", paths: paths,
+            sendInputAction: { text, newline in
+                capture.text = text
+                capture.appendNewline = newline
+                return .init(ok: true, message: "Sent input.")
+            })
+
+        XCTAssertTrue(controller.debugSendTranscriptText("echo hi"))
+        XCTAssertEqual(capture.text, "echo hi")
+        XCTAssertEqual(capture.appendNewline, false)
+    }
+
+    @MainActor func testFallbackTranscriptSpecialKeysUseTransportKeyPath() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-fallback-key", title: "fallback-key", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-13T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-fallback-key", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-13T00:00:01Z"), paths: paths)
+        let capture = InputCapture()
+
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-fallback-key", paths: paths,
+            sendKeyAction: { key in
+                capture.key = key
+                return .init(ok: true, message: "Sent key.")
+            })
+
+        XCTAssertTrue(controller.debugSendTranscriptKey("enter"))
+        XCTAssertEqual(capture.key, "enter")
+    }
+
+    @MainActor func testFallbackViewerTypingIsRejectedUntilTakeover() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-fallback-viewer", title: "fallback-viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-13T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-fallback-viewer", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-13T00:00:01Z"), paths: paths)
+
+        let owner = TerminalClient(
+            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-13T00:00:00Z")
+        let viewer = TerminalClient(
+            id: "viewer-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            connectedAt: "2026-05-13T00:00:01Z")
+        try TerminalSessionPersistence.upsertClient(owner, paths: paths)
+        try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-fallback-viewer", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-13T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-fallback-viewer", client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-05-13T00:00:01Z")
+
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-fallback-viewer", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in },
+            detachClientAction: { _ in })
+        controller.debugForceRefresh()
+
+        XCTAssertFalse(controller.debugSendTranscriptText("pwd"))
+        XCTAssertEqual(controller.debugInputStatus, "Viewer windows cannot send input. Take over ownership first.")
     }
 
     @MainActor func testFallbackWindowPreservesSelectionAndScrollOffsetWhenNewOutputArrives() throws {
@@ -936,7 +1070,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         if controller.debugGhosttyHasRenderableSurface {
             XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty snapshot (viewer)")
         } else {
-            XCTAssertEqual(controller.debugRendererSummary, "Renderer: viewer tail")
+            XCTAssertEqual(controller.debugRendererSummary, "Renderer: transport transcript (viewer)")
         }
         XCTAssertGreaterThan(controller.debugTakeoverContainerWidth, 120)
     }
@@ -1002,7 +1136,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: libghostty (owner)")
         XCTAssertFalse(ownerController.debugShowsTakeoverButton)
         XCTAssertEqual(viewerController.debugWindowTitle, "frontend (viewer)")
-        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: viewer tail")
+        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: transport transcript (viewer)")
         XCTAssertTrue(viewerController.debugShowsTakeoverButton)
 
         try TerminalSessionPersistence.transferOwnership(
@@ -1012,7 +1146,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         viewerController.debugForceRefresh()
 
         XCTAssertEqual(ownerController.debugWindowTitle, "frontend (viewer)")
-        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: viewer tail")
+        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: transport transcript (viewer)")
         XCTAssertTrue(ownerController.debugShowsTakeoverButton)
         XCTAssertEqual(viewerController.debugWindowTitle, "frontend")
         XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty (owner)")
@@ -1053,7 +1187,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         ownerController.debugForceRefresh()
         viewerController.debugForceRefresh()
         XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: libghostty (owner)")
-        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: viewer tail")
+        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: transport transcript (viewer)")
 
         try TerminalSessionPersistence.transferOwnership(
             sessionID: "session-notify", newOwnerClientID: viewer.id, paths: paths, transferredAt: "2026-05-09T00:00:02Z")
@@ -1061,7 +1195,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         ownerController.debugSimulateAttachmentStateDidChange()
         viewerController.debugSimulateAttachmentStateDidChange()
 
-        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: viewer tail")
+        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: transport transcript (viewer)")
         XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty (owner)")
         XCTAssertTrue(ownerController.debugShowsTakeoverButton)
         XCTAssertFalse(viewerController.debugShowsTakeoverButton)

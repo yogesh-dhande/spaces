@@ -1,7 +1,7 @@
 import Dispatch
 import Foundation
 
-public final class TerminalControlServer {
+public final class TerminalControlServer: @unchecked Sendable {
     private let socketPath: String
     private let queue: DispatchQueue
     private let handleRequest: @Sendable (TerminalControlRequest) throws -> TerminalControlResponse

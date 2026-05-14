@@ -31,7 +31,7 @@ The `ghostty-embedded` session path is:
 2. The running app creates or reuses a `GhosttyEmbeddedSessionHost`.
 3. The host starts one `GhosttyEmbeddedTerminalView`, one control socket, one output log, and one runtime-state refresh loop.
 4. Owner windows attach the live libghostty surface.
-5. Viewer windows stay passive and read from the tailed session output until they take over.
+5. Viewer windows stay passive and read from snapshot plus chunked session output until they take over.
 
 ## Session Files
 Each session lives under `~/.spaces/terminal/sessions/<session-id>/` and keeps:
@@ -43,6 +43,36 @@ Each session lives under `~/.spaces/terminal/sessions/<session-id>/` and keeps:
 - `control.sock`: local control-plane socket
 
 The control socket path is shortened through `TerminalSessionPaths` so isolated `SPACES_DB_PATH` roots do not exceed Unix socket path limits.
+`script-pty` hosts also drain unread PTY bytes before they shut down and persist an exited runtime state through the process termination callback, so short-lived commands still leave a complete `output.log` transcript and do not strand attachment metadata on a stale `running` state.
+`TerminalSessionHostConnection` sits above the raw socket path so macOS clients, the CLI, and future mobile or remote clients can all target the same request or response protocol without each caller depending on `TerminalControlClient` directly.
+
+## Host/Client Protocol
+`control.sock` is the explicit session-host boundary for local and future remote clients.
+
+The current request or response protocol supports:
+- `attach`
+- `detach`
+- `snapshot`
+- `output_size`
+- `read_output_chunk`
+- `send`
+- `key`
+- `resize`
+- `takeover`
+- `terminate`
+
+The protocol is intentionally file-backed rather than renderer-backed:
+- `snapshot` returns launch metadata, runtime state, attachment state, recent output, and total output bytes
+- `read_output_chunk` returns raw terminal bytes from `output.log` by byte offset
+- owner or viewer identity is still persisted in `clients.json` and `attachments.json`, but non-AppKit clients do not need to edit those files directly
+
+That split keeps the session host responsible for:
+- PTY lifetime
+- ownership rules
+- output persistence
+- replay state
+
+and lets macOS, iOS, or future remote clients share one attach model without sharing one renderer.
 
 ## Additive libghostty Surface
 Spaces depends on an additive patch strategy rather than a behavior fork.
@@ -70,7 +100,7 @@ These hooks are important because snapshot-style render reads are not enough for
   - stay passive
   - show owner identity
   - can request takeover
-  - continue using tailed output until ownership changes
+  - continue using snapshot plus chunked output until ownership changes
 - Once a session is no longer running, passive viewer windows stop presenting takeover affordances, script-pty fallback windows disable their inline send controls, and owner-window paste actions stop claiming the session is still interactive.
 
 The takeover path updates `attachments.json`, moves ownership to the requested client, and rehosts the active libghostty surface without restarting the session.
@@ -233,9 +263,9 @@ The current branch has verified:
 - stress and soak harnesses for append-only, repaint-heavy, mixed-output, and live passive-viewer repaint sessions
 
 ## Known Constraints
-- Passive viewer windows still use tailed output rather than a second live libghostty surface.
+- Passive viewer windows still use snapshot plus chunked output rather than a second live libghostty surface.
 - Passive viewer windows still keep the 500 ms poll as a safety fallback, but normal live-session updates now arrive through coalesced output notifications. Remaining viewer latency work is mostly about tuning refresh cadence and measuring end-to-end presentation timing rather than transcript rendering throughput.
-- iPhone or VPN clients are intentionally out of scope for this branch.
+- Native iPhone and remote-network clients are still future work, but the local socket contract is already shaped around that attach model instead of direct file mutation.
 - External iTerm2 and Ghostty hosts remain supported overrides on this branch.
 - The Ghostty static archive still emits non-fatal linker warnings about ImGui-related symbols during build.
 

@@ -8,6 +8,7 @@ BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
+TERMINAL_BACKEND="${TERMINAL_BACKEND:-script-pty}"
 
 ITERATIONS="${ITERATIONS:-3}"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-terminal-profile.XXXXXX")}"
@@ -15,6 +16,7 @@ DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 SESSION_SUMMARY="$WORK_ROOT/summary.txt"
 SESSION_METRICS_JSON="$WORK_ROOT/metrics.json"
+SESSION_CLI_METRICS_LOG="$WORK_ROOT/cli-metrics.log"
 APP_PID=""
 
 cleanup() {
@@ -28,18 +30,26 @@ trap cleanup EXIT
 wait_for_log_pattern() {
   local pattern="$1"
   local timeout="${2:-20}"
+  local log_path="${3:-$APP_LOG}"
   local start
   start="$(date +%s)"
   while true; do
-    if grep -Eq "$pattern" "$APP_LOG"; then
+    if grep -Eq "$pattern" "$log_path"; then
       return 0
     fi
     if (( "$(date +%s)" - start >= timeout )); then
-      echo "Timed out waiting for log pattern: $pattern" >&2
+      echo "Timed out waiting for log pattern: $pattern in $log_path" >&2
       return 1
     fi
     sleep 0.2
   done
+}
+
+ms_now() {
+  python3 - <<'PY'
+import time
+print(time.time_ns() // 1_000_000)
+PY
 }
 
 extract_session_id() {
@@ -65,6 +75,36 @@ else:
 PY
 }
 
+session_service_log() {
+  local session_id="$1"
+  printf '%s\n' "$(dirname "$DB_PATH")/terminal/sessions/$session_id/service.log"
+}
+
+active_owner_client_id() {
+  local session_id="$1"
+  local attachments_path
+  attachments_path="$(dirname "$DB_PATH")/terminal/sessions/$session_id/attachments.json"
+  python3 - "$attachments_path" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as handle:
+    attachments = json.load(handle)
+active = [attachment for attachment in attachments if attachment.get("detachedAt") is None and attachment.get("mode") == "owner"]
+if len(active) != 1:
+    raise SystemExit("expected exactly one active owner attachment")
+print(active[0]["clientID"])
+PY
+}
+
+append_cli_metric() {
+  local metric="$1"
+  local session_id="$2"
+  local elapsed_ms="$3"
+  local detail="${4:-}"
+  printf 'spaces: perf metric=%s target=session=%s success=1 elapsed_ms=%s%s\n' \
+    "$metric" "$session_id" "$elapsed_ms" "${detail:+ $detail}" >>"$SESSION_CLI_METRICS_LOG"
+}
+
 require_binary() {
   local path="$1"
   [[ -x "$path" ]] || { echo "Missing binary: $path" >&2; exit 1; }
@@ -72,6 +112,7 @@ require_binary() {
 
 mkdir -p "$(dirname "$DB_PATH")"
 touch "$APP_LOG"
+: >"$SESSION_CLI_METRICS_LOG"
 
 require_binary "$SPACES_APP"
 require_binary "$SPACES_CLI"
@@ -91,59 +132,87 @@ sleep 3
 
 for iteration in $(seq 1 "$ITERATIONS"); do
   title="terminal-profile-$iteration"
-  command_output="$(env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal command --backend ghostty-embedded --command cat --title "$title")"
+  command_output="$(env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal command --backend "$TERMINAL_BACKEND" --command cat --title "$title")"
   session_id="$(extract_session_id "$command_output")"
   [[ -n "$session_id" ]] || { echo "Failed to parse session ID from: $command_output" >&2; exit 1; }
+  service_log="$(session_service_log "$session_id")"
 
   wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=owner"
 
   payload="profile-ping-$iteration"
-  env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal send "$session_id" "$payload" --newline >/dev/null
-  wait_for_log_pattern "spaces: perf metric=terminal_control_send .*target=session=${session_id} .*success=1"
+  send_started_at="$(ms_now)"
+  env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal send "$session_id" "$payload" --newline >/dev/null
+  send_finished_at="$(ms_now)"
+  append_cli_metric "terminal_control_send" "$session_id" "$((send_finished_at - send_started_at))"
 
   tail_output="$(env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal tail "$session_id" --lines 10)"
   printf '%s\n' "$tail_output" | grep -q "$payload"
 
-  env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal show "$session_id" --viewer
+  env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal show "$session_id" --viewer
   wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=viewer"
 
   viewer_payload="viewer-ping-$iteration"
-  env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal send "$session_id" "$viewer_payload" --newline >/dev/null
+  env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal send "$session_id" "$viewer_payload" --newline >/dev/null
   wait_for_log_pattern "spaces: perf metric=terminal_viewer_output_present .*target=session=${session_id} .*success=1"
 
   viewer_client_id="$(active_viewer_client_id "$session_id")"
-  env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal takeover "$session_id" "$viewer_client_id" >/dev/null
-  wait_for_log_pattern "spaces: perf metric=terminal_control_takeover .*target=session=${session_id} client=${viewer_client_id} .*success=1"
+  takeover_started_at="$(ms_now)"
+  env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal takeover "$session_id" "$viewer_client_id" >/dev/null
+  takeover_finished_at="$(ms_now)"
+  append_cli_metric "terminal_control_takeover" "$session_id" "$((takeover_finished_at - takeover_started_at))" "client=${viewer_client_id}"
+  deadline=$(( $(date +%s) + 20 ))
+  while true; do
+    if [[ "$(active_owner_client_id "$session_id")" == "$viewer_client_id" ]]; then
+      break
+    fi
+    if (( $(date +%s) >= deadline )); then
+      echo "Timed out waiting for viewer ownership transfer for session $session_id" >&2
+      exit 1
+    fi
+    sleep 0.2
+  done
 done
 
-python3 - "$APP_LOG" "$ITERATIONS" "$SESSION_METRICS_JSON" >"$SESSION_SUMMARY" <<'PY'
+python3 - "$APP_LOG" "$SESSION_CLI_METRICS_LOG" "$(dirname "$DB_PATH")/terminal/sessions" "$ITERATIONS" "$SESSION_METRICS_JSON" >"$SESSION_SUMMARY" <<'PY'
 import math, re, statistics, sys
 import json
+from pathlib import Path
 
-log_path = sys.argv[1]
-expected_iterations = int(sys.argv[2])
-json_path = sys.argv[3]
+app_log_path = Path(sys.argv[1])
+cli_metrics_log_path = Path(sys.argv[2])
+sessions_root = Path(sys.argv[3])
+expected_iterations = int(sys.argv[4])
+json_path = sys.argv[5]
 pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<target>.*?) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
 samples = {}
 focus_reason_samples = {}
 
-with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
-    for raw_line in handle:
-        line = raw_line.strip()
-        match = pattern.match(line)
-        if not match or match.group("success") != "1":
-            continue
-        metric = match.group("metric")
-        elapsed = int(match.group("elapsed"))
-        detail = match.group("detail") or ""
-        samples.setdefault(metric, []).append(elapsed)
-        if metric == "terminal_owner_focus_sync":
-            reason = "unknown"
-            for part in detail.split():
-                if part.startswith("reason="):
-                    reason = part.split("=", 1)[1]
-                    break
-            focus_reason_samples.setdefault(reason, []).append(elapsed)
+def collect_metrics(path: Path) -> None:
+    if not path.exists():
+        return
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            match = pattern.match(line)
+            if not match or match.group("success") != "1":
+                continue
+            metric = match.group("metric")
+            elapsed = int(match.group("elapsed"))
+            detail = match.group("detail") or ""
+            samples.setdefault(metric, []).append(elapsed)
+            if metric == "terminal_owner_focus_sync":
+                reason = "unknown"
+                for part in detail.split():
+                    if part.startswith("reason="):
+                        reason = part.split("=", 1)[1]
+                        break
+                focus_reason_samples.setdefault(reason, []).append(elapsed)
+
+collect_metrics(app_log_path)
+collect_metrics(cli_metrics_log_path)
+if sessions_root.exists():
+    for service_log in sessions_root.glob("*/service.log"):
+        collect_metrics(service_log)
 
 def summarize(values):
     avg = round(statistics.mean(values), 1)

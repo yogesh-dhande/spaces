@@ -9,6 +9,7 @@ SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 FIXTURE_SCRIPT="$SCRIPT_DIR/terminal_stress_fixture.py"
+TERMINAL_BACKEND="${TERMINAL_BACKEND:-script-pty}"
 
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-terminal-soak.XXXXXX")}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
@@ -108,12 +109,12 @@ if [[ "$SOAK_MODE" == "repaint_viewer" ]]; then
   fixture_mode="repaint"
   session_title="soak-repaint-viewer"
 fi
-command_output="$(env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "python3 '$FIXTURE_SCRIPT' --mode $fixture_mode --frames $frames --rows $ROWS --width 72 --sleep-ms $sleep_ms" --title "$session_title")"
+command_output="$(env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal command --backend "$TERMINAL_BACKEND" --command "python3 '$FIXTURE_SCRIPT' --mode $fixture_mode --frames $frames --rows $ROWS --width 72 --sleep-ms $sleep_ms" --title "$session_title")"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse soak session ID" >&2; exit 1; }
 wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=owner"
 if [[ "$SOAK_MODE" == "repaint_viewer" ]]; then
-  env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal show "$session_id" --viewer >/dev/null
+  env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal show "$session_id" --viewer >/dev/null
   wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=viewer"
 fi
 

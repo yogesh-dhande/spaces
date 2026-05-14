@@ -103,14 +103,7 @@ struct TerminalCommandCommand: ParsableCommand {
         FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
 
         let executablePath = URL(fileURLWithPath: CommandLine.arguments[0], isDirectory: false)
-        if backend == .ghosttyEmbedded {
-            DistributedNotificationCenter.default().postNotificationName(
-                IPCNotification.openTerminalSessionWindow, object: nil,
-                userInfo: [
-                    IPCNotification.terminalSessionIDUserInfoKey: sessionID,
-                    IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
-                ], options: [.deliverImmediately])
-        } else {
+        if backend != .ghosttyEmbedded {
             let process = Process()
             process.executableURL = executablePath
             process.arguments =
@@ -138,6 +131,13 @@ struct TerminalCommandCommand: ParsableCommand {
             }
             throw WorkspaceError.invalidArgument(message: "Timed out waiting for terminal session to start.")
         }
+
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.openTerminalSessionWindow, object: nil,
+            userInfo: [
+                IPCNotification.terminalSessionIDUserInfoKey: sessionID,
+                IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+            ], options: [.deliverImmediately])
 
         print("Started terminal session \(sessionID)\ttitle=\(resolvedTitle)\tbackend=\(backend.rawValue)\tcwd=\(workingDirectory)")
     }
@@ -227,12 +227,21 @@ struct TerminalTakeoverCommand: ParsableCommand {
 
     func run() throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
-            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
+        let transferredAt = ISO8601DateFormatter().string(from: Date())
+        if FileManager.default.fileExists(atPath: paths.controlSocketPath) {
+            do {
+                let response = try TerminalControlClient.send(
+                    request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
+                guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                print("Transferred terminal ownership for session \(sessionID) to \(clientID)")
+                return
+            } catch let error as POSIXError where error.code == .ECONNREFUSED || error.code == .ENOENT {
+                // Ownership transfer is persisted state in the current option-1
+                // design. If the host socket is stale, recover by updating the
+                // attachment snapshot directly instead of dropping takeover.
+            }
         }
-        let response = try TerminalControlClient.send(
-            request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
-        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+        try TerminalSessionPersistence.transferOwnership(sessionID: sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: transferredAt)
         print("Transferred terminal ownership for session \(sessionID) to \(clientID)")
     }
 }

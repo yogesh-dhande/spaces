@@ -1,3 +1,4 @@
+import Darwin
 import Dispatch
 import Foundation
 
@@ -6,6 +7,19 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
     public let launchConfiguration: TerminalSessionLaunchConfiguration
     public let paths: TerminalSessionPaths
     private let now: @Sendable () -> String
+
+    private final class ExitFinalizer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var didFinalize = false
+
+        func beginIfNeeded() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !didFinalize else { return false }
+            didFinalize = true
+            return true
+        }
+    }
 
     public init(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
@@ -34,17 +48,25 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
         let scriptInputHandle = inputPipe.fileHandleForWriting
         let outputHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
         try outputHandle.seekToEnd()
+        let sessionID = launchConfiguration.sessionID
+        let sessionPaths = paths
+        let now = self.now
+        let isActiveOwner: @Sendable (String) -> Bool = { [sessionPaths] clientID in
+            ((try? TerminalSessionPersistence.activeAttachments(paths: sessionPaths)) ?? []).contains { $0.clientID == clientID && $0.mode == .owner }
+        }
+        let resizePTY: @Sendable (Int, Int) -> Bool = { columns, rows in
+            guard columns > 0, rows > 0 else { return false }
+            guard let ttyName = Self.controllingTTYName(for: childPID) else { return false }
+            return Self.resizeTerminal(named: ttyName, columns: columns, rows: rows)
+        }
         let outputFD = outputPipe.fileHandleForReading.fileDescriptor
+        let outputFlags = fcntl(outputFD, F_GETFL)
+        if outputFlags >= 0 { _ = fcntl(outputFD, F_SETFL, outputFlags | O_NONBLOCK) }
+        let drainOutput: @Sendable () -> Void = { Self.drainOutput(from: outputFD, to: outputHandle) }
         let outputSource = DispatchSource.makeReadSource(fileDescriptor: outputFD, queue: queue)
         outputSource.setEventHandler {
-            let available = Int(outputSource.data)
-            guard available > 0 else { return }
-            var buffer = [UInt8](repeating: 0, count: min(available, 8192))
-            let count = read(outputFD, &buffer, buffer.count)
-            if count > 0 {
-                try? outputHandle.write(contentsOf: buffer.prefix(Int(count)))
-                try? outputHandle.synchronize()
-            }
+            guard outputSource.data > 0 else { return }
+            drainOutput()
         }
         outputSource.setCancelHandler {
             try? outputPipe.fileHandleForReading.close()
@@ -53,40 +75,130 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
 
         let controlServer = TerminalControlServer(socketPath: paths.controlSocketPath, queue: queue) { request in
             switch request.command {
+            case "attach":
+                do {
+                    return try TerminalSessionHostProtocolSupport.attach(request: request, sessionID: sessionID, paths: sessionPaths, attachedAt: now)
+                } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+            case "detach":
+                do { return try TerminalSessionHostProtocolSupport.detach(request: request, paths: sessionPaths) } catch {
+                    return TerminalControlResponse(ok: false, message: String(describing: error))
+                }
+            case "snapshot": return TerminalSessionHostProtocolSupport.snapshot(request: request, paths: sessionPaths)
+            case "output_size": return TerminalSessionHostProtocolSupport.outputSize(paths: sessionPaths)
+            case "read_output_chunk":
+                return TerminalSessionHostProtocolSupport.readOutputChunk(request: request, sessionID: sessionID, paths: sessionPaths)
             case "send":
+                let startedAt = Date()
+                if let clientID = request.clientID, !isActiveOwner(clientID) {
+                    TerminalPerformance.logMetric(
+                        "terminal_control_send", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: false)
+                    return TerminalControlResponse(ok: false, message: "Only the active owner can send input.")
+                }
                 guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
                 guard let data = (text + (request.appendNewline ? "\n" : "")).data(using: .utf8) else {
                     return TerminalControlResponse(ok: false, message: "Unable to encode terminal input.")
                 }
                 try scriptInputHandle.write(contentsOf: data)
+                TerminalPerformance.logMetric(
+                    "terminal_control_send", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                    success: true, detail: "bytes=\(data.count)")
                 return TerminalControlResponse(ok: true, message: "Sent input.")
             case "key":
+                let startedAt = Date()
+                if let clientID = request.clientID, !isActiveOwner(clientID) {
+                    TerminalPerformance.logMetric(
+                        "terminal_control_key", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: false)
+                    return TerminalControlResponse(ok: false, message: "Only the active owner can send keys.")
+                }
                 guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
                     return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
                 }
                 try scriptInputHandle.write(contentsOf: bytes)
+                TerminalPerformance.logMetric(
+                    "terminal_control_key", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
+                    detail: "key=\(key)")
                 return TerminalControlResponse(ok: true, message: "Sent key.")
+            case "resize":
+                let startedAt = Date()
+                if let clientID = request.clientID, !isActiveOwner(clientID) {
+                    TerminalPerformance.logMetric(
+                        "terminal_control_resize", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: false)
+                    return TerminalControlResponse(ok: false, message: "Only the active owner can resize the session.")
+                }
+                guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
+                    return TerminalControlResponse(ok: false, message: "Missing terminal size.")
+                }
+                guard resizePTY(columns, rows) else {
+                    TerminalPerformance.logMetric(
+                        "terminal_control_resize", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: false, detail: "cols=\(columns) rows=\(rows)")
+                    return TerminalControlResponse(ok: false, message: "Unable to resize terminal session.")
+                }
+                TerminalPerformance.logMetric(
+                    "terminal_control_resize", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                    success: true, detail: "cols=\(columns) rows=\(rows)")
+                return TerminalControlResponse(ok: true, message: "Resized terminal session.")
+            case "takeover":
+                let startedAt = Date()
+                guard let clientID = request.clientID, !clientID.isEmpty else {
+                    TerminalPerformance.logMetric(
+                        "terminal_control_takeover", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: false)
+                    return TerminalControlResponse(ok: false, message: "Missing client ID.")
+                }
+                do {
+                    try TerminalSessionPersistence.transferOwnership(
+                        sessionID: sessionID, newOwnerClientID: clientID, paths: sessionPaths, transferredAt: now())
+                    TerminalPerformance.logMetric(
+                        "terminal_control_takeover", target: "session=\(sessionID) client=\(clientID)",
+                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
+                    return TerminalControlResponse(ok: true, message: "Transferred terminal ownership.")
+                } catch {
+                    TerminalPerformance.logMetric(
+                        "terminal_control_takeover", target: "session=\(sessionID) client=\(clientID)",
+                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+                    return TerminalControlResponse(ok: false, message: String(describing: error))
+                }
+            case "terminate":
+                let startedAt = Date()
+                if let clientID = request.clientID, !isActiveOwner(clientID) {
+                    TerminalPerformance.logMetric(
+                        "terminal_control_terminate", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: false)
+                    return TerminalControlResponse(ok: false, message: "Only the active owner can terminate the session.")
+                }
+                process.terminate()
+                TerminalPerformance.logMetric(
+                    "terminal_control_terminate", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                    success: true)
+                return TerminalControlResponse(ok: true, message: "Terminating terminal session.")
             default: return TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
             }
         }
         try controlServer.start()
 
-        let processSource = DispatchSource.makeProcessSource(identifier: childPID, eventMask: .exit, queue: queue)
-        processSource.setEventHandler { [paths, now, launchConfiguration] in
-            let state: TerminalSessionState = process.terminationReason == .exit ? .exited : .failed
-            try? TerminalSessionPersistence.writeRuntimeState(
-                TerminalSessionRuntimeState(
-                    sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: childPID,
-                    state: state, updatedAt: now(), exitedAt: now()), paths: paths)
-            outputSource.cancel()
-            controlServer.stop()
-            try? scriptInputHandle.close()
-            processSource.cancel()
-            exit(process.terminationReason == .exit ? Int32(process.terminationStatus) : 1)
+        let exitFinalizer = ExitFinalizer()
+        let finalizeExit: @Sendable (Process) -> Void = { [paths, now, launchConfiguration] terminatedProcess in
+            queue.async {
+                guard exitFinalizer.beginIfNeeded() else { return }
+                drainOutput()
+                let state: TerminalSessionState = terminatedProcess.terminationReason == .exit ? .exited : .failed
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    TerminalSessionRuntimeState(
+                        sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: childPID,
+                        state: state, updatedAt: now(), exitedAt: now()), paths: paths)
+                outputSource.cancel()
+                controlServer.stop()
+                try? scriptInputHandle.close()
+                exit(terminatedProcess.terminationReason == .exit ? Int32(terminatedProcess.terminationStatus) : 1)
+            }
         }
+        process.terminationHandler = { terminatedProcess in finalizeExit(terminatedProcess) }
 
         outputSource.resume()
-        processSource.resume()
         dispatchMain()
     }
 
@@ -104,5 +216,52 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
         process.standardError = outputPipe
         try process.run()
         return process
+    }
+
+    private static func controllingTTYName(for pid: Int32) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-o", "tty=", "-p", String(pid)]
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let tty = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !tty.isEmpty, tty != "??" else { return nil }
+            return tty
+        } catch { return nil }
+    }
+
+    private static func resizeTerminal(named ttyName: String, columns: Int, rows: Int) -> Bool {
+        let ttyPath = ttyName.hasPrefix("/") ? ttyName : "/dev/\(ttyName)"
+        let fileDescriptor = open(ttyPath, O_RDWR | O_NOCTTY)
+        guard fileDescriptor >= 0 else { return false }
+        defer { close(fileDescriptor) }
+        var windowSize = winsize(ws_row: UInt16(rows), ws_col: UInt16(columns), ws_xpixel: 0, ws_ypixel: 0)
+        return ioctl(fileDescriptor, TIOCSWINSZ, &windowSize) == 0
+    }
+
+    private static func drainOutput(from fileDescriptor: Int32, to outputHandle: FileHandle, chunkSize: Int = 8192) {
+        var buffer = [UInt8](repeating: 0, count: chunkSize)
+        while true {
+            let count = read(fileDescriptor, &buffer, buffer.count)
+            if count > 0 {
+                try? outputHandle.write(contentsOf: buffer.prefix(Int(count)))
+                continue
+            }
+            if count == 0 {
+                try? outputHandle.synchronize()
+                return
+            }
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                try? outputHandle.synchronize()
+                return
+            }
+            return
+        }
     }
 }

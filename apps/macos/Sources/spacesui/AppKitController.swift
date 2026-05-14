@@ -710,7 +710,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
         }
         guard !isConfiguredProcessSession else { return }
-        GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
+        if let paths = try? TerminalSessionPaths.forSession(id: sessionID), FileManager.default.fileExists(atPath: paths.controlSocketPath) {
+            _ = try? TerminalControlClient.send(request: TerminalControlRequest(command: "terminate"), socketPath: paths.controlSocketPath)
+        } else {
+            GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
+        }
         if (try? orchestrator.removeAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
     }
 

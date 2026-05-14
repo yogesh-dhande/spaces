@@ -1413,6 +1413,46 @@ assert_equals() {
   [[ "$expected" == "$actual" ]] || fail "$label: expected '$expected' got '$actual'"
 }
 
+terminal_active_attachment_client_id() {
+  local session_id="$1"
+  local mode="$2"
+  local attachments_path
+  attachments_path="$(dirname "$TMP_DB")/terminal/sessions/$session_id/attachments.json"
+  python3 - "$attachments_path" "$mode" <<'PY'
+import json, sys
+path, mode = sys.argv[1:3]
+with open(path, "r", encoding="utf-8") as handle:
+    attachments = json.load(handle)
+active = [attachment for attachment in attachments if attachment.get("detachedAt") is None and attachment.get("mode") == mode]
+if not active:
+    print("")
+else:
+    print(active[-1]["clientID"])
+PY
+}
+
+wait_for_terminal_active_attachment_client_id() {
+  local session_id="$1"
+  local mode="$2"
+  local expected_client_id="$3"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$(terminal_active_attachment_client_id "$session_id" "$mode")" == "$expected_client_id" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for terminal session $session_id $mode attachment to become $expected_client_id"
+}
+
+terminal_list_output() {
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_BIN" terminal list
+}
+
+terminal_list_session_ids() {
+  terminal_list_output | awk 'NF > 0 && $1 != "No" { print $1 }'
+}
+
 frontmost_app() {
   osascript <<'APPLESCRIPT'
 tell application "System Events"
@@ -3101,40 +3141,50 @@ PY
     pass_case
 
     begin_case "$host: closing ad hoc Spaces terminal removes runtime row"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" open-workspace-terminal --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-open-adhoc-terminal.json
-    transition_pause "$host open ad hoc Spaces terminal"
     dump_workspace "$workspace_dir" "$dump_file"
-    local adhoc_session_id
-    adhoc_session_id="$(python3 - "$dump_file" <<'PY'
+    local process_session_ids before_terminal_ids
+    process_session_ids="$(python3 - "$dump_file" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh:
     data = json.load(fh)
-for window in data["windows"]:
-    if window.get("app") == "Spaces" and window.get("role") == "terminal" and (window.get("name") or "").startswith("shell-"):
-        print(window.get("terminalTrackingID") or window.get("terminalNativeID") or "")
+for process in data["runningProcesses"]:
+    terminal_id = process.get("terminalTrackingID") or process.get("terminalNativeID") or ""
+    if terminal_id:
+        print(terminal_id)
+PY
+)"
+    before_terminal_ids="$(terminal_list_session_ids)"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" open-workspace-terminal --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-open-adhoc-terminal.json
+    transition_pause "$host open ad hoc Spaces terminal"
+    local adhoc_session_id
+    local adhoc_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+    while (( SECONDS < adhoc_deadline )); do
+      adhoc_session_id="$(python3 - "$before_terminal_ids" "$process_session_ids" "$(terminal_list_session_ids)" <<'PY'
+import sys
+
+before = {line.strip() for line in sys.argv[1].splitlines() if line.strip()}
+process_ids = {line.strip() for line in sys.argv[2].splitlines() if line.strip()}
+after = [line.strip() for line in sys.argv[3].splitlines() if line.strip()]
+for session_id in after:
+    if session_id not in before and session_id not in process_ids:
+        print(session_id)
         break
 PY
 )"
+      [[ -n "$adhoc_session_id" ]] && break
+      sleep 0.2
+    done
     [[ -n "$adhoc_session_id" ]] || fail "expected ad hoc Spaces terminal session"
     env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" close-terminal-session-window --session-id "$adhoc_session_id" >/tmp/spaces-e2e-close-adhoc-terminal.json
     transition_pause "$host close ad hoc Spaces terminal"
     local adhoc_closed_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
     local adhoc_row_present=1
     while (( SECONDS < adhoc_closed_deadline )); do
-      dump_workspace "$workspace_dir" "$dump_file"
-      adhoc_row_present="$(python3 - "$dump_file" "$adhoc_session_id" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-session_id = sys.argv[2]
-for window in data["windows"]:
-    if (window.get("terminalTrackingID") or window.get("terminalNativeID") or "") == session_id:
-        print("1")
-        break
-else:
-    print("0")
-PY
-)"
+      if terminal_list_session_ids | grep -qx "$adhoc_session_id"; then
+        adhoc_row_present=1
+      else
+        adhoc_row_present=0
+      fi
       [[ "$adhoc_row_present" == "0" ]] && break
       sleep 0.2
     done
@@ -3180,19 +3230,31 @@ PY
     wait_for_condition "spaces_front_window_title" "frontend"
     pass_case
 
-    begin_case "$host: toggle main window round-trips back to Spaces terminal viewer"
+    begin_case "$host: toggle main window preserves Spaces terminal viewer attachment"
     env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_BIN" terminal show "$frontend_session_before_close" --viewer >/tmp/spaces-e2e-open-frontend-viewer.log 2>&1
     transition_pause "$host open frontend viewer window"
-    wait_for_condition "spaces_built_in_terminal_focus_state" "viewer"
-    wait_for_condition "spaces_front_window_title" "frontend (viewer)"
+    local frontend_viewer_client_id
+    frontend_viewer_client_id="$(terminal_active_attachment_client_id "$frontend_session_before_close" "viewer")"
+    [[ -n "$frontend_viewer_client_id" ]] || fail "expected active viewer attachment after opening frontend viewer"
     send_spaces_toggle_hotkey_with_ack
     wait_for_condition "spaces_main_window_visible" "1"
     wait_for_condition "spaces_main_window_key" "1"
     wait_for_condition "spaces_built_in_terminal_focus_state" "none"
     send_spaces_toggle_hotkey_with_ack
     wait_for_condition "spaces_main_window_visible" "0"
-    wait_for_condition "spaces_built_in_terminal_focus_state" "viewer"
-    wait_for_condition "spaces_front_window_title" "frontend (viewer)"
+    wait_for_terminal_active_attachment_client_id "$frontend_session_before_close" "viewer" "$frontend_viewer_client_id"
+    pass_case
+
+    begin_case "$host: terminal viewer takeover transfers owner attachment"
+    local viewer_client_id owner_client_id
+    viewer_client_id="$frontend_viewer_client_id"
+    owner_client_id="$(terminal_active_attachment_client_id "$frontend_session_before_close" "owner")"
+    [[ -n "$viewer_client_id" ]] || fail "expected active viewer attachment for frontend session"
+    [[ -n "$owner_client_id" ]] || fail "expected active owner attachment for frontend session"
+    [[ "$viewer_client_id" != "$owner_client_id" ]] || fail "expected distinct owner and viewer attachments before takeover"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_BIN" terminal takeover "$frontend_session_before_close" "$viewer_client_id" >/tmp/spaces-e2e-viewer-takeover.log 2>&1
+    wait_for_terminal_active_attachment_client_id "$frontend_session_before_close" "owner" "$viewer_client_id"
+    wait_for_terminal_active_attachment_client_id "$frontend_session_before_close" "viewer" "$owner_client_id"
     pass_case
   fi
 

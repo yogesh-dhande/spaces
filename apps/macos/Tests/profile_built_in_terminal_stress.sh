@@ -9,6 +9,7 @@ SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 FIXTURE_SCRIPT="$SCRIPT_DIR/terminal_stress_fixture.py"
+TERMINAL_BACKEND="${TERMINAL_BACKEND:-script-pty}"
 
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-terminal-stress.XXXXXX")}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
@@ -115,7 +116,7 @@ run_scenario() {
   local cli_metrics_path="$WORK_ROOT/${scenario}-cli.log"
   local command_output session_id session_dir output_log
 
-  command_output="$(env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "$command" --title "stress-${scenario}")"
+  command_output="$(env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal command --backend "$TERMINAL_BACKEND" --command "$command" --title "stress-${scenario}")"
   session_id="$(extract_session_id "$command_output")"
   [[ -n "$session_id" ]] || { echo "Failed to parse session ID for scenario $scenario" >&2; exit 1; }
 
@@ -237,7 +238,7 @@ run_viewer_repaint_scenario() {
   local command="python3 '$FIXTURE_SCRIPT' --mode repaint --frames $VIEWER_REPAINT_FRAMES --rows $VIEWER_REPAINT_ROWS --width 72 --sleep-ms $VIEWER_REPAINT_SLEEP_MS"
   local command_output session_id session_dir output_log
 
-  command_output="$(env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "$command" --title "stress-${scenario}")"
+  command_output="$(env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal command --backend "$TERMINAL_BACKEND" --command "$command" --title "stress-${scenario}")"
   session_id="$(extract_session_id "$command_output")"
   [[ -n "$session_id" ]] || { echo "Failed to parse session ID for scenario $scenario" >&2; exit 1; }
 
@@ -245,7 +246,7 @@ run_viewer_repaint_scenario() {
   session_dir="$(dirname "$DB_PATH")/terminal/sessions/$session_id"
   output_log="$session_dir/output.log"
 
-  env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal show "$session_id" --viewer >/dev/null
+  env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal show "$session_id" --viewer >/dev/null
   wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=viewer"
 
   run_tail_samples "$session_id" "$scenario" "$tail_timings_path" "$cli_metrics_path"

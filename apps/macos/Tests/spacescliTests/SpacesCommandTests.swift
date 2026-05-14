@@ -190,6 +190,32 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(command.clientID, "client-1")
     }
 
+    func testTerminalTakeoverFallsBackToPersistedOwnershipWhenControlSocketIsUnavailable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        defer {
+            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let sessionID = "session-takeover"
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        let owner = TerminalClient(id: "client-owner", kind: .localWindow, identity: .init(label: "Owner"), connectedAt: "2026-05-13T00:00:00Z")
+        let viewer = TerminalClient(id: "client-viewer", kind: .localWindow, identity: .init(label: "Viewer"), connectedAt: "2026-05-13T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-13T00:00:01Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-05-13T00:00:02Z")
+
+        try TerminalTakeoverCommand.parse([sessionID, viewer.id]).run()
+
+        let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+        XCTAssertEqual(activeAttachments.first(where: { $0.clientID == viewer.id })?.mode, .owner)
+        XCTAssertEqual(activeAttachments.first(where: { $0.clientID == owner.id })?.mode, .viewer)
+    }
+
     func testTerminalServeParsesBackend() throws {
         let command = try TerminalServeCommand.parse([
             "--session-id", "session-1", "--backend", "script-pty", "--title", "session", "--cwd", "/tmp", "--shell", "/bin/zsh",

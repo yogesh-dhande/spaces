@@ -2,13 +2,6 @@ import AppKit
 import Foundation
 import spacesterminalcore
 
-extension Notification.Name {
-    public static let spacesTerminalAttachmentStateDidChange = Notification.Name("spaces.terminal.attachment-state-did-change")
-    public static let spacesTerminalSessionMetadataDidChange = Notification.Name("spaces.terminal.session-metadata-did-change")
-    public static let spacesTerminalRuntimeStateDidChange = Notification.Name("spaces.terminal.runtime-state-did-change")
-    public static let spacesTerminalOutputDidChange = Notification.Name("spaces.terminal.output-did-change")
-}
-
 @MainActor public final class GhosttyEmbeddedSessionRegistry {
     public static let shared = GhosttyEmbeddedSessionRegistry()
 
@@ -221,6 +214,27 @@ extension Notification.Name {
                 MainActor.assumeIsolated {
                     guard let self else { return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.") }
                     switch request.command {
+                    case "attach":
+                        do {
+                            let response = try TerminalSessionHostProtocolSupport.attach(
+                                request: request, sessionID: self.launchConfiguration.sessionID, paths: self.paths,
+                                attachedAt: { ISO8601DateFormatter().string(from: Date()) })
+                            self.postAttachmentStateDidChange()
+                            self.refreshRuntimeState(force: true)
+                            return response
+                        } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+                    case "detach":
+                        do {
+                            let response = try TerminalSessionHostProtocolSupport.detach(request: request, paths: self.paths)
+                            self.postAttachmentStateDidChange()
+                            self.refreshRuntimeState(force: true)
+                            return response
+                        } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+                    case "snapshot": return TerminalSessionHostProtocolSupport.snapshot(request: request, paths: self.paths)
+                    case "output_size": return TerminalSessionHostProtocolSupport.outputSize(paths: self.paths)
+                    case "read_output_chunk":
+                        return TerminalSessionHostProtocolSupport.readOutputChunk(
+                            request: request, sessionID: self.launchConfiguration.sessionID, paths: self.paths)
                     case "send":
                         let startedAt = Date()
                         if let clientID = request.clientID, !self.isOwner(clientID: clientID) {
@@ -274,6 +288,19 @@ extension Notification.Name {
                                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
                             return TerminalControlResponse(ok: false, message: String(describing: error))
                         }
+                    case "terminate":
+                        let startedAt = Date()
+                        if let clientID = request.clientID, !self.isOwner(clientID: clientID) {
+                            TerminalPerformance.logMetric(
+                                "terminal_control_terminate", target: "session=\(self.launchConfiguration.sessionID)",
+                                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+                            return TerminalControlResponse(ok: false, message: "Only the active owner can terminate the session.")
+                        }
+                        self.terminate()
+                        TerminalPerformance.logMetric(
+                            "terminal_control_terminate", target: "session=\(self.launchConfiguration.sessionID)",
+                            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
+                        return TerminalControlResponse(ok: true, message: "Terminating terminal session.")
                     default: return TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
                     }
                 }
