@@ -87,6 +87,8 @@ flowchart LR
 - Owner or viewer state is persisted in `attachments.json`. Both CLI and UI clients identify themselves so the session host can reject input from passive viewer windows, accept ownership transfer through `spaces terminal takeover`, and fall back to direct attachment persistence when takeover is requested after the runtime has already exited.
 - The current option-1 boundary is already enough for a mobile-shaped client proof: a non-AppKit client can attach through the explicit session socket protocol, load a replay snapshot, stream incremental terminal output by byte offset, and send ownership-aware text or key input through the same host boundary without mutating session files directly.
 - The current terminal slice is backend-explicit: `script-pty` and `ghostty-embedded` are both supported runtime backends. `script-pty` is the default built-in host path because it already matches the persistent session-host model, while `ghostty-embedded` remains available for local embedded rendering experiments and explicit backend selection.
+- Terminal profiling treats `ghostty-embedded` as the local Mac benchmark backend. The compare harness runs the built-in profile and stress suites against both built-in backends so shared-session renderer work can be measured against the existing local libghostty path.
+- The shared-session macOS client keeps its own incremental `TerminalScreenBuffer` over host `read_output_chunk` responses. That lets the fallback renderer rebuild cursor-aware visible terminal state from raw persisted bytes instead of repainting only from tailed plain-text snapshots.
 - This slice does not yet replace workspace-managed tmux process sessions or external terminal hosts.
 
 ## Persistence

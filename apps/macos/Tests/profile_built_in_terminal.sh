@@ -9,6 +9,10 @@ SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 TERMINAL_BACKEND="${TERMINAL_BACKEND:-script-pty}"
+SUPPORTS_INTERACTIVE_CONTROL_PATH=1
+if [[ "$TERMINAL_BACKEND" == "ghostty-embedded" ]]; then
+  SUPPORTS_INTERACTIVE_CONTROL_PATH=0
+fi
 
 ITERATIONS="${ITERATIONS:-3}"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-terminal-profile.XXXXXX")}"
@@ -139,41 +143,43 @@ for iteration in $(seq 1 "$ITERATIONS"); do
 
   wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=owner"
 
-  payload="profile-ping-$iteration"
-  send_started_at="$(ms_now)"
-  env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal send "$session_id" "$payload" --newline >/dev/null
-  send_finished_at="$(ms_now)"
-  append_cli_metric "terminal_control_send" "$session_id" "$((send_finished_at - send_started_at))"
+  if [[ "$SUPPORTS_INTERACTIVE_CONTROL_PATH" == "1" ]]; then
+    payload="profile-ping-$iteration"
+    send_started_at="$(ms_now)"
+    env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal send "$session_id" "$payload" --newline >/dev/null
+    send_finished_at="$(ms_now)"
+    append_cli_metric "terminal_control_send" "$session_id" "$((send_finished_at - send_started_at))"
 
-  tail_output="$(env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal tail "$session_id" --lines 10)"
-  printf '%s\n' "$tail_output" | grep -q "$payload"
+    tail_output="$(env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal tail "$session_id" --lines 10)"
+    printf '%s\n' "$tail_output" | grep -q "$payload"
 
-  env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal show "$session_id" --viewer
-  wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=viewer"
+    env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal show "$session_id" --viewer
+    wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=viewer"
 
-  viewer_payload="viewer-ping-$iteration"
-  env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal send "$session_id" "$viewer_payload" --newline >/dev/null
-  wait_for_log_pattern "spaces: perf metric=terminal_viewer_output_present .*target=session=${session_id} .*success=1"
+    viewer_payload="viewer-ping-$iteration"
+    env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal send "$session_id" "$viewer_payload" --newline >/dev/null
+    wait_for_log_pattern "spaces: perf metric=terminal_viewer_output_present .*target=session=${session_id} .*success=1"
 
-  viewer_client_id="$(active_viewer_client_id "$session_id")"
-  takeover_started_at="$(ms_now)"
-  env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal takeover "$session_id" "$viewer_client_id" >/dev/null
-  takeover_finished_at="$(ms_now)"
-  append_cli_metric "terminal_control_takeover" "$session_id" "$((takeover_finished_at - takeover_started_at))" "client=${viewer_client_id}"
-  deadline=$(( $(date +%s) + 20 ))
-  while true; do
-    if [[ "$(active_owner_client_id "$session_id")" == "$viewer_client_id" ]]; then
-      break
-    fi
-    if (( $(date +%s) >= deadline )); then
-      echo "Timed out waiting for viewer ownership transfer for session $session_id" >&2
-      exit 1
-    fi
-    sleep 0.2
-  done
+    viewer_client_id="$(active_viewer_client_id "$session_id")"
+    takeover_started_at="$(ms_now)"
+    env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal takeover "$session_id" "$viewer_client_id" >/dev/null
+    takeover_finished_at="$(ms_now)"
+    append_cli_metric "terminal_control_takeover" "$session_id" "$((takeover_finished_at - takeover_started_at))" "client=${viewer_client_id}"
+    deadline=$(( $(date +%s) + 20 ))
+    while true; do
+      if [[ "$(active_owner_client_id "$session_id")" == "$viewer_client_id" ]]; then
+        break
+      fi
+      if (( $(date +%s) >= deadline )); then
+        echo "Timed out waiting for viewer ownership transfer for session $session_id" >&2
+        exit 1
+      fi
+      sleep 0.2
+    done
+  fi
 done
 
-python3 - "$APP_LOG" "$SESSION_CLI_METRICS_LOG" "$(dirname "$DB_PATH")/terminal/sessions" "$ITERATIONS" "$SESSION_METRICS_JSON" >"$SESSION_SUMMARY" <<'PY'
+python3 - "$APP_LOG" "$SESSION_CLI_METRICS_LOG" "$(dirname "$DB_PATH")/terminal/sessions" "$ITERATIONS" "$SESSION_METRICS_JSON" "$TERMINAL_BACKEND" "$SUPPORTS_INTERACTIVE_CONTROL_PATH" >"$SESSION_SUMMARY" <<'PY'
 import math, re, statistics, sys
 import json
 from pathlib import Path
@@ -183,6 +189,8 @@ cli_metrics_log_path = Path(sys.argv[2])
 sessions_root = Path(sys.argv[3])
 expected_iterations = int(sys.argv[4])
 json_path = sys.argv[5]
+backend = sys.argv[6]
+supports_interactive_control_path = sys.argv[7] == "1"
 pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<target>.*?) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
 samples = {}
 focus_reason_samples = {}
@@ -240,7 +248,9 @@ ordered_metrics = [
 ]
 
 metrics_payload = {}
-print(f"Profiled built-in terminal over {expected_iterations} iteration(s)")
+print(f"Profiled built-in terminal over {expected_iterations} iteration(s) [backend={backend}]")
+if not supports_interactive_control_path:
+    print("Interactive control metrics skipped for this backend.")
 print()
 for metric in ordered_metrics:
     values = samples.get(metric, [])
@@ -264,6 +274,7 @@ with open(json_path, "w", encoding="utf-8") as handle:
     json.dump(
         {
             "iterations": expected_iterations,
+            "backend": backend,
             "metrics": metrics_payload,
         },
         handle,

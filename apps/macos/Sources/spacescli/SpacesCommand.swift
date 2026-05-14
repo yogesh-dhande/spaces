@@ -101,6 +101,17 @@ struct TerminalCommandCommand: ParsableCommand {
         try paths.ensureDirectories()
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
+        let openWindowUserInfo = [
+            IPCNotification.terminalSessionIDUserInfoKey: sessionID,
+            IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+        ]
+
+        func requestOwnerWindowOpen() {
+            DistributedNotificationCenter.default().postNotificationName(
+                IPCNotification.openTerminalSessionWindow, object: nil, userInfo: openWindowUserInfo, options: [.deliverImmediately])
+        }
+
+        if backend == .ghosttyEmbedded { requestOwnerWindowOpen() }
 
         let executablePath = URL(fileURLWithPath: CommandLine.arguments[0], isDirectory: false)
         if backend != .ghosttyEmbedded {
@@ -119,8 +130,13 @@ struct TerminalCommandCommand: ParsableCommand {
         }
 
         let deadline = Date().addingTimeInterval(5)
+        var lastGhosttyOpenRequestAt = Date()
         while Date() < deadline {
             if FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) { break }
+            if backend == .ghosttyEmbedded, Date().timeIntervalSince(lastGhosttyOpenRequestAt) >= 0.25 {
+                requestOwnerWindowOpen()
+                lastGhosttyOpenRequestAt = Date()
+            }
             Thread.sleep(forTimeInterval: 0.05)
         }
 
@@ -132,12 +148,7 @@ struct TerminalCommandCommand: ParsableCommand {
             throw WorkspaceError.invalidArgument(message: "Timed out waiting for terminal session to start.")
         }
 
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.openTerminalSessionWindow, object: nil,
-            userInfo: [
-                IPCNotification.terminalSessionIDUserInfoKey: sessionID,
-                IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
-            ], options: [.deliverImmediately])
+        if backend != .ghosttyEmbedded { requestOwnerWindowOpen() }
 
         print("Started terminal session \(sessionID)\ttitle=\(resolvedTitle)\tbackend=\(backend.rawValue)\tcwd=\(workingDirectory)")
     }

@@ -83,6 +83,8 @@ import spacesterminalghostty
     private var pendingWindowFramePersistTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
     private var lastTransportOutput = ""
+    private var transportScreenBuffer = TerminalScreenBuffer()
+    private var transportScreenBufferByteCount: Int64 = 0
     private var isClientAttached = false
     private var didCloseWindow = false
     private var lastObservedAttachmentMode: TerminalAttachmentMode?
@@ -704,13 +706,15 @@ import spacesterminalghostty
                 }
                 fallthrough
             case .outputFallback:
-                let output = lastTransportOutput.isEmpty ? snapshot.recentOutput : lastTransportOutput
+                let output: String
+                do { output = try renderedOutput(snapshot: snapshot) } catch {
+                    output = lastTransportOutput.isEmpty ? snapshot.recentOutput : lastTransportOutput
+                }
                 if output != lastRenderedOutput {
                     outputView.string = output
                     if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
                     outputView.sizeToFit()
                     lastRenderedOutput = output
-                    lastTransportOutput = output
                     didUpdatePassivePresentation = true
                 }
                 restoreOutputViewportState(viewportState)
@@ -1111,6 +1115,52 @@ import spacesterminalghostty
 
     private func currentRefreshInterval() -> Duration {
         visibleRenderer == .ghosttyOwner && !shouldShowOwnerStateLabel ? Self.ownerGhosttyRefreshInterval : Self.fallbackRefreshInterval
+    }
+
+    private func renderedOutput(snapshot: TerminalSessionClientSnapshot) throws -> String {
+        let outputByteCount = snapshot.outputByteCount
+        guard outputByteCount > 0 else {
+            transportScreenBuffer.reset()
+            transportScreenBufferByteCount = 0
+            return snapshot.recentOutput
+        }
+
+        if outputByteCount < transportScreenBufferByteCount {
+            try rebuildTransportScreenBuffer(totalBytes: outputByteCount)
+        } else if transportScreenBufferByteCount == 0 {
+            try rebuildTransportScreenBuffer(totalBytes: outputByteCount)
+        } else if outputByteCount > transportScreenBufferByteCount {
+            try appendTransportOutputChunks(from: transportScreenBufferByteCount, to: outputByteCount)
+        }
+
+        let rendered = transportScreenBuffer.renderedText()
+        if rendered.isEmpty, !lastTransportOutput.isEmpty { return lastTransportOutput }
+        return rendered
+    }
+
+    private func rebuildTransportScreenBuffer(totalBytes: Int64) throws {
+        transportScreenBuffer.reset()
+        transportScreenBufferByteCount = 0
+        try appendTransportOutputChunks(from: 0, to: totalBytes)
+    }
+
+    private func appendTransportOutputChunks(from startOffset: Int64, to endOffset: Int64) throws {
+        guard endOffset > startOffset else { return }
+        var offset = startOffset
+        while offset < endOffset {
+            let remainingBytes = endOffset - offset
+            let chunkSize = Int(min(64 * 1024, remainingBytes))
+            guard let chunk = try transport.readOutputChunk(offset, chunkSize) else { break }
+            guard !chunk.bytes.isEmpty else { break }
+            if let text = String(data: chunk.bytes, encoding: .utf8), !text.isEmpty {
+                transportScreenBuffer.ingest(text)
+            } else {
+                let decoded = String(decoding: chunk.bytes, as: UTF8.self)
+                if !decoded.isEmpty { transportScreenBuffer.ingest(decoded) }
+            }
+            offset += Int64(chunk.bytes.count)
+        }
+        transportScreenBufferByteCount = max(transportScreenBufferByteCount, offset)
     }
 
     private func rendererSummary(isOwner: Bool?) -> String {

@@ -10,6 +10,10 @@ SPACES_CLI="$BUILD_DIR/spaces"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 FIXTURE_SCRIPT="$SCRIPT_DIR/terminal_stress_fixture.py"
 TERMINAL_BACKEND="${TERMINAL_BACKEND:-script-pty}"
+SUPPORTS_VIEWER_STRESS=1
+if [[ "$TERMINAL_BACKEND" == "ghostty-embedded" ]]; then
+  SUPPORTS_VIEWER_STRESS=0
+fi
 
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-terminal-stress.XXXXXX")}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
@@ -376,9 +380,11 @@ sleep 3
 run_scenario "lines" "python3 '$FIXTURE_SCRIPT' --mode lines --lines $LINE_LINES --width 80 --flush-every 50" "$LINE_LINES" 0
 run_scenario "repaint" "python3 '$FIXTURE_SCRIPT' --mode repaint --frames $REPAINT_FRAMES --rows $REPAINT_ROWS --width 72" "$((REPAINT_FRAMES * REPAINT_ROWS))" "$REPAINT_FRAMES"
 run_scenario "mixed" "python3 '$FIXTURE_SCRIPT' --mode mixed --frames $MIXED_FRAMES --rows $MIXED_ROWS --width 72" "$((MIXED_FRAMES * MIXED_ROWS))" "$MIXED_FRAMES"
-run_viewer_repaint_scenario
+if [[ "$SUPPORTS_VIEWER_STRESS" == "1" ]]; then
+  run_viewer_repaint_scenario
+fi
 
-python3 - "$WORK_ROOT" "$APP_LOG" "$SUMMARY_PATH" "$METRICS_PATH" <<'PY'
+python3 - "$WORK_ROOT" "$APP_LOG" "$SUMMARY_PATH" "$METRICS_PATH" "$TERMINAL_BACKEND" <<'PY'
 import json
 import math
 import re
@@ -390,6 +396,7 @@ work_root = Path(sys.argv[1])
 app_log = Path(sys.argv[2])
 summary_path = Path(sys.argv[3])
 metrics_path = Path(sys.argv[4])
+backend = sys.argv[5]
 
 scenario_summaries = []
 for path in sorted(work_root.glob("*-summary.json")):
@@ -415,11 +422,12 @@ def summarize(values):
     }
 
 payload = {
+    "backend": backend,
     "scenarios": scenario_summaries,
     "metrics": {metric: summarize(values) for metric, values in sorted(metrics.items()) if values},
 }
 
-lines = ["Built-in terminal stress profile", ""]
+lines = [f"Built-in terminal stress profile [backend={backend}]", ""]
 for scenario in scenario_summaries:
     lines.append(
         f"{scenario['scenario']}: output={scenario['output_bytes']}B seq={scenario['sequence_count']} "

@@ -7,6 +7,7 @@ This document captures the current libghostty-backed terminal integration in Spa
   - `script-pty`
   - `ghostty-embedded`
 - `ghostty-embedded` is the native terminal path for Spaces-owned windows.
+- `ghostty-embedded` is also the local Mac benchmark lane for summon latency, input latency, repaint churn, viewer attach, and takeover while the shared-session renderer catches up on parity.
 - iTerm2 and Ghostty external-host integrations still exist on this branch and remain selectable overrides.
 - When the configured terminal host is `Spaces`, tracked workspace processes use the built-in session backend directly and do not require tmux.
 - The public Ghostty SDK remains a local-renderer tool in this architecture. The maintained SDK probe shows that it still lacks an attach/adopt API for an externally owned PTY or session stream, so it cannot yet serve as the shared option-1 client renderer for mobile/viewer/takeover sessions.
@@ -83,6 +84,7 @@ The protocol is intentionally file-backed rather than renderer-backed:
 - `snapshot` returns launch metadata, runtime state, attachment state, recent output, and total output bytes
 - `read_output_chunk` returns raw terminal bytes from `output.log` by byte offset
 - owner or viewer identity is still persisted in `clients.json` and `attachments.json`, but non-AppKit clients do not need to edit those files directly
+- the shared-session macOS client uses those raw chunks to maintain an incremental local `TerminalScreenBuffer`, so the AppKit fallback path renders cursor motion and line rewrites from terminal bytes instead of only repainting from tailed text
 
 That split keeps the session host responsible for:
 - PTY lifetime
@@ -182,6 +184,8 @@ The host also avoids rewriting `state.json` on every timer tick. Steady-state se
 
 ## Performance Notes
 The active owner path is treated as a hot rendering path.
+
+The profiling lane treats `ghostty-embedded` as the baseline for local Spaces-owned terminal quality. `profile_built_in_terminal_compare.sh` runs the built-in terminal profile and stress suites against both built-in backends and reports the side-by-side delta so shared-session renderer work can be judged against the existing native Mac experience instead of against an absolute target in isolation.
 
 Current performance decisions:
 - `GhosttyEmbeddedTerminalView` caches the last surface geometry, focus state, and occlusion state before calling libghostty.
