@@ -18,9 +18,8 @@ public enum TerminalOutputTail {
     private static let plainTextReadBlockSize = 16 * 1024
     private static let renderedSuffixScanLimit: UInt64 = 512 * 1024
     private static let clearScreenBoundaryPatterns: [Data] = [
-        Data([0x1B, 0x5B, 0x48, 0x1B, 0x5B, 0x32, 0x4A]), Data([0x1B, 0x5B, 0x32, 0x4A]), Data([0x1B, 0x5B, 0x33, 0x4A]),
+        Data([0x1B, 0x5B, 0x32, 0x4A]), Data([0x1B, 0x5B, 0x33, 0x4A]), Data([0x1B, 0x5B, 0x4A]),
     ]
-    private static let cursorHomeBoundaryPattern = Data([0x1B, 0x5B, 0x48])
 
     public static func tail(path: String, lineCount: Int) throws -> String {
         let startedAt = Date()
@@ -161,7 +160,7 @@ public enum TerminalOutputTail {
         return data.first ?? 0
     }
 
-    private static func latestRenderedTranscriptBoundaryOffset(in data: Data) -> Int? {
+    static func latestRenderedTranscriptBoundaryOffset(in data: Data) -> Int? {
         var bestOffset: Int?
         for pattern in clearScreenBoundaryPatterns {
             var searchRange = data.startIndex..<data.endIndex
@@ -170,11 +169,58 @@ public enum TerminalOutputTail {
                 searchRange = range.lowerBound + 1..<data.endIndex
             }
         }
-        var searchRange = data.startIndex..<data.endIndex
-        while let range = data.range(of: cursorHomeBoundaryPattern, options: [], in: searchRange) {
-            bestOffset = max(bestOffset ?? range.lowerBound, range.lowerBound)
-            searchRange = range.lowerBound + 1..<data.endIndex
+        var index = data.startIndex
+        while index < data.endIndex {
+            guard data[index] == 0x1B, index + 1 < data.endIndex, data[index + 1] == 0x5B else {
+                index += 1
+                continue
+            }
+            guard let sequenceEnd = csiSequenceEnd(in: data, startingAt: index + 2) else {
+                index += 1
+                continue
+            }
+            let finalByte = data[sequenceEnd]
+            if finalByte == 0x48 || finalByte == 0x66 {
+                let params = csiParameters(in: data[(index + 2)..<sequenceEnd])
+                if isHomeLikeCursorMove(params) { bestOffset = max(bestOffset ?? index, index) }
+                if let clearOffset = immediateClearBoundaryOffset(afterCSIAt: sequenceEnd + 1, in: data) {
+                    bestOffset = max(bestOffset ?? index, index)
+                    index = clearOffset
+                    continue
+                }
+            }
+            index = sequenceEnd + 1
         }
         return bestOffset
+    }
+
+    private static func csiSequenceEnd(in data: Data, startingAt index: Int) -> Int? {
+        var current = index
+        while current < data.endIndex {
+            let value = data[current]
+            if value >= 0x40, value <= 0x7E { return current }
+            current += 1
+        }
+        return nil
+    }
+
+    private static func csiParameters(in data: Data.SubSequence) -> [Int] {
+        let parameterString = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "?", with: "")
+        if parameterString.isEmpty { return [] }
+        return parameterString.split(separator: ";", omittingEmptySubsequences: false).map { Int($0) ?? 0 }
+    }
+
+    private static func isHomeLikeCursorMove(_ params: [Int]) -> Bool {
+        if params.isEmpty { return true }
+        let row = params.first ?? 1
+        let column = params.count > 1 ? params[1] : 1
+        return row == 1 && column == 1
+    }
+
+    private static func immediateClearBoundaryOffset(afterCSIAt index: Int, in data: Data) -> Int? {
+        guard index + 1 < data.endIndex, data[index] == 0x1B, data[index + 1] == 0x5B else { return nil }
+        guard let sequenceEnd = csiSequenceEnd(in: data, startingAt: index + 2) else { return nil }
+        guard data[sequenceEnd] == 0x4A else { return nil }
+        return sequenceEnd + 1
     }
 }

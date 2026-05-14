@@ -93,6 +93,7 @@ flowchart LR
 - `ScriptPTYTerminalSessionRuntime` seeds the wrapped shell with a default PTY size before any AppKit client attaches. Later owner-window resize messages still take over immediately, but the default launch geometry prevents TUIs like `codex` from seeing a `0x0` terminal and painting a broken first frame before the first live resize arrives.
 - `ScriptPTYTerminalSessionRuntime` also answers a small set of terminal queries directly from the PTY host boundary. The current responder covers cursor-position, primary device-attribute, and terminal foreground/background color queries so `codex`-style TUIs can finish their startup probes even when no libghostty surface is attached to the session host.
 - `TerminalScreenBuffer` is the shared-session terminal state source of truth. It keeps a plain-text projection for transcript heuristics and tests, but it also preserves per-cell ANSI style state, cursor visibility, and alternate-screen state so the AppKit shared-session surface can render colors and TUI screen swaps without depending on libghostty.
+- `TerminalOutputTail` keeps a separate fast-path heuristic for transcript reads. Besides plain append-only logs, it recognizes redraw boundaries such as cursor-home plus erase-display sequences, which lets `codex`-style TUI transcripts fall back to a small rendered suffix instead of replaying the full `output.log` on every tail request.
 - This slice does not yet replace workspace-managed tmux process sessions or external terminal hosts.
 
 ## Persistence

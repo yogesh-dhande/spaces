@@ -89,6 +89,7 @@ The protocol is intentionally file-backed rather than renderer-backed:
 - alternate-screen transitions are treated as screen swaps, not ordinary appended output, so viewer selection and preserved scroll state are dropped when a full-screen TUI replaces or restores the primary screen
 - `script-pty` sessions also start the wrapped shell behind a sane default `stty rows/cols` pair before the first client window attaches. That keeps `codex`-style TUIs from seeing an unset PTY size and painting a broken vertical first frame while the real owner window is still on its way to sending the live geometry.
 - `script-pty` sessions also answer a small set of terminal queries at the PTY boundary. The current responder covers cursor-position (`CSI 6n`), primary device attributes (`CSI c`), and terminal foreground/background color probes (`OSC 10;?`, `OSC 11;?`), which is enough for `codex` startup to complete the same terminal-capability handshake it expects from a real local terminal.
+- `terminal tail` and passive viewer refreshes also recognize Codex-style redraw boundaries such as `CSI 1;1H` or `CSI 9;1H` followed by `CSI J`. That keeps shared-session viewers on the smaller `rendered_partial` replay path for Codex transcripts instead of replaying the full `output.log` every time the viewer polls or refreshes.
 
 That split keeps the session host responsible for:
 - PTY lifetime

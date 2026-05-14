@@ -4,6 +4,12 @@ import XCTest
 @testable import spacesterminalcore
 
 final class TerminalOutputTailTests: XCTestCase {
+    private func fixtureData(named name: String) throws -> Data {
+        let fixturesRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(
+            "fixtures", isDirectory: true)
+        return try Data(contentsOf: fixturesRoot.appendingPathComponent(name))
+    }
+
     func testTailReturnsLastLinesWithoutScanningWholeFileInCaller() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let text = (1...10).map { "line-\($0)" }.joined(separator: "\n") + "\n"
@@ -67,5 +73,14 @@ final class TerminalOutputTailTests: XCTestCase {
         let tailed = try TerminalOutputTail.tail(path: url.path, lineCount: 2)
 
         XCTAssertEqual(tailed, "progress 100%\ncomplete")
+    }
+
+    func testBoundaryDetectionFindsCodexReplayRedrawStart() throws {
+        let data = try fixtureData(named: "codex_session_120x40.ansi")
+
+        let boundaryOffset = TerminalOutputTail.latestRenderedTranscriptBoundaryOffset(in: data)
+
+        XCTAssertNotNil(boundaryOffset)
+        XCTAssertLessThan(boundaryOffset ?? .max, data.count)
     }
 }
