@@ -4,6 +4,7 @@ import random
 import string
 import sys
 import time
+from pathlib import Path
 
 
 def random_payload(width: int, rng: random.Random) -> str:
@@ -151,11 +152,28 @@ def emit_color_scrollback_repaint_stream(args: argparse.Namespace, rng: random.R
     return line_seq
 
 
+def emit_fixture_replay(args: argparse.Namespace, _: random.Random) -> int:
+    fixture_path = Path(args.fixture_path)
+    data = fixture_path.read_bytes()
+    repeats = max(args.repeats, 1)
+    chunk_size = max(args.chunk_size, 1)
+    emitted = 0
+    for _ in range(repeats):
+        for start in range(0, len(data), chunk_size):
+            chunk = data[start : start + chunk_size]
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+            emitted += len(chunk)
+            if args.sleep_ms:
+                time.sleep(args.sleep_ms / 1000.0)
+    return emitted
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=["lines", "repaint", "mixed", "scrollback_repaint", "color_repaint", "color_scrollback_repaint"],
+        choices=["lines", "repaint", "mixed", "scrollback_repaint", "color_repaint", "color_scrollback_repaint", "fixture_replay"],
         required=True,
     )
     parser.add_argument("--lines", type=int, default=20000)
@@ -166,6 +184,9 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--sleep-ms", type=int, default=0)
     parser.add_argument("--flush-every", type=int, default=100)
+    parser.add_argument("--fixture-path", type=str, default="")
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--chunk-size", type=int, default=512)
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
@@ -184,6 +205,8 @@ def main() -> int:
         emitted = emit_color_repaint_stream(args, rng)
     elif args.mode == "color_scrollback_repaint":
         emitted = emit_color_scrollback_repaint_stream(args, rng)
+    elif args.mode == "fixture_replay":
+        emitted = emit_fixture_replay(args, rng)
     else:
         emitted = emit_mixed_stream(args, rng)
 

@@ -88,6 +88,7 @@ The protocol is intentionally file-backed rather than renderer-backed:
 - that same shared-session terminal canvas also preserves ANSI style state and screen modes locally, so palette colors, truecolor, cursor visibility, and alternate-screen swaps survive host replay instead of collapsing into monochrome plain text
 - alternate-screen transitions are treated as screen swaps, not ordinary appended output, so viewer selection and preserved scroll state are dropped when a full-screen TUI replaces or restores the primary screen
 - `script-pty` sessions also start the wrapped shell behind a sane default `stty rows/cols` pair before the first client window attaches. That keeps `codex`-style TUIs from seeing an unset PTY size and painting a broken vertical first frame while the real owner window is still on its way to sending the live geometry.
+- `script-pty` sessions also answer a small set of terminal queries at the PTY boundary. The current responder covers cursor-position (`CSI 6n`), primary device attributes (`CSI c`), and terminal foreground/background color probes (`OSC 10;?`, `OSC 11;?`), which is enough for `codex` startup to complete the same terminal-capability handshake it expects from a real local terminal.
 
 That split keeps the session host responsible for:
 - PTY lifetime
@@ -191,6 +192,7 @@ The active owner path is treated as a hot rendering path.
 The profiling lane treats `ghostty-embedded` as the baseline for local Spaces-owned terminal quality. Renderer work is judged against Ghostty repaint cadence and resource pressure rather than against summon or attach costs.
 `profile_terminal_renderer_compare.sh` is the renderer-specific lane. It runs the same repaint-heavy fixture against `ghostty-embedded` owner rendering and the shared-session `script-pty` canvas path, then reports render latency, frame-interval jitter, and app CPU/RSS pressure from timestamped perf metrics instead of emphasizing summon or attach costs.
 `profile_ghostty_renderer_baseline.sh` is the controlled local-owner Ghostty lane. It launches one visible `ghostty-embedded` session with a delayed repaint fixture, samples app CPU/RSS, closes the owner window through the same IPC path the real app uses, and records Ghostty refresh cadence metrics without leaving an untracked owner window or session behind.
+`profile_built_in_terminal_stress.sh` also includes a `codex_fixture_replay` lane. It replays a captured ANSI-heavy `codex` transcript through the shared-session host, opens a passive viewer, and reports both raw `output.log` content coverage and rendered-tail timing so `codex`-style scrollback and redraw behavior stay measurable while terminal fidelity work continues.
 
 Current performance decisions:
 - `GhosttyEmbeddedTerminalView` caches the last surface geometry, focus state, and occlusion state before calling libghostty.

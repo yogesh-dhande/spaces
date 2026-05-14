@@ -46,10 +46,14 @@ COLOR_SCROLLBACK_REPAINT_FRAMES="${COLOR_SCROLLBACK_REPAINT_FRAMES:-160}"
 COLOR_SCROLLBACK_REPAINT_ROWS="${COLOR_SCROLLBACK_REPAINT_ROWS:-18}"
 COLOR_SCROLLBACK_HISTORY_ROWS="${COLOR_SCROLLBACK_HISTORY_ROWS:-18}"
 COLOR_SCROLLBACK_REPAINT_SLEEP_MS="${COLOR_SCROLLBACK_REPAINT_SLEEP_MS:-2}"
+CODEX_FIXTURE_PATH="${CODEX_FIXTURE_PATH:-$SCRIPT_DIR/fixtures/codex_session_120x40.ansi}"
+CODEX_FIXTURE_REPEATS="${CODEX_FIXTURE_REPEATS:-6}"
+CODEX_FIXTURE_CHUNK_SIZE="${CODEX_FIXTURE_CHUNK_SIZE:-512}"
+CODEX_FIXTURE_SLEEP_MS="${CODEX_FIXTURE_SLEEP_MS:-1}"
 SAMPLE_INTERVAL_SECONDS="${SAMPLE_INTERVAL_SECONDS:-1}"
 SESSION_ROOT_OVERRIDE="${SESSION_ROOT_OVERRIDE:-}"
 RESOURCE_SAMPLES_PATH="$WORK_ROOT/app-resource.csv"
-SCENARIOS="${SCENARIOS:-lines repaint mixed repaint_viewer scrollback_repaint color_repaint color_scrollback_repaint}"
+SCENARIOS="${SCENARIOS:-lines repaint mixed repaint_viewer scrollback_repaint color_repaint color_scrollback_repaint codex_fixture_replay}"
 
 cleanup() {
   if [[ -n "$RESOURCE_SAMPLER_PID" ]] && kill -0 "$RESOURCE_SAMPLER_PID" >/dev/null 2>&1; then
@@ -638,6 +642,142 @@ run_viewer_color_scrollback_repaint_scenario() {
     "$COLOR_SCROLLBACK_HISTORY_ROWS" "$COLOR_SCROLLBACK_REPAINT_SLEEP_MS"
 }
 
+run_fixture_viewer_scenario() {
+  local scenario="$1"
+  local fixture_path="$2"
+  local repeats="$3"
+  local chunk_size="$4"
+  local sleep_ms="$5"
+  local tail_timings_path="$WORK_ROOT/${scenario}-tail.tsv"
+  local cli_metrics_path="$WORK_ROOT/${scenario}-cli.log"
+  local command="python3 '$FIXTURE_SCRIPT' --mode fixture_replay --fixture-path '$fixture_path' --repeats $repeats --chunk-size $chunk_size --sleep-ms $sleep_ms"
+  local command_output session_id session_dir output_log tail_capture_path
+
+  echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=launch"
+  command_output="$(env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal command --backend "$TERMINAL_BACKEND" --command "$command" --title "stress-${scenario}")"
+  session_id="$(extract_session_id "$command_output")"
+  [[ -n "$session_id" ]] || { echo "Failed to parse session ID for scenario $scenario" >&2; exit 1; }
+
+  echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=wait_ready session=$session_id"
+  wait_for_owner_ready "$session_id"
+  session_dir="$(resolve_session_dir "$session_id" 60)"
+  output_log="$session_dir/output.log"
+  tail_capture_path="$WORK_ROOT/${scenario}-tail.txt"
+
+  echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=open_viewer session=$session_id"
+  env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" terminal show "$session_id" --viewer >/dev/null
+  wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=viewer"
+
+  echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=tail_samples session=$session_id"
+  run_tail_samples "$session_id" "$scenario" "$tail_timings_path" "$cli_metrics_path"
+
+  local fixture_bytes expected_bytes done_pattern
+  fixture_bytes="$(wc -c <"$fixture_path" | tr -d ' ')"
+  expected_bytes=$((fixture_bytes * repeats))
+  done_pattern="FIXTURE_DONE mode=fixture_replay emitted=${expected_bytes}"
+  echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=wait_done session=$session_id"
+  wait_for_file_pattern "$output_log" "$done_pattern" 180
+  capture_terminal_tail "$session_id" 4000 "$tail_capture_path"
+  wait_for_log_pattern "spaces: perf metric=terminal_viewer_output_present .*target=session=${session_id} .*success=1" 30
+
+  echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=summarize session=$session_id"
+  python3 - "$scenario" "$output_log" "$tail_capture_path" "$expected_bytes" "$tail_timings_path" "$cli_metrics_path" "$APP_LOG" "$session_id" >"$WORK_ROOT/${scenario}-summary.json" <<'PY'
+import json
+import math
+import re
+import statistics
+import sys
+from pathlib import Path
+
+scenario = sys.argv[1]
+output_log_path = Path(sys.argv[2])
+tail_capture = Path(sys.argv[3])
+expected_bytes = int(sys.argv[4])
+tail_timings_path = Path(sys.argv[5])
+cli_metrics_path = Path(sys.argv[6])
+app_log_path = Path(sys.argv[7])
+session_id = sys.argv[8]
+output_text = output_log_path.read_text(encoding="utf-8", errors="replace")
+tail_text = tail_capture.read_text(encoding="utf-8", errors="replace")
+perf_pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<target>.*?) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
+mode_pattern = re.compile(r"mode=(?P<mode>\S+)")
+tail_rows = []
+if tail_timings_path.exists():
+    for row in tail_timings_path.read_text(encoding="utf-8").splitlines():
+        if not row:
+            continue
+        _, elapsed_ms, output_bytes = row.split("\t")
+        tail_rows.append((int(elapsed_ms), int(output_bytes)))
+
+cli_metrics = {}
+app_metrics = {}
+mode_counts = {}
+if cli_metrics_path.exists():
+    for raw_line in cli_metrics_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = perf_pattern.match(raw_line.strip())
+        if not match or match.group("success") != "1":
+            continue
+        metric = match.group("metric")
+        elapsed_ms = int(match.group("elapsed"))
+        cli_metrics.setdefault(metric, []).append(elapsed_ms)
+        detail = match.group("detail") or ""
+        if metric == "terminal_tail_read":
+            mode_match = mode_pattern.search(detail)
+            if mode_match:
+                mode = mode_match.group("mode")
+                mode_counts[mode] = mode_counts.get(mode, 0) + 1
+if app_log_path.exists():
+    for raw_line in app_log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = perf_pattern.match(raw_line.strip())
+        if not match or match.group("success") != "1":
+            continue
+        target = match.group("target")
+        if f"session={session_id}" not in target:
+            continue
+        metric = match.group("metric")
+        elapsed_ms = int(match.group("elapsed"))
+        app_metrics.setdefault(metric, []).append(elapsed_ms)
+
+def summarize(values):
+    values = sorted(values)
+    return {
+        "count": len(values),
+        "min_ms": min(values),
+        "median_ms": round(statistics.median(values), 1),
+        "avg_ms": round(statistics.mean(values), 1),
+        "p95_ms": values[max(math.ceil(len(values) * 0.95) - 1, 0)],
+        "max_ms": max(values),
+    }
+
+summary = {
+    "scenario": scenario,
+    "output_bytes": output_log_path.stat().st_size,
+    "rendered_tail_bytes": tail_capture.stat().st_size,
+    "expected_fixture_bytes": expected_bytes,
+    "contains_codex": "OpenAI Codex" in output_text,
+    "contains_context": "Context 0% used" in output_text,
+    "contains_boot_status": "Booting MCP server: codex_apps" in output_text,
+    "tail_contains_codex": "OpenAI Codex" in tail_text,
+}
+if tail_rows:
+    elapsed = [row[0] for row in tail_rows]
+    summary["tail_samples"] = len(tail_rows)
+    summary["tail_min_ms"] = min(elapsed)
+    summary["tail_median_ms"] = round(statistics.median(elapsed), 1)
+    summary["tail_avg_ms"] = round(statistics.mean(elapsed), 1)
+    summary["tail_p95_ms"] = sorted(elapsed)[max(math.ceil(len(elapsed) * 0.95) - 1, 0)]
+    summary["tail_max_ms"] = max(elapsed)
+    summary["tail_output_bytes_max"] = max(row[1] for row in tail_rows)
+if cli_metrics:
+    summary["cli_metrics"] = {metric: summarize(values) for metric, values in sorted(cli_metrics.items()) if values}
+if app_metrics:
+    summary["app_metrics"] = {metric: summarize(values) for metric, values in sorted(app_metrics.items()) if values}
+if mode_counts:
+    summary["tail_modes"] = mode_counts
+print(json.dumps(summary))
+PY
+}
+
 require_binary "$SPACES_APP"
 require_binary "$SPACES_CLI"
 [[ -x "$FIXTURE_SCRIPT" ]] || chmod +x "$FIXTURE_SCRIPT"
@@ -685,6 +825,9 @@ if [[ "$SUPPORTS_VIEWER_STRESS" == "1" ]] && scenario_enabled "color_repaint"; t
 fi
 if [[ "$SUPPORTS_VIEWER_STRESS" == "1" ]] && scenario_enabled "color_scrollback_repaint"; then
   run_viewer_color_scrollback_repaint_scenario
+fi
+if [[ "$SUPPORTS_VIEWER_STRESS" == "1" ]] && scenario_enabled "codex_fixture_replay"; then
+  run_fixture_viewer_scenario "codex_fixture_replay" "$CODEX_FIXTURE_PATH" "$CODEX_FIXTURE_REPEATS" "$CODEX_FIXTURE_CHUNK_SIZE" "$CODEX_FIXTURE_SLEEP_MS"
 fi
 
 python3 - "$WORK_ROOT" "$APP_LOG" "$SUMMARY_PATH" "$METRICS_PATH" "$TERMINAL_BACKEND" "$RESOURCE_SAMPLES_PATH" <<'PY'
@@ -749,13 +892,22 @@ if resource_rows:
 
 lines = [f"Built-in terminal stress profile [backend={backend}]", ""]
 for scenario in scenario_summaries:
-    lines.append(
-        f"{scenario['scenario']}: output={scenario['output_bytes']}B seq={scenario['sequence_count']} "
-        f"complete={1 if scenario['sequence_complete'] else 0} expected={1 if scenario['lines_match_expected'] else 0} "
-        f"tail_min={scenario.get('tail_min_ms', 0)}ms tail_median={scenario.get('tail_median_ms', 0)}ms "
-        f"tail_avg={scenario.get('tail_avg_ms', 0)}ms tail_p95={scenario.get('tail_p95_ms', 0)}ms tail_max={scenario.get('tail_max_ms', 0)}ms "
-        f"frame_ok={1 if scenario.get('frame_match_expected', True) else 0}"
-    )
+    if "sequence_count" in scenario:
+        lines.append(
+            f"{scenario['scenario']}: output={scenario['output_bytes']}B seq={scenario['sequence_count']} "
+            f"complete={1 if scenario['sequence_complete'] else 0} expected={1 if scenario['lines_match_expected'] else 0} "
+            f"tail_min={scenario.get('tail_min_ms', 0)}ms tail_median={scenario.get('tail_median_ms', 0)}ms "
+            f"tail_avg={scenario.get('tail_avg_ms', 0)}ms tail_p95={scenario.get('tail_p95_ms', 0)}ms tail_max={scenario.get('tail_max_ms', 0)}ms "
+            f"frame_ok={1 if scenario.get('frame_match_expected', True) else 0}"
+        )
+    else:
+        lines.append(
+            f"{scenario['scenario']}: output={scenario['output_bytes']}B tail={scenario.get('rendered_tail_bytes', 0)}B "
+            f"codex={1 if scenario.get('contains_codex') else 0} tail_codex={1 if scenario.get('tail_contains_codex') else 0} "
+            f"context={1 if scenario.get('contains_context') else 0} boot={1 if scenario.get('contains_boot_status') else 0} "
+            f"tail_min={scenario.get('tail_min_ms', 0)}ms tail_median={scenario.get('tail_median_ms', 0)}ms "
+            f"tail_avg={scenario.get('tail_avg_ms', 0)}ms tail_p95={scenario.get('tail_p95_ms', 0)}ms tail_max={scenario.get('tail_max_ms', 0)}ms"
+        )
     if "tail_modes" in scenario:
         modes = ",".join(f"{mode}:{count}" for mode, count in sorted(scenario["tail_modes"].items()))
         lines.append(f"  tail_modes: {modes}")

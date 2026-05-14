@@ -87,6 +87,8 @@ public struct TerminalScreenBuffer {
     private var currentStyle = TerminalTextStyle()
     private var cursorVisible = true
     private var isUsingAlternateScreen = false
+    private var scrollRegionTop = 0
+    private var scrollRegionBottom: Int?
 
     public init() {}
 
@@ -102,6 +104,8 @@ public struct TerminalScreenBuffer {
         currentStyle = TerminalTextStyle()
         cursorVisible = true
         isUsingAlternateScreen = false
+        scrollRegionTop = 0
+        scrollRegionBottom = nil
     }
 
     public mutating func ingest(_ text: String) {
@@ -147,6 +151,9 @@ public struct TerminalScreenBuffer {
         switch introducer.value {
         case 0x5B: return consumeCSI(scalars, startingAt: nextIndex + 1)
         case 0x5D: return consumeOSC(scalars, startingAt: nextIndex + 1)
+        case 0x4D:
+            reverseIndex()
+            return nextIndex + 1
         case 0x37:
             saveCursor()
             return nextIndex + 1
@@ -230,7 +237,7 @@ public struct TerminalScreenBuffer {
         case 0x6D: applySGR(values)
         case 0x68: applyMode(values, enabled: true)
         case 0x6C: applyMode(values, enabled: false)
-        case 0x72: break
+        case 0x72: setScrollRegion(values)
         default: break
         }
     }
@@ -292,6 +299,8 @@ public struct TerminalScreenBuffer {
             cursorColumn = 0
             savedCursorRow = 0
             savedCursorColumn = 0
+            scrollRegionTop = 0
+            scrollRegionBottom = nil
             isUsingAlternateScreen = true
         } else {
             guard isUsingAlternateScreen else { return }
@@ -301,6 +310,8 @@ public struct TerminalScreenBuffer {
             primaryRows = nil
             primaryCursorRow = 0
             primaryCursorColumn = 0
+            scrollRegionTop = 0
+            scrollRegionBottom = nil
             isUsingAlternateScreen = false
         }
     }
@@ -336,12 +347,17 @@ public struct TerminalScreenBuffer {
     }
 
     private mutating func newline() {
-        cursorRow += 1
+        if hasExplicitScrollRegion, cursorRow == activeScrollRegionBottom { scrollUpWithinRegion(1) } else { cursorRow += 1 }
         cursorColumn = 0
         ensurePosition()
     }
 
     private mutating func carriageReturn() { cursorColumn = 0 }
+
+    private mutating func reverseIndex() {
+        if hasExplicitScrollRegion, cursorRow == scrollRegionTop { scrollDownWithinRegion(1) } else { cursorRow = max(0, cursorRow - 1) }
+        ensurePosition()
+    }
 
     private mutating func moveCursor(row: Int? = nil, column: Int? = nil) {
         if let row { cursorRow = max(row, 0) }
@@ -353,6 +369,8 @@ public struct TerminalScreenBuffer {
         rows = [[]]
         cursorRow = 0
         cursorColumn = 0
+        scrollRegionTop = 0
+        scrollRegionBottom = nil
     }
 
     private mutating func saveCursor() {
@@ -425,20 +443,38 @@ public struct TerminalScreenBuffer {
     private mutating func insertLines(_ count: Int) {
         guard count > 0 else { return }
         ensureRowExists(cursorRow)
-        rows.insert(contentsOf: repeatElement([], count: count), at: cursorRow)
+        if !hasExplicitScrollRegion {
+            rows.insert(contentsOf: repeatElement([], count: count), at: cursorRow)
+            return
+        }
+        let lowerBound = max(scrollRegionTop, min(cursorRow, activeScrollRegionBottom))
+        let upperBound = activeScrollRegionBottom
+        let insertionCount = min(count, upperBound - lowerBound + 1)
+        guard insertionCount > 0 else { return }
+        ensureRowExists(upperBound)
+        rows.insert(contentsOf: repeatElement([], count: insertionCount), at: lowerBound)
+        rows.removeSubrange((upperBound + 1)...(upperBound + insertionCount))
     }
 
     private mutating func deleteLines(_ count: Int) {
-        guard count > 0, cursorRow < rows.count else { return }
-        let upperBound = min(cursorRow + count, rows.count)
-        rows.removeSubrange(cursorRow..<upperBound)
-        if rows.isEmpty {
-            rows = [[]]
-            cursorRow = 0
-            cursorColumn = 0
+        guard count > 0 else { return }
+        if !hasExplicitScrollRegion {
+            ensureRowExists(cursorRow)
+            let deletionCount = min(count, rows.count - cursorRow)
+            guard deletionCount > 0 else { return }
+            rows.removeSubrange(cursorRow..<(cursorRow + deletionCount))
+            cursorRow = min(cursorRow, max(rows.count - 1, 0))
+            cursorColumn = min(cursorColumn, max(rows[cursorRow].count - 1, 0))
             return
         }
-        cursorRow = min(cursorRow, rows.count - 1)
+        let lowerBound = max(scrollRegionTop, min(cursorRow, activeScrollRegionBottom))
+        let upperBound = activeScrollRegionBottom
+        guard lowerBound <= upperBound else { return }
+        ensureRowExists(upperBound)
+        let deletionCount = min(count, upperBound - lowerBound + 1)
+        rows.removeSubrange(lowerBound..<(lowerBound + deletionCount))
+        rows.insert(contentsOf: repeatElement([], count: deletionCount), at: upperBound - deletionCount + 1)
+        cursorRow = min(cursorRow, max(rows.count - 1, 0))
         cursorColumn = min(cursorColumn, max(rows[cursorRow].count - 1, 0))
     }
 
@@ -456,6 +492,47 @@ public struct TerminalScreenBuffer {
         rows.insert(contentsOf: repeatElement([], count: amount), at: 0)
         if rows.count > Self.maxColumnCount { rows.removeLast(rows.count - Self.maxColumnCount) }
         cursorRow = min(cursorRow + amount, max(rows.count - 1, 0))
+    }
+
+    private mutating func setScrollRegion(_ values: [Int]) {
+        if values.isEmpty || (values.count == 1 && values[0] == 0) {
+            scrollRegionTop = 0
+            scrollRegionBottom = nil
+            moveCursor(row: 0, column: 0)
+            return
+        }
+
+        let top = max((values.first ?? 1) - 1, 0)
+        let requestedBottom = values.count > 1 && values[1] > 0 ? values[1] - 1 : top
+        let bottom = max(requestedBottom, top)
+        scrollRegionTop = top
+        scrollRegionBottom = bottom
+        ensureRowExists(bottom)
+        moveCursor(row: 0, column: 0)
+    }
+
+    private var activeScrollRegionBottom: Int { max(scrollRegionTop, scrollRegionBottom ?? max(rows.count - 1, scrollRegionTop)) }
+
+    private var hasExplicitScrollRegion: Bool { scrollRegionBottom != nil }
+
+    private mutating func scrollUpWithinRegion(_ count: Int) {
+        let top = scrollRegionTop
+        let bottom = activeScrollRegionBottom
+        guard count > 0, top <= bottom else { return }
+        ensureRowExists(bottom)
+        let amount = min(count, bottom - top + 1)
+        rows.removeSubrange(top..<(top + amount))
+        rows.insert(contentsOf: repeatElement([], count: amount), at: bottom - amount + 1)
+    }
+
+    private mutating func scrollDownWithinRegion(_ count: Int) {
+        let top = scrollRegionTop
+        let bottom = activeScrollRegionBottom
+        guard count > 0, top <= bottom else { return }
+        ensureRowExists(bottom)
+        let amount = min(count, bottom - top + 1)
+        rows.insert(contentsOf: repeatElement([], count: amount), at: top)
+        rows.removeSubrange((bottom + 1)...(bottom + amount))
     }
 
     private mutating func ensurePosition() {

@@ -24,6 +24,12 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
         }
     }
 
+    private final class QueryResponderBox: @unchecked Sendable {
+        private var responder = TerminalQueryResponder()
+
+        func responses(for output: Data) -> [Data] { responder.responses(for: output) }
+    }
+
     public init(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
         now: @escaping @Sendable () -> String = { ISO8601DateFormatter().string(from: Date()) }
@@ -54,6 +60,7 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
         let sessionID = launchConfiguration.sessionID
         let sessionPaths = paths
         let now = self.now
+        let queryResponder = QueryResponderBox()
         let isActiveOwner: @Sendable (String) -> Bool = { [sessionPaths] clientID in
             ((try? TerminalSessionPersistence.activeAttachments(paths: sessionPaths)) ?? []).contains { $0.clientID == clientID && $0.mode == .owner }
         }
@@ -65,7 +72,15 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
         let outputFD = outputPipe.fileHandleForReading.fileDescriptor
         let outputFlags = fcntl(outputFD, F_GETFL)
         if outputFlags >= 0 { _ = fcntl(outputFD, F_SETFL, outputFlags | O_NONBLOCK) }
-        let drainOutput: @Sendable () -> Void = { Self.drainOutput(from: outputFD, to: outputHandle) }
+        let drainOutput: @Sendable () -> Void = {
+            let chunks = Self.readAvailableOutputChunks(from: outputFD)
+            guard !chunks.isEmpty else { return }
+            for chunk in chunks {
+                try? outputHandle.write(contentsOf: chunk)
+                for response in queryResponder.responses(for: chunk) { try? scriptInputHandle.write(contentsOf: response) }
+            }
+            try? outputHandle.synchronize()
+        }
         let outputSource = DispatchSource.makeReadSource(fileDescriptor: outputFD, queue: queue)
         outputSource.setEventHandler {
             guard outputSource.data > 0 else { return }
@@ -258,23 +273,18 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
         return ioctl(fileDescriptor, TIOCSWINSZ, &windowSize) == 0
     }
 
-    private static func drainOutput(from fileDescriptor: Int32, to outputHandle: FileHandle, chunkSize: Int = 8192) {
+    private static func readAvailableOutputChunks(from fileDescriptor: Int32, chunkSize: Int = 8192) -> [Data] {
         var buffer = [UInt8](repeating: 0, count: chunkSize)
+        var chunks = [Data]()
         while true {
             let count = read(fileDescriptor, &buffer, buffer.count)
             if count > 0 {
-                try? outputHandle.write(contentsOf: buffer.prefix(Int(count)))
+                chunks.append(Data(buffer.prefix(Int(count))))
                 continue
             }
-            if count == 0 {
-                try? outputHandle.synchronize()
-                return
-            }
-            if errno == EAGAIN || errno == EWOULDBLOCK {
-                try? outputHandle.synchronize()
-                return
-            }
-            return
+            if count == 0 { return chunks }
+            if errno == EAGAIN || errno == EWOULDBLOCK { return chunks }
+            return chunks
         }
     }
 }

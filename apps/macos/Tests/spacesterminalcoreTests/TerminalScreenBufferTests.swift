@@ -81,4 +81,16 @@ final class TerminalScreenBufferTests: XCTestCase {
         buffer.ingest("\u{001B}[?25h")
         XCTAssertTrue(buffer.renderedScreen().cursorVisible)
     }
+
+    func testIngestSupportsScrollRegionsAndReverseIndex() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("top\none\ntwo\nbottom")
+        buffer.ingest("\u{001B}[2;3r")
+        buffer.ingest("\u{001B}[2;1H")
+        buffer.ingest("\u{001B}M")
+        buffer.ingest("inserted")
+
+        XCTAssertEqual(buffer.renderedText(), "top\ninserted\none\nbottom")
+    }
 }

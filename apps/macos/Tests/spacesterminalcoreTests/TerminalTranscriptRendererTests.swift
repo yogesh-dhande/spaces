@@ -6,7 +6,7 @@ import XCTest
 final class TerminalTranscriptRendererTests: XCTestCase {
     private func fixture(named name: String) throws -> String {
         let fixturesRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(
-            "Fixtures", isDirectory: true)
+            "fixtures", isDirectory: true)
         let data = try Data(contentsOf: fixturesRoot.appendingPathComponent(name))
         return String(decoding: data, as: UTF8.self)
     }
@@ -52,5 +52,16 @@ final class TerminalTranscriptRendererTests: XCTestCase {
         XCTAssertTrue(rendered.contains("OpenAI Codex"))
         XCTAssertTrue(rendered.contains("/model to change"))
         XCTAssertTrue(rendered.contains("~/spaces/…/spaces-8e8d6cb5c6f3e281/terminal"))
+    }
+
+    func testRenderCodexSessionFixture() throws {
+        let transcript = try fixture(named: "codex_session_120x40.ansi")
+
+        let rendered = TerminalTranscriptRenderer.render(transcript)
+
+        XCTAssertTrue(rendered.contains("OpenAI Codex"))
+        XCTAssertTrue(rendered.contains("Tip: New Use /fast"))
+        XCTAssertFalse(rendered.contains("\u{001B}[6n"))
+        XCTAssertFalse(rendered.contains("\u{001B}]10;?"))
     }
 }
