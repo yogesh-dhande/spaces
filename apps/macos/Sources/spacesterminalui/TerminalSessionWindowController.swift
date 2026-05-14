@@ -23,7 +23,7 @@ import spacesterminalghostty
     private static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
     private static let fallbackRefreshInterval: Duration = .milliseconds(100)
     private static let passiveOutputRefreshCoalescingInterval: Duration = .milliseconds(16)
-    private static let passiveOutputRefreshHighChurnInterval: Duration = .milliseconds(4)
+    private static let passiveOutputRefreshHighChurnInterval: Duration = .milliseconds(2)
     private static let passiveOutputRefreshHighChurnNotificationThreshold = 3
     private static let passiveOutputRefreshHighChurnByteThreshold = 16 * 1024
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
@@ -113,6 +113,8 @@ import spacesterminalghostty
     private var transportObservation: TerminalSessionClientTransportObservation?
     private var hasHeadlessPresentation = false
     private var pendingPassiveOutputRefreshTask: Task<Void, Never>?
+    private var pendingPassiveOutputRefreshScheduledAt: Date?
+    private var pendingPassiveOutputRefreshInterval: Duration?
     private var pendingPassiveOutputStartedAt: Date?
     private var pendingPassiveOutputByteCount = 0
     private var pendingPassiveOutputNotificationCount = 0
@@ -924,14 +926,29 @@ import spacesterminalghostty
         transportObservation = nil
         pendingPassiveOutputRefreshTask?.cancel()
         pendingPassiveOutputRefreshTask = nil
+        pendingPassiveOutputRefreshScheduledAt = nil
+        pendingPassiveOutputRefreshInterval = nil
     }
 
     private func schedulePassiveOutputRefresh() {
         guard visibleRenderer != .ghosttyOwner else { return }
-        guard pendingPassiveOutputRefreshTask == nil else { return }
         let refreshInterval = passiveOutputRefreshInterval()
+        if let existingInterval = pendingPassiveOutputRefreshInterval {
+            guard refreshInterval < existingInterval else { return }
+            pendingPassiveOutputRefreshTask?.cancel()
+            pendingPassiveOutputRefreshTask = nil
+        } else if pendingPassiveOutputRefreshTask != nil {
+            return
+        }
+        let scheduledAt = Date()
+        pendingPassiveOutputRefreshScheduledAt = scheduledAt
+        pendingPassiveOutputRefreshInterval = refreshInterval
         pendingPassiveOutputRefreshTask = Task { @MainActor [weak self] in
-            defer { self?.pendingPassiveOutputRefreshTask = nil }
+            defer {
+                self?.pendingPassiveOutputRefreshTask = nil
+                self?.pendingPassiveOutputRefreshScheduledAt = nil
+                self?.pendingPassiveOutputRefreshInterval = nil
+            }
             do { try await Task.sleep(for: refreshInterval) } catch { return }
             self?.refreshNow()
         }
@@ -967,10 +984,17 @@ import spacesterminalghostty
 
     private func logPendingPassiveOutputWaitToRender(startedAt: Date, renderer: String) {
         guard let pendingStartedAt = pendingPassiveOutputStartedAt else { return }
+        let scheduledWaitMS: Int
+        if let scheduledAt = pendingPassiveOutputRefreshScheduledAt {
+            scheduledWaitMS = max(Int(startedAt.timeIntervalSince(scheduledAt) * 1000), 0)
+        } else {
+            scheduledWaitMS = 0
+        }
         TerminalPerformance.logMetric(
             "terminal_viewer_refresh_wait_to_render", target: "session=\(sessionID)",
             elapsedMS: max(Int(startedAt.timeIntervalSince(pendingStartedAt) * 1000), 0), success: true,
-            detail: "renderer=\(renderer) notifications=\(pendingPassiveOutputNotificationCount) bytes=\(pendingPassiveOutputByteCount)")
+            detail: "renderer=\(renderer) notifications=\(pendingPassiveOutputNotificationCount) bytes=\(pendingPassiveOutputByteCount) "
+                + "scheduled_wait_ms=\(scheduledWaitMS)")
     }
 
     private func syncGhosttyOwnerFocus(reason: String, requestWindowFocus: Bool, focused explicitFocused: Bool? = nil) {
