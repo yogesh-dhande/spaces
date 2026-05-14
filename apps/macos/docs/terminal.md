@@ -45,7 +45,7 @@ Each session lives under `~/.spaces/terminal/sessions/<session-id>/` and keeps:
 - `control.sock`: local control-plane socket
 
 The control socket path is shortened through `TerminalSessionPaths` so isolated `SPACES_DB_PATH` roots do not exceed Unix socket path limits.
-`script-pty` hosts also drain unread PTY bytes before they shut down and persist an exited runtime state through the process termination callback, so short-lived commands still leave a complete `output.log` transcript and do not strand attachment metadata on a stale `running` state.
+`script-pty` hosts also drain unread PTY bytes before they shut down and persist an exited runtime state through the process termination callback, so short-lived commands still leave a complete `output.log` history and do not strand attachment metadata on a stale `running` state.
 `TerminalSessionHostConnection` sits above the raw socket path so macOS clients, the CLI, and future mobile or remote clients can all target the same request or response protocol without each caller depending on `TerminalControlClient` directly.
 `spaces terminal proxy` can also expose that same protocol over a TCP listener with an auth token, which makes the current `script-pty` session host reachable by mobile-shaped or remote test clients without giving those clients direct access to the session directory.
 
@@ -84,7 +84,7 @@ The protocol is intentionally file-backed rather than renderer-backed:
 - `snapshot` returns launch metadata, runtime state, attachment state, recent output, and total output bytes
 - `read_output_chunk` returns raw terminal bytes from `output.log` by byte offset
 - owner or viewer identity is still persisted in `clients.json` and `attachments.json`, but non-AppKit clients do not need to edit those files directly
-- the shared-session macOS client uses those raw chunks to maintain an incremental local `TerminalScreenBuffer`, so the AppKit fallback path renders cursor motion and line rewrites from terminal bytes instead of only repainting from tailed text
+- the shared-session macOS client uses those raw chunks to maintain an incremental local `TerminalScreenBuffer`, so the AppKit fallback path renders cursor motion and line rewrites through a lightweight terminal canvas instead of replaying the full text system on every refresh
 
 That split keeps the session host responsible for:
 - PTY lifetime
@@ -166,9 +166,9 @@ The owner window controller also routes standard AppKit edit actions to the acti
 - `Copy` reads from the live libghostty selection when the window owns the session
 - `Paste` sends pasteboard text into the owner session rather than the hidden inline input field
 - fallback or viewer windows keep using the text-output or inline-input path instead of pretending they own the live terminal surface
-- fallback or viewer windows preserve selection plus both horizontal and vertical scroll position when new tailed output arrives, including when the transcript is pinned to the bottom
-- fallback transcript output disables smart quotes, dashes, spell correction, text replacement, and text completion so AppKit editing helpers do not mutate copied terminal text
-- fallback windows choose a focused first responder on show: interactive inline-input sessions land in the input field, while passive viewer transcripts land directly in the output view for keyboard selection and scrolling
+- fallback or viewer windows preserve selection plus both horizontal and vertical scroll position when new chunked output arrives, including when the canvas is pinned to the bottom
+- fallback canvas output keeps copy, paste, keyboard selection, and scrolling inside a terminal-specific AppKit view instead of routing through `NSTextView` editing features
+- fallback windows choose a focused first responder on show: interactive inline-input sessions land in the input field, while passive viewer canvases land directly in the output view for keyboard selection and scrolling
 
 The headless `ghostty-embedded` backend runtime disables selection clipboard hooks because it is not the user-facing surface. The app-hosted owner path enables clipboard hooks through `GhosttyEmbeddedAppService`.
 
@@ -258,10 +258,10 @@ These metrics are intentionally noisy and are meant for isolated benchmark or so
 Current stress baselines on this branch:
 - append-only `lines` output around `950 KB` tails in roughly `23-31 ms` wall time per CLI invocation, with the internal tail path around `1-2 ms`
 - repaint-heavy output around `262 KB` tails in roughly `27-33 ms` wall time per CLI invocation, with the internal partial-render tail path around `2-3 ms`
-- repaint-heavy output around `2.6 MB` still tails in roughly `27-28 ms` wall time per CLI invocation because the recent clear-screen boundary keeps replay bounded to the visible frame suffix rather than the full transcript
+- repaint-heavy output around `2.6 MB` still tails in roughly `27-28 ms` wall time per CLI invocation because the recent clear-screen boundary keeps replay bounded to the visible frame suffix rather than the full scrollback
 
 Those numbers matter differently depending on the caller:
-- `terminal_tail_read` measures only the transcript read and render path
+- `terminal_tail_read` measures only the chunk read and canvas render path
 - `terminal_tail_command` measures the CLI command body once the `spaces` process is already running
 - the outer stress-harness wall time also includes process startup, argument parsing, stdout capture, and process exit
 
@@ -281,12 +281,12 @@ The current branch has verified:
 - workspace-process launch into `Spaces` terminal sessions
 - built-in process recovery when only the process row remains
 - built-in process focus and reopen when stale yabai window IDs must be cleared or replaced
-- high-volume ordered output tails through unit coverage for large transcript suffixes and repaint-heavy transcript rendering
+- high-volume ordered output tails through unit coverage for large suffixes and repaint-heavy screen-buffer rendering
 - stress and soak harnesses for append-only, repaint-heavy, mixed-output, and live passive-viewer repaint sessions
 
 ## Known Constraints
 - Passive viewer windows still use snapshot plus chunked output rather than a second live libghostty surface.
-- Passive viewer windows still keep the 500 ms poll as a safety fallback, but normal live-session updates now arrive through coalesced output notifications. Remaining viewer latency work is mostly about tuning refresh cadence and measuring end-to-end presentation timing rather than transcript rendering throughput.
+- Passive viewer windows still keep the 500 ms poll as a safety fallback, but normal live-session updates now arrive through coalesced output notifications. Remaining viewer latency work is mostly about tuning refresh cadence and measuring end-to-end presentation timing rather than text-system layout throughput.
 - Native iPhone and remote-network clients are still future work, but the local socket contract is already shaped around that attach model instead of direct file mutation.
 - External iTerm2 and Ghostty hosts remain supported overrides on this branch.
 - The Ghostty static archive still emits non-fatal linker warnings about ImGui-related symbols during build.

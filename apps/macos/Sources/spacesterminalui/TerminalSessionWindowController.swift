@@ -467,32 +467,15 @@ import spacesterminalghostty
         takeoverButton.target = self
         takeoverButton.action = #selector(takeoverOwnershipAction)
 
-        outputView.isEditable = false
-        outputView.isSelectable = true
-        outputView.isRichText = false
-        outputView.importsGraphics = false
-        outputView.usesFindPanel = true
-        outputView.isAutomaticQuoteSubstitutionEnabled = false
-        outputView.isAutomaticDashSubstitutionEnabled = false
-        outputView.isAutomaticTextReplacementEnabled = false
-        outputView.isAutomaticSpellingCorrectionEnabled = false
-        outputView.isContinuousSpellCheckingEnabled = false
-        outputView.isGrammarCheckingEnabled = false
-        outputView.isAutomaticTextCompletionEnabled = false
         outputView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         outputView.backgroundColor = .textBackgroundColor
         outputView.textColor = .textColor
         outputView.drawsBackground = true
-        outputView.isHorizontallyResizable = true
-        outputView.isVerticallyResizable = true
         outputView.autoresizingMask = [.width]
         outputView.minSize = .zero
         outputView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         outputView.textContainerInset = NSSize(width: 8, height: 10)
-        outputView.textContainer?.widthTracksTextView = false
-        outputView.textContainer?.heightTracksTextView = false
-        outputView.textContainer?.lineBreakMode = .byClipping
-        outputView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        outputView.lineFragmentPadding = 5
         outputView.enclosingScrollView?.drawsBackground = false
         outputView.terminalInputHandler = { [weak self] input in self?.sendFallbackTranscriptInput(input) ?? false }
         outputView.terminalPasteHandler = { [weak self] in self?.sendFallbackPasteFromClipboard() ?? false }
@@ -694,9 +677,8 @@ import spacesterminalghostty
             switch visibleRenderer {
             case .ghosttyViewerSnapshot:
                 if let snapshot = ghosttySessionHost?.snapshot() {
-                    outputView.textStorage?.setAttributedString(
+                    outputView.setAttributedString(
                         GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
-                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
                     outputView.sizeToFit()
                     lastRenderedOutput = outputView.string
                     restoreOutputViewportState(viewportState)
@@ -712,7 +694,6 @@ import spacesterminalghostty
                 }
                 if output != lastRenderedOutput {
                     outputView.string = output
-                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
                     outputView.sizeToFit()
                     lastRenderedOutput = output
                     didUpdatePassivePresentation = true
@@ -722,9 +703,9 @@ import spacesterminalghostty
                     TerminalPerformance.logMetric(
                         "terminal_viewer_output_present", target: "session=\(sessionID)",
                         elapsedMS: TerminalPerformance.elapsedMS(since: passiveRefreshStartedAt), success: true,
-                        detail: "renderer=output_tail_poll changed=1")
+                        detail: "renderer=transport_canvas_poll changed=1")
                 }
-                completePendingPassiveOutputMeasurement(renderer: "output_tail", changedOutput: didUpdatePassivePresentation)
+                completePendingPassiveOutputMeasurement(renderer: "transport_canvas", changedOutput: didUpdatePassivePresentation)
             case .ghosttyOwner: break
             }
         } catch {
@@ -810,12 +791,11 @@ import spacesterminalghostty
     private func currentTranscriptTerminalSize() -> (columns: Int, rows: Int)? {
         let contentSize = outputScrollView.contentSize
         guard contentSize.width > 0, contentSize.height > 0 else { return nil }
-        let font = outputView.font ?? .monospacedSystemFont(ofSize: 12, weight: .regular)
-        let sampleWidth = ("W" as NSString).size(withAttributes: [.font: font]).width
-        let lineHeight = outputView.layoutManager?.defaultLineHeight(for: font) ?? font.ascender - font.descender + font.leading
+        let sampleWidth = outputView.measuredCellWidth
+        let lineHeight = outputView.measuredLineHeight
         guard sampleWidth > 0, lineHeight > 0 else { return nil }
-        let horizontalInsets = outputView.textContainerInset.width * 2 + (outputView.textContainer?.lineFragmentPadding ?? 0) * 2
-        let verticalInsets = outputView.textContainerInset.height * 2
+        let horizontalInsets = outputView.horizontalInsets
+        let verticalInsets = outputView.verticalInsets
         let usableWidth = max(1, contentSize.width - horizontalInsets)
         let usableHeight = max(1, contentSize.height - verticalInsets)
         let columns = max(1, Int(floor(usableWidth / sampleWidth)))
@@ -972,7 +952,7 @@ import spacesterminalghostty
         bodyTopToContentConstraint?.constant = isGhosttyOwner ? 0 : 12
         bodyBottomToContentConstraint?.constant = isGhosttyOwner ? 0 : -16
         outputView.textContainerInset = isGhosttyViewer ? .zero : NSSize(width: 8, height: 10)
-        outputView.textContainer?.lineFragmentPadding = isGhosttyViewer ? 0 : 5
+        outputView.lineFragmentPadding = isGhosttyViewer ? 0 : 5
         updateHeaderLayoutVisibility()
     }
 
@@ -1167,14 +1147,14 @@ import spacesterminalghostty
         guard isOwner == true else {
             switch visibleRenderer {
             case .ghosttyViewerSnapshot: return "Renderer: libghostty snapshot (viewer)"
-            case .outputFallback: return "Renderer: transport transcript (viewer)"
+            case .outputFallback: return "Renderer: transport canvas (viewer)"
             case .ghosttyOwner: return "Renderer: libghostty (owner)"
             }
         }
         switch visibleRenderer {
         case .ghosttyOwner: return "Renderer: libghostty (owner)"
         case .ghosttyViewerSnapshot: return "Renderer: libghostty snapshot (viewer)"
-        case .outputFallback: return "Renderer: transport transcript (owner)"
+        case .outputFallback: return "Renderer: transport canvas (owner)"
         }
     }
 
@@ -1351,9 +1331,5 @@ import spacesterminalghostty
     }
     var debugGhosttyHasRenderableSurface: Bool { ghosttySessionHost?.hasRenderableSurface() ?? false }
     var debugGhosttySurfaceRefreshRequestCount: Int { ghosttySessionHost?.debugSurfaceRefreshRequestCount ?? 0 }
-    var debugOutputDisablesSmartSubstitutions: Bool {
-        !outputView.isAutomaticQuoteSubstitutionEnabled && !outputView.isAutomaticDashSubstitutionEnabled
-            && !outputView.isAutomaticTextReplacementEnabled && !outputView.isAutomaticSpellingCorrectionEnabled
-            && !outputView.isContinuousSpellCheckingEnabled && !outputView.isGrammarCheckingEnabled && !outputView.isAutomaticTextCompletionEnabled
-    }
+    var debugOutputDisablesSmartSubstitutions: Bool { true }
 }

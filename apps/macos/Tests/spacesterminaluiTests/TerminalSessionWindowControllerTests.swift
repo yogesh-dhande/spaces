@@ -1070,7 +1070,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         if controller.debugGhosttyHasRenderableSurface {
             XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty snapshot (viewer)")
         } else {
-            XCTAssertEqual(controller.debugRendererSummary, "Renderer: transport transcript (viewer)")
+            XCTAssertEqual(controller.debugRendererSummary, "Renderer: transport canvas (viewer)")
         }
         XCTAssertGreaterThan(controller.debugTakeoverContainerWidth, 120)
     }
@@ -1136,7 +1136,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: libghostty (owner)")
         XCTAssertFalse(ownerController.debugShowsTakeoverButton)
         XCTAssertEqual(viewerController.debugWindowTitle, "frontend (viewer)")
-        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: transport transcript (viewer)")
+        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: transport canvas (viewer)")
         XCTAssertTrue(viewerController.debugShowsTakeoverButton)
 
         try TerminalSessionPersistence.transferOwnership(
@@ -1146,7 +1146,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         viewerController.debugForceRefresh()
 
         XCTAssertEqual(ownerController.debugWindowTitle, "frontend (viewer)")
-        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: transport transcript (viewer)")
+        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: transport canvas (viewer)")
         XCTAssertTrue(ownerController.debugShowsTakeoverButton)
         XCTAssertEqual(viewerController.debugWindowTitle, "frontend")
         XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty (owner)")
@@ -1187,7 +1187,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         ownerController.debugForceRefresh()
         viewerController.debugForceRefresh()
         XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: libghostty (owner)")
-        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: transport transcript (viewer)")
+        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: transport canvas (viewer)")
 
         try TerminalSessionPersistence.transferOwnership(
             sessionID: "session-notify", newOwnerClientID: viewer.id, paths: paths, transferredAt: "2026-05-09T00:00:02Z")
@@ -1195,7 +1195,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         ownerController.debugSimulateAttachmentStateDidChange()
         viewerController.debugSimulateAttachmentStateDidChange()
 
-        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: transport transcript (viewer)")
+        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: transport canvas (viewer)")
         XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty (owner)")
         XCTAssertTrue(ownerController.debugShowsTakeoverButton)
         XCTAssertFalse(viewerController.debugShowsTakeoverButton)
