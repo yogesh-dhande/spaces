@@ -3,6 +3,9 @@ import Dispatch
 import Foundation
 
 public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntime {
+    static let defaultInitialColumns = 120
+    static let defaultInitialRows = 40
+
     public let backendKind: TerminalSessionBackendKind = .scriptPTY
     public let launchConfiguration: TerminalSessionLaunchConfiguration
     public let paths: TerminalSessionPaths
@@ -208,11 +211,10 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
     private func startPTYWrappedProcess(inputPipe: Pipe, outputPipe: Pipe) throws -> Process {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/script")
-        if let command = launchConfiguration.command {
-            process.arguments = ["-q", "/dev/null", launchConfiguration.shell, "-lc", command]
-        } else {
-            process.arguments = ["-q", "/dev/null", launchConfiguration.shell, "-l"]
-        }
+        process.arguments = [
+            "-q", "/dev/null", launchConfiguration.shell, "-lc",
+            Self.makeLaunchCommand(shell: launchConfiguration.shell, command: launchConfiguration.command),
+        ]
         process.currentDirectoryURL = URL(fileURLWithPath: launchConfiguration.workingDirectory, isDirectory: true)
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
@@ -220,6 +222,14 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
         try process.run()
         return process
     }
+
+    static func makeLaunchCommand(shell: String, command: String?) -> String {
+        let initialSizePrefix = "stty rows \(defaultInitialRows) cols \(defaultInitialColumns) 2>/dev/null;"
+        if let command, !command.isEmpty { return "\(initialSizePrefix) \(command)" }
+        return "\(initialSizePrefix) exec \(singleQuotedShellEscape(shell)) -l"
+    }
+
+    private static func singleQuotedShellEscape(_ value: String) -> String { "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'" }
 
     private static func controllingTTYName(for pid: Int32) -> String? {
         let process = Process()

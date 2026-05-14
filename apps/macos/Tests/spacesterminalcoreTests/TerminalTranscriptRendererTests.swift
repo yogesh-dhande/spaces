@@ -4,6 +4,13 @@ import XCTest
 @testable import spacesterminalcore
 
 final class TerminalTranscriptRendererTests: XCTestCase {
+    private func fixture(named name: String) throws -> String {
+        let fixturesRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(
+            "Fixtures", isDirectory: true)
+        let data = try Data(contentsOf: fixturesRoot.appendingPathComponent(name))
+        return String(decoding: data, as: UTF8.self)
+    }
+
     func testRenderKeepsFinalVisibleFrameFromRepeatedRepaintTranscript() {
         let frames = (1...25).map { frame -> String in
             let row1 = "\u{001B}[H\u{001B}[2JFRAME \(frame)"
@@ -35,5 +42,15 @@ final class TerminalTranscriptRendererTests: XCTestCase {
         let rendered = TerminalTranscriptRenderer.render(transcript)
 
         XCTAssertEqual(rendered, "red plain blue")
+    }
+
+    func testRenderCodexStartupFixture() throws {
+        let transcript = try fixture(named: "codex_startup_120x40.ansi")
+
+        let rendered = TerminalTranscriptRenderer.render(transcript)
+
+        XCTAssertTrue(rendered.contains("OpenAI Codex"))
+        XCTAssertTrue(rendered.contains("/model to change"))
+        XCTAssertTrue(rendered.contains("~/spaces/…/spaces-8e8d6cb5c6f3e281/terminal"))
     }
 }

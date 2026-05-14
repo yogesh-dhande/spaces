@@ -87,6 +87,7 @@ The protocol is intentionally file-backed rather than renderer-backed:
 - the shared-session macOS client uses those raw chunks to maintain an incremental local `TerminalScreenBuffer`, so the AppKit fallback path renders cursor motion and line rewrites through a lightweight terminal canvas instead of replaying the full text system on every refresh
 - that same shared-session terminal canvas also preserves ANSI style state and screen modes locally, so palette colors, truecolor, cursor visibility, and alternate-screen swaps survive host replay instead of collapsing into monochrome plain text
 - alternate-screen transitions are treated as screen swaps, not ordinary appended output, so viewer selection and preserved scroll state are dropped when a full-screen TUI replaces or restores the primary screen
+- `script-pty` sessions also start the wrapped shell behind a sane default `stty rows/cols` pair before the first client window attaches. That keeps `codex`-style TUIs from seeing an unset PTY size and painting a broken vertical first frame while the real owner window is still on its way to sending the live geometry.
 
 That split keeps the session host responsible for:
 - PTY lifetime
