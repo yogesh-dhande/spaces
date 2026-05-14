@@ -86,6 +86,7 @@ The protocol is intentionally file-backed rather than renderer-backed:
 - owner or viewer identity is still persisted in `clients.json` and `attachments.json`, but non-AppKit clients do not need to edit those files directly
 - the shared-session macOS client uses those raw chunks to maintain an incremental local `TerminalScreenBuffer`, so the AppKit fallback path renders cursor motion and line rewrites through a lightweight terminal canvas instead of replaying the full text system on every refresh
 - that same shared-session terminal canvas also preserves ANSI style state and screen modes locally, so palette colors, truecolor, cursor visibility, and alternate-screen swaps survive host replay instead of collapsing into monochrome plain text
+- alternate-screen transitions are treated as screen swaps, not ordinary appended output, so viewer selection and preserved scroll state are dropped when a full-screen TUI replaces or restores the primary screen
 
 That split keeps the session host responsible for:
 - PTY lifetime

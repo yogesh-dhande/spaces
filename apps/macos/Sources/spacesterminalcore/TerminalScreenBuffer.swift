@@ -47,12 +47,14 @@ public struct TerminalRenderedScreen: Equatable {
     public let cursorRow: Int
     public let cursorColumn: Int
     public let cursorVisible: Bool
+    public let usesAlternateScreen: Bool
 
-    public init(rows: [[TerminalRenderedCell]], cursorRow: Int, cursorColumn: Int, cursorVisible: Bool) {
+    public init(rows: [[TerminalRenderedCell]], cursorRow: Int, cursorColumn: Int, cursorVisible: Bool, usesAlternateScreen: Bool) {
         self.rows = rows
         self.cursorRow = cursorRow
         self.cursorColumn = cursorColumn
         self.cursorVisible = cursorVisible
+        self.usesAlternateScreen = usesAlternateScreen
     }
 
     public var plainText: String {
@@ -135,7 +137,7 @@ public struct TerminalScreenBuffer {
     public func renderedScreen() -> TerminalRenderedScreen {
         TerminalRenderedScreen(
             rows: rows.map { $0.map { TerminalRenderedCell(character: $0.character, style: $0.style) } }, cursorRow: cursorRow,
-            cursorColumn: cursorColumn, cursorVisible: cursorVisible)
+            cursorColumn: cursorColumn, cursorVisible: cursorVisible, usesAlternateScreen: isUsingAlternateScreen)
     }
 
     private mutating func consumeEscapeSequence(_ scalars: [UnicodeScalar], startingAt index: Int) -> Int {

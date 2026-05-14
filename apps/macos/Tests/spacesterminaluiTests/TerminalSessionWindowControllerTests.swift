@@ -1090,6 +1090,41 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertLessThan(abs(controller.debugOutputHorizontalOffset - initialHorizontalOffset), 32)
     }
 
+    @MainActor func testFallbackWindowClearsSelectionAndViewportWhenAlternateScreenChanges() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-alt-screen", title: "alt-screen", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "printf ''",
+                createdAt: "2026-05-14T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-alt-screen", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-14T00:00:01Z"), paths: paths)
+        let longLine = String(repeating: "abcdefghij", count: 120)
+        let initialOutput = (0..<40).map { index in "line-\(index)-\(longLine)" }.joined(separator: "\n") + "\n"
+        try initialOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-alt-screen", paths: paths)
+        controller.show()
+        controller.window?.setContentSize(NSSize(width: 760, height: 420))
+        controller.window?.layoutIfNeeded()
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        controller.debugSelectRenderedRange(NSRange(location: 8, length: 12))
+        controller.debugScrollOutputToOffsetFromBottom(140)
+        controller.debugScrollOutputHorizontally(to: 180)
+
+        let alternateOutput = initialOutput + "\u{001B}[?1049hFULLSCREEN APP\nstatus: running\n"
+        try alternateOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        controller.debugForceRefresh()
+
+        XCTAssertEqual(controller.debugSelectedRange.length, 0)
+        XCTAssertEqual(controller.debugOutputHorizontalOffset, 0, accuracy: 1)
+        XCTAssertTrue(controller.debugRenderedOutput.contains("FULLSCREEN APP"))
+    }
+
     @MainActor func testFallbackTranscriptDisablesSmartTextEditingFeatures() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

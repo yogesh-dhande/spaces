@@ -39,6 +39,7 @@ import spacesterminalghostty
         let attributedText: NSAttributedString
         let replayMode: String
         let replayBytes: Int64
+        let usesAlternateScreen: Bool
     }
 
     private struct OutputViewportState {
@@ -93,6 +94,7 @@ import spacesterminalghostty
     private var pendingWindowFramePersistTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
     private var lastRenderedAttributedOutput = NSAttributedString()
+    private var lastRenderedUsedAlternateScreen = false
     private var lastTransportOutput = ""
     private var transportScreenBuffer = TerminalScreenBuffer()
     private var transportScreenBufferByteCount: Int64 = 0
@@ -697,6 +699,7 @@ import spacesterminalghostty
                     outputView.sizeToFit()
                     lastRenderedOutput = plainSnapshot
                     lastRenderedAttributedOutput = renderedSnapshot
+                    lastRenderedUsedAlternateScreen = false
                     restoreOutputViewportState(viewportState)
                     didUpdatePassivePresentation = true
                     completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
@@ -713,13 +716,14 @@ import spacesterminalghostty
                         text: fallbackText,
                         attributedText: NSAttributedString(
                             string: fallbackText, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor]),
-                        replayMode: "fallback_recent_output", replayBytes: 0)
+                        replayMode: "fallback_recent_output", replayBytes: 0, usesAlternateScreen: false)
                 }
                 TerminalPerformance.logMetric(
                     "terminal_viewer_refresh_render_output", target: "session=\(sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: renderOutputStartedAt), success: true,
                     detail: "renderer=transport_canvas mode=\(renderedOutputResult.replayMode) replay_bytes=\(renderedOutputResult.replayBytes)")
                 let assignTextStartedAt = Date()
+                let alternateScreenChanged = renderedOutputResult.usesAlternateScreen != lastRenderedUsedAlternateScreen
                 if renderedOutputResult.text != lastRenderedOutput || !renderedOutputResult.attributedText.isEqual(lastRenderedAttributedOutput) {
                     outputView.setRenderedOutput(plainText: renderedOutputResult.text, attributedText: renderedOutputResult.attributedText)
                     TerminalPerformance.logMetric(
@@ -734,6 +738,7 @@ import spacesterminalghostty
                     )
                     lastRenderedOutput = renderedOutputResult.text
                     lastRenderedAttributedOutput = renderedOutputResult.attributedText
+                    lastRenderedUsedAlternateScreen = renderedOutputResult.usesAlternateScreen
                     didUpdatePassivePresentation = true
                 } else {
                     TerminalPerformance.logMetric(
@@ -742,11 +747,19 @@ import spacesterminalghostty
                         detail: "renderer=transport_canvas changed=0 chars=\(renderedOutputResult.text.count)")
                 }
                 let restoreViewportStartedAt = Date()
-                restoreOutputViewportState(viewportState)
+                if alternateScreenChanged {
+                    outputView.setSelectedRange(NSRange(location: 0, length: 0))
+                    outputScrollView.contentView.scroll(to: .zero)
+                    outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
+                } else {
+                    restoreOutputViewportState(viewportState)
+                }
                 TerminalPerformance.logMetric(
                     "terminal_viewer_refresh_viewport_restore", target: "session=\(sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: restoreViewportStartedAt), success: true,
-                    detail: "renderer=transport_canvas changed=\(didUpdatePassivePresentation ? 1 : 0)")
+                    detail:
+                        "renderer=transport_canvas changed=\(didUpdatePassivePresentation ? 1 : 0) alt_screen_changed=\(alternateScreenChanged ? 1 : 0)"
+                )
                 if backend != .ghosttyEmbedded, !isOwner, didUpdatePassivePresentation {
                     TerminalPerformance.logMetric(
                         "terminal_viewer_output_present", target: "session=\(sessionID)",
@@ -762,6 +775,7 @@ import spacesterminalghostty
             outputView.string = ""
             lastRenderedOutput = ""
             lastRenderedAttributedOutput = NSAttributedString()
+            lastRenderedUsedAlternateScreen = false
             lastTransportOutput = ""
         }
     }
@@ -1238,7 +1252,8 @@ import spacesterminalghostty
             let attributedText = NSAttributedString(
                 string: snapshot.recentOutput, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor])
             return TransportRenderedOutput(
-                text: snapshot.recentOutput, attributedText: attributedText, replayMode: "recent_output_empty", replayBytes: 0)
+                text: snapshot.recentOutput, attributedText: attributedText, replayMode: "recent_output_empty", replayBytes: 0,
+                usesAlternateScreen: false)
         }
 
         var replayMode = "reuse"
@@ -1254,17 +1269,20 @@ import spacesterminalghostty
             replayBytes = try appendTransportOutputChunks(from: transportScreenBufferByteCount, to: outputByteCount)
         }
 
-        let rendered = transportScreenBuffer.renderedText()
+        let renderedScreen = transportScreenBuffer.renderedScreen()
+        let rendered = renderedScreen.plainText
         let attributed = TerminalRenderedScreenAttributedRenderer.render(
-            transportScreenBuffer.renderedScreen(), defaultForeground: outputView.textColor, defaultBackground: outputView.backgroundColor,
-            font: outputView.font)
+            renderedScreen, defaultForeground: outputView.textColor, defaultBackground: outputView.backgroundColor, font: outputView.font)
         if rendered.isEmpty, !lastTransportOutput.isEmpty {
             let fallback = NSAttributedString(
                 string: lastTransportOutput, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor])
             return TransportRenderedOutput(
-                text: lastTransportOutput, attributedText: fallback, replayMode: "recent_output_fallback", replayBytes: replayBytes)
+                text: lastTransportOutput, attributedText: fallback, replayMode: "recent_output_fallback", replayBytes: replayBytes,
+                usesAlternateScreen: renderedScreen.usesAlternateScreen)
         }
-        return TransportRenderedOutput(text: rendered, attributedText: attributed, replayMode: replayMode, replayBytes: replayBytes)
+        return TransportRenderedOutput(
+            text: rendered, attributedText: attributed, replayMode: replayMode, replayBytes: replayBytes,
+            usesAlternateScreen: renderedScreen.usesAlternateScreen)
     }
 
     private func rebuildTransportScreenBuffer(totalBytes: Int64) throws -> Int64 {
