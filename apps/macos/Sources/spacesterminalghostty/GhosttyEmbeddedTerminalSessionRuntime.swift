@@ -184,17 +184,20 @@ public final class GhosttyEmbeddedTerminalSessionRuntime: TerminalSessionBackend
     private func startControlServer() throws {
         let controlServer = TerminalControlServer(socketPath: paths.controlSocketPath, queue: controlQueue) { [weak self] request in
             guard let self else { return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.") }
+            if let compatibilityFailure = TerminalSessionHostProtocolSupport.validateCompatibility(for: request) { return compatibilityFailure }
             switch request.command {
+            case "hello": return TerminalSessionHostProtocolSupport.hello(sessionID: self.launchConfiguration.sessionID, backend: self.backendKind)
+            case "ping": return TerminalSessionHostProtocolSupport.ping()
             case "send":
-                guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
+                guard let text = request.text else { return TerminalSessionHostProtocolSupport.missingParameter("Missing text payload.") }
                 let payload = text + (request.appendNewline ? "\n" : "")
                 return self.sendRawBytes(Data(payload.utf8), successMessage: "Sent input.")
             case "key":
                 guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
-                    return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
+                    return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .missingParameter)
                 }
                 return self.sendRawBytes(Data(bytes), successMessage: "Sent key.")
-            default: return TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
+            default: return TerminalSessionHostProtocolSupport.unsupportedCommand(request.command)
             }
         }
         try controlServer.start()

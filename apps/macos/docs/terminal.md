@@ -53,6 +53,8 @@ The control socket path is shortened through `TerminalSessionPaths` so isolated 
 The same request or response protocol can also be bridged over TCP by `spaces terminal proxy`, which keeps transport changes separate from session ownership rules.
 
 The current request or response protocol supports:
+- `hello`
+- `ping`
 - `attach`
 - `detach`
 - `snapshot`
@@ -64,7 +66,18 @@ The current request or response protocol supports:
 - `takeover`
 - `terminate`
 
-When the protocol is exposed over TCP, each request also carries an auth token. The token is validated by the proxy bridge before the request is forwarded to the local session host.
+Every request carries a protocol version and a minimum supported protocol version. Missing fields are treated as the current protocol so older local clients stay compatible. The host rejects requests that are too old or that require a newer protocol than the server can speak.
+
+`hello` returns:
+- protocol version
+- minimum supported protocol version
+- backend kind
+- current capability list
+- optional session ID
+
+`ping` is the low-cost RTT and availability probe for off-box clients. It uses the same auth and version checks as the rest of the protocol without forcing a snapshot or output read.
+
+When the protocol is exposed over TCP, each request also carries an auth token. The token is validated by the TCP listener before the request is forwarded to the local session host.
 
 The protocol is intentionally file-backed rather than renderer-backed:
 - `snapshot` returns launch metadata, runtime state, attachment state, recent output, and total output bytes

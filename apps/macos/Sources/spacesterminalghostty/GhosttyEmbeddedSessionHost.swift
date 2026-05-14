@@ -213,7 +213,14 @@ import spacesterminalcore
             DispatchQueue.main.sync {
                 MainActor.assumeIsolated {
                     guard let self else { return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.") }
+                    if let compatibilityFailure = TerminalSessionHostProtocolSupport.validateCompatibility(for: request) {
+                        return compatibilityFailure
+                    }
                     switch request.command {
+                    case "hello":
+                        return TerminalSessionHostProtocolSupport.hello(
+                            sessionID: self.launchConfiguration.sessionID, backend: self.launchConfiguration.backend)
+                    case "ping": return TerminalSessionHostProtocolSupport.ping()
                     case "attach":
                         do {
                             let response = try TerminalSessionHostProtocolSupport.attach(
@@ -241,9 +248,9 @@ import spacesterminalcore
                             TerminalPerformance.logMetric(
                                 "terminal_control_send", target: "session=\(self.launchConfiguration.sessionID)",
                                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                            return TerminalControlResponse(ok: false, message: "Only the active owner can send input.")
+                            return TerminalSessionHostProtocolSupport.ownerRequired("Only the active owner can send input.")
                         }
-                        guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
+                        guard let text = request.text else { return TerminalSessionHostProtocolSupport.missingParameter("Missing text payload.") }
                         let payload = text + (request.appendNewline ? "\n" : "")
                         self.terminalView.sendRawBytes(Data(payload.utf8))
                         TerminalPerformance.logMetric(
@@ -256,13 +263,13 @@ import spacesterminalcore
                             TerminalPerformance.logMetric(
                                 "terminal_control_key", target: "session=\(self.launchConfiguration.sessionID)",
                                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                            return TerminalControlResponse(ok: false, message: "Only the active owner can send keys.")
+                            return TerminalSessionHostProtocolSupport.ownerRequired("Only the active owner can send keys.")
                         }
                         guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
                             TerminalPerformance.logMetric(
                                 "terminal_control_key", target: "session=\(self.launchConfiguration.sessionID)",
                                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                            return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
+                            return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .missingParameter)
                         }
                         self.terminalView.sendRawBytes(Data(bytes))
                         TerminalPerformance.logMetric(
@@ -271,7 +278,9 @@ import spacesterminalcore
                         return TerminalControlResponse(ok: true, message: "Sent key.")
                     case "takeover":
                         let startedAt = Date()
-                        guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
+                        guard let clientID = request.clientID else {
+                            return TerminalSessionHostProtocolSupport.missingParameter("Missing client ID.")
+                        }
                         do {
                             try TerminalSessionPersistence.transferOwnership(
                                 sessionID: self.launchConfiguration.sessionID, newOwnerClientID: clientID, paths: self.paths,
@@ -294,14 +303,14 @@ import spacesterminalcore
                             TerminalPerformance.logMetric(
                                 "terminal_control_terminate", target: "session=\(self.launchConfiguration.sessionID)",
                                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                            return TerminalControlResponse(ok: false, message: "Only the active owner can terminate the session.")
+                            return TerminalSessionHostProtocolSupport.ownerRequired("Only the active owner can terminate the session.")
                         }
                         self.terminate()
                         TerminalPerformance.logMetric(
                             "terminal_control_terminate", target: "session=\(self.launchConfiguration.sessionID)",
                             elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
                         return TerminalControlResponse(ok: true, message: "Terminating terminal session.")
-                    default: return TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
+                    default: return TerminalSessionHostProtocolSupport.unsupportedCommand(request.command)
                     }
                 }
             }

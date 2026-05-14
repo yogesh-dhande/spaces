@@ -21,10 +21,11 @@ public struct TerminalSessionHostConnection: Sendable {
             send: { request in
                 try TerminalControlClient.send(
                     request: TerminalControlRequest(
-                        command: request.command, authToken: authToken, text: request.text, key: request.key, clientID: request.clientID,
-                        client: request.client, attachmentMode: request.attachmentMode, appendNewline: request.appendNewline,
-                        columns: request.columns, rows: request.rows, offset: request.offset, maximumBytes: request.maximumBytes,
-                        recentOutputLineCount: request.recentOutputLineCount), host: host, port: port)
+                        command: request.command, protocolVersion: request.protocolVersion,
+                        minimumSupportedProtocolVersion: request.minimumSupportedProtocolVersion, authToken: authToken, text: request.text,
+                        key: request.key, clientID: request.clientID, client: request.client, attachmentMode: request.attachmentMode,
+                        appendNewline: request.appendNewline, columns: request.columns, rows: request.rows, offset: request.offset,
+                        maximumBytes: request.maximumBytes, recentOutputLineCount: request.recentOutputLineCount), host: host, port: port)
             })
     }
 }

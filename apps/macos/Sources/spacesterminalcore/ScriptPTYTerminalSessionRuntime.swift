@@ -74,7 +74,10 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
         }
 
         let controlServer = TerminalControlServer(socketPath: paths.controlSocketPath, queue: queue) { request in
+            if let compatibilityFailure = TerminalSessionHostProtocolSupport.validateCompatibility(for: request) { return compatibilityFailure }
             switch request.command {
+            case "hello": return TerminalSessionHostProtocolSupport.hello(sessionID: sessionID, backend: self.backendKind)
+            case "ping": return TerminalSessionHostProtocolSupport.ping()
             case "attach":
                 do {
                     return try TerminalSessionHostProtocolSupport.attach(request: request, sessionID: sessionID, paths: sessionPaths, attachedAt: now)
@@ -93,11 +96,11 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
                     TerminalPerformance.logMetric(
                         "terminal_control_send", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                         success: false)
-                    return TerminalControlResponse(ok: false, message: "Only the active owner can send input.")
+                    return TerminalSessionHostProtocolSupport.ownerRequired("Only the active owner can send input.")
                 }
-                guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
+                guard let text = request.text else { return TerminalSessionHostProtocolSupport.missingParameter("Missing text payload.") }
                 guard let data = (text + (request.appendNewline ? "\n" : "")).data(using: .utf8) else {
-                    return TerminalControlResponse(ok: false, message: "Unable to encode terminal input.")
+                    return TerminalControlResponse(ok: false, message: "Unable to encode terminal input.", errorCode: .internalError)
                 }
                 try scriptInputHandle.write(contentsOf: data)
                 TerminalPerformance.logMetric(
@@ -110,10 +113,10 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
                     TerminalPerformance.logMetric(
                         "terminal_control_key", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                         success: false)
-                    return TerminalControlResponse(ok: false, message: "Only the active owner can send keys.")
+                    return TerminalSessionHostProtocolSupport.ownerRequired("Only the active owner can send keys.")
                 }
                 guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
-                    return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
+                    return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .missingParameter)
                 }
                 try scriptInputHandle.write(contentsOf: bytes)
                 TerminalPerformance.logMetric(
@@ -126,16 +129,16 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
                     TerminalPerformance.logMetric(
                         "terminal_control_resize", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                         success: false)
-                    return TerminalControlResponse(ok: false, message: "Only the active owner can resize the session.")
+                    return TerminalSessionHostProtocolSupport.ownerRequired("Only the active owner can resize the session.")
                 }
                 guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
-                    return TerminalControlResponse(ok: false, message: "Missing terminal size.")
+                    return TerminalSessionHostProtocolSupport.missingParameter("Missing terminal size.")
                 }
                 guard resizePTY(columns, rows) else {
                     TerminalPerformance.logMetric(
                         "terminal_control_resize", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                         success: false, detail: "cols=\(columns) rows=\(rows)")
-                    return TerminalControlResponse(ok: false, message: "Unable to resize terminal session.")
+                    return TerminalSessionHostProtocolSupport.runtimeUnavailable("Unable to resize terminal session.")
                 }
                 TerminalPerformance.logMetric(
                     "terminal_control_resize", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
@@ -147,7 +150,7 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
                     TerminalPerformance.logMetric(
                         "terminal_control_takeover", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                         success: false)
-                    return TerminalControlResponse(ok: false, message: "Missing client ID.")
+                    return TerminalSessionHostProtocolSupport.missingParameter("Missing client ID.")
                 }
                 do {
                     try TerminalSessionPersistence.transferOwnership(
@@ -168,14 +171,14 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
                     TerminalPerformance.logMetric(
                         "terminal_control_terminate", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                         success: false)
-                    return TerminalControlResponse(ok: false, message: "Only the active owner can terminate the session.")
+                    return TerminalSessionHostProtocolSupport.ownerRequired("Only the active owner can terminate the session.")
                 }
                 process.terminate()
                 TerminalPerformance.logMetric(
                     "terminal_control_terminate", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                     success: true)
                 return TerminalControlResponse(ok: true, message: "Terminating terminal session.")
-            default: return TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
+            default: return TerminalSessionHostProtocolSupport.unsupportedCommand(request.command)
             }
         }
         try controlServer.start()

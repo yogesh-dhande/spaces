@@ -1,5 +1,55 @@
 import Foundation
 
+public enum TerminalControlProtocolVersion {
+    public static let current = 1
+    public static let minimumSupported = 1
+}
+
+public enum TerminalControlErrorCode: String, Codable, Sendable, Equatable {
+    case unauthorized
+    case unsupportedCommand
+    case unsupportedProtocolVersion
+    case missingParameter
+    case ownerRequired
+    case runtimeUnavailable
+    case internalError
+}
+
+public enum TerminalControlCapability: String, Codable, Sendable, Equatable {
+    case attach
+    case detach
+    case snapshot
+    case outputSize = "output_size"
+    case readOutputChunk = "read_output_chunk"
+    case send
+    case key
+    case resize
+    case takeover
+    case terminate
+    case ping
+    case hello
+}
+
+public struct TerminalControlServerHello: Codable, Sendable, Equatable {
+    public let sessionID: String?
+    public let protocolVersion: Int
+    public let minimumSupportedProtocolVersion: Int
+    public let capabilities: [TerminalControlCapability]
+    public let backend: TerminalSessionBackendKind?
+
+    public init(
+        sessionID: String?, protocolVersion: Int = TerminalControlProtocolVersion.current,
+        minimumSupportedProtocolVersion: Int = TerminalControlProtocolVersion.minimumSupported, capabilities: [TerminalControlCapability],
+        backend: TerminalSessionBackendKind?
+    ) {
+        self.sessionID = sessionID
+        self.protocolVersion = protocolVersion
+        self.minimumSupportedProtocolVersion = minimumSupportedProtocolVersion
+        self.capabilities = capabilities
+        self.backend = backend
+    }
+}
+
 public struct TerminalSessionHostSnapshot: Codable, Sendable, Equatable {
     public let launchConfiguration: TerminalSessionLaunchConfiguration?
     public let runtimeState: TerminalSessionRuntimeState?
@@ -21,6 +71,8 @@ public struct TerminalSessionHostSnapshot: Codable, Sendable, Equatable {
 
 public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let command: String
+    public let protocolVersion: Int?
+    public let minimumSupportedProtocolVersion: Int?
     public let authToken: String?
     public let text: String?
     public let key: String?
@@ -35,11 +87,15 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let recentOutputLineCount: Int?
 
     public init(
-        command: String, authToken: String? = nil, text: String? = nil, key: String? = nil, clientID: String? = nil, client: TerminalClient? = nil,
-        attachmentMode: TerminalAttachmentMode? = nil, appendNewline: Bool = false, columns: Int? = nil, rows: Int? = nil, offset: Int64? = nil,
-        maximumBytes: Int? = nil, recentOutputLineCount: Int? = nil
+        command: String, protocolVersion: Int? = TerminalControlProtocolVersion.current,
+        minimumSupportedProtocolVersion: Int? = TerminalControlProtocolVersion.minimumSupported, authToken: String? = nil, text: String? = nil,
+        key: String? = nil, clientID: String? = nil, client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil,
+        appendNewline: Bool = false, columns: Int? = nil, rows: Int? = nil, offset: Int64? = nil, maximumBytes: Int? = nil,
+        recentOutputLineCount: Int? = nil
     ) {
         self.command = command
+        self.protocolVersion = protocolVersion
+        self.minimumSupportedProtocolVersion = minimumSupportedProtocolVersion
         self.authToken = authToken
         self.text = text
         self.key = key
@@ -56,6 +112,8 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case command
+        case protocolVersion
+        case minimumSupportedProtocolVersion
         case authToken
         case text
         case key
@@ -73,6 +131,9 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         command = try container.decode(String.self, forKey: .command)
+        protocolVersion = try container.decodeIfPresent(Int.self, forKey: .protocolVersion) ?? TerminalControlProtocolVersion.current
+        minimumSupportedProtocolVersion =
+            try container.decodeIfPresent(Int.self, forKey: .minimumSupportedProtocolVersion) ?? TerminalControlProtocolVersion.minimumSupported
         authToken = try container.decodeIfPresent(String.self, forKey: .authToken)
         text = try container.decodeIfPresent(String.self, forKey: .text)
         key = try container.decodeIfPresent(String.self, forKey: .key)
@@ -91,16 +152,25 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
 public struct TerminalControlResponse: Codable, Sendable, Equatable {
     public let ok: Bool
     public let message: String
+    public let errorCode: TerminalControlErrorCode?
+    public let protocolVersion: Int
+    public let minimumSupportedProtocolVersion: Int
+    public let serverHello: TerminalControlServerHello?
     public let snapshot: TerminalSessionHostSnapshot?
     public let outputChunk: TerminalOutputChunk?
     public let outputByteCount: Int64?
 
     public init(
-        ok: Bool, message: String, snapshot: TerminalSessionHostSnapshot? = nil, outputChunk: TerminalOutputChunk? = nil,
-        outputByteCount: Int64? = nil
+        ok: Bool, message: String, errorCode: TerminalControlErrorCode? = nil, protocolVersion: Int = TerminalControlProtocolVersion.current,
+        minimumSupportedProtocolVersion: Int = TerminalControlProtocolVersion.minimumSupported, serverHello: TerminalControlServerHello? = nil,
+        snapshot: TerminalSessionHostSnapshot? = nil, outputChunk: TerminalOutputChunk? = nil, outputByteCount: Int64? = nil
     ) {
         self.ok = ok
         self.message = message
+        self.errorCode = errorCode
+        self.protocolVersion = protocolVersion
+        self.minimumSupportedProtocolVersion = minimumSupportedProtocolVersion
+        self.serverHello = serverHello
         self.snapshot = snapshot
         self.outputChunk = outputChunk
         self.outputByteCount = outputByteCount

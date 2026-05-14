@@ -4,6 +4,21 @@ import XCTest
 @testable import spacesterminalcore
 
 final class TerminalSessionHostProtocolSupportTests: XCTestCase {
+    func testHelloAndCompatibilityValidationDescribeCurrentHostProtocol() throws {
+        let hello = TerminalSessionHostProtocolSupport.hello(sessionID: "session-1", backend: .scriptPTY)
+        XCTAssertTrue(hello.ok)
+        XCTAssertEqual(hello.serverHello?.sessionID, "session-1")
+        XCTAssertEqual(hello.serverHello?.protocolVersion, TerminalControlProtocolVersion.current)
+        XCTAssertEqual(hello.serverHello?.minimumSupportedProtocolVersion, TerminalControlProtocolVersion.minimumSupported)
+        XCTAssertEqual(hello.serverHello?.backend, .scriptPTY)
+        XCTAssertTrue(hello.serverHello?.capabilities.contains(.snapshot) ?? false)
+        XCTAssertEqual(TerminalSessionHostProtocolSupport.ping().message, "pong")
+
+        let failure = TerminalSessionHostProtocolSupport.validateCompatibility(
+            for: TerminalControlRequest(command: "snapshot", protocolVersion: 0, minimumSupportedProtocolVersion: 0))
+        XCTAssertEqual(failure?.errorCode, .unsupportedProtocolVersion)
+    }
+
     func testAttachSnapshotAndReadOutputChunkUseExplicitSocketProtocolShape() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

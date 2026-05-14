@@ -1,6 +1,46 @@
 import Foundation
 
 public enum TerminalSessionHostProtocolSupport {
+    public static let serverCapabilities: [TerminalControlCapability] = [
+        .hello, .ping, .attach, .detach, .snapshot, .outputSize, .readOutputChunk, .send, .key, .resize, .takeover, .terminate,
+    ]
+
+    public static func hello(sessionID: String, backend: TerminalSessionBackendKind) -> TerminalControlResponse {
+        TerminalControlResponse(
+            ok: true, message: "Loaded terminal host info.",
+            serverHello: TerminalControlServerHello(sessionID: sessionID, capabilities: serverCapabilities, backend: backend))
+    }
+
+    public static func ping() -> TerminalControlResponse { TerminalControlResponse(ok: true, message: "pong") }
+
+    public static func validateCompatibility(for request: TerminalControlRequest) -> TerminalControlResponse? {
+        if let minimum = request.minimumSupportedProtocolVersion, minimum > TerminalControlProtocolVersion.current {
+            return TerminalControlResponse(
+                ok: false, message: "Terminal client requires a newer protocol version.", errorCode: .unsupportedProtocolVersion)
+        }
+        if let requested = request.protocolVersion, requested < TerminalControlProtocolVersion.minimumSupported {
+            return TerminalControlResponse(
+                ok: false, message: "Terminal client uses an unsupported protocol version.", errorCode: .unsupportedProtocolVersion)
+        }
+        return nil
+    }
+
+    public static func unsupportedCommand(_ command: String) -> TerminalControlResponse {
+        TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(command)'.", errorCode: .unsupportedCommand)
+    }
+
+    public static func missingParameter(_ message: String) -> TerminalControlResponse {
+        TerminalControlResponse(ok: false, message: message, errorCode: .missingParameter)
+    }
+
+    public static func ownerRequired(_ message: String) -> TerminalControlResponse {
+        TerminalControlResponse(ok: false, message: message, errorCode: .ownerRequired)
+    }
+
+    public static func runtimeUnavailable(_ message: String) -> TerminalControlResponse {
+        TerminalControlResponse(ok: false, message: message, errorCode: .runtimeUnavailable)
+    }
+
     public static func hostSnapshot(paths: TerminalSessionPaths, recentOutputLineCount: Int) -> TerminalSessionHostSnapshot {
         TerminalSessionHostSnapshot(
             launchConfiguration: try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
@@ -13,14 +53,14 @@ public enum TerminalSessionHostProtocolSupport {
     public static func attach(
         request: TerminalControlRequest, sessionID: String, paths: TerminalSessionPaths, attachedAt: @escaping @Sendable () -> String
     ) throws -> TerminalControlResponse {
-        guard let client = request.client else { return TerminalControlResponse(ok: false, message: "Missing client payload.") }
+        guard let client = request.client else { return missingParameter("Missing client payload.") }
         let mode = request.attachmentMode ?? .viewer
         try TerminalSessionPersistence.attachClient(sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: attachedAt())
         return TerminalControlResponse(ok: true, message: "Attached client.", snapshot: hostSnapshot(paths: paths, recentOutputLineCount: 200))
     }
 
     public static func detach(request: TerminalControlRequest, paths: TerminalSessionPaths) throws -> TerminalControlResponse {
-        guard let clientID = request.clientID, !clientID.isEmpty else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
+        guard let clientID = request.clientID, !clientID.isEmpty else { return missingParameter("Missing client ID.") }
         try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
         return TerminalControlResponse(ok: true, message: "Detached client.", snapshot: hostSnapshot(paths: paths, recentOutputLineCount: 200))
     }
@@ -36,7 +76,7 @@ public enum TerminalSessionHostProtocolSupport {
     }
 
     public static func readOutputChunk(request: TerminalControlRequest, sessionID: String, paths: TerminalSessionPaths) -> TerminalControlResponse {
-        guard let offset = request.offset else { return TerminalControlResponse(ok: false, message: "Missing output offset.") }
+        guard let offset = request.offset else { return missingParameter("Missing output offset.") }
         let maximumBytes = max(1, request.maximumBytes ?? 4096)
         do {
             let chunk = try TerminalOutputChunkReader.readChunk(

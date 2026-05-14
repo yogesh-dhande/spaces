@@ -7,7 +7,9 @@ import XCTest
 final class TerminalControlProtocolTests: XCTestCase {
     func testRequestAndResponseRoundTripThroughCodec() throws {
         let request = TerminalControlRequest(command: "resize", clientID: "client-1", appendNewline: false, columns: 120, rows: 42)
-        let response = TerminalControlResponse(ok: true, message: "ok")
+        let response = TerminalControlResponse(
+            ok: true, message: "ok",
+            serverHello: TerminalControlServerHello(sessionID: "session-1", capabilities: [.hello, .ping, .snapshot], backend: .scriptPTY))
 
         XCTAssertEqual(try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request)), request)
         XCTAssertEqual(try TerminalControlCodec.decodeResponse(TerminalControlCodec.encodeResponse(response)), response)
@@ -88,5 +90,38 @@ final class TerminalControlProtocolTests: XCTestCase {
 
         wait(for: [received], timeout: 2)
         XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "ack"))
+    }
+
+    func testTCPServerRejectsUnsupportedProtocolVersion() throws {
+        let queue = DispatchQueue(label: "terminal-control-protocol-test.tcp.version")
+        let server = TerminalControlTCPServer(host: "127.0.0.1", port: 0, authToken: nil, queue: queue) { _ in
+            XCTFail("handler should not run for unsupported protocol request")
+            return TerminalControlResponse(ok: true, message: "unexpected")
+        }
+        try server.start()
+        defer { server.stop() }
+
+        let response = try TerminalControlClient.send(
+            request: TerminalControlRequest(command: "snapshot", protocolVersion: 0, minimumSupportedProtocolVersion: 0), host: "127.0.0.1",
+            port: server.listeningPort)
+
+        XCTAssertEqual(response.ok, false)
+        XCTAssertEqual(response.errorCode, .unsupportedProtocolVersion)
+    }
+
+    func testTCPServerRejectsUnauthorizedClientsWithErrorCode() throws {
+        let queue = DispatchQueue(label: "terminal-control-protocol-test.tcp.auth")
+        let server = TerminalControlTCPServer(host: "127.0.0.1", port: 0, authToken: "SECRET", queue: queue) { _ in
+            XCTFail("handler should not run for unauthorized client")
+            return TerminalControlResponse(ok: true, message: "unexpected")
+        }
+        try server.start()
+        defer { server.stop() }
+
+        let response = try TerminalControlClient.send(
+            request: TerminalControlRequest(command: "snapshot", authToken: "WRONG"), host: "127.0.0.1", port: server.listeningPort)
+
+        XCTAssertEqual(response.ok, false)
+        XCTAssertEqual(response.errorCode, .unauthorized)
     }
 }

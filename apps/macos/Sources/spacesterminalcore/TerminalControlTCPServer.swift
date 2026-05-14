@@ -101,7 +101,17 @@ public final class TerminalControlTCPServer: @unchecked Sendable {
     }
 
     private func validateAndHandle(request: TerminalControlRequest) throws -> TerminalControlResponse {
-        if let authToken, authToken != request.authToken { return TerminalControlResponse(ok: false, message: "Unauthorized terminal client.") }
+        if let authToken, authToken != request.authToken {
+            return TerminalControlResponse(ok: false, message: "Unauthorized terminal client.", errorCode: .unauthorized)
+        }
+        if let minimum = request.minimumSupportedProtocolVersion, minimum > TerminalControlProtocolVersion.current {
+            return TerminalControlResponse(
+                ok: false, message: "Terminal client requires a newer protocol version.", errorCode: .unsupportedProtocolVersion)
+        }
+        if let requested = request.protocolVersion, requested < TerminalControlProtocolVersion.minimumSupported {
+            return TerminalControlResponse(
+                ok: false, message: "Terminal client uses an unsupported protocol version.", errorCode: .unsupportedProtocolVersion)
+        }
         return try handleRequest(request)
     }
 

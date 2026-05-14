@@ -56,7 +56,10 @@ def send_unix_request(socket_path: Path, request: dict) -> dict:
     return json.loads(response.decode("utf-8"))
 
 
-def send_tcp_request(host: str, port: int, request: dict) -> dict:
+def send_tcp_request(host: str, port: int, request: dict, simulated_rtt_ms: float = 0.0) -> dict:
+    half_rtt = max(0.0, simulated_rtt_ms) / 2000.0
+    if half_rtt:
+        time.sleep(half_rtt)
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client.settimeout(5)
     client.connect((host, port))
@@ -70,6 +73,8 @@ def send_tcp_request(host: str, port: int, request: dict) -> dict:
             break
         response.extend(chunk)
     client.close()
+    if half_rtt:
+        time.sleep(half_rtt)
     return json.loads(response.decode("utf-8"))
 
 
@@ -107,7 +112,12 @@ def wait_for_output(send_request, needle: str, timeout: float = 10) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--iterations", type=int, default=10)
+    parser.add_argument(
+        "--simulated-rtt-ms", type=str, default="0,20,80",
+        help="Comma-separated artificial RTT values in milliseconds applied around TCP requests.",
+    )
     args = parser.parse_args()
+    simulated_rtts = [float(value) for value in args.simulated_rtt_ms.split(",") if value.strip()]
 
     repo_root = Path(__file__).resolve().parents[3]
     spaces_cli = Path(os.environ.get("SPACES_CLI", repo_root / "apps/macos/.build/debug/spaces"))
@@ -161,9 +171,6 @@ def main() -> int:
         def unix_request(request):
             return send_unix_request(socket_path, request)
 
-        def tcp_request(request):
-            return send_tcp_request(host, port, {"authToken": auth_token, **request})
-
         owner_client = {
             "id": str(uuid.uuid4()).upper(),
             "kind": "remoteViewer",
@@ -178,51 +185,27 @@ def main() -> int:
             "connectedAt": "2026-05-14T00:00:00Z",
             "disconnectedAt": None,
         }
-        response = tcp_request({"command": "attach", "client": owner_client, "attachmentMode": "owner"})
+        response = send_tcp_request(host, port, {"authToken": auth_token, "command": "attach", "client": owner_client, "attachmentMode": "owner"})
         if not response.get("ok"):
             raise RuntimeError(f"Owner attach failed: {response}")
-        response = tcp_request({"command": "attach", "client": viewer_client, "attachmentMode": "viewer"})
+        response = send_tcp_request(host, port, {"authToken": auth_token, "command": "attach", "client": viewer_client, "attachmentMode": "viewer"})
         if not response.get("ok"):
             raise RuntimeError(f"Viewer attach failed: {response}")
 
-        snapshot_tcp = []
         snapshot_unix = []
-        output_size_tcp = []
         output_size_unix = []
-        chunk_tcp = []
         chunk_unix = []
-        send_tcp = []
-        send_echo_tcp = []
-        takeover_tcp = []
-
-        for index in range(args.iterations):
-            elapsed, response = timed_ms(lambda: tcp_request({"command": "snapshot", "recentOutputLineCount": 20}))
-            if not response.get("ok"):
-                raise RuntimeError(f"TCP snapshot failed: {response}")
-            snapshot_tcp.append(elapsed)
-
+        for _ in range(args.iterations):
             elapsed, response = timed_ms(lambda: unix_request({"command": "snapshot", "recentOutputLineCount": 20}))
             if not response.get("ok"):
                 raise RuntimeError(f"Unix snapshot failed: {response}")
             snapshot_unix.append(elapsed)
 
-            elapsed, response = timed_ms(lambda: tcp_request({"command": "output_size"}))
-            if not response.get("ok"):
-                raise RuntimeError(f"TCP output_size failed: {response}")
-            output_size_tcp.append(elapsed)
-            output_offset = response.get("outputByteCount", 0)
-
             elapsed, response = timed_ms(lambda: unix_request({"command": "output_size"}))
             if not response.get("ok"):
                 raise RuntimeError(f"Unix output_size failed: {response}")
             output_size_unix.append(elapsed)
-
-            elapsed, response = timed_ms(
-                lambda: tcp_request({"command": "read_output_chunk", "offset": max(0, output_offset - 32), "maximumBytes": 32})
-            )
-            if not response.get("ok"):
-                raise RuntimeError(f"TCP read_output_chunk failed: {response}")
-            chunk_tcp.append(elapsed)
+            output_offset = response.get("outputByteCount", 0)
 
             elapsed, response = timed_ms(
                 lambda: unix_request({"command": "read_output_chunk", "offset": max(0, output_offset - 32), "maximumBytes": 32})
@@ -231,38 +214,85 @@ def main() -> int:
                 raise RuntimeError(f"Unix read_output_chunk failed: {response}")
             chunk_unix.append(elapsed)
 
-            send_started = time.perf_counter_ns()
-            response = tcp_request(
-                {"command": "send", "text": f"proxy-{index}", "appendNewline": True, "clientID": owner_client["id"]}
-            )
-            send_elapsed = (time.perf_counter_ns() - send_started) / 1_000_000
-            if not response.get("ok"):
-                raise RuntimeError(f"TCP send failed: {response}")
-            send_tcp.append(send_elapsed)
-            wait_for_output(tcp_request, f"echo:proxy-{index}")
-            send_echo_tcp.append((time.perf_counter_ns() - send_started) / 1_000_000)
-
-        for _ in range(3):
-            elapsed, response = timed_ms(lambda: tcp_request({"command": "takeover", "clientID": viewer_client["id"]}))
-            if not response.get("ok"):
-                raise RuntimeError(f"TCP takeover to viewer failed: {response}")
-            takeover_tcp.append(elapsed)
-            elapsed, response = timed_ms(lambda: tcp_request({"command": "takeover", "clientID": owner_client["id"]}))
-            if not response.get("ok"):
-                raise RuntimeError(f"TCP takeover to owner failed: {response}")
-            takeover_tcp.append(elapsed)
-
         print("Terminal TCP proxy profile")
         print("")
-        print(f"tcp_snapshot: {metric_summary(snapshot_tcp)}")
         print(f"unix_snapshot: {metric_summary(snapshot_unix)}")
-        print(f"tcp_output_size: {metric_summary(output_size_tcp)}")
         print(f"unix_output_size: {metric_summary(output_size_unix)}")
-        print(f"tcp_read_output_chunk: {metric_summary(chunk_tcp)}")
         print(f"unix_read_output_chunk: {metric_summary(chunk_unix)}")
-        print(f"tcp_control_send: {metric_summary(send_tcp)}")
-        print(f"tcp_send_echo_roundtrip: {metric_summary(send_echo_tcp)}")
-        print(f"tcp_control_takeover: {metric_summary(takeover_tcp)}")
+
+        for simulated_rtt_ms in simulated_rtts:
+            def tcp_request(request):
+                return send_tcp_request(host, port, {"authToken": auth_token, **request}, simulated_rtt_ms=simulated_rtt_ms)
+
+            hello_tcp = []
+            ping_tcp = []
+            snapshot_tcp = []
+            output_size_tcp = []
+            chunk_tcp = []
+            send_tcp = []
+            send_echo_tcp = []
+            takeover_tcp = []
+
+            for index in range(args.iterations):
+                elapsed, response = timed_ms(lambda: tcp_request({"command": "hello"}))
+                if not response.get("ok"):
+                    raise RuntimeError(f"TCP hello failed: {response}")
+                hello_tcp.append(elapsed)
+
+                elapsed, response = timed_ms(lambda: tcp_request({"command": "ping"}))
+                if not response.get("ok"):
+                    raise RuntimeError(f"TCP ping failed: {response}")
+                ping_tcp.append(elapsed)
+
+                elapsed, response = timed_ms(lambda: tcp_request({"command": "snapshot", "recentOutputLineCount": 20}))
+                if not response.get("ok"):
+                    raise RuntimeError(f"TCP snapshot failed: {response}")
+                snapshot_tcp.append(elapsed)
+
+                elapsed, response = timed_ms(lambda: tcp_request({"command": "output_size"}))
+                if not response.get("ok"):
+                    raise RuntimeError(f"TCP output_size failed: {response}")
+                output_size_tcp.append(elapsed)
+                output_offset = response.get("outputByteCount", 0)
+
+                elapsed, response = timed_ms(
+                    lambda: tcp_request({"command": "read_output_chunk", "offset": max(0, output_offset - 32), "maximumBytes": 32})
+                )
+                if not response.get("ok"):
+                    raise RuntimeError(f"TCP read_output_chunk failed: {response}")
+                chunk_tcp.append(elapsed)
+
+                send_started = time.perf_counter_ns()
+                response = tcp_request(
+                    {"command": "send", "text": f"proxy-rtt{int(simulated_rtt_ms)}-{index}", "appendNewline": True, "clientID": owner_client["id"]}
+                )
+                send_elapsed = (time.perf_counter_ns() - send_started) / 1_000_000
+                if not response.get("ok"):
+                    raise RuntimeError(f"TCP send failed: {response}")
+                send_tcp.append(send_elapsed)
+                wait_for_output(tcp_request, f"echo:proxy-rtt{int(simulated_rtt_ms)}-{index}")
+                send_echo_tcp.append((time.perf_counter_ns() - send_started) / 1_000_000)
+
+            for _ in range(3):
+                elapsed, response = timed_ms(lambda: tcp_request({"command": "takeover", "clientID": viewer_client["id"]}))
+                if not response.get("ok"):
+                    raise RuntimeError(f"TCP takeover to viewer failed: {response}")
+                takeover_tcp.append(elapsed)
+                elapsed, response = timed_ms(lambda: tcp_request({"command": "takeover", "clientID": owner_client["id"]}))
+                if not response.get("ok"):
+                    raise RuntimeError(f"TCP takeover to owner failed: {response}")
+                takeover_tcp.append(elapsed)
+
+            print("")
+            print(f"simulated_rtt_ms={simulated_rtt_ms:.0f}")
+            print(f"tcp_hello: {metric_summary(hello_tcp)}")
+            print(f"tcp_ping: {metric_summary(ping_tcp)}")
+            print(f"tcp_snapshot: {metric_summary(snapshot_tcp)}")
+            print(f"tcp_output_size: {metric_summary(output_size_tcp)}")
+            print(f"tcp_read_output_chunk: {metric_summary(chunk_tcp)}")
+            print(f"tcp_control_send: {metric_summary(send_tcp)}")
+            print(f"tcp_send_echo_roundtrip: {metric_summary(send_echo_tcp)}")
+            print(f"tcp_control_takeover: {metric_summary(takeover_tcp)}")
         print("")
         print(f"session_id={session_id} iterations={args.iterations} proxy={host}:{port}")
         return 0
