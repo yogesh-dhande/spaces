@@ -103,6 +103,35 @@ public enum GhosttyTerminalSnapshotRenderer {
         return rendered
     }
 
+    public static func plainText(_ snapshot: GhosttyTerminalSnapshot) -> String {
+        let columns = max(0, snapshot.columns)
+        let rows = max(0, snapshot.rows)
+        guard columns > 0, rows > 0, snapshot.cells.count >= columns * rows else { return "" }
+
+        var lines: [String] = []
+        lines.reserveCapacity(rows)
+        for row in 0..<rows {
+            let rowStart = row * columns
+            let rowEnd = rowStart + columns
+            let rowCells = Array(snapshot.cells[rowStart..<rowEnd])
+            var line = ""
+            for column in rowCells.indices {
+                let cell = rowCells[column]
+                if shouldKeep(cell: cell, defaultForegroundRGB: snapshot.defaultForegroundRGB, defaultBackgroundRGB: snapshot.defaultBackgroundRGB) {
+                    line.append(displayCharacter(for: cell))
+                } else if !line.isEmpty {
+                    line.append(displayCharacter(for: cell))
+                }
+            }
+            while line.last == " " { line.removeLast() }
+            lines.append(line)
+        }
+
+        guard let firstNonEmptyIndex = lines.firstIndex(where: { !$0.isEmpty }), let lastNonEmptyIndex = lines.lastIndex(where: { !$0.isEmpty })
+        else { return "" }
+        return lines[firstNonEmptyIndex...lastNonEmptyIndex].joined(separator: "\n")
+    }
+
     private static func visibleColumn(in rowCells: [GhosttyTerminalSnapshot.Cell], row: Int, snapshot: GhosttyTerminalSnapshot) -> Int {
         var lastVisible = -1
         for column in rowCells.indices

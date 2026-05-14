@@ -36,6 +36,7 @@ import spacesterminalghostty
 
     private struct TransportRenderedOutput {
         let text: String
+        let attributedText: NSAttributedString
         let replayMode: String
         let replayBytes: Int64
     }
@@ -91,6 +92,7 @@ import spacesterminalghostty
     private var takeoverTask: Task<Void, Never>?
     private var pendingWindowFramePersistTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
+    private var lastRenderedAttributedOutput = NSAttributedString()
     private var lastTransportOutput = ""
     private var transportScreenBuffer = TerminalScreenBuffer()
     private var transportScreenBufferByteCount: Int64 = 0
@@ -689,10 +691,12 @@ import spacesterminalghostty
             case .ghosttyViewerSnapshot:
                 logPendingPassiveOutputWaitToRender(startedAt: passiveRefreshStartedAt, renderer: "viewer_snapshot")
                 if let snapshot = ghosttySessionHost?.snapshot() {
-                    outputView.setAttributedString(
-                        GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
+                    let renderedSnapshot = GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor)
+                    let plainSnapshot = GhosttyTerminalSnapshotRenderer.plainText(snapshot)
+                    outputView.setRenderedOutput(plainText: plainSnapshot, attributedText: renderedSnapshot)
                     outputView.sizeToFit()
-                    lastRenderedOutput = outputView.string
+                    lastRenderedOutput = plainSnapshot
+                    lastRenderedAttributedOutput = renderedSnapshot
                     restoreOutputViewportState(viewportState)
                     didUpdatePassivePresentation = true
                     completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
@@ -704,17 +708,20 @@ import spacesterminalghostty
                 let renderOutputStartedAt = Date()
                 let renderedOutputResult: TransportRenderedOutput
                 do { renderedOutputResult = try renderedOutput(snapshot: snapshot) } catch {
+                    let fallbackText = lastTransportOutput.isEmpty ? snapshot.recentOutput : lastTransportOutput
                     renderedOutputResult = TransportRenderedOutput(
-                        text: lastTransportOutput.isEmpty ? snapshot.recentOutput : lastTransportOutput, replayMode: "fallback_recent_output",
-                        replayBytes: 0)
+                        text: fallbackText,
+                        attributedText: NSAttributedString(
+                            string: fallbackText, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor]),
+                        replayMode: "fallback_recent_output", replayBytes: 0)
                 }
                 TerminalPerformance.logMetric(
                     "terminal_viewer_refresh_render_output", target: "session=\(sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: renderOutputStartedAt), success: true,
                     detail: "renderer=transport_canvas mode=\(renderedOutputResult.replayMode) replay_bytes=\(renderedOutputResult.replayBytes)")
                 let assignTextStartedAt = Date()
-                if renderedOutputResult.text != lastRenderedOutput {
-                    outputView.string = renderedOutputResult.text
+                if renderedOutputResult.text != lastRenderedOutput || !renderedOutputResult.attributedText.isEqual(lastRenderedAttributedOutput) {
+                    outputView.setRenderedOutput(plainText: renderedOutputResult.text, attributedText: renderedOutputResult.attributedText)
                     TerminalPerformance.logMetric(
                         "terminal_viewer_refresh_text_assign", target: "session=\(sessionID)",
                         elapsedMS: TerminalPerformance.elapsedMS(since: assignTextStartedAt), success: true,
@@ -726,6 +733,7 @@ import spacesterminalghostty
                         elapsedMS: TerminalPerformance.elapsedMS(since: layoutStartedAt), success: true, detail: "renderer=transport_canvas changed=1"
                     )
                     lastRenderedOutput = renderedOutputResult.text
+                    lastRenderedAttributedOutput = renderedOutputResult.attributedText
                     didUpdatePassivePresentation = true
                 } else {
                     TerminalPerformance.logMetric(
@@ -753,6 +761,7 @@ import spacesterminalghostty
             stateLabel.stringValue = String(describing: error)
             outputView.string = ""
             lastRenderedOutput = ""
+            lastRenderedAttributedOutput = NSAttributedString()
             lastTransportOutput = ""
         }
     }
@@ -792,6 +801,7 @@ import spacesterminalghostty
     }
 
     @discardableResult private func sendFallbackTranscriptInput(_ input: TransportTerminalTranscriptInput, appendNewline: Bool = false) -> Bool {
+        if case .key(let key) = input, preferredAttachmentMode != .owner, handleViewerLocalNavigation(key: key) { return true }
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else {
             updateInputStatus(message: "Session is not running.", isError: true)
             return false
@@ -811,7 +821,8 @@ import spacesterminalghostty
             case .text(let text): response = try transport.sendInput(text, appendNewline, client.id)
             case .key(let key): response = try transport.sendKey(key, client.id)
             }
-            updateInputStatus(message: response.message, isError: !response.ok)
+            let shouldSuppressSuccessStatus = response.ok && visibleRenderer == .outputFallback
+            updateInputStatus(message: shouldSuppressSuccessStatus ? "" : response.message, isError: !response.ok)
             refreshNow()
             return response.ok
         } catch {
@@ -826,6 +837,44 @@ import spacesterminalghostty
             return false
         }
         return sendFallbackTranscriptInput(.text(text))
+    }
+
+    private func handleViewerLocalNavigation(key: String) -> Bool {
+        guard visibleRenderer != .ghosttyOwner else { return false }
+        switch key {
+        case "pageup":
+            scrollOutputByViewportPages(-1)
+            return true
+        case "pagedown":
+            scrollOutputByViewportPages(1)
+            return true
+        case "home":
+            scrollOutputVertically(to: 0)
+            return true
+        case "end":
+            scrollOutputToBottom()
+            return true
+        default: return false
+        }
+    }
+
+    private func scrollOutputByViewportPages(_ pageDelta: Int) {
+        let visibleRect = outputScrollView.contentView.documentVisibleRect
+        let pageHeight = max(visibleRect.height - outputView.measuredLineHeight * 2, outputView.measuredLineHeight * 4)
+        scrollOutputVertically(to: visibleRect.minY + CGFloat(pageDelta) * pageHeight)
+    }
+
+    private func scrollOutputVertically(to originY: CGFloat) {
+        guard let documentView = outputScrollView.documentView else { return }
+        let visibleRect = outputScrollView.contentView.documentVisibleRect
+        let maxOriginY = max(0, documentView.bounds.height - visibleRect.height)
+        outputScrollView.contentView.scroll(to: NSPoint(x: visibleRect.minX, y: max(0, min(originY, maxOriginY))))
+        outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
+        if !inputStatusIsError, !inputStatusLabel.stringValue.isEmpty {
+            inputStatusLabel.stringValue = ""
+            inputStatusLabel.isHidden = true
+            updateHeaderLayoutVisibility()
+        }
     }
 
     private func currentTranscriptTerminalSize() -> (columns: Int, rows: Int)? {
@@ -1019,20 +1068,24 @@ import spacesterminalghostty
         }
         let isGhosttyOwner = visibleRenderer == .ghosttyOwner && preferredAttachmentMode == .owner
         let isGhosttyViewer = backend == .ghosttyEmbedded && preferredAttachmentMode != .owner
+        let isTransportCanvas = visibleRenderer == .outputFallback
+        let shouldCollapseTransportChrome = isTransportCanvas && inputStatusLabel.isHidden
         let shouldCollapseOwnerChrome = isGhosttyOwner && !shouldShowOwnerStateLabel
         let shouldCollapseViewerChrome = isGhosttyViewer && inputStatusLabel.isHidden
-        titleLabel.isHidden = isGhosttyOwner || shouldCollapseViewerChrome
-        summaryLabel.isHidden = shouldCollapseOwnerChrome || shouldCollapseViewerChrome
-        rendererLabel.isHidden = isGhosttyOwner || shouldCollapseViewerChrome
-        stateLabel.isHidden = shouldCollapseOwnerChrome || shouldCollapseViewerChrome
-        outputScrollView.borderType = isGhosttyViewer ? .noBorder : .bezelBorder
-        bodyStackView.spacing = isGhosttyOwner ? 0 : 12
-        bodyLeadingConstraint?.constant = isGhosttyOwner ? 0 : 16
-        bodyTrailingConstraint?.constant = isGhosttyOwner ? 0 : -16
-        bodyTopToContentConstraint?.constant = isGhosttyOwner ? 0 : 12
-        bodyBottomToContentConstraint?.constant = isGhosttyOwner ? 0 : -16
-        outputView.textContainerInset = isGhosttyViewer ? .zero : NSSize(width: 8, height: 10)
-        outputView.lineFragmentPadding = isGhosttyViewer ? 0 : 5
+        let usesTerminalSurfaceChrome = isGhosttyOwner || isGhosttyViewer || shouldCollapseTransportChrome
+        let collapsedInset: CGFloat = 0
+        titleLabel.isHidden = usesTerminalSurfaceChrome
+        summaryLabel.isHidden = shouldCollapseOwnerChrome || shouldCollapseViewerChrome || shouldCollapseTransportChrome
+        rendererLabel.isHidden = usesTerminalSurfaceChrome
+        stateLabel.isHidden = shouldCollapseOwnerChrome || shouldCollapseViewerChrome || shouldCollapseTransportChrome
+        outputScrollView.borderType = (isGhosttyViewer || shouldCollapseTransportChrome) ? .noBorder : .bezelBorder
+        bodyStackView.spacing = usesTerminalSurfaceChrome ? 0 : 12
+        bodyLeadingConstraint?.constant = usesTerminalSurfaceChrome ? collapsedInset : 16
+        bodyTrailingConstraint?.constant = usesTerminalSurfaceChrome ? -collapsedInset : -16
+        bodyTopToContentConstraint?.constant = usesTerminalSurfaceChrome ? collapsedInset : 12
+        bodyBottomToContentConstraint?.constant = usesTerminalSurfaceChrome ? -collapsedInset : -16
+        outputView.textContainerInset = isGhosttyViewer ? .zero : (shouldCollapseTransportChrome ? .zero : NSSize(width: 8, height: 10))
+        outputView.lineFragmentPadding = (isGhosttyViewer || shouldCollapseTransportChrome) ? 0 : 5
         updateHeaderLayoutVisibility()
     }
 
@@ -1182,7 +1235,10 @@ import spacesterminalghostty
         guard outputByteCount > 0 else {
             transportScreenBuffer.reset()
             transportScreenBufferByteCount = 0
-            return TransportRenderedOutput(text: snapshot.recentOutput, replayMode: "recent_output_empty", replayBytes: 0)
+            let attributedText = NSAttributedString(
+                string: snapshot.recentOutput, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor])
+            return TransportRenderedOutput(
+                text: snapshot.recentOutput, attributedText: attributedText, replayMode: "recent_output_empty", replayBytes: 0)
         }
 
         var replayMode = "reuse"
@@ -1199,10 +1255,16 @@ import spacesterminalghostty
         }
 
         let rendered = transportScreenBuffer.renderedText()
+        let attributed = TerminalRenderedScreenAttributedRenderer.render(
+            transportScreenBuffer.renderedScreen(), defaultForeground: outputView.textColor, defaultBackground: outputView.backgroundColor,
+            font: outputView.font)
         if rendered.isEmpty, !lastTransportOutput.isEmpty {
-            return TransportRenderedOutput(text: lastTransportOutput, replayMode: "recent_output_fallback", replayBytes: replayBytes)
+            let fallback = NSAttributedString(
+                string: lastTransportOutput, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor])
+            return TransportRenderedOutput(
+                text: lastTransportOutput, attributedText: fallback, replayMode: "recent_output_fallback", replayBytes: replayBytes)
         }
-        return TransportRenderedOutput(text: rendered, replayMode: replayMode, replayBytes: replayBytes)
+        return TransportRenderedOutput(text: rendered, attributedText: attributed, replayMode: replayMode, replayBytes: replayBytes)
     }
 
     private func rebuildTransportScreenBuffer(totalBytes: Int64) throws -> Int64 {

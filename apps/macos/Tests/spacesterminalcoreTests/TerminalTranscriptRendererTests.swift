@@ -28,4 +28,12 @@ final class TerminalTranscriptRendererTests: XCTestCase {
         XCTAssertEqual(lines.count, 5000)
         XCTAssertEqual(lines.suffix(3).map(String.init), ["SEQ 4998", "SEQ 4999", "SEQ 5000"])
     }
+
+    func testRenderPreservesVisibleTextAcrossSGRStyleChanges() {
+        let transcript = "\u{001B}[31mred\u{001B}[0m plain \u{001B}[1;34mblue\u{001B}[0m"
+
+        let rendered = TerminalTranscriptRenderer.render(transcript)
+
+        XCTAssertEqual(rendered, "red plain blue")
+    }
 }

@@ -85,6 +85,7 @@ The protocol is intentionally file-backed rather than renderer-backed:
 - `read_output_chunk` returns raw terminal bytes from `output.log` by byte offset
 - owner or viewer identity is still persisted in `clients.json` and `attachments.json`, but non-AppKit clients do not need to edit those files directly
 - the shared-session macOS client uses those raw chunks to maintain an incremental local `TerminalScreenBuffer`, so the AppKit fallback path renders cursor motion and line rewrites through a lightweight terminal canvas instead of replaying the full text system on every refresh
+- that same shared-session terminal canvas also preserves ANSI style state and screen modes locally, so palette colors, truecolor, cursor visibility, and alternate-screen swaps survive host replay instead of collapsing into monochrome plain text
 
 That split keeps the session host responsible for:
 - PTY lifetime
@@ -261,6 +262,12 @@ The current branch also emits per-operation stress metrics for sustained output 
 - `terminal_viewer_refresh_viewport_restore`
 
 These metrics are intentionally noisy and are meant for isolated benchmark or soak runs with `DEBUG=1`, not for routine interactive use.
+
+The stress fixture also includes ANSI-heavy shared-session lanes:
+- `color_repaint`
+- `color_scrollback_repaint`
+
+Those scenarios drive palette colors, truecolor foreground and background changes, and dense style toggles so renderer profiling captures the cost of terminal fidelity work rather than only monochrome text churn.
 
 Current stress baselines on this branch:
 - append-only `lines` output around `950 KB` tails in roughly `23-31 ms` wall time per CLI invocation, with the internal tail path around `1-2 ms`

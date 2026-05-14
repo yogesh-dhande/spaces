@@ -837,6 +837,30 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.debugFirstResponderTargetsOutputView)
     }
 
+    @MainActor func testFallbackOwnerCollapsesDiagnosticChromeForTerminalSurfaceTesting() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-fallback-surface", title: "fallback-surface", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-14T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-fallback-surface", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-14T00:00:01Z"), paths: paths
+        )
+
+        let controller = TerminalSessionWindowController(sessionID: "session-fallback-surface", paths: paths)
+
+        XCTAssertFalse(controller.debugShowsTitleLabel)
+        XCTAssertFalse(controller.debugShowsSummaryLabel)
+        XCTAssertFalse(controller.debugShowsStateLabel)
+        XCTAssertFalse(controller.debugShowsRendererLabel)
+        XCTAssertFalse(controller.debugShowsHeader)
+        XCTAssertFalse(controller.debugShowsInlineControls)
+    }
+
     @MainActor func testFallbackTranscriptTypingSendsTransportInputWithoutNewline() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -922,6 +946,46 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertFalse(controller.debugSendTranscriptText("pwd"))
         XCTAssertEqual(controller.debugInputStatus, "Viewer windows cannot send input. Take over ownership first.")
+    }
+
+    @MainActor func testFallbackViewerPageNavigationScrollsLocallyInsteadOfShowingInputError() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-fallback-viewer-scroll", title: "fallback-viewer-scroll", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-14T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-fallback-viewer-scroll", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-14T00:00:01Z"),
+            paths: paths)
+        let output = (0..<320).map { "line-\($0)" }.joined(separator: "\n") + "\n"
+        try output.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let owner = TerminalClient(
+            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-14T00:00:00Z")
+        let viewer = TerminalClient(
+            id: "viewer-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            connectedAt: "2026-05-14T00:00:01Z")
+        try TerminalSessionPersistence.upsertClient(owner, paths: paths)
+        try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-fallback-viewer-scroll", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-14T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-fallback-viewer-scroll", client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-05-14T00:00:01Z")
+
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-fallback-viewer-scroll", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in },
+            detachClientAction: { _ in })
+        controller.show()
+        let initialOffset = controller.debugOutputOffsetFromBottom
+
+        XCTAssertTrue(controller.debugSendTranscriptKey("pageup"))
+        XCTAssertGreaterThan(controller.debugOutputOffsetFromBottom, initialOffset + 40)
+        XCTAssertEqual(controller.debugInputStatus, "")
     }
 
     @MainActor func testFallbackWindowPreservesSelectionAndScrollOffsetWhenNewOutputArrives() throws {

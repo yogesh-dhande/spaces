@@ -1,0 +1,37 @@
+import AppKit
+import XCTest
+
+@testable import spacesterminalcore
+@testable import spacesterminalui
+
+@MainActor final class TerminalRenderedScreenAttributedRendererTests: XCTestCase {
+    func testRendererMapsANSIStylesToAttributedString() {
+        var buffer = TerminalScreenBuffer()
+        buffer.ingest("\u{001B}[31mred\u{001B}[0m \u{001B}[1;44mblue\u{001B}[0m")
+
+        let rendered = TerminalRenderedScreenAttributedRenderer.render(
+            buffer.renderedScreen(), defaultForeground: .textColor, defaultBackground: .textBackgroundColor)
+
+        XCTAssertEqual(rendered.string, "red blue ")
+        let redAttributes = rendered.attributes(at: 0, effectiveRange: nil)
+        let blueAttributes = rendered.attributes(at: 4, effectiveRange: nil)
+        let cursorAttributes = rendered.attributes(at: rendered.length - 1, effectiveRange: nil)
+
+        XCTAssertNotNil(redAttributes[.foregroundColor] as? NSColor)
+        XCTAssertNotNil(blueAttributes[.backgroundColor] as? NSColor)
+        XCTAssertNotEqual(blueAttributes[.backgroundColor] as? NSColor, cursorAttributes[.backgroundColor] as? NSColor)
+    }
+
+    func testRendererShowsCursorByInvertingCellColors() {
+        var buffer = TerminalScreenBuffer()
+        buffer.ingest("hi")
+
+        let rendered = TerminalRenderedScreenAttributedRenderer.render(
+            buffer.renderedScreen(), defaultForeground: .textColor, defaultBackground: .textBackgroundColor)
+
+        XCTAssertEqual(rendered.string, "hi ")
+        let iAttributes = rendered.attributes(at: 1, effectiveRange: nil)
+        let cursorAttributes = rendered.attributes(at: 2, effectiveRange: nil)
+        XCTAssertNotEqual(iAttributes[.backgroundColor] as? NSColor, cursorAttributes[.backgroundColor] as? NSColor)
+    }
+}

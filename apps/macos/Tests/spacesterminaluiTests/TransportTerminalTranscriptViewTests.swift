@@ -60,4 +60,17 @@ import XCTest
         XCTAssertFalse(view.handleTerminalEvent(commandVEvent))
         XCTAssertNil(received)
     }
+
+    func testCharacterIndexRespectsLineAndColumn() {
+        let view = TransportTerminalTranscriptView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        view.string = "alpha\nbeta"
+        view.sizeToFit()
+
+        let firstLineIndex = view.characterIndex(at: NSPoint(x: 0, y: 0))
+        let secondLineIndex = view.characterIndex(
+            at: NSPoint(x: view.horizontalInsets + view.measuredCellWidth * 2, y: view.verticalInsets + view.measuredLineHeight + 1))
+
+        XCTAssertEqual(firstLineIndex, 0)
+        XCTAssertEqual(secondLineIndex, "alpha\nbet".utf16.count)
+    }
 }

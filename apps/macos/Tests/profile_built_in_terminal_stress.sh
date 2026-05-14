@@ -39,10 +39,17 @@ SCROLLBACK_REPAINT_FRAMES="${SCROLLBACK_REPAINT_FRAMES:-180}"
 SCROLLBACK_REPAINT_ROWS="${SCROLLBACK_REPAINT_ROWS:-18}"
 SCROLLBACK_HISTORY_ROWS="${SCROLLBACK_HISTORY_ROWS:-18}"
 SCROLLBACK_REPAINT_SLEEP_MS="${SCROLLBACK_REPAINT_SLEEP_MS:-2}"
+COLOR_REPAINT_FRAMES="${COLOR_REPAINT_FRAMES:-220}"
+COLOR_REPAINT_ROWS="${COLOR_REPAINT_ROWS:-22}"
+COLOR_REPAINT_SLEEP_MS="${COLOR_REPAINT_SLEEP_MS:-2}"
+COLOR_SCROLLBACK_REPAINT_FRAMES="${COLOR_SCROLLBACK_REPAINT_FRAMES:-160}"
+COLOR_SCROLLBACK_REPAINT_ROWS="${COLOR_SCROLLBACK_REPAINT_ROWS:-18}"
+COLOR_SCROLLBACK_HISTORY_ROWS="${COLOR_SCROLLBACK_HISTORY_ROWS:-18}"
+COLOR_SCROLLBACK_REPAINT_SLEEP_MS="${COLOR_SCROLLBACK_REPAINT_SLEEP_MS:-2}"
 SAMPLE_INTERVAL_SECONDS="${SAMPLE_INTERVAL_SECONDS:-1}"
 SESSION_ROOT_OVERRIDE="${SESSION_ROOT_OVERRIDE:-}"
 RESOURCE_SAMPLES_PATH="$WORK_ROOT/app-resource.csv"
-SCENARIOS="${SCENARIOS:-lines repaint mixed repaint_viewer scrollback_repaint}"
+SCENARIOS="${SCENARIOS:-lines repaint mixed repaint_viewer scrollback_repaint color_repaint color_scrollback_repaint}"
 
 cleanup() {
   if [[ -n "$RESOURCE_SAMPLER_PID" ]] && kill -0 "$RESOURCE_SAMPLER_PID" >/dev/null 2>&1; then
@@ -333,11 +340,15 @@ print(json.dumps(summary))
 PY
 }
 
-run_viewer_repaint_scenario() {
-  local scenario="repaint_viewer"
+run_viewer_repaint_like_scenario() {
+  local scenario="$1"
+  local fixture_mode="$2"
+  local frames="$3"
+  local rows="$4"
+  local sleep_ms="$5"
   local tail_timings_path="$WORK_ROOT/${scenario}-tail.tsv"
   local cli_metrics_path="$WORK_ROOT/${scenario}-cli.log"
-  local command="python3 '$FIXTURE_SCRIPT' --mode repaint --frames $VIEWER_REPAINT_FRAMES --rows $VIEWER_REPAINT_ROWS --width 72 --sleep-ms $VIEWER_REPAINT_SLEEP_MS"
+  local command="python3 '$FIXTURE_SCRIPT' --mode $fixture_mode --frames $frames --rows $rows --width 72 --sleep-ms $sleep_ms"
   local command_output session_id session_dir output_log tail_capture_path
 
   echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=launch"
@@ -358,14 +369,15 @@ run_viewer_repaint_scenario() {
   echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=tail_samples session=$session_id"
   run_tail_samples "$session_id" "$scenario" "$tail_timings_path" "$cli_metrics_path"
 
-  local done_pattern="FIXTURE_DONE mode=repaint emitted=$((VIEWER_REPAINT_FRAMES * VIEWER_REPAINT_ROWS))"
+  local expected_lines=$((frames * rows))
+  local done_pattern="FIXTURE_DONE mode=${fixture_mode} emitted=${expected_lines}"
   echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=wait_done session=$session_id"
-  wait_for_tail_pattern "$session_id" "$done_pattern" "$(((VIEWER_REPAINT_FRAMES * VIEWER_REPAINT_ROWS) + 200))" 180
-  capture_terminal_tail "$session_id" "$(((VIEWER_REPAINT_FRAMES * VIEWER_REPAINT_ROWS) + 200))" "$tail_capture_path"
+  wait_for_tail_pattern "$session_id" "$done_pattern" "$((expected_lines + 200))" 180
+  capture_terminal_tail "$session_id" "$((expected_lines + 200))" "$tail_capture_path"
   wait_for_log_pattern "spaces: perf metric=terminal_viewer_output_present .*target=session=${session_id} .*success=1" 30
 
   echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=summarize session=$session_id"
-  python3 - "$scenario" "$tail_capture_path" "$((VIEWER_REPAINT_FRAMES * VIEWER_REPAINT_ROWS))" "$VIEWER_REPAINT_FRAMES" "$tail_timings_path" "$cli_metrics_path" "$APP_LOG" "$session_id" >"$WORK_ROOT/${scenario}-summary.json" <<'PY'
+  python3 - "$scenario" "$tail_capture_path" "$expected_lines" "$frames" "$tail_timings_path" "$cli_metrics_path" "$APP_LOG" "$session_id" >"$WORK_ROOT/${scenario}-summary.json" <<'PY'
 import json
 import math
 import re
@@ -467,12 +479,25 @@ print(json.dumps(summary))
 PY
 }
 
-run_viewer_scrollback_repaint_scenario() {
-  local scenario="scrollback_repaint"
+run_viewer_repaint_scenario() {
+  run_viewer_repaint_like_scenario "repaint_viewer" "repaint" "$VIEWER_REPAINT_FRAMES" "$VIEWER_REPAINT_ROWS" "$VIEWER_REPAINT_SLEEP_MS"
+}
+
+run_viewer_color_repaint_scenario() {
+  run_viewer_repaint_like_scenario "color_repaint" "color_repaint" "$COLOR_REPAINT_FRAMES" "$COLOR_REPAINT_ROWS" "$COLOR_REPAINT_SLEEP_MS"
+}
+
+run_viewer_scrollback_repaint_like_scenario() {
+  local scenario="$1"
+  local fixture_mode="$2"
+  local frames="$3"
+  local rows="$4"
+  local history_rows="$5"
+  local sleep_ms="$6"
   local tail_timings_path="$WORK_ROOT/${scenario}-tail.tsv"
   local cli_metrics_path="$WORK_ROOT/${scenario}-cli.log"
-  local expected_lines=$((SCROLLBACK_REPAINT_FRAMES * (SCROLLBACK_HISTORY_ROWS + SCROLLBACK_REPAINT_ROWS)))
-  local command="python3 '$FIXTURE_SCRIPT' --mode scrollback_repaint --frames $SCROLLBACK_REPAINT_FRAMES --rows $SCROLLBACK_REPAINT_ROWS --history-rows $SCROLLBACK_HISTORY_ROWS --width 72 --sleep-ms $SCROLLBACK_REPAINT_SLEEP_MS"
+  local expected_lines=$((frames * (history_rows + rows)))
+  local command="python3 '$FIXTURE_SCRIPT' --mode $fixture_mode --frames $frames --rows $rows --history-rows $history_rows --width 72 --sleep-ms $sleep_ms"
   local command_output session_id session_dir tail_capture_path
 
   echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=launch"
@@ -492,14 +517,14 @@ run_viewer_scrollback_repaint_scenario() {
   echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=tail_samples session=$session_id"
   run_tail_samples "$session_id" "$scenario" "$tail_timings_path" "$cli_metrics_path"
 
-  local done_pattern="FIXTURE_DONE mode=scrollback_repaint emitted=${expected_lines}"
+  local done_pattern="FIXTURE_DONE mode=${fixture_mode} emitted=${expected_lines}"
   echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=wait_done session=$session_id"
   wait_for_tail_pattern "$session_id" "$done_pattern" "$((expected_lines + 200))" 180
   capture_terminal_tail "$session_id" "$((expected_lines + 200))" "$tail_capture_path"
   wait_for_log_pattern "spaces: perf metric=terminal_viewer_output_present .*target=session=${session_id} .*success=1" 30
 
   echo "phase backend=$TERMINAL_BACKEND scenario=$scenario action=summarize session=$session_id"
-  python3 - "$scenario" "$tail_capture_path" "$expected_lines" "$SCROLLBACK_REPAINT_FRAMES" "$tail_timings_path" "$cli_metrics_path" "$APP_LOG" "$session_id" >"$WORK_ROOT/${scenario}-summary.json" <<'PY'
+  python3 - "$scenario" "$tail_capture_path" "$expected_lines" "$frames" "$tail_timings_path" "$cli_metrics_path" "$APP_LOG" "$session_id" >"$WORK_ROOT/${scenario}-summary.json" <<'PY'
 import json
 import math
 import re
@@ -601,6 +626,18 @@ print(json.dumps(summary))
 PY
 }
 
+run_viewer_scrollback_repaint_scenario() {
+  run_viewer_scrollback_repaint_like_scenario \
+    "scrollback_repaint" "scrollback_repaint" "$SCROLLBACK_REPAINT_FRAMES" "$SCROLLBACK_REPAINT_ROWS" "$SCROLLBACK_HISTORY_ROWS" \
+    "$SCROLLBACK_REPAINT_SLEEP_MS"
+}
+
+run_viewer_color_scrollback_repaint_scenario() {
+  run_viewer_scrollback_repaint_like_scenario \
+    "color_scrollback_repaint" "color_scrollback_repaint" "$COLOR_SCROLLBACK_REPAINT_FRAMES" "$COLOR_SCROLLBACK_REPAINT_ROWS" \
+    "$COLOR_SCROLLBACK_HISTORY_ROWS" "$COLOR_SCROLLBACK_REPAINT_SLEEP_MS"
+}
+
 require_binary "$SPACES_APP"
 require_binary "$SPACES_CLI"
 [[ -x "$FIXTURE_SCRIPT" ]] || chmod +x "$FIXTURE_SCRIPT"
@@ -642,6 +679,12 @@ if [[ "$SUPPORTS_VIEWER_STRESS" == "1" ]] && scenario_enabled "repaint_viewer"; 
 fi
 if [[ "$SUPPORTS_VIEWER_STRESS" == "1" ]] && scenario_enabled "scrollback_repaint"; then
   run_viewer_scrollback_repaint_scenario
+fi
+if [[ "$SUPPORTS_VIEWER_STRESS" == "1" ]] && scenario_enabled "color_repaint"; then
+  run_viewer_color_repaint_scenario
+fi
+if [[ "$SUPPORTS_VIEWER_STRESS" == "1" ]] && scenario_enabled "color_scrollback_repaint"; then
+  run_viewer_color_scrollback_repaint_scenario
 fi
 
 python3 - "$WORK_ROOT" "$APP_LOG" "$SUMMARY_PATH" "$METRICS_PATH" "$TERMINAL_BACKEND" "$RESOURCE_SAMPLES_PATH" <<'PY'

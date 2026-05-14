@@ -37,6 +37,7 @@ import Carbon
     private var plainString = ""
     private var attributedString = NSAttributedString(string: "")
     private var selectedRangeValue = NSRange(location: 0, length: 0)
+    private var selectionAnchorLocation: Int?
 
     private var defaultTextAttributes: [NSAttributedString.Key: Any] { [.font: font, .foregroundColor: textColor] }
 
@@ -57,6 +58,25 @@ import Carbon
             super.keyDown(with: event)
             return
         }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard window != nil else { return }
+        let location = convert(event.locationInWindow, from: nil)
+        let index = characterIndex(at: location)
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift), let anchor = selectionAnchorLocation {
+            setSelectedRange(selectionRange(from: anchor, to: index))
+        } else {
+            selectionAnchorLocation = index
+            setSelectedRange(NSRange(location: index, length: 0))
+        }
+        window?.makeFirstResponder(self)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let anchor = selectionAnchorLocation else { return }
+        let location = convert(event.locationInWindow, from: nil)
+        setSelectedRange(selectionRange(from: anchor, to: characterIndex(at: location)))
     }
 
     @objc func paste(_ sender: Any?) {
@@ -84,12 +104,16 @@ import Carbon
         drawContent()
     }
 
-    func setAttributedString(_ string: NSAttributedString) {
-        attributedString = string
-        plainString = string.string
+    func setAttributedString(_ string: NSAttributedString) { setRenderedOutput(plainText: string.string, attributedText: string) }
+
+    func setRenderedOutput(plainText: String, attributedText: NSAttributedString) {
+        self.plainString = plainText
+        self.attributedString = attributedText
         clampSelection()
         invalidateLayoutAndDisplay()
     }
+
+    func attributedStringValue() -> NSAttributedString { attributedString }
 
     func selectedRange() -> NSRange { selectedRangeValue }
 
@@ -163,6 +187,27 @@ import Carbon
         guard selectedRangeValue.length > 0 else { return }
         NSColor.selectedTextBackgroundColor.withAlphaComponent(0.35).setFill()
         for rect in selectionRects(for: selectedRangeValue) { rect.fill() }
+    }
+
+    func characterIndex(at point: NSPoint) -> Int {
+        let lines = plainString.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard !lines.isEmpty else { return 0 }
+
+        let contentY = max(0, point.y - textContainerInset.height)
+        let lineIndex = min(max(Int(floor(contentY / lineHeight)), 0), max(lines.count - 1, 0))
+        let line = lines[lineIndex]
+        let contentX = max(0, point.x - textContainerInset.width - lineFragmentPadding)
+        let lineColumn = min(max(Int(floor(contentX / characterCellWidth)), 0), line.utf16.count)
+
+        var location = 0
+        for index in 0..<lineIndex { location += lines[index].utf16.count + 1 }
+        return min(location + lineColumn, plainString.utf16.count)
+    }
+
+    private func selectionRange(from anchor: Int, to current: Int) -> NSRange {
+        let lowerBound = min(anchor, current)
+        let upperBound = max(anchor, current)
+        return NSRange(location: lowerBound, length: upperBound - lowerBound)
     }
 
     private func selectionRects(for range: NSRange) -> [NSRect] {
