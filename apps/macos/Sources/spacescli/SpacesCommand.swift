@@ -36,7 +36,7 @@ struct TerminalCommand: ParsableCommand {
         commandName: "terminal", abstract: "Manage tmux-free Spaces terminal sessions.",
         subcommands: [
             TerminalListCommand.self, TerminalCommandCommand.self, TerminalSendCommand.self, TerminalKeyCommand.self, TerminalTailCommand.self,
-            TerminalShowCommand.self, TerminalTakeoverCommand.self, TerminalServeCommand.self,
+            TerminalShowCommand.self, TerminalTakeoverCommand.self, TerminalProxyCommand.self, TerminalServeCommand.self,
         ])
 }
 
@@ -243,6 +243,32 @@ struct TerminalTakeoverCommand: ParsableCommand {
         }
         try TerminalSessionPersistence.transferOwnership(sessionID: sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: transferredAt)
         print("Transferred terminal ownership for session \(sessionID) to \(clientID)")
+    }
+}
+
+struct TerminalProxyCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "proxy", abstract: "Expose a terminal session's host/client protocol over TCP for mobile or remote clients.")
+
+    @Argument(help: "Terminal session ID.") var sessionID: String
+    @Option(name: .long, help: "TCP host to bind. Use 127.0.0.1 for local-only access.") var host = "127.0.0.1"
+    @Option(name: .long, help: "TCP port to bind. Use 0 to choose an ephemeral port.") var port = 0
+    @Option(name: .long, help: "Shared auth token required by remote clients.") var authToken: String
+
+    func run() throws {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
+            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
+        }
+
+        let queue = DispatchQueue(label: "spaces.terminal.proxy.\(sessionID)")
+        let server = TerminalControlTCPServer(host: host, port: port, authToken: authToken, queue: queue) { request in
+            try TerminalControlClient.send(request: request, socketPath: paths.controlSocketPath)
+        }
+        try server.start()
+        print("Terminal proxy ready\tsession=\(sessionID)\thost=\(host)\tport=\(server.listeningPort)")
+        fflush(stdout)
+        dispatchMain()
     }
 }
 

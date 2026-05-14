@@ -45,9 +45,11 @@ Each session lives under `~/.spaces/terminal/sessions/<session-id>/` and keeps:
 The control socket path is shortened through `TerminalSessionPaths` so isolated `SPACES_DB_PATH` roots do not exceed Unix socket path limits.
 `script-pty` hosts also drain unread PTY bytes before they shut down and persist an exited runtime state through the process termination callback, so short-lived commands still leave a complete `output.log` transcript and do not strand attachment metadata on a stale `running` state.
 `TerminalSessionHostConnection` sits above the raw socket path so macOS clients, the CLI, and future mobile or remote clients can all target the same request or response protocol without each caller depending on `TerminalControlClient` directly.
+`spaces terminal proxy` can also expose that same protocol over a TCP listener with an auth token, which makes the current `script-pty` session host reachable by mobile-shaped or remote test clients without giving those clients direct access to the session directory.
 
 ## Host/Client Protocol
 `control.sock` is the explicit session-host boundary for local and future remote clients.
+The same request or response protocol can also be bridged over TCP by `spaces terminal proxy`, which keeps transport changes separate from session ownership rules.
 
 The current request or response protocol supports:
 - `attach`
@@ -60,6 +62,8 @@ The current request or response protocol supports:
 - `resize`
 - `takeover`
 - `terminate`
+
+When the protocol is exposed over TCP, each request also carries an auth token. The token is validated by the proxy bridge before the request is forwarded to the local session host.
 
 The protocol is intentionally file-backed rather than renderer-backed:
 - `snapshot` returns launch metadata, runtime state, attachment state, recent output, and total output bytes

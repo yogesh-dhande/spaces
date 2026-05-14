@@ -21,6 +21,12 @@ final class TerminalControlProtocolTests: XCTestCase {
             TerminalControlRequest(command: "takeover", clientID: "remote-client", appendNewline: false))
     }
 
+    func testRequestDecodePreservesAuthToken() throws {
+        let payload = #"{"command":"snapshot","authToken":"SECRET"}"#.data(using: .utf8)!
+
+        XCTAssertEqual(try TerminalControlCodec.decodeRequest(payload), TerminalControlRequest(command: "snapshot", authToken: "SECRET"))
+    }
+
     func testAttachRequestAndSnapshotResponseRoundTripThroughCodec() throws {
         let client = TerminalClient(
             id: "client-1", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
@@ -60,6 +66,25 @@ final class TerminalControlProtocolTests: XCTestCase {
 
         let response = try TerminalControlClient.send(
             request: TerminalControlRequest(command: "send", text: "payload", appendNewline: true), socketPath: socketPath)
+
+        wait(for: [received], timeout: 2)
+        XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "ack"))
+    }
+
+    func testClientCanSendRequestToTCPServerWithAuthToken() throws {
+        let queue = DispatchQueue(label: "terminal-control-protocol-test.tcp")
+        let received = expectation(description: "received tcp request")
+
+        let server = TerminalControlTCPServer(host: "127.0.0.1", port: 0, authToken: "SECRET", queue: queue) { request in
+            XCTAssertEqual(request, TerminalControlRequest(command: "snapshot", authToken: "SECRET"))
+            received.fulfill()
+            return TerminalControlResponse(ok: true, message: "ack")
+        }
+        try server.start()
+        defer { server.stop() }
+
+        let response = try TerminalControlClient.send(
+            request: TerminalControlRequest(command: "snapshot", authToken: "SECRET"), host: "127.0.0.1", port: server.listeningPort)
 
         wait(for: [received], timeout: 2)
         XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "ack"))

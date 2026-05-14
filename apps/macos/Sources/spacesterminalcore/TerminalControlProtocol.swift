@@ -21,6 +21,7 @@ public struct TerminalSessionHostSnapshot: Codable, Sendable, Equatable {
 
 public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let command: String
+    public let authToken: String?
     public let text: String?
     public let key: String?
     public let clientID: String?
@@ -34,11 +35,12 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let recentOutputLineCount: Int?
 
     public init(
-        command: String, text: String? = nil, key: String? = nil, clientID: String? = nil, client: TerminalClient? = nil,
+        command: String, authToken: String? = nil, text: String? = nil, key: String? = nil, clientID: String? = nil, client: TerminalClient? = nil,
         attachmentMode: TerminalAttachmentMode? = nil, appendNewline: Bool = false, columns: Int? = nil, rows: Int? = nil, offset: Int64? = nil,
         maximumBytes: Int? = nil, recentOutputLineCount: Int? = nil
     ) {
         self.command = command
+        self.authToken = authToken
         self.text = text
         self.key = key
         self.clientID = clientID
@@ -54,6 +56,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case command
+        case authToken
         case text
         case key
         case clientID
@@ -70,6 +73,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         command = try container.decode(String.self, forKey: .command)
+        authToken = try container.decodeIfPresent(String.self, forKey: .authToken)
         text = try container.decodeIfPresent(String.self, forKey: .text)
         key = try container.decodeIfPresent(String.self, forKey: .key)
         clientID = try container.decodeIfPresent(String.self, forKey: .clientID)

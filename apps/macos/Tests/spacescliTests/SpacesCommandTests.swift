@@ -190,6 +190,15 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(command.clientID, "client-1")
     }
 
+    func testTerminalProxyParsesNetworkOptions() throws {
+        let command = try TerminalProxyCommand.parse(["session-1", "--host", "127.0.0.1", "--port", "4141", "--auth-token", "SECRET"])
+
+        XCTAssertEqual(command.sessionID, "session-1")
+        XCTAssertEqual(command.host, "127.0.0.1")
+        XCTAssertEqual(command.port, 4141)
+        XCTAssertEqual(command.authToken, "SECRET")
+    }
+
     func testTerminalTakeoverFallsBackToPersistedOwnershipWhenControlSocketIsUnavailable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

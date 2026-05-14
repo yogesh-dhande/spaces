@@ -14,4 +14,17 @@ public struct TerminalSessionHostConnection: Sendable {
             isAvailable: { FileManager.default.fileExists(atPath: path) },
             send: { request in try TerminalControlClient.send(request: request, socketPath: path) })
     }
+
+    public static func tcp(host: String, port: Int, authToken: String? = nil) -> Self {
+        Self(
+            isAvailable: { true },
+            send: { request in
+                try TerminalControlClient.send(
+                    request: TerminalControlRequest(
+                        command: request.command, authToken: authToken, text: request.text, key: request.key, clientID: request.clientID,
+                        client: request.client, attachmentMode: request.attachmentMode, appendNewline: request.appendNewline,
+                        columns: request.columns, rows: request.rows, offset: request.offset, maximumBytes: request.maximumBytes,
+                        recentOutputLineCount: request.recentOutputLineCount), host: host, port: port)
+            })
+    }
 }

@@ -1,33 +1,48 @@
+import Darwin
 import Dispatch
 import Foundation
 
-public final class TerminalControlServer: @unchecked Sendable {
-    private let socketPath: String
+public final class TerminalControlTCPServer: @unchecked Sendable {
+    private let host: String
+    private let port: Int
+    private let authToken: String?
     private let queue: DispatchQueue
     private let handleRequest: @Sendable (TerminalControlRequest) throws -> TerminalControlResponse
     private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
 
+    public private(set) var listeningPort: Int = 0
+
     public init(
-        socketPath: String, queue: DispatchQueue, handleRequest: @escaping @Sendable (TerminalControlRequest) throws -> TerminalControlResponse
+        host: String, port: Int, authToken: String? = nil, queue: DispatchQueue,
+        handleRequest: @escaping @Sendable (TerminalControlRequest) throws -> TerminalControlResponse
     ) {
-        self.socketPath = socketPath
+        self.host = host
+        self.port = port
+        self.authToken = authToken
         self.queue = queue
         self.handleRequest = handleRequest
     }
 
     public func start() throws {
-        try removeSocketIfPresent()
-        let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
+        let socketFD = socket(AF_INET, SOCK_STREAM, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
 
         var yes: Int32 = 1
         setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
 
-        var address = try makeSocketAddress(path: socketPath)
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(UInt16(port).bigEndian)
+        guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
+            close(socketFD)
+            throw POSIXError(.EADDRNOTAVAIL)
+        }
+
         let bindResult = withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                bind(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
+                bind(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
         guard bindResult == 0 else {
@@ -36,8 +51,6 @@ public final class TerminalControlServer: @unchecked Sendable {
             throw POSIXError(code)
         }
 
-        chmod(socketPath, S_IRUSR | S_IWUSR)
-
         guard listen(socketFD, 16) == 0 else {
             let code = POSIXErrorCode(rawValue: errno) ?? .EIO
             close(socketFD)
@@ -45,13 +58,13 @@ public final class TerminalControlServer: @unchecked Sendable {
         }
         try setNonBlocking(socketFD)
 
+        listeningPort = try Self.resolveListeningPort(socketFD: socketFD)
         listenSocketFD = socketFD
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
         source.setEventHandler { [weak self] in self?.acceptReadyConnections() }
         source.setCancelHandler { [weak self] in
             guard let self else { return }
             if self.listenSocketFD >= 0 { close(self.listenSocketFD) }
-            try? self.removeSocketIfPresent()
         }
         acceptSource = source
         source.resume()
@@ -74,7 +87,7 @@ public final class TerminalControlServer: @unchecked Sendable {
                 try setBlocking(clientFD)
                 let requestData = try TerminalControlSocketIO.readAll(from: clientFD)
                 let request = try TerminalControlCodec.decodeRequest(requestData)
-                let response = try handleRequest(request)
+                let response = try validateAndHandle(request: request)
                 let responseData = try TerminalControlCodec.encodeResponse(response)
                 try TerminalControlSocketIO.writeAll(data: responseData, to: clientFD)
             } catch {
@@ -87,20 +100,9 @@ public final class TerminalControlServer: @unchecked Sendable {
         }
     }
 
-    private func removeSocketIfPresent() throws {
-        if FileManager.default.fileExists(atPath: socketPath) { try FileManager.default.removeItem(atPath: socketPath) }
-    }
-
-    private func makeSocketAddress(path: String) throws -> sockaddr_un {
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let maxLength = MemoryLayout.size(ofValue: address.sun_path)
-        let utf8Path = path.utf8CString
-        guard utf8Path.count <= maxLength else { throw POSIXError(.ENAMETOOLONG) }
-        withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
-            _ = utf8Path.withUnsafeBufferPointer { buffer in memcpy(pointer, buffer.baseAddress, buffer.count) }
-        }
-        return address
+    private func validateAndHandle(request: TerminalControlRequest) throws -> TerminalControlResponse {
+        if let authToken, authToken != request.authToken { return TerminalControlResponse(ok: false, message: "Unauthorized terminal client.") }
+        return try handleRequest(request)
     }
 
     private func setNonBlocking(_ fileDescriptor: Int32) throws {
@@ -113,5 +115,43 @@ public final class TerminalControlServer: @unchecked Sendable {
         let currentFlags = fcntl(fileDescriptor, F_GETFL)
         guard currentFlags >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         guard fcntl(fileDescriptor, F_SETFL, currentFlags & ~O_NONBLOCK) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+
+    private static func resolveListeningPort(socketFD: Int32) throws -> Int {
+        var address = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let result = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in getsockname(socketFD, sockaddrPointer, &length) }
+        }
+        guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        return Int(UInt16(bigEndian: address.sin_port))
+    }
+}
+
+enum TerminalControlSocketIO {
+    static func writeAll(data: Data, to fileDescriptor: Int32) throws {
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var bytesRemaining = rawBuffer.count
+            var offset = 0
+            while bytesRemaining > 0 {
+                let written = write(fileDescriptor, baseAddress.advanced(by: offset), bytesRemaining)
+                if written < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                bytesRemaining -= written
+                offset += written
+            }
+        }
+    }
+
+    static func readAll(from fileDescriptor: Int32) throws -> Data {
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = read(fileDescriptor, &buffer, buffer.count)
+            if count == 0 { break }
+            if count < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            data.append(buffer, count: count)
+        }
+        return data
     }
 }
