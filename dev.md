@@ -28,14 +28,20 @@ Build, test, and release workflows for the Spaces monorepo. For product overview
 Run from the repository root:
 
 ```bash
+scripts/format.sh
 scripts/swiftpm.sh build
 scripts/swiftpm.sh test --parallel
 scripts/format-staged-swift.sh
 scripts/lint.sh
 scripts/coverage.sh
+scripts/verify.sh
 ```
 
-`scripts/lint.sh` auto-formats `apps/macos/Sources` and `apps/macos/Tests` with `swift format` before running lint so formatter-driven warnings do not drown out real issues.
+`scripts/format.sh` performs an explicit tree-wide `swift format` pass across `apps/macos/Sources` and `apps/macos/Tests`.
+`scripts/lint.sh` is read-only and checks formatting without mutating files, so build artifacts are not invalidated by lint.
+`scripts/coverage.sh` runs SwiftPM tests in parallel by default and caps auto-detected workers at `8` unless you override it with `SPACES_TEST_WORKERS` or change the cap with `SPACES_TEST_MAX_AUTO_WORKERS`.
+`scripts/verify.sh` is the canonical sequential local verification path: lint, build, then coverage.
+`scripts/swiftpm.sh` also uses a fail-fast lock around SwiftPM itself so overlapping build, test, or coverage commands stop immediately with a clear message instead of silently contending on the shared `.build` directory.
 
 Useful local entry points:
 
@@ -98,6 +104,15 @@ ITERATIONS=3 apps/macos/Tests/profile_built_in_terminal.sh
 
 The profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, exercises owner attach, viewer attach, send, `tail`, and takeover, then summarizes the built-in terminal perf metrics captured from the app log.
 It also writes `summary.txt` and `metrics.json` under its temp work root so baseline metric snapshots can be compared across terminal-window parity changes.
+Set `TERMINAL_BACKEND=ghostty-embedded` or `TERMINAL_BACKEND=script-pty` to force a specific built-in backend.
+
+For side-by-side built-in backend comparison:
+
+```bash
+apps/macos/Tests/profile_built_in_terminal_compare.sh
+```
+
+That harness treats `ghostty-embedded` as the local Mac benchmark lane, runs the built-in profile and stress suites against both built-in backends, and writes a combined comparison summary under its temp work root.
 
 For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
 
@@ -105,7 +120,7 @@ For sustained throughput, repaint-heavy output, tail latency, and scrollback com
 apps/macos/Tests/profile_built_in_terminal_stress.sh
 ```
 
-That profiler runs three isolated scenarios against the embedded Ghostty backend:
+That profiler runs three isolated scenarios against the selected built-in backend:
 - `lines`: high-volume append-only output
 - `repaint`: full-screen ANSI clears and redraws
 - `mixed`: status repaints plus ordered line emission
@@ -204,7 +219,7 @@ Expected output:
 
 The pre-commit hook does three things:
 - formats staged macOS Swift source and test files with `swift format`
-- runs `scripts/lint.sh`, which also auto-formats the full macOS Swift source and test tree before linting
+- runs `scripts/lint.sh`
 - runs `scripts/coverage.sh`
 
 Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](.github/workflows/pr-checks.yml), which runs the same Swift lint/build/coverage flow plus the static website build.
