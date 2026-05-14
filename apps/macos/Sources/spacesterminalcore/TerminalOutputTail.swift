@@ -20,6 +20,7 @@ public enum TerminalOutputTail {
     private static let clearScreenBoundaryPatterns: [Data] = [
         Data([0x1B, 0x5B, 0x48, 0x1B, 0x5B, 0x32, 0x4A]), Data([0x1B, 0x5B, 0x32, 0x4A]), Data([0x1B, 0x5B, 0x33, 0x4A]),
     ]
+    private static let cursorHomeBoundaryPattern = Data([0x1B, 0x5B, 0x48])
 
     public static func tail(path: String, lineCount: Int) throws -> String {
         let startedAt = Date()
@@ -109,7 +110,7 @@ public enum TerminalOutputTail {
         try fileHandle.seek(toOffset: startOffset)
         let data = try fileHandle.readToEnd() ?? Data()
         guard !data.isEmpty else { return nil }
-        guard let boundaryOffset = latestClearScreenBoundaryOffset(in: data) else { return nil }
+        guard let boundaryOffset = latestRenderedTranscriptBoundaryOffset(in: data) else { return nil }
 
         let suffix = data.suffix(from: boundaryOffset)
         guard let text = String(data: suffix, encoding: .utf8) else { return nil }
@@ -160,7 +161,7 @@ public enum TerminalOutputTail {
         return data.first ?? 0
     }
 
-    private static func latestClearScreenBoundaryOffset(in data: Data) -> Int? {
+    private static func latestRenderedTranscriptBoundaryOffset(in data: Data) -> Int? {
         var bestOffset: Int?
         for pattern in clearScreenBoundaryPatterns {
             var searchRange = data.startIndex..<data.endIndex
@@ -168,6 +169,11 @@ public enum TerminalOutputTail {
                 bestOffset = max(bestOffset ?? range.lowerBound, range.lowerBound)
                 searchRange = range.lowerBound + 1..<data.endIndex
             }
+        }
+        var searchRange = data.startIndex..<data.endIndex
+        while let range = data.range(of: cursorHomeBoundaryPattern, options: [], in: searchRange) {
+            bestOffset = max(bestOffset ?? range.lowerBound, range.lowerBound)
+            searchRange = range.lowerBound + 1..<data.endIndex
         }
         return bestOffset
     }

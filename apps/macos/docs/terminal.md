@@ -185,7 +185,9 @@ The host also avoids rewriting `state.json` on every timer tick. Steady-state se
 ## Performance Notes
 The active owner path is treated as a hot rendering path.
 
-The profiling lane treats `ghostty-embedded` as the baseline for local Spaces-owned terminal quality. `profile_built_in_terminal_compare.sh` runs the built-in terminal profile and stress suites against both built-in backends and reports the side-by-side delta so shared-session renderer work can be judged against the existing native Mac experience instead of against an absolute target in isolation.
+The profiling lane treats `ghostty-embedded` as the baseline for local Spaces-owned terminal quality. Renderer work is judged against Ghostty repaint cadence and resource pressure rather than against summon or attach costs.
+`profile_terminal_renderer_compare.sh` is the renderer-specific lane. It runs the same repaint-heavy fixture against `ghostty-embedded` owner rendering and the shared-session `script-pty` canvas path, then reports render latency, frame-interval jitter, and app CPU/RSS pressure from timestamped perf metrics instead of emphasizing summon or attach costs.
+`profile_ghostty_renderer_baseline.sh` is the controlled local-owner Ghostty lane. It launches one visible `ghostty-embedded` session with a delayed repaint fixture, samples app CPU/RSS, closes the owner window through the same IPC path the real app uses, and records Ghostty refresh cadence metrics without leaving an untracked owner window or session behind.
 
 Current performance decisions:
 - `GhosttyEmbeddedTerminalView` caches the last surface geometry, focus state, and occlusion state before calling libghostty.
@@ -252,6 +254,11 @@ The current branch also emits per-operation stress metrics for sustained output 
 - `terminal_surface_refresh`
 - `terminal_tail_read`
 - `terminal_viewer_output_present`
+- `terminal_viewer_refresh_wait_to_render`
+- `terminal_viewer_refresh_render_output`
+- `terminal_viewer_refresh_text_assign`
+- `terminal_viewer_refresh_layout`
+- `terminal_viewer_refresh_viewport_restore`
 
 These metrics are intentionally noisy and are meant for isolated benchmark or soak runs with `DEBUG=1`, not for routine interactive use.
 
@@ -259,6 +266,7 @@ Current stress baselines on this branch:
 - append-only `lines` output around `950 KB` tails in roughly `23-31 ms` wall time per CLI invocation, with the internal tail path around `1-2 ms`
 - repaint-heavy output around `262 KB` tails in roughly `27-33 ms` wall time per CLI invocation, with the internal partial-render tail path around `2-3 ms`
 - repaint-heavy output around `2.6 MB` still tails in roughly `27-28 ms` wall time per CLI invocation because the recent clear-screen boundary keeps replay bounded to the visible frame suffix rather than the full scrollback
+- scrollback-heavy repaint viewer runs keep a growing history while rewriting the active viewport so render replay, text assignment, layout, and viewport restore can be profiled separately under Codex-like churn
 
 Those numbers matter differently depending on the caller:
 - `terminal_tail_read` measures only the chunk read and canvas render path
@@ -286,7 +294,7 @@ The current branch has verified:
 
 ## Known Constraints
 - Passive viewer windows still use snapshot plus chunked output rather than a second live libghostty surface.
-- Passive viewer windows still keep the 500 ms poll as a safety fallback, but normal live-session updates now arrive through coalesced output notifications. Remaining viewer latency work is mostly about tuning refresh cadence and measuring end-to-end presentation timing rather than text-system layout throughput.
+- Passive viewer windows still keep the 500 ms poll as a safety fallback, but normal live-session updates now arrive through adaptive coalesced output notifications. Remaining viewer latency work is mostly about tuning refresh cadence and reducing the cases that still fall back to whole-transcript replay under scrollback-heavy churn.
 - Native iPhone and remote-network clients are still future work, but the local socket contract is already shaped around that attach model instead of direct file mutation.
 - External iTerm2 and Ghostty hosts remain supported overrides on this branch.
 - The Ghostty static archive still emits non-fatal linker warnings about ImGui-related symbols during build.

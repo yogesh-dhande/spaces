@@ -53,7 +53,7 @@ import spacesterminalcore
         self.paths = paths
         controlQueue = DispatchQueue(label: "spaces.terminal.session-host.control.\(launchConfiguration.sessionID)")
         terminalView = GhosttyEmbeddedTerminalView(launchConfiguration: launchConfiguration)
-        self.requestSurfaceRefreshAction = requestSurfaceRefreshAction ?? { [terminalView] in terminalView.requestSurfaceRefresh() }
+        self.requestSurfaceRefreshAction = requestSurfaceRefreshAction ?? { [terminalView] in terminalView.requestSurfaceRefresh(reason: "output") }
         terminalView.onActionEvent = { [weak self] event in self?.applyActionEvent(event) }
     }
 

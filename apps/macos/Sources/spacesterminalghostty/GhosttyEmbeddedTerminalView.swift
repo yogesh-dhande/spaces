@@ -213,7 +213,7 @@ import spacesterminalcore
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         if sendGhosttyKey(event: event, action: event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS) {
-            requestSurfaceRefresh()
+            requestSurfaceRefresh(reason: "key_down")
             return
         }
         if flags.contains(.command) {
@@ -229,7 +229,7 @@ import spacesterminalcore
 
     public override func keyUp(with event: NSEvent) {
         if sendGhosttyKey(event: event, action: GHOSTTY_ACTION_RELEASE) {
-            requestSurfaceRefresh()
+            requestSurfaceRefresh(reason: "key_up")
             return
         }
         super.keyUp(with: event)
@@ -237,7 +237,7 @@ import spacesterminalcore
 
     public override func flagsChanged(with event: NSEvent) {
         if sendGhosttyKey(event: event, action: modifierKeyAction(for: event)) {
-            requestSurfaceRefresh()
+            requestSurfaceRefresh(reason: "flags_changed")
             return
         }
         super.flagsChanged(with: event)
@@ -254,7 +254,7 @@ import spacesterminalcore
         input.text = nil
         guard ghostty_surface_key_is_binding(surface, input, nil) else { return false }
         _ = ghostty_surface_key(surface, input)
-        requestSurfaceRefresh()
+        requestSurfaceRefresh(reason: "binding")
         return true
     }
 
@@ -287,7 +287,7 @@ import spacesterminalcore
             guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
             ghostty_surface_send_input_raw(surface, baseAddress, UInt(data.count))
         }
-        requestSurfaceRefresh()
+        requestSurfaceRefresh(reason: "raw_input")
     }
 
     public func foregroundPID() -> Int32? {
@@ -319,8 +319,11 @@ import spacesterminalcore
         if hostWindow.isVisible { hostWindow.orderOut(nil) }
     }
 
-    public func requestSurfaceRefresh() {
+    public func requestSurfaceRefresh(reason: String = "generic") {
         debugSurfaceRefreshRequestCountValue += 1
+        TerminalPerformance.logMetric(
+            "terminal_surface_refresh_request", target: "session=\(launchConfiguration.sessionID)", elapsedMS: 0, success: true,
+            detail: "reason=\(reason) requests=\(debugSurfaceRefreshRequestCountValue)")
         guard surface != nil else {
             createSurfaceIfNeeded()
             return
@@ -427,7 +430,7 @@ import spacesterminalcore
         guard let surface else { return false }
         focusWindow()
         ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), mods)
-        requestSurfaceRefresh()
+        requestSurfaceRefresh(reason: "scroll")
         return true
     }
 

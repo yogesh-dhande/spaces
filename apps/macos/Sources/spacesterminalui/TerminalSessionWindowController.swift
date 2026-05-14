@@ -23,12 +23,21 @@ import spacesterminalghostty
     private static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
     private static let fallbackRefreshInterval: Duration = .milliseconds(100)
     private static let passiveOutputRefreshCoalescingInterval: Duration = .milliseconds(16)
+    private static let passiveOutputRefreshHighChurnInterval: Duration = .milliseconds(4)
+    private static let passiveOutputRefreshHighChurnNotificationThreshold = 3
+    private static let passiveOutputRefreshHighChurnByteThreshold = 16 * 1024
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     private enum VisibleRenderer {
         case ghosttyOwner
         case ghosttyViewerSnapshot
         case outputFallback
+    }
+
+    private struct TransportRenderedOutput {
+        let text: String
+        let replayMode: String
+        let replayBytes: Int64
     }
 
     private struct OutputViewportState {
@@ -676,6 +685,7 @@ import spacesterminalghostty
             var didUpdatePassivePresentation = false
             switch visibleRenderer {
             case .ghosttyViewerSnapshot:
+                logPendingPassiveOutputWaitToRender(startedAt: passiveRefreshStartedAt, renderer: "viewer_snapshot")
                 if let snapshot = ghosttySessionHost?.snapshot() {
                     outputView.setAttributedString(
                         GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
@@ -688,17 +698,45 @@ import spacesterminalghostty
                 }
                 fallthrough
             case .outputFallback:
-                let output: String
-                do { output = try renderedOutput(snapshot: snapshot) } catch {
-                    output = lastTransportOutput.isEmpty ? snapshot.recentOutput : lastTransportOutput
+                logPendingPassiveOutputWaitToRender(startedAt: passiveRefreshStartedAt, renderer: "transport_canvas")
+                let renderOutputStartedAt = Date()
+                let renderedOutputResult: TransportRenderedOutput
+                do { renderedOutputResult = try renderedOutput(snapshot: snapshot) } catch {
+                    renderedOutputResult = TransportRenderedOutput(
+                        text: lastTransportOutput.isEmpty ? snapshot.recentOutput : lastTransportOutput, replayMode: "fallback_recent_output",
+                        replayBytes: 0)
                 }
-                if output != lastRenderedOutput {
-                    outputView.string = output
+                TerminalPerformance.logMetric(
+                    "terminal_viewer_refresh_render_output", target: "session=\(sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: renderOutputStartedAt), success: true,
+                    detail: "renderer=transport_canvas mode=\(renderedOutputResult.replayMode) replay_bytes=\(renderedOutputResult.replayBytes)")
+                let assignTextStartedAt = Date()
+                if renderedOutputResult.text != lastRenderedOutput {
+                    outputView.string = renderedOutputResult.text
+                    TerminalPerformance.logMetric(
+                        "terminal_viewer_refresh_text_assign", target: "session=\(sessionID)",
+                        elapsedMS: TerminalPerformance.elapsedMS(since: assignTextStartedAt), success: true,
+                        detail: "renderer=transport_canvas changed=1 chars=\(renderedOutputResult.text.count)")
+                    let layoutStartedAt = Date()
                     outputView.sizeToFit()
-                    lastRenderedOutput = output
+                    TerminalPerformance.logMetric(
+                        "terminal_viewer_refresh_layout", target: "session=\(sessionID)",
+                        elapsedMS: TerminalPerformance.elapsedMS(since: layoutStartedAt), success: true, detail: "renderer=transport_canvas changed=1"
+                    )
+                    lastRenderedOutput = renderedOutputResult.text
                     didUpdatePassivePresentation = true
+                } else {
+                    TerminalPerformance.logMetric(
+                        "terminal_viewer_refresh_text_assign", target: "session=\(sessionID)",
+                        elapsedMS: TerminalPerformance.elapsedMS(since: assignTextStartedAt), success: true,
+                        detail: "renderer=transport_canvas changed=0 chars=\(renderedOutputResult.text.count)")
                 }
+                let restoreViewportStartedAt = Date()
                 restoreOutputViewportState(viewportState)
+                TerminalPerformance.logMetric(
+                    "terminal_viewer_refresh_viewport_restore", target: "session=\(sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: restoreViewportStartedAt), success: true,
+                    detail: "renderer=transport_canvas changed=\(didUpdatePassivePresentation ? 1 : 0)")
                 if backend != .ghosttyEmbedded, !isOwner, didUpdatePassivePresentation {
                     TerminalPerformance.logMetric(
                         "terminal_viewer_output_present", target: "session=\(sessionID)",
@@ -891,9 +929,10 @@ import spacesterminalghostty
     private func schedulePassiveOutputRefresh() {
         guard visibleRenderer != .ghosttyOwner else { return }
         guard pendingPassiveOutputRefreshTask == nil else { return }
+        let refreshInterval = passiveOutputRefreshInterval()
         pendingPassiveOutputRefreshTask = Task { @MainActor [weak self] in
             defer { self?.pendingPassiveOutputRefreshTask = nil }
-            do { try await Task.sleep(for: Self.passiveOutputRefreshCoalescingInterval) } catch { return }
+            do { try await Task.sleep(for: refreshInterval) } catch { return }
             self?.refreshNow()
         }
     }
@@ -915,6 +954,23 @@ import spacesterminalghostty
         TerminalPerformance.logMetric(
             "terminal_viewer_output_present", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: true, detail: "renderer=\(renderer) bytes=\(byteCount) notifications=\(notificationCount) changed=\(changedOutput ? 1 : 0)")
+    }
+
+    private func passiveOutputRefreshInterval() -> Duration {
+        if pendingPassiveOutputNotificationCount >= Self.passiveOutputRefreshHighChurnNotificationThreshold
+            || pendingPassiveOutputByteCount >= Self.passiveOutputRefreshHighChurnByteThreshold
+        {
+            return Self.passiveOutputRefreshHighChurnInterval
+        }
+        return Self.passiveOutputRefreshCoalescingInterval
+    }
+
+    private func logPendingPassiveOutputWaitToRender(startedAt: Date, renderer: String) {
+        guard let pendingStartedAt = pendingPassiveOutputStartedAt else { return }
+        TerminalPerformance.logMetric(
+            "terminal_viewer_refresh_wait_to_render", target: "session=\(sessionID)",
+            elapsedMS: max(Int(startedAt.timeIntervalSince(pendingStartedAt) * 1000), 0), success: true,
+            detail: "renderer=\(renderer) notifications=\(pendingPassiveOutputNotificationCount) bytes=\(pendingPassiveOutputByteCount)")
     }
 
     private func syncGhosttyOwnerFocus(reason: String, requestWindowFocus: Bool, focused explicitFocused: Bool? = nil) {
@@ -1097,36 +1153,44 @@ import spacesterminalghostty
         visibleRenderer == .ghosttyOwner && !shouldShowOwnerStateLabel ? Self.ownerGhosttyRefreshInterval : Self.fallbackRefreshInterval
     }
 
-    private func renderedOutput(snapshot: TerminalSessionClientSnapshot) throws -> String {
+    private func renderedOutput(snapshot: TerminalSessionClientSnapshot) throws -> TransportRenderedOutput {
         let outputByteCount = snapshot.outputByteCount
         guard outputByteCount > 0 else {
             transportScreenBuffer.reset()
             transportScreenBufferByteCount = 0
-            return snapshot.recentOutput
+            return TransportRenderedOutput(text: snapshot.recentOutput, replayMode: "recent_output_empty", replayBytes: 0)
         }
 
+        var replayMode = "reuse"
+        var replayBytes: Int64 = 0
         if outputByteCount < transportScreenBufferByteCount {
-            try rebuildTransportScreenBuffer(totalBytes: outputByteCount)
+            replayMode = "rebuild_shrink"
+            replayBytes = try rebuildTransportScreenBuffer(totalBytes: outputByteCount)
         } else if transportScreenBufferByteCount == 0 {
-            try rebuildTransportScreenBuffer(totalBytes: outputByteCount)
+            replayMode = "rebuild_initial"
+            replayBytes = try rebuildTransportScreenBuffer(totalBytes: outputByteCount)
         } else if outputByteCount > transportScreenBufferByteCount {
-            try appendTransportOutputChunks(from: transportScreenBufferByteCount, to: outputByteCount)
+            replayMode = "append"
+            replayBytes = try appendTransportOutputChunks(from: transportScreenBufferByteCount, to: outputByteCount)
         }
 
         let rendered = transportScreenBuffer.renderedText()
-        if rendered.isEmpty, !lastTransportOutput.isEmpty { return lastTransportOutput }
-        return rendered
+        if rendered.isEmpty, !lastTransportOutput.isEmpty {
+            return TransportRenderedOutput(text: lastTransportOutput, replayMode: "recent_output_fallback", replayBytes: replayBytes)
+        }
+        return TransportRenderedOutput(text: rendered, replayMode: replayMode, replayBytes: replayBytes)
     }
 
-    private func rebuildTransportScreenBuffer(totalBytes: Int64) throws {
+    private func rebuildTransportScreenBuffer(totalBytes: Int64) throws -> Int64 {
         transportScreenBuffer.reset()
         transportScreenBufferByteCount = 0
-        try appendTransportOutputChunks(from: 0, to: totalBytes)
+        return try appendTransportOutputChunks(from: 0, to: totalBytes)
     }
 
-    private func appendTransportOutputChunks(from startOffset: Int64, to endOffset: Int64) throws {
-        guard endOffset > startOffset else { return }
+    private func appendTransportOutputChunks(from startOffset: Int64, to endOffset: Int64) throws -> Int64 {
+        guard endOffset > startOffset else { return 0 }
         var offset = startOffset
+        var replayBytes: Int64 = 0
         while offset < endOffset {
             let remainingBytes = endOffset - offset
             let chunkSize = Int(min(64 * 1024, remainingBytes))
@@ -1139,8 +1203,10 @@ import spacesterminalghostty
                 if !decoded.isEmpty { transportScreenBuffer.ingest(decoded) }
             }
             offset += Int64(chunk.bytes.count)
+            replayBytes += Int64(chunk.bytes.count)
         }
         transportScreenBufferByteCount = max(transportScreenBufferByteCount, offset)
+        return replayBytes
     }
 
     private func rendererSummary(isOwner: Bool?) -> String {

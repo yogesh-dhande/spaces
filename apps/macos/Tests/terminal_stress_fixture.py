@@ -53,12 +53,32 @@ def emit_mixed_stream(args: argparse.Namespace, rng: random.Random) -> int:
     return line_seq
 
 
+def emit_scrollback_repaint_stream(args: argparse.Namespace, rng: random.Random) -> int:
+    line_seq = 0
+    for frame in range(1, args.frames + 1):
+        sys.stdout.write("\x1b[H")
+        sys.stdout.write(f"STATUS frame={frame:06d} total={args.frames:06d} mode=scrollback_repaint\n")
+        for history_row in range(1, args.history_rows + 1):
+            line_seq += 1
+            payload = random_payload(args.width, rng)
+            sys.stdout.write(f"HISTORY {line_seq:08d} FRAME {frame:06d} ROW {history_row:03d} {payload}\n")
+        for live_row in range(1, args.rows + 1):
+            line_seq += 1
+            payload = random_payload(args.width, rng)
+            sys.stdout.write(f"SEQ {line_seq:08d} FRAME {frame:06d} LIVE {live_row:03d} {payload}\n")
+        sys.stdout.flush()
+        if args.sleep_ms:
+            time.sleep(args.sleep_ms / 1000.0)
+    return line_seq
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["lines", "repaint", "mixed"], required=True)
+    parser.add_argument("--mode", choices=["lines", "repaint", "mixed", "scrollback_repaint"], required=True)
     parser.add_argument("--lines", type=int, default=20000)
     parser.add_argument("--frames", type=int, default=300)
     parser.add_argument("--rows", type=int, default=24)
+    parser.add_argument("--history-rows", type=int, default=24)
     parser.add_argument("--width", type=int, default=72)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--sleep-ms", type=int, default=0)
@@ -75,6 +95,8 @@ def main() -> int:
         emitted = emit_line_stream(args, rng)
     elif args.mode == "repaint":
         emitted = emit_repaint_stream(args, rng)
+    elif args.mode == "scrollback_repaint":
+        emitted = emit_scrollback_repaint_stream(args, rng)
     else:
         emitted = emit_mixed_stream(args, rng)
 
