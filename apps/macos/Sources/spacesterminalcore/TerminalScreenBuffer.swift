@@ -92,6 +92,7 @@ public struct TerminalRenderedScreen: Equatable {
 public struct TerminalScreenBuffer {
     private static let maxColumnCount = 240
     private static let maxScrollbackRowCount = 10_000
+    private static let defaultTabStopColumns = stride(from: 8, to: maxColumnCount, by: 8).map { $0 }
 
     private struct Cell: Equatable {
         var character: Character
@@ -118,6 +119,7 @@ public struct TerminalScreenBuffer {
     private var usesFocusReporting = false
     private var scrollRegionTop = 0
     private var scrollRegionBottom: Int?
+    private var tabStops = Set(Self.defaultTabStopColumns)
 
     public init() {}
 
@@ -142,6 +144,7 @@ public struct TerminalScreenBuffer {
         usesFocusReporting = false
         scrollRegionTop = 0
         scrollRegionBottom = nil
+        tabStops = Set(Self.defaultTabStopColumns)
     }
 
     public mutating func ingest(_ text: String) {
@@ -155,8 +158,7 @@ public struct TerminalScreenBuffer {
                 moveCursor(column: max(0, cursorColumn - 1))
                 index += 1
             case 0x09:
-                let nextTabStop = ((cursorColumn / 8) + 1) * 8
-                moveCursor(column: nextTabStop)
+                moveCursor(column: nextTabStop(after: cursorColumn))
                 index += 1
             case 0x0A:
                 newline()
@@ -189,8 +191,14 @@ public struct TerminalScreenBuffer {
         switch introducer.value {
         case 0x5B: return consumeCSI(scalars, startingAt: nextIndex + 1)
         case 0x5D: return consumeOSC(scalars, startingAt: nextIndex + 1)
+        case 0x48:
+            setTabStop(at: cursorColumn)
+            return nextIndex + 1
         case 0x4D:
             reverseIndex()
+            return nextIndex + 1
+        case 0x63:
+            reset()
             return nextIndex + 1
         case 0x37:
             saveCursor()
@@ -246,9 +254,11 @@ public struct TerminalScreenBuffer {
         case 0x47:
             let column = max((values.first ?? 1) - 1, 0)
             moveCursor(column: column)
+        case 0x49: moveCursor(column: nextTabStop(after: cursorColumn, count: max(values.first ?? 0, 1)))
         case 0x64:
             let row = max((values.first ?? 1) - 1, 0)
             moveCursor(row: row)
+        case 0x5A: moveCursor(column: previousTabStop(before: cursorColumn, count: max(values.first ?? 0, 1)))
         case 0x4A:
             switch values.first ?? 0 {
             case 0: clearFromCursorToDisplayEnd()
@@ -272,10 +282,12 @@ public struct TerminalScreenBuffer {
         case 0x54: scrollDown(max(values.first ?? 0, 1))
         case 0x73: saveCursor()
         case 0x75: restoreCursor()
+        case 0x67: clearTabStops(values.first ?? 0)
         case 0x6D: applySGR(values)
         case 0x68: applyMode(values, enabled: true)
         case 0x6C: applyMode(values, enabled: false)
         case 0x72: setScrollRegion(values)
+        case 0x70: if parameters == "!" { softReset() }
         default: break
         }
     }
@@ -422,12 +434,39 @@ public struct TerminalScreenBuffer {
         scrollRegionBottom = nil
     }
 
+    private mutating func softReset() {
+        currentStyle = TerminalTextStyle()
+        cursorVisible = true
+        mouseTrackingMode = .disabled
+        usesSGRMouseEncoding = false
+        usesAlternateScrollMode = false
+        usesBracketedPasteMode = false
+        usesFocusReporting = false
+        scrollRegionTop = 0
+        scrollRegionBottom = nil
+        savedCursorRow = 0
+        savedCursorColumn = 0
+    }
+
     private mutating func saveCursor() {
         savedCursorRow = cursorRow
         savedCursorColumn = cursorColumn
     }
 
     private mutating func restoreCursor() { moveCursor(row: savedCursorRow, column: savedCursorColumn) }
+
+    private mutating func setTabStop(at column: Int) {
+        guard column >= 0, column < Self.maxColumnCount else { return }
+        tabStops.insert(column)
+    }
+
+    private mutating func clearTabStops(_ mode: Int) {
+        switch mode {
+        case 0: tabStops.remove(cursorColumn)
+        case 3: tabStops.removeAll()
+        default: break
+        }
+    }
 
     private mutating func clearFromCursorToDisplayEnd() {
         clearLineFromCursorToEnd()
@@ -614,5 +653,29 @@ public struct TerminalScreenBuffer {
     private mutating func trimTrailingSpaces(on row: Int) {
         guard rows.indices.contains(row) else { return }
         while rows[row].last?.character == " " { rows[row].removeLast() }
+    }
+
+    private func nextTabStop(after column: Int, count: Int = 1) -> Int {
+        var currentColumn = column
+        var remaining = max(count, 1)
+        while remaining > 0 {
+            if let next = tabStops.sorted().first(where: { $0 > currentColumn }) {
+                currentColumn = next
+            } else {
+                currentColumn = min(Self.maxColumnCount - 1, currentColumn + 1)
+            }
+            remaining -= 1
+        }
+        return currentColumn
+    }
+
+    private func previousTabStop(before column: Int, count: Int = 1) -> Int {
+        var currentColumn = column
+        var remaining = max(count, 1)
+        while remaining > 0 {
+            if let previous = tabStops.sorted().last(where: { $0 < currentColumn }) { currentColumn = previous } else { currentColumn = 0 }
+            remaining -= 1
+        }
+        return currentColumn
     }
 }

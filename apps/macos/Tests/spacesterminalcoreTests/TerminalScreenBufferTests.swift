@@ -131,6 +131,45 @@ final class TerminalScreenBufferTests: XCTestCase {
         XCTAssertFalse(buffer.renderedScreen().usesFocusReporting)
     }
 
+    func testIngestSupportsTabStopsAndTabClearSequences() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("a\tb")
+        XCTAssertEqual(buffer.renderedText(), "a       b")
+
+        buffer.reset()
+        buffer.ingest("1234\u{001B}H\tX")
+        XCTAssertEqual(buffer.renderedText(), "1234    X")
+
+        buffer.ingest("\u{001B}[0g\r\tY")
+        XCTAssertEqual(buffer.renderedText(), "1234Y   X")
+
+        buffer.reset()
+        buffer.ingest("\u{001B}[3g1234\u{001B}H\r\tZ")
+        XCTAssertEqual(buffer.renderedText(), "1234Z")
+    }
+
+    func testIngestSupportsHardAndSoftTerminalResetSequences() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("hello\u{001B}[31m red\u{001B}[?1004h\u{001B}[?2004h")
+        buffer.ingest("\u{001B}[!p")
+
+        let softResetScreen = buffer.renderedScreen()
+        XCTAssertEqual(buffer.renderedText(), "hello red")
+        XCTAssertFalse(softResetScreen.usesFocusReporting)
+        XCTAssertFalse(softResetScreen.usesBracketedPasteMode)
+        XCTAssertTrue(softResetScreen.cursorVisible)
+
+        buffer.ingest("\u{001B}creset")
+        let hardResetScreen = buffer.renderedScreen()
+        XCTAssertEqual(buffer.renderedText(), "reset")
+        XCTAssertFalse(hardResetScreen.usesAlternateScreen)
+        XCTAssertFalse(hardResetScreen.usesFocusReporting)
+        XCTAssertFalse(hardResetScreen.usesBracketedPasteMode)
+        XCTAssertTrue(hardResetScreen.cursorVisible)
+    }
+
     func testPrimaryScreenFullRegionScrollPreservesScrollbackHistory() {
         var buffer = TerminalScreenBuffer()
 

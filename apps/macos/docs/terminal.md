@@ -302,7 +302,7 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: alternate screen enter and exit (`?47`, `?1047`, `?1049`)
 - `implemented`: cursor visibility (`?25h`, `?25l`)
 - `partial`: full terminal state reset behavior across every alternate-screen or private-mode combination
-- `missing`: horizontal tab stop management and tab clear sequences
+- `implemented`: horizontal tab stop management, tab clear sequences, and hard/soft terminal reset basics
 
 ### Styling and Color
 - `implemented`: ANSI SGR reset plus common style toggles used by shells and TUIs
