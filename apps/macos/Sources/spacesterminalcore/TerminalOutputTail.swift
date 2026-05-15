@@ -16,7 +16,7 @@ public enum TerminalOutputTail {
     }
 
     private static let plainTextReadBlockSize = 16 * 1024
-    private static let renderedSuffixScanLimit: UInt64 = 512 * 1024
+    private static let renderedSuffixScanWindows: [UInt64] = [64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024]
     private static let defaultColumns = 120
     private static let defaultRows = 40
     fileprivate static let maxScrollback = 20_000
@@ -110,17 +110,21 @@ public enum TerminalOutputTail {
     private static func tailRenderedSuffixWithGhosttyVTIfPossible(fileHandle: FileHandle, fileSize: UInt64, outputPath: String, lineCount: Int) throws
         -> VTTailResult?
     {
-        let startOffset = fileSize > renderedSuffixScanLimit ? fileSize - renderedSuffixScanLimit : 0
-        try fileHandle.seek(toOffset: startOffset)
-        let data = try fileHandle.readToEnd() ?? Data()
-        guard !data.isEmpty else { return nil }
-        guard let boundaryOffset = latestRenderedTranscriptBoundaryOffset(in: data) else { return nil }
+        for scanWindow in renderedSuffixScanWindows {
+            let startOffset = fileSize > scanWindow ? fileSize - scanWindow : 0
+            try fileHandle.seek(toOffset: startOffset)
+            let data = try fileHandle.readToEnd() ?? Data()
+            guard !data.isEmpty else { return nil }
+            guard let boundaryOffset = latestRenderedTranscriptBoundaryOffset(in: data) else { continue }
 
-        let suffix = data.suffix(from: boundaryOffset)
-        let terminalSize = resolvedTerminalSize(forOutputPath: outputPath)
-        let rendered = try TerminalOutputVTRenderer.renderPlain(suffix, columns: terminalSize.columns, rows: terminalSize.rows)
-        let result = tailRenderedText(rendered, lineCount: lineCount)
-        return VTTailResult(result: result, scannedBytes: UInt64(data.count), renderedByteCount: suffix.count, boundaryOffset: boundaryOffset)
+            let suffix = data.suffix(from: boundaryOffset)
+            let terminalSize = resolvedTerminalSize(forOutputPath: outputPath)
+            let rendered = try TerminalOutputVTRenderer.renderPlain(suffix, columns: terminalSize.columns, rows: terminalSize.rows)
+            let result = tailRenderedText(rendered, lineCount: lineCount)
+            return VTTailResult(result: result, scannedBytes: UInt64(data.count), renderedByteCount: suffix.count, boundaryOffset: boundaryOffset)
+        }
+
+        return nil
     }
 
     private static func plainTextTail(from text: String, lineCount: Int) -> String {
