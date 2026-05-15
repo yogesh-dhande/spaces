@@ -86,12 +86,22 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
   terminal tail <session-id> --lines 5
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal proxy <session-id> --host 127.0.0.1 --port 0 --auth-token local-test-token
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
   terminal show <session-id> --viewer
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
   terminal takeover <session-id> <viewer-client-id>
 ```
 
 For owner or viewer verification, keep exactly one `SpacesApp` process running for the chosen `SPACES_DB_PATH`. The current `ghostty-embedded` slice supports one live libghostty owner window plus one or more passive viewer windows that follow `output.log` and can take over ownership without restarting the session.
+
+For the headless mobile-shaped control proof of concept against the Ghostty-owner path:
+
+```bash
+python3 apps/macos/Tests/poc_mobile_terminal_client.py --start-app
+```
+
+That flow launches an isolated `SpacesApp`, starts one `ghostty-embedded` session, exposes it through `spaces terminal proxy`, attaches a synthetic desktop owner plus an iPhone viewer, verifies viewer input rejection before takeover, promotes the mobile client, sends text plus `Enter`, and finally transfers ownership back to the desktop client.
 
 For repeatable profiling of the built-in terminal owner and viewer flows:
 

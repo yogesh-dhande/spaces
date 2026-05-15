@@ -190,6 +190,15 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(command.clientID, "client-1")
     }
 
+    func testTerminalProxyParsesSessionHostPortAndAuthToken() throws {
+        let command = try TerminalProxyCommand.parse(["session-1", "--host", "127.0.0.1", "--port", "9123", "--auth-token", "SECRET"])
+
+        XCTAssertEqual(command.sessionID, "session-1")
+        XCTAssertEqual(command.host, "127.0.0.1")
+        XCTAssertEqual(command.port, 9123)
+        XCTAssertEqual(command.authToken, "SECRET")
+    }
+
     func testTerminalServeParsesBackend() throws {
         let command = try TerminalServeCommand.parse([
             "--session-id", "session-1", "--backend", "script-pty", "--title", "session", "--cwd", "/tmp", "--shell", "/bin/zsh",

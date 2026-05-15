@@ -10,6 +10,7 @@ This document captures the current libghostty-backed terminal integration in Spa
 - Spaces consumes a forked `GhosttyKit.xcframework` from `yogesh-dhande/ghostty` because the branch depends on two additive PTY I/O exports:
   - `ghostty_surface_set_data_callback(...)`
   - `ghostty_surface_send_input_raw(...)`
+- Spaces does not add a second terminal-emulation layer on top of Ghostty for the preferred path. Mobile and remote control reuse the existing session files plus control socket boundary from the Mac-owned libghostty host.
 - The pinned fork build tag lives in `apps/macos/ghosttykit-release-tag.txt`, and a scheduled workflow updates that pin to the latest published fork release through a pull request.
 - The fork itself is expected to auto-sync with upstream Ghostty and publish fresh `GhosttyKit` builds on its own cadence; this repo only tracks the published build tag.
 - `apps/macos/scripts/verify_ghosttykit.sh` is the repository-level contract check for that forked artifact. It verifies that the published `GhosttyKit` still declares and exports the two additive PTY I/O hooks Spaces relies on before local setup completes.
@@ -38,6 +39,18 @@ The `ghostty-embedded` session path is:
 3. The host starts one `GhosttyEmbeddedTerminalView`, one control socket, one output log, and one runtime-state refresh loop.
 4. Owner windows attach the live libghostty surface.
 5. Viewer windows stay passive and read from the tailed session output until they take over.
+
+## Mobile and Remote Control
+- `spaces terminal proxy <session-id> --host ... --port ... --auth-token ...` exposes a local TCP bridge for one session.
+- The proxy reuses the same JSON control protocol as `control.sock`.
+- Supported control patterns on that TCP seam are:
+  - `attach` with an explicit client record and attachment mode
+  - `tail` for recent output
+  - `send`
+  - `key`
+  - `takeover`
+- The proxy answers `attach` and `tail` from persisted session state and forwards the remaining commands into the local control socket. That keeps the Mac-owned libghostty host as the PTY owner while still allowing mobile-shaped or remote-shaped clients to view, tail, and take over.
+- The current repository includes `apps/macos/Tests/poc_mobile_terminal_client.py` as a headless mobile-shaped proof of concept over that TCP bridge.
 
 ## Session Files
 Each session lives under `~/.spaces/terminal/sessions/<session-id>/` and keeps:

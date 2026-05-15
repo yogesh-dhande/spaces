@@ -1,5 +1,6 @@
 import ArgumentParser
 import Darwin
+import Dispatch
 import Foundation
 import spacesterminalcore
 import spacesterminalruntime
@@ -36,7 +37,7 @@ struct TerminalCommand: ParsableCommand {
         commandName: "terminal", abstract: "Manage tmux-free Spaces terminal sessions.",
         subcommands: [
             TerminalListCommand.self, TerminalCommandCommand.self, TerminalSendCommand.self, TerminalKeyCommand.self, TerminalTailCommand.self,
-            TerminalShowCommand.self, TerminalTakeoverCommand.self, TerminalServeCommand.self,
+            TerminalShowCommand.self, TerminalTakeoverCommand.self, TerminalProxyCommand.self, TerminalServeCommand.self,
         ])
 }
 
@@ -234,6 +235,43 @@ struct TerminalTakeoverCommand: ParsableCommand {
             request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
         guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
         print("Transferred terminal ownership for session \(sessionID) to \(clientID)")
+    }
+}
+
+struct TerminalProxyCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "proxy", abstract: "Expose a Spaces terminal session over TCP for mobile or remote control.")
+
+    @Argument(help: "Terminal session ID.") var sessionID: String
+    @Option(name: .long, help: "TCP host to bind. Use 127.0.0.1 for local-only access.") var host = "127.0.0.1"
+    @Option(name: .long, help: "TCP port to bind. Use 0 to choose an ephemeral port.") var port = 0
+    @Option(name: .long, help: "Shared auth token required by remote clients.") var authToken: String
+
+    func run() throws {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
+            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
+        }
+
+        let queue = DispatchQueue(label: "spaces.terminal.proxy.\(sessionID)")
+        let server = TerminalControlTCPServer(host: host, port: port, authToken: authToken, queue: queue) { request in
+            switch request.command {
+            case "attach":
+                guard let client = request.client else { return TerminalControlResponse(ok: false, message: "Missing client payload.") }
+                let mode = request.attachmentMode ?? .viewer
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: ISO8601DateFormatter().string(from: Date()))
+                return TerminalControlResponse(ok: true, message: "Attached \(mode.rawValue) client.")
+            case "tail":
+                let tailed = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: max(request.lineCount ?? 40, 1))
+                return TerminalControlResponse(ok: true, message: tailed)
+            default: return try TerminalControlClient.send(request: request, socketPath: paths.controlSocketPath)
+            }
+        }
+        try server.start()
+        print("Terminal proxy ready\tsession=\(sessionID)\thost=\(host)\tport=\(server.listeningPort)")
+        fflush(stdout)
+        dispatchMain()
     }
 }
 
