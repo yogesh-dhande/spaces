@@ -35,6 +35,32 @@ import XCTest
         XCTAssertNotEqual(iAttributes[.backgroundColor] as? NSColor, cursorAttributes[.backgroundColor] as? NSColor)
     }
 
+    func testRendererReportsUnderlineCursorWithoutInvertingCellColors() {
+        var buffer = TerminalScreenBuffer()
+        buffer.ingest("hi\u{001B}[3 q")
+
+        let rendered = TerminalRenderedScreenAttributedRenderer.renderResult(
+            buffer.renderedScreen(), defaultForeground: .textColor, defaultBackground: .textBackgroundColor)
+
+        XCTAssertEqual(rendered.attributedText.string, "hi ")
+        XCTAssertEqual(rendered.cursorStyle, .underline)
+        XCTAssertEqual(rendered.cursorRange, NSRange(location: 2, length: 1))
+        let iAttributes = rendered.attributedText.attributes(at: 1, effectiveRange: nil)
+        let cursorAttributes = rendered.attributedText.attributes(at: 2, effectiveRange: nil)
+        XCTAssertEqual(iAttributes[.backgroundColor] as? NSColor, cursorAttributes[.backgroundColor] as? NSColor)
+    }
+
+    func testRendererReportsBarCursorWithoutInvertingCellColors() {
+        var buffer = TerminalScreenBuffer()
+        buffer.ingest("hi\u{001B}[5 q")
+
+        let rendered = TerminalRenderedScreenAttributedRenderer.renderResult(
+            buffer.renderedScreen(), defaultForeground: .textColor, defaultBackground: .textBackgroundColor)
+
+        XCTAssertEqual(rendered.cursorStyle, .bar)
+        XCTAssertEqual(rendered.cursorRange, NSRange(location: 2, length: 1))
+    }
+
     func testRendererMapsHyperlinkCellsToAttributedLinks() {
         var buffer = TerminalScreenBuffer()
         buffer.ingest("\u{001B}]8;;https://example.com\u{0007}link\u{001B}]8;;\u{0007}")

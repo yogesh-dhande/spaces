@@ -53,6 +53,8 @@ import spacesterminalghostty
     private struct TransportRenderedOutput {
         let text: String
         let attributedText: NSAttributedString
+        let cursorRange: NSRange?
+        let cursorStyle: TerminalCursorStyle
         let replayMode: String
         let replayBytes: Int64
         let usesAlternateScreen: Bool
@@ -866,9 +868,10 @@ import spacesterminalghostty
                     renderedOutputResult = TransportRenderedOutput(
                         text: fallbackText,
                         attributedText: NSAttributedString(
-                            string: fallbackText, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor]),
-                        replayMode: "fallback_recent_output", replayBytes: 0, usesAlternateScreen: false, mouseTrackingMode: .disabled,
-                        usesSGRMouseEncoding: false, usesAlternateScrollMode: false, usesBracketedPasteMode: false, usesFocusReporting: false)
+                            string: fallbackText, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor]), cursorRange: nil,
+                        cursorStyle: .block, replayMode: "fallback_recent_output", replayBytes: 0, usesAlternateScreen: false,
+                        mouseTrackingMode: .disabled, usesSGRMouseEncoding: false, usesAlternateScrollMode: false, usesBracketedPasteMode: false,
+                        usesFocusReporting: false)
                 }
                 TerminalPerformance.logMetric(
                     "terminal_viewer_refresh_render_output", target: "session=\(sessionID)",
@@ -882,7 +885,9 @@ import spacesterminalghostty
                 lastRenderedUsesBracketedPasteMode = renderedOutputResult.usesBracketedPasteMode
                 lastRenderedUsesFocusReporting = renderedOutputResult.usesFocusReporting
                 if renderedOutputResult.text != lastRenderedOutput || !renderedOutputResult.attributedText.isEqual(lastRenderedAttributedOutput) {
-                    outputView.setRenderedOutput(plainText: renderedOutputResult.text, attributedText: renderedOutputResult.attributedText)
+                    outputView.setRenderedOutput(
+                        plainText: renderedOutputResult.text, attributedText: renderedOutputResult.attributedText,
+                        cursorRange: renderedOutputResult.cursorRange, cursorStyle: renderedOutputResult.cursorStyle)
                     TerminalPerformance.logMetric(
                         "terminal_viewer_refresh_text_assign", target: "session=\(sessionID)",
                         elapsedMS: TerminalPerformance.elapsedMS(since: assignTextStartedAt), success: true,
@@ -1593,8 +1598,8 @@ import spacesterminalghostty
             let attributedText = NSAttributedString(
                 string: snapshot.recentOutput, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor])
             return TransportRenderedOutput(
-                text: snapshot.recentOutput, attributedText: attributedText, replayMode: "recent_output_empty", replayBytes: 0,
-                usesAlternateScreen: false, mouseTrackingMode: .disabled, usesSGRMouseEncoding: false, usesAlternateScrollMode: false,
+                text: snapshot.recentOutput, attributedText: attributedText, cursorRange: nil, cursorStyle: .block, replayMode: "recent_output_empty",
+                replayBytes: 0, usesAlternateScreen: false, mouseTrackingMode: .disabled, usesSGRMouseEncoding: false, usesAlternateScrollMode: false,
                 usesBracketedPasteMode: false, usesFocusReporting: false)
         }
 
@@ -1613,22 +1618,25 @@ import spacesterminalghostty
 
         let renderedScreen = transportScreenBuffer.renderedScreen()
         let rendered = renderedScreen.plainText
-        let attributed = TerminalRenderedScreenAttributedRenderer.render(
+        let renderedResult = TerminalRenderedScreenAttributedRenderer.renderResult(
             renderedScreen, defaultForeground: outputView.textColor, defaultBackground: outputView.backgroundColor, font: outputView.font)
+        let attributed = renderedResult.attributedText
         if rendered.isEmpty, !lastTransportOutput.isEmpty {
             let fallback = NSAttributedString(
                 string: lastTransportOutput, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor])
             return TransportRenderedOutput(
-                text: lastTransportOutput, attributedText: fallback, replayMode: "recent_output_fallback", replayBytes: replayBytes,
-                usesAlternateScreen: renderedScreen.usesAlternateScreen, mouseTrackingMode: renderedScreen.mouseTrackingMode,
-                usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding, usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode,
-                usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode, usesFocusReporting: renderedScreen.usesFocusReporting)
+                text: lastTransportOutput, attributedText: fallback, cursorRange: nil, cursorStyle: .block, replayMode: "recent_output_fallback",
+                replayBytes: replayBytes, usesAlternateScreen: renderedScreen.usesAlternateScreen,
+                mouseTrackingMode: renderedScreen.mouseTrackingMode, usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding,
+                usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode, usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode,
+                usesFocusReporting: renderedScreen.usesFocusReporting)
         }
         return TransportRenderedOutput(
-            text: rendered, attributedText: attributed, replayMode: replayMode, replayBytes: replayBytes,
-            usesAlternateScreen: renderedScreen.usesAlternateScreen, mouseTrackingMode: renderedScreen.mouseTrackingMode,
-            usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding, usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode,
-            usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode, usesFocusReporting: renderedScreen.usesFocusReporting)
+            text: rendered, attributedText: attributed, cursorRange: renderedResult.cursorRange, cursorStyle: renderedResult.cursorStyle,
+            replayMode: replayMode, replayBytes: replayBytes, usesAlternateScreen: renderedScreen.usesAlternateScreen,
+            mouseTrackingMode: renderedScreen.mouseTrackingMode, usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding,
+            usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode, usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode,
+            usesFocusReporting: renderedScreen.usesFocusReporting)
     }
 
     private func rebuildTransportScreenBuffer(totalBytes: Int64) throws -> Int64 {

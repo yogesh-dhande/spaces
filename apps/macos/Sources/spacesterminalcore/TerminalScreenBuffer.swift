@@ -11,6 +11,12 @@ public enum TerminalUnderlineStyle: Equatable {
     case double
 }
 
+public enum TerminalCursorStyle: Equatable {
+    case block
+    case underline
+    case bar
+}
+
 public struct TerminalTextStyle: Equatable {
     public var foreground: TerminalANSIColor?
     public var background: TerminalANSIColor?
@@ -65,6 +71,7 @@ public struct TerminalRenderedScreen: Equatable {
     public let cursorRow: Int
     public let cursorColumn: Int
     public let cursorVisible: Bool
+    public let cursorStyle: TerminalCursorStyle
     public let usesAlternateScreen: Bool
     public let mouseTrackingMode: TerminalMouseTrackingMode
     public let usesSGRMouseEncoding: Bool
@@ -73,14 +80,15 @@ public struct TerminalRenderedScreen: Equatable {
     public let usesFocusReporting: Bool
 
     public init(
-        rows: [[TerminalRenderedCell]], cursorRow: Int, cursorColumn: Int, cursorVisible: Bool, usesAlternateScreen: Bool,
-        mouseTrackingMode: TerminalMouseTrackingMode, usesSGRMouseEncoding: Bool, usesAlternateScrollMode: Bool, usesBracketedPasteMode: Bool,
-        usesFocusReporting: Bool
+        rows: [[TerminalRenderedCell]], cursorRow: Int, cursorColumn: Int, cursorVisible: Bool, cursorStyle: TerminalCursorStyle,
+        usesAlternateScreen: Bool, mouseTrackingMode: TerminalMouseTrackingMode, usesSGRMouseEncoding: Bool, usesAlternateScrollMode: Bool,
+        usesBracketedPasteMode: Bool, usesFocusReporting: Bool
     ) {
         self.rows = rows
         self.cursorRow = cursorRow
         self.cursorColumn = cursorColumn
         self.cursorVisible = cursorVisible
+        self.cursorStyle = cursorStyle
         self.usesAlternateScreen = usesAlternateScreen
         self.mouseTrackingMode = mouseTrackingMode
         self.usesSGRMouseEncoding = usesSGRMouseEncoding
@@ -130,6 +138,7 @@ public struct TerminalScreenBuffer {
     private var primaryScreenState: StoredScreenState?
     private var currentStyle = TerminalTextStyle()
     private var cursorVisible = true
+    private var cursorStyle = TerminalCursorStyle.block
     private var isUsingAlternateScreen = false
     private var mouseTrackingMode = TerminalMouseTrackingMode.disabled
     private var usesSGRMouseEncoding = false
@@ -152,6 +161,7 @@ public struct TerminalScreenBuffer {
         primaryScreenState = nil
         currentStyle = TerminalTextStyle()
         cursorVisible = true
+        cursorStyle = .block
         isUsingAlternateScreen = false
         mouseTrackingMode = .disabled
         usesSGRMouseEncoding = false
@@ -195,7 +205,7 @@ public struct TerminalScreenBuffer {
     public func renderedScreen() -> TerminalRenderedScreen {
         TerminalRenderedScreen(
             rows: renderedRows().map { $0.map { TerminalRenderedCell(character: $0.character, style: $0.style) } }, cursorRow: renderedCursorRow(),
-            cursorColumn: cursorColumn, cursorVisible: cursorVisible, usesAlternateScreen: isUsingAlternateScreen,
+            cursorColumn: cursorColumn, cursorVisible: cursorVisible, cursorStyle: cursorStyle, usesAlternateScreen: isUsingAlternateScreen,
             mouseTrackingMode: mouseTrackingMode, usesSGRMouseEncoding: usesSGRMouseEncoding, usesAlternateScrollMode: usesAlternateScrollMode,
             usesBracketedPasteMode: usesBracketedPasteMode, usesFocusReporting: usesFocusReporting)
     }
@@ -229,14 +239,20 @@ public struct TerminalScreenBuffer {
     private mutating func consumeCSI(_ scalars: [UnicodeScalar], startingAt index: Int) -> Int {
         var current = index
         var parameterBuffer = ""
-        while current < scalars.count {
-            let scalar = scalars[current]
-            if scalar.value >= 0x40 && scalar.value <= 0x7E {
-                applyCSI(final: scalar, parameters: parameterBuffer)
-                return current + 1
-            }
-            parameterBuffer.unicodeScalars.append(scalar)
+        while current < scalars.count, (0x30...0x3F).contains(scalars[current].value) {
+            parameterBuffer.unicodeScalars.append(scalars[current])
             current += 1
+        }
+        var intermediateBuffer = ""
+        while current < scalars.count, (0x20...0x2F).contains(scalars[current].value) {
+            intermediateBuffer.unicodeScalars.append(scalars[current])
+            current += 1
+        }
+        guard current < scalars.count else { return current }
+        let scalar = scalars[current]
+        if scalar.value >= 0x40 && scalar.value <= 0x7E {
+            applyCSI(final: scalar, parameters: parameterBuffer, intermediate: intermediateBuffer)
+            return current + 1
         }
         return current
     }
@@ -268,7 +284,7 @@ public struct TerminalScreenBuffer {
         currentStyle.hyperlink = uri.isEmpty ? nil : uri
     }
 
-    private mutating func applyCSI(final: UnicodeScalar, parameters: String) {
+    private mutating func applyCSI(final: UnicodeScalar, parameters: String, intermediate: String) {
         let cleaned = parameters.replacingOccurrences(of: "?", with: "")
         let values = cleaned.split(separator: ";", omittingEmptySubsequences: false).map { Int($0) ?? 0 }
 
@@ -319,8 +335,17 @@ public struct TerminalScreenBuffer {
         case 0x68: applyMode(values, enabled: true)
         case 0x6C: applyMode(values, enabled: false)
         case 0x72: setScrollRegion(values)
-        case 0x70: if parameters == "!" { softReset() }
+        case 0x71: if intermediate == " " { applyCursorStyle(values.first ?? 0) }
+        case 0x70: if intermediate == "!" { softReset() }
         default: break
+        }
+    }
+
+    private mutating func applyCursorStyle(_ value: Int) {
+        switch value {
+        case 3, 4: cursorStyle = .underline
+        case 5, 6: cursorStyle = .bar
+        default: cursorStyle = .block
         }
     }
 
@@ -493,6 +518,7 @@ public struct TerminalScreenBuffer {
     private mutating func softReset() {
         currentStyle = TerminalTextStyle()
         cursorVisible = true
+        cursorStyle = .block
         mouseTrackingMode = .disabled
         usesSGRMouseEncoding = false
         usesAlternateScrollMode = false

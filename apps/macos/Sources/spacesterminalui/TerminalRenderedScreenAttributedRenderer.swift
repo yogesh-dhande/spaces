@@ -1,6 +1,12 @@
 import AppKit
 import spacesterminalcore
 
+struct TerminalRenderedAttributedScreen {
+    let attributedText: NSAttributedString
+    let cursorRange: NSRange?
+    let cursorStyle: TerminalCursorStyle
+}
+
 enum TerminalRenderedScreenAttributedRenderer {
     private static let ansiPalette: [NSColor] = [
         .init(calibratedRed: 0.12, green: 0.14, blue: 0.16, alpha: 1), .init(calibratedRed: 0.86, green: 0.24, blue: 0.21, alpha: 1),
@@ -17,9 +23,20 @@ enum TerminalRenderedScreenAttributedRenderer {
         _ screen: TerminalRenderedScreen, defaultForeground: NSColor = .textColor, defaultBackground: NSColor = .textBackgroundColor,
         font: NSFont = .monospacedSystemFont(ofSize: 12, weight: .regular)
     ) -> NSAttributedString {
+        renderResult(screen, defaultForeground: defaultForeground, defaultBackground: defaultBackground, font: font).attributedText
+    }
+
+    static func renderResult(
+        _ screen: TerminalRenderedScreen, defaultForeground: NSColor = .textColor, defaultBackground: NSColor = .textBackgroundColor,
+        font: NSFont = .monospacedSystemFont(ofSize: 12, weight: .regular)
+    ) -> TerminalRenderedAttributedScreen {
         let rendered = NSMutableAttributedString()
         let visibleRowRange = visibleRows(in: screen)
-        guard let visibleRowRange else { return rendered }
+        guard let visibleRowRange else {
+            return TerminalRenderedAttributedScreen(attributedText: rendered, cursorRange: nil, cursorStyle: screen.cursorStyle)
+        }
+
+        var cursorRange: NSRange?
 
         for rowIndex in visibleRowRange {
             let row = screen.rows[rowIndex]
@@ -28,18 +45,21 @@ enum TerminalRenderedScreenAttributedRenderer {
                 for column in 0...lastVisibleColumn {
                     let cell = column < row.count ? row[column] : TerminalRenderedCell(character: " ", style: TerminalTextStyle())
                     let isCursor = screen.cursorVisible && rowIndex == screen.cursorRow && column == screen.cursorColumn
+                    let shouldInvertForCursor = isCursor && screen.cursorStyle == .block
+                    let location = rendered.length
                     rendered.append(
                         NSAttributedString(
                             string: String(cell.character),
                             attributes: attributes(
                                 for: cell.style, defaultForeground: defaultForeground, defaultBackground: defaultBackground, baseFont: font,
-                                invertForCursor: isCursor)))
+                                invertForCursor: shouldInvertForCursor)))
+                    if isCursor { cursorRange = NSRange(location: location, length: 1) }
                 }
             }
             if rowIndex < visibleRowRange.upperBound - 1 { rendered.append(NSAttributedString(string: "\n")) }
         }
 
-        return rendered
+        return TerminalRenderedAttributedScreen(attributedText: rendered, cursorRange: cursorRange, cursorStyle: screen.cursorStyle)
     }
 
     private static func visibleRows(in screen: TerminalRenderedScreen) -> Range<Int>? {

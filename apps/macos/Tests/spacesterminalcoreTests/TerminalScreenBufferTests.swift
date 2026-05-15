@@ -113,6 +113,22 @@ final class TerminalScreenBufferTests: XCTestCase {
         XCTAssertTrue(buffer.renderedScreen().cursorVisible)
     }
 
+    func testIngestTracksCursorStyleModes() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("x")
+        XCTAssertEqual(buffer.renderedScreen().cursorStyle, .block)
+
+        buffer.ingest("\u{001B}[3 q")
+        XCTAssertEqual(buffer.renderedScreen().cursorStyle, .underline)
+
+        buffer.ingest("\u{001B}[5 q")
+        XCTAssertEqual(buffer.renderedScreen().cursorStyle, .bar)
+
+        buffer.ingest("\u{001B}[2 q")
+        XCTAssertEqual(buffer.renderedScreen().cursorStyle, .block)
+    }
+
     func testIngestSupportsScrollRegionsAndReverseIndex() {
         var buffer = TerminalScreenBuffer()
 

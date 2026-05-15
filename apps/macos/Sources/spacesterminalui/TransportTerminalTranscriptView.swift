@@ -55,6 +55,8 @@ import spacesterminalcore
 
     private var plainString = ""
     private var attributedString = NSAttributedString(string: "")
+    private var cursorOverlayRange: NSRange?
+    private var cursorOverlayStyle = TerminalCursorStyle.block
     private var markedTextValue = NSAttributedString(string: "")
     private var markedSelectionRange = NSRange(location: 0, length: 0)
     private var selectedRangeValue = NSRange(location: 0, length: 0)
@@ -201,13 +203,18 @@ import spacesterminalcore
         }
         drawSelectionHighlights()
         drawContent()
+        drawCursorOverlay()
     }
 
     func setAttributedString(_ string: NSAttributedString) { setRenderedOutput(plainText: string.string, attributedText: string) }
 
-    func setRenderedOutput(plainText: String, attributedText: NSAttributedString) {
+    func setRenderedOutput(
+        plainText: String, attributedText: NSAttributedString, cursorRange: NSRange? = nil, cursorStyle: TerminalCursorStyle = .block
+    ) {
         self.plainString = plainText
         self.attributedString = attributedText
+        self.cursorOverlayRange = cursorRange
+        self.cursorOverlayStyle = cursorStyle
         clampSelection()
         invalidateLayoutAndDisplay()
     }
@@ -362,6 +369,24 @@ import spacesterminalcore
         guard selectedRangeValue.length > 0 else { return }
         NSColor.selectedTextBackgroundColor.withAlphaComponent(0.35).setFill()
         for rect in selectionRects(for: selectedRangeValue) { rect.fill() }
+    }
+
+    private func drawCursorOverlay() {
+        guard let cursorOverlayRange, cursorOverlayRange.length > 0 else { return }
+        guard cursorOverlayStyle != .block else { return }
+        guard let rect = selectionRects(for: cursorOverlayRange).first else { return }
+        let foregroundColor =
+            (attributedString.attribute(.foregroundColor, at: cursorOverlayRange.location, effectiveRange: nil) as? NSColor) ?? textColor
+        foregroundColor.setFill()
+        switch cursorOverlayStyle {
+        case .block: return
+        case .bar:
+            let width = max(2, ceil(characterCellWidth * 0.12))
+            NSRect(x: rect.minX, y: rect.minY, width: width, height: rect.height).fill()
+        case .underline:
+            let height = max(2, ceil(lineHeight * 0.12))
+            NSRect(x: rect.minX, y: rect.maxY - height, width: rect.width, height: height).fill()
+        }
     }
 
     func characterIndex(at point: NSPoint) -> Int {
