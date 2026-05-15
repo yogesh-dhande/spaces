@@ -18,6 +18,7 @@ import spacesterminalcore
 
     public var onSurfaceReady: SurfaceReadyHandler?
     public var onActionEvent: (@MainActor (GhosttyActionEvent) -> Void)?
+    public var onSurfaceCellSizeChanged: (@MainActor (Int, Int) -> Void)?
 
     public nonisolated(unsafe) private(set) var surface: ghostty_surface_t?
 
@@ -297,6 +298,13 @@ import spacesterminalcore
         return Int32(pid)
     }
 
+    public func surfaceCellSize() -> (columns: Int, rows: Int)? {
+        guard let surface else { return nil }
+        let size = ghostty_surface_size(surface)
+        guard size.columns > 0, size.rows > 0 else { return nil }
+        return (Int(size.columns), Int(size.rows))
+    }
+
     public func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { outputHandler = handler }
     public func setFocused(_ focused: Bool) { setSurfaceFocus(focused) }
     public func snapshot() -> GhosttyTerminalSnapshot? { GhosttyTerminalSnapshotCapture.capture(from: surface) }
@@ -485,6 +493,7 @@ import spacesterminalcore
         if lastGeometry?.displayID != geometry.displayID, let displayID { ghostty_surface_set_display_id(surface, displayID) }
         if lastGeometry?.width != geometry.width || lastGeometry?.height != geometry.height {
             ghostty_surface_set_size(surface, geometry.width, geometry.height)
+            if let cellSize = surfaceCellSize() { onSurfaceCellSizeChanged?(cellSize.columns, cellSize.rows) }
         }
         lastGeometry = geometry
     }

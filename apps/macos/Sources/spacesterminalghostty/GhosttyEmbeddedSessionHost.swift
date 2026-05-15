@@ -64,6 +64,7 @@ extension Notification.Name {
     private var currentTitle: String?
     private var currentWorkingDirectory: String?
     private var lastKnownChildPID: Int32?
+    private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
     private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
     private var lastRuntimeStateWriteAt: Date?
     private var sessionStartedAt: Date?
@@ -79,6 +80,11 @@ extension Notification.Name {
         terminalView = GhosttyEmbeddedTerminalView(launchConfiguration: launchConfiguration)
         self.requestSurfaceRefreshAction = requestSurfaceRefreshAction ?? { [terminalView] in terminalView.requestSurfaceRefresh() }
         terminalView.onActionEvent = { [weak self] event in self?.applyActionEvent(event) }
+        terminalView.onSurfaceCellSizeChanged = { [weak self] columns, rows in
+            guard let self else { return }
+            self.lastKnownSurfaceSize = (columns, rows)
+            self.refreshRuntimeState(force: true)
+        }
     }
 
     public func startIfNeeded() throws {
@@ -222,7 +228,7 @@ extension Notification.Name {
         outputHandle = nil
         let exitedState = TerminalSessionRuntimeState(
             sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: childPID, state: .exited,
-            updatedAt: now, exitedAt: now)
+            updatedAt: now, exitedAt: now, columns: lastKnownSurfaceSize?.columns, rows: lastKnownSurfaceSize?.rows)
         try? TerminalSessionPersistence.writeRuntimeState(exitedState, paths: paths)
         lastPersistedRuntimeState = exitedState
         postRuntimeStateDidChange()
@@ -314,7 +320,8 @@ extension Notification.Name {
         let now = Date()
         let state = TerminalSessionRuntimeState(
             sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
-            state: .running, updatedAt: ISO8601DateFormatter().string(from: now))
+            state: .running, updatedAt: ISO8601DateFormatter().string(from: now), columns: observedSurfaceSize()?.columns,
+            rows: observedSurfaceSize()?.rows)
         let shouldPersist = force || shouldPersistRuntimeState(state, now: now)
         guard shouldPersist else { return }
         let previousSignature = lastPersistedRuntimeState.map(runtimeStateSignature(for:))
@@ -382,6 +389,14 @@ extension Notification.Name {
         return lastKnownChildPID
     }
 
+    private func observedSurfaceSize() -> (columns: Int, rows: Int)? {
+        if let size = terminalView.surfaceCellSize() {
+            lastKnownSurfaceSize = size
+            return size
+        }
+        return lastKnownSurfaceSize
+    }
+
     private func postAttachmentStateDidChange() {
         NotificationCenter.default.post(
             name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
@@ -409,7 +424,7 @@ extension Notification.Name {
     }
 
     private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
-        "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
+        "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
     }
 
     var debugCurrentTitle: String? { currentTitle }

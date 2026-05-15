@@ -25,6 +25,7 @@ public final class GhosttyEmbeddedTerminalSessionRuntime: TerminalSessionBackend
     private var exitCode: Int32 = 0
     private var didStop = false
     private var lastKnownChildPID: Int32?
+    private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
 
     public init(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
@@ -62,7 +63,7 @@ public final class GhosttyEmbeddedTerminalSessionRuntime: TerminalSessionBackend
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
-                state: .running, updatedAt: now()), paths: paths)
+                state: .running, updatedAt: now(), columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows), paths: paths)
 
         try startControlServer()
         startStateTimer()
@@ -243,7 +244,7 @@ public final class GhosttyEmbeddedTerminalSessionRuntime: TerminalSessionBackend
         try? TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
-                state: .running, updatedAt: now()), paths: paths)
+                state: .running, updatedAt: now(), columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows), paths: paths)
     }
 
     @MainActor private func observedChildPID() -> Int32? {
@@ -255,6 +256,15 @@ public final class GhosttyEmbeddedTerminalSessionRuntime: TerminalSessionBackend
             return intPID
         }
         return lastKnownChildPID
+    }
+
+    @MainActor private func observedSurfaceSize() -> (columns: Int, rows: Int)? {
+        guard let surface else { return lastKnownSurfaceSize }
+        let size = ghostty_surface_size(surface)
+        guard size.columns > 0, size.rows > 0 else { return lastKnownSurfaceSize }
+        let resolved = (columns: Int(size.columns), rows: Int(size.rows))
+        lastKnownSurfaceSize = resolved
+        return resolved
     }
 
     @MainActor private func tick() {
@@ -270,7 +280,8 @@ public final class GhosttyEmbeddedTerminalSessionRuntime: TerminalSessionBackend
         try? TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
-                state: .exited, updatedAt: now(), exitedAt: now()), paths: paths)
+                state: .exited, updatedAt: now(), exitedAt: now(), columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows),
+            paths: paths)
         exitCode = 0
         controlServer?.stop()
         NSApplication.shared.stop(nil)

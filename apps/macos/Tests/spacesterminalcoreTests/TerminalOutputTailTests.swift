@@ -66,6 +66,46 @@ final class TerminalOutputTailTests: XCTestCase {
 
         let tailed = try TerminalOutputTail.tail(path: url.path, lineCount: 2)
 
-        XCTAssertEqual(tailed, "progress 100%\ncomplete")
+        XCTAssertEqual(tailed, "progress 100%\n\(String(repeating: " ", count: "progress 100%".count))complete")
+    }
+
+    func testTailRendersCursorHomeStatusRewriteThroughGhosttyVT() throws {
+        let sessionRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sessionRoot) }
+        let paths = TerminalSessionPaths(rootDirectory: sessionRoot.path)
+        let url = URL(fileURLWithPath: paths.outputPath)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: "session-home", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-15T00:00:00Z",
+                columns: 200, rows: 4), paths: paths)
+        let text = """
+            SEQ 00000001 bootstrap
+            \u{001B}[HSTATUS frame=000002 total=000002\u{001B}[2;1HSEQ 00000002 FRAME 000002 ROW 001 alpha\u{001B}[3;1HSEQ 00000003 FRAME 000002 ROW 002 beta\u{001B}[4;1HSEQ 00000004 FRAME 000002 ROW 003 gamma
+            """
+        try text.data(using: .utf8)?.write(to: url)
+
+        let tailed = try TerminalOutputTail.tail(path: url.path, lineCount: 3)
+
+        XCTAssertEqual(
+            tailed, "SEQ 00000002 FRAME 000002 ROW 001 alpha\nSEQ 00000003 FRAME 000002 ROW 002 beta\nSEQ 00000004 FRAME 000002 ROW 003 gamma")
+    }
+
+    func testTailUsesPersistedTerminalSizeForANSIWrapping() throws {
+        let sessionRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sessionRoot) }
+
+        let paths = TerminalSessionPaths(rootDirectory: sessionRoot.path)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: "session-size", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-15T00:00:00Z",
+                columns: 4, rows: 3), paths: paths)
+        let text = "\u{001B}[31mABCDEFGHIJ\u{001B}[0m"
+        try text.data(using: .utf8)?.write(to: URL(fileURLWithPath: paths.outputPath))
+
+        let tailed = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: 2)
+
+        XCTAssertEqual(tailed, "EFGH\nIJ")
     }
 }

@@ -7,10 +7,11 @@ This document captures the current libghostty-backed terminal integration in Spa
 - Spaces consumes a forked `GhosttyKit.xcframework` from `yogesh-dhande/ghostty` because the branch depends on two additive PTY I/O exports:
   - `ghostty_surface_set_data_callback(...)`
   - `ghostty_surface_send_input_raw(...)`
-- Spaces does not add a second terminal-emulation layer on top of Ghostty for the preferred path. Mobile and remote control reuse the existing session files plus control socket boundary from the Mac-owned libghostty host.
+- Spaces keeps live owner rendering on Ghostty itself. For non-surface replay such as `spaces terminal tail`, Spaces feeds `output.log` through `libghostty-vt` so terminal reconstruction stays aligned with Ghostty behavior without introducing a second live PTY owner.
 - The pinned fork build tag lives in `apps/macos/ghosttykit-release-tag.txt`, and a scheduled workflow updates that pin to the latest published fork release through a pull request.
 - The fork itself is expected to auto-sync with upstream Ghostty and publish fresh `GhosttyKit` builds on its own cadence; this repo only tracks the published build tag.
 - `apps/macos/scripts/verify_ghosttykit.sh` is the repository-level contract check for that forked artifact. It verifies that the published `GhosttyKit` still declares and exports the two additive PTY I/O hooks Spaces relies on before local setup completes.
+- `apps/macos/scripts/setup_ghosttyvt.sh` installs a pinned local `ghostty` checkout plus Zig toolchain under `apps/macos/.local/ghosttyvt/` and builds `libghostty-vt` for the replay path.
 - iTerm2 and Ghostty external-host integrations still exist on this branch and remain selectable overrides.
 - When the configured terminal host is `Spaces`, tracked workspace processes use the built-in session backend directly and do not require tmux.
 
@@ -56,13 +57,21 @@ The current forked GhosttyKit build exposes the raw PTY I/O hooks Spaces needs b
 ## Session Files
 Each session lives under `~/.spaces/terminal/sessions/<session-id>/` and keeps:
 - `metadata.json`: launch configuration and declared backend
-- `state.json`: live runtime state, including backend and child PID
+- `state.json`: live runtime state, including backend, child PID, and the last known terminal columns and rows
 - `output.log`: append-only terminal output used by `tail`
 - `clients.json`: known client identities
 - `attachments.json`: owner or viewer attachment history
 - `control.sock`: local control-plane socket
 
 The control socket path is shortened through `TerminalSessionPaths` so isolated `SPACES_DB_PATH` roots do not exceed Unix socket path limits.
+
+## Tail Replay
+- `spaces terminal tail` consumes `output.log`, not the live owner surface.
+- Plain append-only logs stay on a cheap text path.
+- ANSI or full-screen output is replayed through `libghostty-vt`.
+- Replay uses the session's persisted columns and rows from `state.json`, not a hard-coded terminal size, so wrapping and redraw-heavy TUIs stay aligned after the owner window resizes.
+- `GhosttyEmbeddedTerminalView` publishes cell-size changes whenever the live owner surface geometry changes, and the session host persists those values alongside the rest of runtime state.
+- The replay path still uses bounded redraw-boundary detection to avoid replaying the entire log when the tail request only needs the latest visible frame, but Ghostty VT is responsible for reconstructing terminal state from that boundary forward.
 
 ## Additive libghostty Surface
 Spaces depends on an additive patch strategy rather than a behavior fork.

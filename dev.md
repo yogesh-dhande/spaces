@@ -121,6 +121,14 @@ apps/macos/Tests/e2e_terminal_cli_commands.sh
 
 That script exercises `spaces terminal command`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Ghostty-backed session.
 
+The Ghostty-backed `tail` path also depends on a local `libghostty-vt` build. Set that up before building or profiling terminal changes:
+
+```bash
+apps/macos/scripts/setup_ghosttyvt.sh
+```
+
+That script pins a local `ghostty` checkout to `apps/macos/ghosttyvt-revision.txt`, installs Zig `0.15.2` under `apps/macos/.local/ghosttyvt/toolchain/`, and builds `libghostty-vt` under `apps/macos/.local/ghosttyvt/src/zig-out/`.
+
 The terminal E2E, profiling, and soak scripts that launch `SpacesApp` acquire a shared harness lock before they run `setup_ghosttykit`, kill existing app instances, or launch a new app instance. Running them at the same time should serialize rather than tearing each other down mid-run.
 
 For repeatable profiling of the built-in terminal owner and viewer flows:

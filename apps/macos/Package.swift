@@ -1,5 +1,9 @@
 // swift-tools-version: 6.2
+import Foundation
 import PackageDescription
+
+let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
+let ghosttyVTIncludeDirectory = "\(packageDirectory)/.local/ghosttyvt/src/zig-out/include"
 
 let package = Package(
     name: "spaces",
@@ -27,8 +31,14 @@ let package = Package(
             name: "GhosttyKit",
             path: ".local/ghosttykit/GhosttyKit.xcframework"
         ),
+        .target(
+            name: "ghosttyvtshim",
+            cSettings: [
+                .unsafeFlags(["-I", ghosttyVTIncludeDirectory])
+            ]
+        ),
         .target(name: "systembridge"),
-        .target(name: "spacesterminalcore"),
+        .target(name: "spacesterminalcore", dependencies: ["ghosttyvtshim"]),
         .target(
             name: "spacesterminalghostty",
             dependencies: ["spacesterminalcore", "GhosttyKit"],

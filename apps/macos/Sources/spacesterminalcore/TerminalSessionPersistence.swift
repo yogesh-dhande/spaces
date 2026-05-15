@@ -49,18 +49,22 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
     public let backend: TerminalSessionBackendKind
     public let servicePID: Int32
     public let childPID: Int32?
+    public let columns: Int?
+    public let rows: Int?
     public let state: TerminalSessionState
     public let updatedAt: String
     public let exitedAt: String?
 
     public init(
         sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, servicePID: Int32, childPID: Int32?, state: TerminalSessionState,
-        updatedAt: String, exitedAt: String? = nil
+        updatedAt: String, exitedAt: String? = nil, columns: Int? = nil, rows: Int? = nil
     ) {
         self.sessionID = sessionID
         self.backend = backend
         self.servicePID = servicePID
         self.childPID = childPID
+        self.columns = columns
+        self.rows = rows
         self.state = state
         self.updatedAt = updatedAt
         self.exitedAt = exitedAt
@@ -71,6 +75,8 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
         case backend
         case servicePID
         case childPID
+        case columns
+        case rows
         case state
         case updatedAt
         case exitedAt
@@ -82,6 +88,8 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
         backend = try container.decodeIfPresent(TerminalSessionBackendKind.self, forKey: .backend) ?? .ghosttyEmbedded
         servicePID = try container.decode(Int32.self, forKey: .servicePID)
         childPID = try container.decodeIfPresent(Int32.self, forKey: .childPID)
+        columns = try container.decodeIfPresent(Int.self, forKey: .columns)
+        rows = try container.decodeIfPresent(Int.self, forKey: .rows)
         state = try container.decode(TerminalSessionState.self, forKey: .state)
         updatedAt = try container.decode(String.self, forKey: .updatedAt)
         exitedAt = try container.decodeIfPresent(String.self, forKey: .exitedAt)
