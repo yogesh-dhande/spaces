@@ -222,6 +222,19 @@ final class TerminalScreenBufferTests: XCTestCase {
         XCTAssertNil(screen.rows.first?[5].style.hyperlink)
     }
 
+    func testIngestTracksOSCTitleUpdates() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("\u{001B}]0;session title\u{0007}prompt")
+        XCTAssertEqual(buffer.renderedScreen().title, "session title")
+
+        buffer.ingest("\u{001B}]2; pane title \u{0007}")
+        XCTAssertEqual(buffer.renderedScreen().title, "pane title")
+
+        buffer.ingest("\u{001B}]1;\u{0007}")
+        XCTAssertNil(buffer.renderedScreen().title)
+    }
+
     func testIngestTracksDoubleUnderlineAndUnderlineColor() {
         var buffer = TerminalScreenBuffer()
 

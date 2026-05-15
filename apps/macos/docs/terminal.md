@@ -304,6 +304,7 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: cursor-style updates (`DECSCUSR`) for block, underline, and bar cursors in the shared renderer
 - `implemented`: modern alternate-screen and private-mode state flows used by TUIs (`?47`, `?1047`, `?1048`, `?1049`) preserve primary cursor and scroll-region state across screen swaps
 - `implemented`: horizontal tab stop management, tab clear sequences, and hard/soft terminal reset basics
+- `implemented`: terminal-driven window-title updates (`OSC 0`, `OSC 1`, `OSC 2`) propagate through the shared renderer instead of staying pinned to the launch title
 
 ### Styling and Color
 - `implemented`: ANSI SGR reset plus common style toggles used by shells and TUIs

@@ -72,6 +72,7 @@ public struct TerminalRenderedScreen: Equatable {
     public let cursorColumn: Int
     public let cursorVisible: Bool
     public let cursorStyle: TerminalCursorStyle
+    public let title: String?
     public let usesAlternateScreen: Bool
     public let mouseTrackingMode: TerminalMouseTrackingMode
     public let usesSGRMouseEncoding: Bool
@@ -80,7 +81,7 @@ public struct TerminalRenderedScreen: Equatable {
     public let usesFocusReporting: Bool
 
     public init(
-        rows: [[TerminalRenderedCell]], cursorRow: Int, cursorColumn: Int, cursorVisible: Bool, cursorStyle: TerminalCursorStyle,
+        rows: [[TerminalRenderedCell]], cursorRow: Int, cursorColumn: Int, cursorVisible: Bool, cursorStyle: TerminalCursorStyle, title: String?,
         usesAlternateScreen: Bool, mouseTrackingMode: TerminalMouseTrackingMode, usesSGRMouseEncoding: Bool, usesAlternateScrollMode: Bool,
         usesBracketedPasteMode: Bool, usesFocusReporting: Bool
     ) {
@@ -89,6 +90,7 @@ public struct TerminalRenderedScreen: Equatable {
         self.cursorColumn = cursorColumn
         self.cursorVisible = cursorVisible
         self.cursorStyle = cursorStyle
+        self.title = title
         self.usesAlternateScreen = usesAlternateScreen
         self.mouseTrackingMode = mouseTrackingMode
         self.usesSGRMouseEncoding = usesSGRMouseEncoding
@@ -139,6 +141,7 @@ public struct TerminalScreenBuffer {
     private var currentStyle = TerminalTextStyle()
     private var cursorVisible = true
     private var cursorStyle = TerminalCursorStyle.block
+    private var currentTitle: String?
     private var isUsingAlternateScreen = false
     private var mouseTrackingMode = TerminalMouseTrackingMode.disabled
     private var usesSGRMouseEncoding = false
@@ -162,6 +165,7 @@ public struct TerminalScreenBuffer {
         currentStyle = TerminalTextStyle()
         cursorVisible = true
         cursorStyle = .block
+        currentTitle = nil
         isUsingAlternateScreen = false
         mouseTrackingMode = .disabled
         usesSGRMouseEncoding = false
@@ -205,9 +209,9 @@ public struct TerminalScreenBuffer {
     public func renderedScreen() -> TerminalRenderedScreen {
         TerminalRenderedScreen(
             rows: renderedRows().map { $0.map { TerminalRenderedCell(character: $0.character, style: $0.style) } }, cursorRow: renderedCursorRow(),
-            cursorColumn: cursorColumn, cursorVisible: cursorVisible, cursorStyle: cursorStyle, usesAlternateScreen: isUsingAlternateScreen,
-            mouseTrackingMode: mouseTrackingMode, usesSGRMouseEncoding: usesSGRMouseEncoding, usesAlternateScrollMode: usesAlternateScrollMode,
-            usesBracketedPasteMode: usesBracketedPasteMode, usesFocusReporting: usesFocusReporting)
+            cursorColumn: cursorColumn, cursorVisible: cursorVisible, cursorStyle: cursorStyle, title: currentTitle,
+            usesAlternateScreen: isUsingAlternateScreen, mouseTrackingMode: mouseTrackingMode, usesSGRMouseEncoding: usesSGRMouseEncoding,
+            usesAlternateScrollMode: usesAlternateScrollMode, usesBracketedPasteMode: usesBracketedPasteMode, usesFocusReporting: usesFocusReporting)
     }
 
     private mutating func consumeEscapeSequence(_ scalars: [UnicodeScalar], startingAt index: Int) -> Int {
@@ -277,11 +281,22 @@ public struct TerminalScreenBuffer {
     }
 
     private mutating func applyOSC(_ content: String) {
-        guard content.hasPrefix("8;") else { return }
         let components = content.split(separator: ";", maxSplits: 2, omittingEmptySubsequences: false)
-        guard components.count == 3 else { return }
-        let uri = String(components[2])
-        currentStyle.hyperlink = uri.isEmpty ? nil : uri
+        guard let command = components.first else { return }
+        switch command {
+        case "0", "1", "2":
+            guard components.count >= 2 else {
+                currentTitle = nil
+                return
+            }
+            let title = String(components.last ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            currentTitle = title.isEmpty ? nil : title
+        case "8":
+            guard components.count == 3 else { return }
+            let uri = String(components[2])
+            currentStyle.hyperlink = uri.isEmpty ? nil : uri
+        default: break
+        }
     }
 
     private mutating func applyCSI(final: UnicodeScalar, parameters: String, intermediate: String) {

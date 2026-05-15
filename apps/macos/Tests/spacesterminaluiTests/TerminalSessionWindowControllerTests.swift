@@ -326,6 +326,26 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(capture.appendNewline, false)
     }
 
+    @MainActor func testFallbackWindowUsesTerminalDrivenOSCTitle() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-title", title: "fallback-title", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-15T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-title", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-15T00:00:01Z"), paths: paths)
+        try "\u{001B}]0;live-title\u{0007}prompt".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-title", paths: paths)
+        controller.debugForceRefresh()
+
+        XCTAssertEqual(controller.debugWindowTitle, "live-title")
+    }
+
     @MainActor func testControllerLoadsRecentOutputIntoTextView() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
