@@ -7,6 +7,11 @@ This document captures the current libghostty-backed terminal integration in Spa
   - `script-pty`
   - `ghostty-embedded`
 - `ghostty-embedded` is the native terminal path for Spaces-owned windows.
+- Spaces consumes a forked `GhosttyKit.xcframework` from `yogesh-dhande/ghostty` because the branch depends on two additive PTY I/O exports:
+  - `ghostty_surface_set_data_callback(...)`
+  - `ghostty_surface_send_input_raw(...)`
+- The pinned fork build tag lives in `apps/macos/ghosttykit-release-tag.txt`, and a scheduled workflow updates that pin to the latest published fork release through a pull request.
+- The fork itself is expected to auto-sync with upstream Ghostty and publish fresh `GhosttyKit` builds on its own cadence; this repo only tracks the published build tag.
 - iTerm2 and Ghostty external-host integrations still exist on this branch and remain selectable overrides.
 - When the configured terminal host is `Spaces`, tracked workspace processes use the built-in session backend directly and do not require tmux.
 

@@ -66,8 +66,10 @@ apps/macos/scripts/setup_ghosttykit.sh
 ```
 
 That installs `GhosttyKit.xcframework` and the Ghostty resource bundle under `apps/macos/.local/ghosttykit/`, which the current branch-local resolver will discover automatically.
+The default fork build comes from `apps/macos/ghosttykit-release-tag.txt`, and the setup script also accepts an explicit release tag argument plus `SPACES_GHOSTTYKIT_RELEASE_TAG` and `SPACES_GHOSTTYKIT_REPO` overrides when you need a different build or fork locally.
 
 If `SPACES_PROJECT_DIR` points at another checkout that already has `apps/macos/.local/ghosttykit/`, the setup script copies those local artifacts first and only falls back to GitHub release download when needed.
+The repo also runs [`.github/workflows/sync-ghosttykit-release.yml`](.github/workflows/sync-ghosttykit-release.yml) daily to bump that pinned tag to the latest published build from the Spaces-owned fork via pull request. The fork itself should run its own daily upstream-sync and rebuild automation; this repo only consumes the published release tag.
 
 To verify the embedded Ghostty backend on an isolated database root:
 

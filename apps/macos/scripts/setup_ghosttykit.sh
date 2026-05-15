@@ -3,12 +3,20 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+RELEASE_TAG_FILE="$APP_ROOT/ghosttykit-release-tag.txt"
 LOCAL_ROOT="$APP_ROOT/.local/ghosttykit"
 XCFRAMEWORK_ROOT="$LOCAL_ROOT/GhosttyKit.xcframework"
 RESOURCES_ROOT="$LOCAL_ROOT/Resources"
 SOURCE_PROJECT_DIR="${SPACES_PROJECT_DIR:-}"
-FORK_REPO="muxy-app/ghostty"
-RELEASE_TAG="${1:-build-2026-04-29}"
+FORK_REPO="${SPACES_GHOSTTYKIT_REPO:-yogesh-dhande/ghostty}"
+
+if [[ -f "$RELEASE_TAG_FILE" ]]; then
+    DEFAULT_RELEASE_TAG="$(tr -d '[:space:]' < "$RELEASE_TAG_FILE")"
+else
+    DEFAULT_RELEASE_TAG="build-2026-04-29"
+fi
+
+RELEASE_TAG="${1:-${SPACES_GHOSTTYKIT_RELEASE_TAG:-$DEFAULT_RELEASE_TAG}}"
 
 mkdir -p "$LOCAL_ROOT"
 
