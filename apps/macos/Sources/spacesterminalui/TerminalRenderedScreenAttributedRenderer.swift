@@ -68,7 +68,7 @@ enum TerminalRenderedScreenAttributedRenderer {
         if cell.character != " " { return true }
         let style = cell.style
         return style.foreground != nil || style.background != nil || style.bold || style.italic || style.faint || style.underline || style.inverse
-            || style.hidden || style.strikethrough
+            || style.hidden || style.strikethrough || style.hyperlink != nil
     }
 
     private static func attributes(
@@ -94,6 +94,7 @@ enum TerminalRenderedScreenAttributedRenderer {
             attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
             attributes[.strikethroughColor] = foreground
         }
+        if let hyperlink = style.hyperlink, let url = URL(string: hyperlink) { attributes[.link] = url }
         return attributes
     }
 

@@ -34,4 +34,16 @@ import XCTest
         let cursorAttributes = rendered.attributes(at: 2, effectiveRange: nil)
         XCTAssertNotEqual(iAttributes[.backgroundColor] as? NSColor, cursorAttributes[.backgroundColor] as? NSColor)
     }
+
+    func testRendererMapsHyperlinkCellsToAttributedLinks() {
+        var buffer = TerminalScreenBuffer()
+        buffer.ingest("\u{001B}]8;;https://example.com\u{0007}link\u{001B}]8;;\u{0007}")
+
+        let rendered = TerminalRenderedScreenAttributedRenderer.render(
+            buffer.renderedScreen(), defaultForeground: .textColor, defaultBackground: .textBackgroundColor)
+
+        XCTAssertEqual(rendered.string, "link ")
+        XCTAssertEqual(rendered.attribute(.link, at: 0, effectiveRange: nil) as? URL, URL(string: "https://example.com"))
+        XCTAssertNil(rendered.attribute(.link, at: rendered.length - 1, effectiveRange: nil))
+    }
 }

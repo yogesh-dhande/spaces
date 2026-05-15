@@ -170,6 +170,18 @@ final class TerminalScreenBufferTests: XCTestCase {
         XCTAssertTrue(hardResetScreen.cursorVisible)
     }
 
+    func testIngestTracksOSCHyperlinkRanges() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("\u{001B}]8;;https://example.com\u{0007}link\u{001B}]8;;\u{0007} plain")
+
+        let screen = buffer.renderedScreen()
+        XCTAssertEqual(buffer.renderedText(), "link plain")
+        XCTAssertEqual(screen.rows.first?[0].style.hyperlink, "https://example.com")
+        XCTAssertEqual(screen.rows.first?[3].style.hyperlink, "https://example.com")
+        XCTAssertNil(screen.rows.first?[5].style.hyperlink)
+    }
+
     func testPrimaryScreenFullRegionScrollPreservesScrollbackHistory() {
         var buffer = TerminalScreenBuffer()
 

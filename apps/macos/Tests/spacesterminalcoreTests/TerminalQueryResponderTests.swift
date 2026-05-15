@@ -32,4 +32,12 @@ final class TerminalQueryResponderTests: XCTestCase {
         XCTAssertTrue(firstResponses.isEmpty)
         XCTAssertEqual(secondResponses, [Data("\u{001B}[1;1R".utf8), Data("\u{001B}[?62;4;22c".utf8)])
     }
+
+    func testResponderAnswersStatusAndSecondaryDeviceAttributesQueries() {
+        var responder = TerminalQueryResponder()
+
+        let responses = responder.responses(for: Data("\u{001B}[5n\u{001B}[>c".utf8))
+
+        XCTAssertEqual(responses, [Data("\u{001B}[0n".utf8), Data("\u{001B}[>0;10;1c".utf8)])
+    }
 }

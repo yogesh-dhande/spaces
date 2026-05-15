@@ -309,13 +309,14 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: palette colors, 256 colors, and truecolor foreground/background rendering
 - `implemented`: inverse-style cursor rendering in the shared-session canvas
 - `partial`: complete SGR coverage for the broader xterm attribute set, especially less common attributes and exact reset edge cases
-- `missing`: hyperlink rendering (`OSC 8`) and any richer semantic text affordances on top of terminal output
+- `partial`: hyperlink rendering (`OSC 8`) is present in the shared renderer, but richer semantic affordances on top of terminal output are still minimal
 
 ### Queries and Host Responses
+- `implemented`: terminal-status (`CSI 5n`) and secondary device-attributes (`CSI > c`) queries
 - `implemented`: cursor-position query (`CSI 6n`)
 - `implemented`: primary device attributes (`CSI c`)
 - `implemented`: terminal foreground/background color probes (`OSC 10;?`, `OSC 11;?`)
-- `partial`: broader device and mode query coverage beyond the handshake that `codex` and similar TUIs already require
+- `partial`: broader device and mode query coverage beyond the current status/device/color handshake
 - `missing`: the wider xterm query surface for advanced clients that probe more than cursor position, device attributes, and theme colors
 
 ### Input, Paste, and Mouse

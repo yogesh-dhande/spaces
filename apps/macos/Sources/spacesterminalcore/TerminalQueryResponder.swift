@@ -7,8 +7,10 @@ struct TerminalQueryResponder {
     }
 
     private static let queryPatterns: [QueryPattern] = [
+        .init(request: Array("\u{001B}[5n".utf8), response: Array("\u{001B}[0n".utf8)),
         .init(request: Array("\u{001B}[6n".utf8), response: Array("\u{001B}[1;1R".utf8)),
         .init(request: Array("\u{001B}[c".utf8), response: Array("\u{001B}[?62;4;22c".utf8)),
+        .init(request: Array("\u{001B}[>c".utf8), response: Array("\u{001B}[>0;10;1c".utf8)),
         .init(request: Array("\u{001B}]10;?\u{001B}\\".utf8), response: Array("\u{001B}]10;rgb:dddd/dddd/dddd\u{001B}\\".utf8)),
         .init(request: Array("\u{001B}]10;?\u{0007}".utf8), response: Array("\u{001B}]10;rgb:dddd/dddd/dddd\u{0007}".utf8)),
         .init(request: Array("\u{001B}]11;?\u{001B}\\".utf8), response: Array("\u{001B}]11;rgb:1111/1111/1111\u{001B}\\".utf8)),

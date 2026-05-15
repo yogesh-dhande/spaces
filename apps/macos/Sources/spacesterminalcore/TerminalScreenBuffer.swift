@@ -8,6 +8,7 @@ public enum TerminalANSIColor: Equatable {
 public struct TerminalTextStyle: Equatable {
     public var foreground: TerminalANSIColor?
     public var background: TerminalANSIColor?
+    public var hyperlink: String?
     public var bold = false
     public var italic = false
     public var faint = false
@@ -17,11 +18,12 @@ public struct TerminalTextStyle: Equatable {
     public var strikethrough = false
 
     public init(
-        foreground: TerminalANSIColor? = nil, background: TerminalANSIColor? = nil, bold: Bool = false, italic: Bool = false, faint: Bool = false,
-        underline: Bool = false, inverse: Bool = false, hidden: Bool = false, strikethrough: Bool = false
+        foreground: TerminalANSIColor? = nil, background: TerminalANSIColor? = nil, hyperlink: String? = nil, bold: Bool = false,
+        italic: Bool = false, faint: Bool = false, underline: Bool = false, inverse: Bool = false, hidden: Bool = false, strikethrough: Bool = false
     ) {
         self.foreground = foreground
         self.background = background
+        self.hyperlink = hyperlink
         self.bold = bold
         self.italic = italic
         self.faint = faint
@@ -225,15 +227,31 @@ public struct TerminalScreenBuffer {
         return current
     }
 
-    private func consumeOSC(_ scalars: [UnicodeScalar], startingAt index: Int) -> Int {
+    private mutating func consumeOSC(_ scalars: [UnicodeScalar], startingAt index: Int) -> Int {
         var current = index
+        var oscContent = ""
         while current < scalars.count {
             let scalar = scalars[current]
-            if scalar.value == 0x07 { return current + 1 }
-            if scalar.value == 0x1B, current + 1 < scalars.count, scalars[current + 1].value == 0x5C { return current + 2 }
+            if scalar.value == 0x07 {
+                applyOSC(oscContent)
+                return current + 1
+            }
+            if scalar.value == 0x1B, current + 1 < scalars.count, scalars[current + 1].value == 0x5C {
+                applyOSC(oscContent)
+                return current + 2
+            }
+            oscContent.unicodeScalars.append(scalar)
             current += 1
         }
         return current
+    }
+
+    private mutating func applyOSC(_ content: String) {
+        guard content.hasPrefix("8;") else { return }
+        let components = content.split(separator: ";", maxSplits: 2, omittingEmptySubsequences: false)
+        guard components.count == 3 else { return }
+        let uri = String(components[2])
+        currentStyle.hyperlink = uri.isEmpty ? nil : uri
     }
 
     private mutating func applyCSI(final: UnicodeScalar, parameters: String) {
