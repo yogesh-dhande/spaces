@@ -54,17 +54,6 @@ final class GhosttyEmbeddedLocatorTests: XCTestCase {
         XCTAssertTrue(mode.statusSummary.contains("shell fallback"))
     }
 
-    func testRendererResolverFallsBackForNonGhosttyBackends() {
-        let mode = TerminalRendererResolver.resolveGhosttyEmbeddedMode(
-            backend: .scriptPTY, environment: [:], currentDirectoryPath: "/tmp/spaces-terminal")
-        guard case .shellFallback(let reason) = mode else {
-            XCTFail("Expected shell fallback renderer mode")
-            return
-        }
-
-        XCTAssertEqual(reason, "session backend is script-pty")
-    }
-
     func testResolveFindsBranchLocalGhosttykitLayout() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let frameworkRoot = root.appendingPathComponent("apps/macos/.local/ghosttykit/GhosttyKit.xcframework", isDirectory: true)

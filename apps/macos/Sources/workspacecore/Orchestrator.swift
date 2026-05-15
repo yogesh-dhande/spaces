@@ -2786,7 +2786,6 @@ public final class WorkspaceOrchestrator {
         FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
 
         let snapshot = bestEffortYabaiWindowSnapshot()
-        if backend == .scriptPTY { try spawnBuiltInTerminalRuntimeProcess(configuration: launchConfiguration, paths: paths) }
         builtInTerminalWindowOpener(sessionID, showMode)
 
         let deadline = currentDate().addingTimeInterval(timeout)
@@ -2808,22 +2807,6 @@ public final class WorkspaceOrchestrator {
         let windowID = bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: TerminalHost.spaces.appName)
         return SpacesTerminalSessionHandle(
             sessionID: sessionID, childPID: runtimeState.childPID.map(Int.init), windowID: windowID, outputPath: paths.outputPath)
-    }
-
-    private func spawnBuiltInTerminalRuntimeProcess(configuration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) throws {
-        let executableURL = try spacesCLIExecutableURL()
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments =
-            [
-                "terminal", "_serve", "--session-id", configuration.sessionID, "--backend", configuration.backend.rawValue, "--title",
-                configuration.title, "--cwd", configuration.workingDirectory, "--shell", configuration.shell,
-            ] + (configuration.command.map { ["--command", $0] } ?? [])
-        process.standardInput = FileHandle.nullDevice
-        let logHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.serviceLogPath))
-        process.standardOutput = logHandle
-        process.standardError = logHandle
-        try process.run()
     }
 
     private func spacesCLIExecutableURL() throws -> URL {

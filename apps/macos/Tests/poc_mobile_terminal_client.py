@@ -71,14 +71,31 @@ def start_spaces_app(spaces_app: Path, env: dict[str, str]) -> subprocess.Popen[
     )
 
 
+def resolve_built_binary(repo_root: Path, env_name: str, default_name: str) -> Path:
+    explicit = os.environ.get(env_name)
+    if explicit:
+        return Path(explicit)
+
+    direct = repo_root / "apps/macos/.build/debug" / default_name
+    if direct.exists():
+        return direct
+
+    matches = sorted((repo_root / "apps/macos/.build").glob(f"**/{default_name}"))
+    for match in matches:
+        if match.is_file() and ".dSYM" not in str(match):
+            return match
+
+    return direct
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--start-app", action="store_true", help="Launch an isolated SpacesApp instance for the POC.")
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[3]
-    spaces_cli = Path(os.environ.get("SPACES_CLI", repo_root / "apps/macos/.build/debug/spaces"))
-    spaces_app = Path(os.environ.get("SPACES_APP", repo_root / "apps/macos/.build/debug/SpacesApp"))
+    spaces_cli = resolve_built_binary(repo_root, "SPACES_CLI", "spaces")
+    spaces_app = resolve_built_binary(repo_root, "SPACES_APP", "SpacesApp")
     temp_root = Path(tempfile.mkdtemp(prefix="spaces-mobile-poc."))
     temp_home = temp_root / "home"
     temp_home.mkdir(parents=True, exist_ok=True)
@@ -111,8 +128,6 @@ def main() -> int:
                 str(spaces_cli),
                 "terminal",
                 "command",
-                "--backend",
-                "ghostty-embedded",
                 "--command",
                 fixture,
                 "--title",

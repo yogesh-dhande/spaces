@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 import XCTest
 import spacesterminalcore
-import spacesterminalruntime
+import spacesterminalghostty
 import systembridge
 import workspacecore
 
@@ -114,12 +114,12 @@ final class MXCommandTests: XCTestCase {
 
         let paths = try TerminalSessionPaths.forSession(id: "session-live")
         let configuration = TerminalSessionLaunchConfiguration(
-            sessionID: "session-live", backend: .scriptPTY, title: "shell", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+            sessionID: "session-live", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
             createdAt: "2026-05-12T00:00:00Z")
         try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
-                sessionID: "session-live", backend: .scriptPTY, servicePID: getpid(), childPID: nil, state: .running,
+                sessionID: "session-live", backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
                 updatedAt: "2026-05-12T00:00:01Z"), paths: paths)
         FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
 
@@ -139,12 +139,12 @@ final class MXCommandTests: XCTestCase {
     }
 
     func testTerminalCommandParsesOptions() throws {
-        let command = try TerminalCommandCommand.parse(["--command", "cat", "--title", "session", "--cwd", "/tmp", "--backend", "script-pty"])
+        let command = try TerminalCommandCommand.parse(["--command", "cat", "--title", "session", "--cwd", "/tmp", "--backend", "ghostty-embedded"])
 
         XCTAssertEqual(command.command, "cat")
         XCTAssertEqual(command.title, "session")
         XCTAssertEqual(command.cwd, "/tmp")
-        XCTAssertEqual(command.backend, .scriptPTY)
+        XCTAssertEqual(command.backend, .ghosttyEmbedded)
     }
 
     func testTerminalSendParsesSessionAndText() throws {
@@ -197,15 +197,6 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(command.host, "127.0.0.1")
         XCTAssertEqual(command.port, 9123)
         XCTAssertEqual(command.authToken, "SECRET")
-    }
-
-    func testTerminalServeParsesBackend() throws {
-        let command = try TerminalServeCommand.parse([
-            "--session-id", "session-1", "--backend", "script-pty", "--title", "session", "--cwd", "/tmp", "--shell", "/bin/zsh",
-        ])
-
-        XCTAssertEqual(command.sessionID, "session-1")
-        XCTAssertEqual(command.backend, .scriptPTY)
     }
 
     func testSpacesCommandListsFlattenedPublicVerbs() {

@@ -3,7 +3,7 @@ import Darwin
 import Dispatch
 import Foundation
 import spacesterminalcore
-import spacesterminalruntime
+import spacesterminalghostty
 import systembridge
 import workspacecore
 
@@ -37,7 +37,7 @@ struct TerminalCommand: ParsableCommand {
         commandName: "terminal", abstract: "Manage tmux-free Spaces terminal sessions.",
         subcommands: [
             TerminalListCommand.self, TerminalCommandCommand.self, TerminalSendCommand.self, TerminalKeyCommand.self, TerminalTailCommand.self,
-            TerminalShowCommand.self, TerminalTakeoverCommand.self, TerminalProxyCommand.self, TerminalServeCommand.self,
+            TerminalShowCommand.self, TerminalTakeoverCommand.self, TerminalProxyCommand.self,
         ])
 }
 
@@ -83,7 +83,7 @@ struct TerminalCommandCommand: ParsableCommand {
 
     @Option(name: .long, help: "Shell executable path. Defaults to $SHELL or /bin/zsh.") var shell: String?
 
-    @Option(name: .long, help: "Terminal backend. Defaults to script-pty.") var backend: TerminalSessionBackendKind = .scriptPTY
+    @Option(name: .long, help: "Terminal backend. Defaults to ghostty-embedded.") var backend: TerminalSessionBackendKind = .ghosttyEmbedded
 
     func run() throws {
         guard TerminalSessionBackendSupport.isSupported(backend) else {
@@ -103,28 +103,12 @@ struct TerminalCommandCommand: ParsableCommand {
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
 
-        let executablePath = URL(fileURLWithPath: CommandLine.arguments[0], isDirectory: false)
-        if backend == .ghosttyEmbedded {
-            DistributedNotificationCenter.default().postNotificationName(
-                IPCNotification.openTerminalSessionWindow, object: nil,
-                userInfo: [
-                    IPCNotification.terminalSessionIDUserInfoKey: sessionID,
-                    IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
-                ], options: [.deliverImmediately])
-        } else {
-            let process = Process()
-            process.executableURL = executablePath
-            process.arguments =
-                [
-                    "terminal", "_serve", "--session-id", sessionID, "--backend", backend.rawValue, "--title", resolvedTitle, "--cwd",
-                    workingDirectory, "--shell", resolvedShell,
-                ] + (command.map { ["--command", $0] } ?? [])
-            process.standardInput = FileHandle.nullDevice
-            let logHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.serviceLogPath))
-            process.standardOutput = logHandle
-            process.standardError = logHandle
-            try process.run()
-        }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.openTerminalSessionWindow, object: nil,
+            userInfo: [
+                IPCNotification.terminalSessionIDUserInfoKey: sessionID,
+                IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+            ], options: [.deliverImmediately])
 
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
@@ -133,11 +117,8 @@ struct TerminalCommandCommand: ParsableCommand {
         }
 
         guard FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) else {
-            if backend == .ghosttyEmbedded {
-                throw WorkspaceError.invalidArgument(
-                    message: "Timed out waiting for SpacesApp to create the Ghostty terminal session. Ensure the app is running.")
-            }
-            throw WorkspaceError.invalidArgument(message: "Timed out waiting for terminal session to start.")
+            throw WorkspaceError.invalidArgument(
+                message: "Timed out waiting for SpacesApp to create the Ghostty terminal session. Ensure the app is running.")
         }
 
         print("Started terminal session \(sessionID)\ttitle=\(resolvedTitle)\tbackend=\(backend.rawValue)\tcwd=\(workingDirectory)")
@@ -272,25 +253,6 @@ struct TerminalProxyCommand: ParsableCommand {
         print("Terminal proxy ready\tsession=\(sessionID)\thost=\(host)\tport=\(server.listeningPort)")
         fflush(stdout)
         dispatchMain()
-    }
-}
-
-struct TerminalServeCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "_serve", abstract: "Internal terminal session daemon.", shouldDisplay: false)
-
-    @Option(name: .long) var sessionID: String
-    @Option(name: .long) var backend: TerminalSessionBackendKind = .scriptPTY
-    @Option(name: .long) var title: String
-    @Option(name: .long) var cwd: String
-    @Option(name: .long) var shell: String
-    @Option(name: .long) var command: String?
-
-    func run() throws {
-        let configuration = TerminalSessionLaunchConfiguration(
-            sessionID: sessionID, backend: backend, title: title, workingDirectory: cwd, shell: shell, command: command,
-            createdAt: ISO8601DateFormatter().string(from: Date()))
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        try TerminalSessionRunner.run(launchConfiguration: configuration, paths: paths)
     }
 }
 

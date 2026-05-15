@@ -3,10 +3,7 @@
 This document captures the current libghostty-backed terminal integration in Spaces: what it is, how it is wired, what constraints shaped it, and what remains intentionally out of scope for this branch. User-facing behavior belongs in [spec.md](../spec.md). Module boundaries and broader app architecture belong in [architecture.md](architecture.md).
 
 ## Scope
-- Spaces supports two built-in terminal backends:
-  - `script-pty`
-  - `ghostty-embedded`
-- `ghostty-embedded` is the native terminal path for Spaces-owned windows.
+- `ghostty-embedded` is the built-in terminal path for Spaces-owned windows.
 - Spaces consumes a forked `GhosttyKit.xcframework` from `yogesh-dhande/ghostty` because the branch depends on two additive PTY I/O exports:
   - `ghostty_surface_set_data_callback(...)`
   - `ghostty_surface_send_input_raw(...)`
@@ -29,16 +26,17 @@ This document captures the current libghostty-backed terminal integration in Spa
 
 ## Runtime Shape
 - `spacesterminalcore` owns session records, client records, attachment persistence, output paths, and control protocol types.
-- `spacesterminalruntime` chooses the backend runtime for a session.
 - `spacesterminalghostty` owns libghostty artifact discovery, session host behavior, clipboard hooks, runtime callbacks, and the native terminal view.
 - `spacesterminalui` owns the window controller shell and local owner or viewer attachment UX.
 
 The `ghostty-embedded` session path is:
-1. `spaces terminal command --backend ghostty-embedded` persists launch metadata.
+1. `spaces terminal command` persists launch metadata.
 2. The running app creates or reuses a `GhosttyEmbeddedSessionHost`.
 3. The host starts one `GhosttyEmbeddedTerminalView`, one control socket, one output log, and one runtime-state refresh loop.
 4. Owner windows attach the live libghostty surface.
 5. Viewer windows stay passive and read from the tailed session output until they take over.
+
+The current forked GhosttyKit build exposes the raw PTY I/O hooks Spaces needs but does not expose the older cell-snapshot inspection API, so passive viewers currently go straight to tailed output instead of a rendered live-surface snapshot.
 
 ## Mobile and Remote Control
 - `spaces terminal proxy <session-id> --host ... --port ... --auth-token ...` exposes a local TCP bridge for one session.
@@ -90,7 +88,7 @@ These hooks are important because snapshot-style render reads are not enough for
   - show owner identity
   - can request takeover
   - continue using tailed output until ownership changes
-- Once a session is no longer running, passive viewer windows stop presenting takeover affordances, script-pty fallback windows disable their inline send controls, and owner-window paste actions stop claiming the session is still interactive.
+- Once a session is no longer running, passive viewer windows stop presenting takeover affordances, tail-fallback windows disable their inline send controls, and owner-window paste actions stop claiming the session is still interactive.
 
 The takeover path updates `attachments.json`, moves ownership to the requested client, and rehosts the active libghostty surface without restarting the session.
 Local macOS windows also react to ownership changes immediately through an in-process attachment-state notification, so owner and viewer chrome does not wait for the polling loop to catch up after takeover.
@@ -160,7 +158,7 @@ Current performance decisions:
 - Owner-window focus avoids unnecessary `makeKeyAndOrderFront` and repeated focus toggles when the view is already first responder.
 - Active owner windows skip fallback `output.log` tail reads while the live libghostty surface is visible, so steady-state refresh ticks do not churn hidden text views.
 - Active owner windows also use the slower notification-first refresh cadence above, which keeps the live terminal path responsive without doing the same fallback polling work as passive windows.
-- If a window controller is created before `metadata.json` is readable, the next refresh upgrades that window to the persisted backend instead of leaving it stuck on fallback `script-pty` controls.
+- If a window controller is created before `metadata.json` is readable, the next refresh upgrades that window to the persisted Ghostty-backed mode instead of leaving it stuck on fallback tail controls.
 - Active owner windows fall back to the faster 500 ms cadence again whenever the runtime state is no longer steady-state `running`, so exited or warning states refresh like the diagnostic viewer path instead of waiting on the slower safety poll.
 - Fresh terminal window controllers do an immediate one-time render pass during construction but do not start their periodic refresh loop until `show()`, so summon and reopen avoid canceling and restarting a loop that the user has not seen yet.
 - App-managed terminal summon paths also skip that constructor refresh for newly created controllers and rely on `show()` for the first render pass, so a real window summon does not pay the same synchronous metadata and output read twice.

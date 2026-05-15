@@ -9,6 +9,22 @@ extension Notification.Name {
     public static let spacesTerminalOutputDidChange = Notification.Name("spaces.terminal.output-did-change")
 }
 
+@MainActor public protocol TerminalGhosttySessionHosting: AnyObject {
+    func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws
+    func parkSurfaceInHiddenHostWindow()
+    func setFocused(_ focused: Bool, for clientID: String)
+    func focusWindow(_ window: NSWindow?)
+    func activeOwnerClientID() -> String?
+    func hasRenderableSurface() -> Bool
+    func snapshot() -> GhosttyTerminalSnapshot?
+    func copySelectionToPasteboard() -> Bool
+    func pasteClipboardContents() -> Bool
+    @discardableResult func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool
+    var debugSurfaceRefreshRequestCount: Int { get }
+    var effectiveTitle: String { get }
+    var effectiveWorkingDirectory: String { get }
+}
+
 @MainActor public final class GhosttyEmbeddedSessionRegistry {
     public static let shared = GhosttyEmbeddedSessionRegistry()
 
@@ -403,3 +419,5 @@ extension Notification.Name {
     func debugPersistRuntimeState(force: Bool = true) { refreshRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
 }
+
+extension GhosttyEmbeddedSessionHost: TerminalGhosttySessionHosting {}

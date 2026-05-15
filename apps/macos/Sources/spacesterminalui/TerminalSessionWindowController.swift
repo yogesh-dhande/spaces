@@ -84,6 +84,7 @@ import spacesterminalghostty
     private let onWindowClose: (@MainActor (String, String) -> Void)?
     private let loadWindowFrameAction: (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?
     private let saveWindowFrameAction: (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void
+    private let sessionHostProvider: @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
     private var refreshTask: Task<Void, Never>?
     private var takeoverTask: Task<Void, Never>?
     private var pendingWindowFramePersistTask: Task<Void, Never>?
@@ -91,7 +92,7 @@ import spacesterminalghostty
     private var isClientAttached = false
     private var didCloseWindow = false
     private var lastObservedAttachmentMode: TerminalAttachmentMode?
-    private var ghosttySessionHost: GhosttyEmbeddedSessionHost?
+    private var ghosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var visibleRenderer: VisibleRenderer = .outputFallback
     private var lastObservedOwnerClientID: String?
     private var lastObservedRuntimeState: TerminalSessionRuntimeState?
@@ -109,7 +110,7 @@ import spacesterminalghostty
     private var pendingPassiveOutputByteCount = 0
     private var pendingPassiveOutputNotificationCount = 0
 
-    public init(
+    public convenience init(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
         sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
@@ -121,12 +122,34 @@ import spacesterminalghostty
         loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
         saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil
     ) {
+        self.init(
+            sessionID: sessionID, paths: paths, preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh,
+            sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
+            detachClientAction: detachClientAction, copySelectionAction: copySelectionAction, pasteClipboardAction: pasteClipboardAction,
+            ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowClose: onWindowClose,
+            loadWindowFrameAction: loadWindowFrameAction, saveWindowFrameAction: saveWindowFrameAction,
+            sessionHostProvider: { launchConfiguration, paths in GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths) })
+    }
+
+    init(
+        sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
+        sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
+        sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
+        takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
+        attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
+        detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
+        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
+        saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil,
+        sessionHostProvider: @escaping @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
+    ) {
         self.sessionID = sessionID
         self.paths = paths
         self.preferredAttachmentMode = preferredAttachmentMode
         let resolvedLaunchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
         launchConfiguration = resolvedLaunchConfiguration
-        let resolvedBackend = resolvedLaunchConfiguration?.backend ?? .scriptPTY
+        let resolvedBackend = resolvedLaunchConfiguration?.backend ?? .ghosttyEmbedded
         backend = resolvedBackend
         rendererMode = TerminalRendererResolver.resolveGhosttyEmbeddedMode(backend: resolvedBackend)
         let now = ISO8601DateFormatter().string(from: Date())
@@ -166,6 +189,7 @@ import spacesterminalghostty
         self.loadWindowFrameAction = loadWindowFrameAction ?? { mode in try TerminalSessionPersistence.readWindowFrame(mode: mode, paths: paths) }
         self.saveWindowFrameAction =
             saveWindowFrameAction ?? { frame, mode in try TerminalSessionPersistence.writeWindowFrame(frame, mode: mode, paths: paths) }
+        self.sessionHostProvider = sessionHostProvider
 
         let contentRect = NSRect(x: 0, y: 0, width: 980, height: 640)
         let styleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -558,7 +582,7 @@ import spacesterminalghostty
         do {
             window?.contentView?.layoutSubtreeIfNeeded()
             terminalContainer.layoutSubtreeIfNeeded()
-            let host = GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths)
+            let host = sessionHostProvider(launchConfiguration, paths)
             ghosttySessionHost = host
             try host.attach(client: client, mode: preferredAttachmentMode, into: preferredAttachmentMode == .owner ? terminalContainer : nil)
             lastObservedAttachmentMode = preferredAttachmentMode
@@ -896,14 +920,14 @@ import spacesterminalghostty
     }
 
     private func updateInputOwnershipUI(isOwner: Bool, isInteractive: Bool) {
-        let usesInlineControls = backend != .ghosttyEmbedded
+        let usesInlineControls = visibleRenderer == .outputFallback && isOwner
         inputRowStackView.isHidden = !usesInlineControls
         takeoverContainerView.isHidden = !(backend == .ghosttyEmbedded && !isOwner && isInteractive)
         takeoverRowStackView.isHidden = takeoverContainerView.isHidden
-        inputField.isEnabled = usesInlineControls && isOwner && isInteractive
-        sendButton.isEnabled = usesInlineControls && isOwner && isInteractive
-        interruptButton.isEnabled = usesInlineControls && isOwner && isInteractive
-        newlineButton.isEnabled = usesInlineControls && isOwner && isInteractive
+        inputField.isEnabled = usesInlineControls && isInteractive
+        sendButton.isEnabled = usesInlineControls && isInteractive
+        interruptButton.isEnabled = usesInlineControls && isInteractive
+        newlineButton.isEnabled = usesInlineControls && isInteractive
         takeoverButton.isHidden = isOwner
         takeoverButton.isEnabled = !isOwner && isInteractive
         if !isInteractive {
@@ -1023,8 +1047,8 @@ import spacesterminalghostty
     }
 
     private func resolveVisibleRenderer(isOwner: Bool?) -> VisibleRenderer {
-        guard backend == .ghosttyEmbedded else { return .outputFallback }
-        if isOwner == true { return .ghosttyOwner }
+        guard case .ghosttyEmbedded = rendererMode else { return .outputFallback }
+        if isOwner == true { return ghosttySessionHost?.hasRenderableSurface() == true ? .ghosttyOwner : .outputFallback }
         if ghosttySessionHost?.hasRenderableSurface() == true { return .ghosttyViewerSnapshot }
         return .outputFallback
     }
@@ -1092,9 +1116,7 @@ import spacesterminalghostty
 
     private func updateGhosttySessionHostReference(for launchConfiguration: TerminalSessionLaunchConfiguration) {
         guard launchConfiguration.backend == .ghosttyEmbedded else { return }
-        if let existingHost = GhosttyEmbeddedSessionRegistry.shared.existingHost(sessionID: launchConfiguration.sessionID) {
-            ghosttySessionHost = existingHost
-        }
+        if ghosttySessionHost == nil { ghosttySessionHost = sessionHostProvider(launchConfiguration, paths) }
     }
 
     private func activeOwnerClient(snapshot: TerminalSessionAttachmentSnapshot?) -> TerminalClient? {

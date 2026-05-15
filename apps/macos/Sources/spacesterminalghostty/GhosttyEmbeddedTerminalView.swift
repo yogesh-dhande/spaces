@@ -496,7 +496,26 @@ import spacesterminalcore
     }
 
     private func backingPixelSize() -> (width: UInt32, height: UInt32)? {
-        let size = convertToBacking(bounds).size
+        let directSize = convertToBacking(bounds).size
+        if let measured = sanitizedPixelSize(directSize) { return measured }
+
+        guard let window else { return nil }
+
+        // Owner sessions can be attached before AppKit has pushed the final
+        // layout into this view. Fall back to the live window content rect so
+        // Ghostty can start immediately and then resize once layout settles.
+        let contentLayoutSize = window.convertToBacking(window.contentLayoutRect).size
+        if let measured = sanitizedPixelSize(contentLayoutSize) { return measured }
+
+        if let contentView = window.contentView {
+            let contentViewSize = contentView.convertToBacking(contentView.bounds).size
+            if let measured = sanitizedPixelSize(contentViewSize) { return measured }
+        }
+
+        return nil
+    }
+
+    private func sanitizedPixelSize(_ size: CGSize) -> (width: UInt32, height: UInt32)? {
         let width = Int(floor(size.width))
         let height = Int(floor(size.height))
         guard width > 0, height > 0 else { return nil }

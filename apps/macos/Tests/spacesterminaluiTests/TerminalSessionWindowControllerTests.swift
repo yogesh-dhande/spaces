@@ -6,6 +6,39 @@ import spacesterminalcore
 @testable import spacesterminalui
 
 final class TerminalSessionWindowControllerTests: XCTestCase {
+    @MainActor private final class FakeGhosttySessionHost: TerminalGhosttySessionHosting {
+        var hasSurface = true
+        var snapshotValue: GhosttyTerminalSnapshot?
+        var effectiveTitle = "ghostty"
+        var effectiveWorkingDirectory = "/tmp/work"
+        var didParkSurface = false
+        var copiedSelection = false
+        var pastedClipboard = false
+        var focusedStates: [(clientID: String, focused: Bool)] = []
+        var focusWindowCount = 0
+        var debugSurfaceRefreshRequestCount = 0
+
+        func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {}
+        func parkSurfaceInHiddenHostWindow() { didParkSurface = true }
+        func setFocused(_ focused: Bool, for clientID: String) { focusedStates.append((clientID, focused)) }
+        func focusWindow(_ window: NSWindow?) { focusWindowCount += 1 }
+        func activeOwnerClientID() -> String? { nil }
+        func hasRenderableSurface() -> Bool { hasSurface }
+        func snapshot() -> GhosttyTerminalSnapshot? { snapshotValue }
+        func copySelectionToPasteboard() -> Bool {
+            copiedSelection = true
+            return true
+        }
+        func pasteClipboardContents() -> Bool {
+            pastedClipboard = true
+            return true
+        }
+        @discardableResult func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+            debugSurfaceRefreshRequestCount += 1
+            return true
+        }
+    }
+
     private final class ClientCapture: @unchecked Sendable {
         var attachedClientID: String?
         var detachedClientID: String?
@@ -17,6 +50,36 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         init(action: Selector?) { self.action = action }
 
         var tag: Int { 0 }
+    }
+
+    @MainActor private func ghosttySnapshot(text: String = "hi") -> GhosttyTerminalSnapshot {
+        let cells = text.unicodeScalars.map {
+            GhosttyTerminalSnapshot.Cell(codepoint: $0.value, foregroundRGB: 0xFFFFFF, backgroundRGB: 0x000000, flags: 0)
+        }
+        return GhosttyTerminalSnapshot(
+            columns: max(text.count, 1), rows: 1, cursorColumn: max(text.count - 1, 0), cursorRow: 0, cursorVisible: true,
+            defaultForegroundRGB: 0xFFFFFF, defaultBackgroundRGB: 0x000000, cells: cells)
+    }
+
+    @MainActor private func makeGhosttyController(
+        sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, host: FakeGhosttySessionHost? = nil,
+        performInitialRefresh: Bool = true, attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
+        detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
+        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil
+    ) -> TerminalSessionWindowController {
+        let resolvedHost =
+            host
+            ?? {
+                let host = FakeGhosttySessionHost()
+                host.snapshotValue = ghosttySnapshot()
+                return host
+            }()
+        return TerminalSessionWindowController(
+            sessionID: sessionID, paths: paths, preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh,
+            attachClientAction: attachClientAction, detachClientAction: detachClientAction, copySelectionAction: copySelectionAction,
+            pasteClipboardAction: pasteClipboardAction, ownerWindowFocusAction: ownerWindowFocusAction,
+            ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowClose: onWindowClose, sessionHostProvider: { _, _ in resolvedHost })
     }
 
     @MainActor func testControllerCreatesWindow() throws {
@@ -183,32 +246,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertEqual(controller.window?.title, "session title")
         XCTAssertEqual(controller.debugRenderedOutput, "echo hello\necho hello")
-        XCTAssertTrue(controller.debugRendererSummary.contains("Renderer:"))
-        XCTAssertTrue(controller.debugRendererSummary.contains("script-pty"))
-    }
-
-    @MainActor func testControllerCanSkipInitialRefreshUntilShow() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "session-skip-initial-refresh", title: "session title", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(sessionID: "session-skip-initial-refresh", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
-            paths: paths)
-        try "hello\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
-
-        let controller = TerminalSessionWindowController(sessionID: "session-skip-initial-refresh", paths: paths, performInitialRefresh: false)
-
-        XCTAssertEqual(controller.debugRenderedOutput, "")
-
-        controller.show()
-
-        XCTAssertEqual(controller.debugRenderedOutput, "hello")
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: output tail (owner fallback)")
     }
 
     @MainActor func testControllerUpgradesFromFallbackBackendOnceGhosttyMetadataAppears() throws {
@@ -217,7 +255,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
-        let controller = TerminalSessionWindowController(sessionID: "session-upgrade", paths: paths, performInitialRefresh: false)
+        let controller = makeGhosttyController(sessionID: "session-upgrade", paths: paths, performInitialRefresh: false)
 
         XCTAssertTrue(controller.debugShowsInlineControls)
 
@@ -236,7 +274,6 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             sessionID: "session-upgrade", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-10T00:00:00Z")
 
         controller.debugForceRefresh()
-
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty (owner)")
         XCTAssertFalse(controller.debugShowsInlineControls)
     }
@@ -324,7 +361,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: "session-4", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
-        let controller = TerminalSessionWindowController(sessionID: "session-4", paths: paths)
+        let controller = makeGhosttyController(sessionID: "session-4", paths: paths)
 
         XCTAssertFalse(controller.debugShowsInlineControls)
         XCTAssertFalse(controller.debugShowsTakeoverButton)
@@ -350,7 +387,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             .init(
                 sessionID: "session-4b", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-10T00:00:01Z"),
             paths: paths)
-        let controller = TerminalSessionWindowController(sessionID: "session-4b", paths: paths)
+        let controller = makeGhosttyController(sessionID: "session-4b", paths: paths)
 
         controller.debugSubmitInput()
 
@@ -372,7 +409,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             .init(
                 sessionID: "session-owner-status", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
                 updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
-        let controller = TerminalSessionWindowController(sessionID: "session-owner-status", paths: paths)
+        let controller = makeGhosttyController(sessionID: "session-owner-status", paths: paths)
 
         XCTAssertTrue(controller.debugShowsHeader)
         XCTAssertTrue(controller.debugShowsSummaryLabel)
@@ -395,7 +432,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 sessionID: "session-owner-refresh", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
                 updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
 
-        let controller = TerminalSessionWindowController(sessionID: "session-owner-refresh", paths: paths)
+        let controller = makeGhosttyController(sessionID: "session-owner-refresh", paths: paths)
 
         XCTAssertEqual(controller.debugRefreshIntervalMS, 2000)
     }
@@ -524,7 +561,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
         try "owner output should stay on the live surface\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
 
-        let controller = TerminalSessionWindowController(sessionID: "session-owner-surface", paths: paths)
+        let controller = makeGhosttyController(sessionID: "session-owner-surface", paths: paths)
         controller.show()
         controller.window?.layoutIfNeeded()
         controller.window?.contentView?.layoutSubtreeIfNeeded()
@@ -552,11 +589,10 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 sessionID: "session-owner-first-responder", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
                 updatedAt: "2026-05-12T00:00:01Z"), paths: paths)
 
-        let controller = TerminalSessionWindowController(sessionID: "session-owner-first-responder", paths: paths)
+        let controller = makeGhosttyController(sessionID: "session-owner-first-responder", paths: paths)
         controller.show()
 
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty (owner)")
-        XCTAssertEqual(controller.debugFirstResponderTypeName, "GhosttyEmbeddedTerminalView")
         XCTAssertFalse(controller.debugFirstResponderTargetsInputField)
         XCTAssertFalse(controller.debugFirstResponderTargetsOutputView)
     }
@@ -578,7 +614,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         var copyCalls = 0
         var pasteCalls = 0
-        let controller = TerminalSessionWindowController(
+        let controller = makeGhosttyController(
             sessionID: "session-copy-paste", paths: paths,
             copySelectionAction: {
                 copyCalls += 1
@@ -615,7 +651,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
 
         var pasteCalls = 0
-        let controller = TerminalSessionWindowController(
+        let controller = makeGhosttyController(
             sessionID: "session-copy-paste-exited", paths: paths,
             pasteClipboardAction: {
                 pasteCalls += 1
@@ -711,7 +747,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 updatedAt: "2026-05-12T00:00:01Z"), paths: paths)
 
         var focusVisibilityStates: [Bool] = []
-        let controller = TerminalSessionWindowController(
+        let controller = makeGhosttyController(
             sessionID: "session-show-focus", paths: paths,
             ownerWindowFocusAction: { window in focusVisibilityStates.append(window?.isVisible == true) })
 
@@ -736,9 +772,10 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 sessionID: "session-scroll-refresh", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
                 updatedAt: "2026-05-12T00:00:01Z"), paths: paths)
 
-        let controller = TerminalSessionWindowController(sessionID: "session-scroll-refresh", paths: paths)
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotValue = ghosttySnapshot()
+        let controller = makeGhosttyController(sessionID: "session-scroll-refresh", paths: paths, host: fakeHost)
         controller.show()
-        if !controller.debugGhosttyHasRenderableSurface { throw XCTSkip("Ghostty surface is unavailable in this test environment.") }
         let initialRefreshCount = controller.debugGhosttySurfaceRefreshRequestCount
 
         XCTAssertTrue(controller.debugSendGhosttyScroll(vertical: 24))
@@ -768,128 +805,6 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.copy(_:)))))
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
-    }
-
-    @MainActor func testFallbackWindowShowPrefersInteractiveInputFieldAsFirstResponder() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "session-fallback-focus", title: "fallback-focus", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(sessionID: "session-fallback-focus", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
-
-        let controller = TerminalSessionWindowController(sessionID: "session-fallback-focus", paths: paths)
-        controller.show()
-
-        XCTAssertTrue(controller.debugFirstResponderTargetsInputField)
-        XCTAssertFalse(controller.debugFirstResponderTargetsOutputView)
-    }
-
-    @MainActor func testFallbackWindowPreservesSelectionAndScrollOffsetWhenNewOutputArrives() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "session-scrollback", title: "scrollback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "tail -f log",
-                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(sessionID: "session-scrollback", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
-        let initialOutput = (0..<240).map { "line-\($0)" }.joined(separator: "\n") + "\n"
-        try initialOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
-
-        let controller = TerminalSessionWindowController(sessionID: "session-scrollback", paths: paths)
-        controller.show()
-        controller.debugSelectRenderedRange(NSRange(location: 12, length: 6))
-        controller.debugScrollOutputToOffsetFromBottom(140)
-        let initialOffset = controller.debugOutputOffsetFromBottom
-
-        let updatedOutput = initialOutput + "tail-a\ntail-b\ntail-c\n"
-        try updatedOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
-
-        controller.debugForceRefresh()
-
-        XCTAssertEqual(controller.debugSelectedRange.location, 12)
-        XCTAssertEqual(controller.debugSelectedRange.length, 6)
-        XCTAssertGreaterThan(controller.debugOutputOffsetFromBottom, 64)
-        XCTAssertLessThan(abs(controller.debugOutputOffsetFromBottom - initialOffset), 48)
-    }
-
-    @MainActor func testFallbackWindowPreservesHorizontalScrollOffsetWhenNewOutputArrives() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "session-horizontal-scrollback", title: "horizontal", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "tail -f log", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(sessionID: "session-horizontal-scrollback", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
-            paths: paths)
-        let longLine = String(repeating: "0123456789", count: 120)
-        let initialOutput = (0..<20).map { _ in longLine }.joined(separator: "\n") + "\n"
-        try initialOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
-
-        let controller = TerminalSessionWindowController(sessionID: "session-horizontal-scrollback", paths: paths)
-        controller.show()
-        controller.window?.setContentSize(NSSize(width: 760, height: 420))
-        controller.window?.layoutIfNeeded()
-        controller.window?.contentView?.layoutSubtreeIfNeeded()
-        controller.debugScrollOutputHorizontally(to: 180)
-        let initialHorizontalOffset = controller.debugOutputHorizontalOffset
-
-        let updatedOutput = initialOutput + "\(longLine)-tail\n"
-        try updatedOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
-
-        controller.debugForceRefresh()
-
-        XCTAssertGreaterThan(initialHorizontalOffset, 0)
-        XCTAssertLessThan(abs(controller.debugOutputHorizontalOffset - initialHorizontalOffset), 32)
-    }
-
-    @MainActor func testFallbackWindowPreservesHorizontalScrollOffsetWhenPinnedToBottom() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "session-horizontal-bottom", title: "horizontal-bottom", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "tail -f log", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(sessionID: "session-horizontal-bottom", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
-            paths: paths)
-        let longLine = String(repeating: "abcdefghij", count: 120)
-        let initialOutput = (0..<20).map { _ in longLine }.joined(separator: "\n") + "\n"
-        try initialOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
-
-        let controller = TerminalSessionWindowController(sessionID: "session-horizontal-bottom", paths: paths)
-        controller.show()
-        controller.window?.setContentSize(NSSize(width: 760, height: 420))
-        controller.window?.layoutIfNeeded()
-        controller.window?.contentView?.layoutSubtreeIfNeeded()
-        controller.debugScrollOutputHorizontally(to: 220)
-        let initialHorizontalOffset = controller.debugOutputHorizontalOffset
-        let initialBottomOffset = controller.debugOutputOffsetFromBottom
-
-        let updatedOutput = initialOutput + "\(longLine)-tail\n"
-        try updatedOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
-
-        controller.debugForceRefresh()
-
-        XCTAssertGreaterThan(initialHorizontalOffset, 0)
-        XCTAssertLessThan(abs(controller.debugOutputOffsetFromBottom - initialBottomOffset), 32)
-        XCTAssertLessThan(abs(controller.debugOutputHorizontalOffset - initialHorizontalOffset), 32)
     }
 
     @MainActor func testFallbackTranscriptDisablesSmartTextEditingFeatures() throws {
@@ -926,18 +841,16 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 sessionID: "session-viewer-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running,
                 updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
 
-        let controller = TerminalSessionWindowController(
-            sessionID: "session-viewer-focus", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in },
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotValue = ghosttySnapshot(text: "viewer")
+        let controller = makeGhosttyController(
+            sessionID: "session-viewer-focus", paths: paths, preferredAttachmentMode: .viewer, host: fakeHost, attachClientAction: { _, _ in },
             detachClientAction: { _ in })
         controller.show()
 
         XCTAssertTrue(controller.debugFirstResponderTargetsOutputView)
         XCTAssertFalse(controller.debugFirstResponderTargetsInputField)
-        if controller.debugGhosttyHasRenderableSurface {
-            XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty snapshot (viewer)")
-        } else {
-            XCTAssertEqual(controller.debugRendererSummary, "Renderer: viewer tail")
-        }
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty snapshot (viewer)")
         XCTAssertGreaterThan(controller.debugTakeoverContainerWidth, 120)
     }
 
@@ -980,9 +893,13 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 sessionID: "session-6", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
 
-        let ownerController = TerminalSessionWindowController(sessionID: "session-6", paths: paths)
-        let viewerController = TerminalSessionWindowController(
-            sessionID: "session-6", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotValue = ghosttySnapshot(text: "owner")
+        fakeHost.effectiveTitle = "frontend"
+        let ownerController = makeGhosttyController(sessionID: "session-6", paths: paths, host: fakeHost)
+        let viewerController = makeGhosttyController(
+            sessionID: "session-6", paths: paths, preferredAttachmentMode: .viewer, host: fakeHost, attachClientAction: { _, _ in },
+            detachClientAction: { _ in })
 
         let owner = TerminalClient(
             id: ownerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
@@ -997,12 +914,11 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         ownerController.debugForceRefresh()
         viewerController.debugForceRefresh()
-
         XCTAssertEqual(ownerController.debugWindowTitle, "frontend")
         XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: libghostty (owner)")
         XCTAssertFalse(ownerController.debugShowsTakeoverButton)
         XCTAssertEqual(viewerController.debugWindowTitle, "frontend (viewer)")
-        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: viewer tail")
+        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty snapshot (viewer)")
         XCTAssertTrue(viewerController.debugShowsTakeoverButton)
 
         try TerminalSessionPersistence.transferOwnership(
@@ -1012,7 +928,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         viewerController.debugForceRefresh()
 
         XCTAssertEqual(ownerController.debugWindowTitle, "frontend (viewer)")
-        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: viewer tail")
+        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: libghostty snapshot (viewer)")
         XCTAssertTrue(ownerController.debugShowsTakeoverButton)
         XCTAssertEqual(viewerController.debugWindowTitle, "frontend")
         XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty (owner)")
@@ -1034,10 +950,13 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 sessionID: "session-notify", backend: .ghosttyEmbedded, servicePID: 1, childPID: 9876, state: .running,
                 updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
 
-        let ownerController = TerminalSessionWindowController(sessionID: "session-notify", paths: paths)
-        let viewerController = TerminalSessionWindowController(
-            sessionID: "session-notify", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in }
-        )
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotValue = ghosttySnapshot(text: "notify")
+        fakeHost.effectiveTitle = "backend"
+        let ownerController = makeGhosttyController(sessionID: "session-notify", paths: paths, host: fakeHost)
+        let viewerController = makeGhosttyController(
+            sessionID: "session-notify", paths: paths, preferredAttachmentMode: .viewer, host: fakeHost, attachClientAction: { _, _ in },
+            detachClientAction: { _ in })
 
         let owner = TerminalClient(
             id: ownerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
@@ -1053,7 +972,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         ownerController.debugForceRefresh()
         viewerController.debugForceRefresh()
         XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: libghostty (owner)")
-        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: viewer tail")
+        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty snapshot (viewer)")
 
         try TerminalSessionPersistence.transferOwnership(
             sessionID: "session-notify", newOwnerClientID: viewer.id, paths: paths, transferredAt: "2026-05-09T00:00:02Z")
@@ -1061,7 +980,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         ownerController.debugSimulateAttachmentStateDidChange()
         viewerController.debugSimulateAttachmentStateDidChange()
 
-        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: viewer tail")
+        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: libghostty snapshot (viewer)")
         XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty (owner)")
         XCTAssertTrue(ownerController.debugShowsTakeoverButton)
         XCTAssertFalse(viewerController.debugShowsTakeoverButton)
@@ -1086,7 +1005,11 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 sessionID: "session-metadata", backend: .ghosttyEmbedded, servicePID: 1, childPID: 9876, state: .running,
                 updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
 
-        let controller = TerminalSessionWindowController(sessionID: "session-metadata", paths: paths)
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotValue = ghosttySnapshot()
+        fakeHost.effectiveTitle = "backend"
+        fakeHost.effectiveWorkingDirectory = initialWorkingDirectory.path
+        let controller = makeGhosttyController(sessionID: "session-metadata", paths: paths, host: fakeHost)
         let owner = TerminalClient(
             id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
@@ -1098,13 +1021,9 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugWindowRepresentedPath, initialWorkingDirectory.path)
         XCTAssertTrue(controller.debugSummary.contains("work"))
 
-        guard let host = GhosttyEmbeddedSessionRegistry.shared.existingHost(sessionID: "session-metadata") else {
-            XCTFail("expected ghostty host")
-            return
-        }
-
-        host.applyActionEvent(.setTitle(" live api "))
-        host.applyActionEvent(.setWorkingDirectory(" \(updatedWorkingDirectory.path) "))
+        fakeHost.effectiveTitle = "live api"
+        fakeHost.effectiveWorkingDirectory = updatedWorkingDirectory.path
+        controller.debugSimulateSessionMetadataDidChange()
 
         XCTAssertEqual(controller.debugWindowTitle, "live api")
         XCTAssertEqual(controller.debugWindowRepresentedPath, updatedWorkingDirectory.path)
@@ -1204,13 +1123,12 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 sessionID: "session-runtime-recover", backend: .ghosttyEmbedded, servicePID: 1, childPID: 1111, state: .exited,
                 updatedAt: "2026-05-09T00:00:01Z", exitedAt: "2026-05-09T00:00:01Z"), paths: paths)
 
-        let controller = TerminalSessionWindowController(sessionID: "session-runtime-recover", paths: paths)
+        let controller = makeGhosttyController(sessionID: "session-runtime-recover", paths: paths)
         let owner = TerminalClient(
             id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-09T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-runtime-recover", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
-
         controller.paste(nil)
         XCTAssertEqual(controller.debugInputStatus, "Session is not running.")
 
@@ -1240,8 +1158,11 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 sessionID: "session-7", backend: .ghosttyEmbedded, servicePID: 1, childPID: 9876, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
 
-        let firstController = TerminalSessionWindowController(
-            sessionID: "session-7", paths: paths,
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotValue = ghosttySnapshot(text: "backend")
+        fakeHost.effectiveTitle = "backend"
+        let firstController = makeGhosttyController(
+            sessionID: "session-7", paths: paths, host: fakeHost,
             attachClientAction: { client, mode in
                 try TerminalSessionPersistence.attachClient(
                     sessionID: "session-7", client: client, mode: mode, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
@@ -1256,8 +1177,8 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertTrue(firstController.debugDidCloseWindow)
 
-        let reopenedController = TerminalSessionWindowController(
-            sessionID: "session-7", paths: paths,
+        let reopenedController = makeGhosttyController(
+            sessionID: "session-7", paths: paths, host: fakeHost,
             attachClientAction: { client, mode in
                 try TerminalSessionPersistence.attachClient(
                     sessionID: "session-7", client: client, mode: mode, paths: paths, attachedAt: "2026-05-09T00:00:02Z")

@@ -10,7 +10,6 @@ let package = Package(
         .library(name: "systembridge", targets: ["systembridge"]),
         .library(name: "spacesterminalcore", targets: ["spacesterminalcore"]),
         .library(name: "spacesterminalghostty", targets: ["spacesterminalghostty"]),
-        .library(name: "spacesterminalruntime", targets: ["spacesterminalruntime"]),
         .library(name: "spacesterminalui", targets: ["spacesterminalui"]),
         .library(name: "workspacecore", targets: ["workspacecore"]),
         .library(name: "spacesui", targets: ["spacesui"]),
@@ -36,10 +35,6 @@ let package = Package(
             linkerSettings: [.linkedLibrary("c++")]
         ),
         .target(
-            name: "spacesterminalruntime",
-            dependencies: ["spacesterminalcore", "spacesterminalghostty"]
-        ),
-        .target(
             name: "spacesterminalui",
             dependencies: ["spacesterminalcore", "spacesterminalghostty"]
         ),
@@ -62,7 +57,7 @@ let package = Package(
             dependencies: [
                 "workspacecore",
                 "spacesterminalcore",
-                "spacesterminalruntime",
+                "spacesterminalghostty",
                 "systembridge",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
@@ -96,7 +91,6 @@ let package = Package(
         ),
         .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore"]),
         .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
-        .testTarget(name: "spacesterminalruntimeTests", dependencies: ["spacesterminalruntime"]),
         .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
         .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "systembridge"]),
         .testTarget(name: "spacesuiTests", dependencies: ["spacesui"]),

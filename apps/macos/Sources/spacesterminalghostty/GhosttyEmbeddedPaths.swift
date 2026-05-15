@@ -65,12 +65,16 @@ public enum GhosttyEmbeddedLocator {
     private static func candidateSearchRoots(fileManager: FileManager, currentDirectoryPath: String?) -> [String] {
         let cwd = currentDirectoryPath ?? fileManager.currentDirectoryPath
         let cwdURL = URL(fileURLWithPath: cwd, isDirectory: true)
-        let macOSRoot = cwdURL.appendingPathComponent("apps/macos", isDirectory: true)
-        return [
-            cwdURL.path, cwdURL.appendingPathComponent("apps/macos/.local/ghosttykit", isDirectory: true).path,
-            cwdURL.appendingPathComponent("apps/macos", isDirectory: true).path,
-            macOSRoot.appendingPathComponent(".local/ghosttykit", isDirectory: true).path, cwdURL.deletingLastPathComponent().path,
-        ]
+        let parentURL = cwdURL.deletingLastPathComponent()
+        let roots = [
+            cwdURL, cwdURL.appendingPathComponent(".local/ghosttykit", isDirectory: true),
+            cwdURL.appendingPathComponent("apps/macos", isDirectory: true),
+            cwdURL.appendingPathComponent("apps/macos/.local/ghosttykit", isDirectory: true), parentURL,
+            parentURL.appendingPathComponent(".local/ghosttykit", isDirectory: true),
+            parentURL.appendingPathComponent("apps/macos", isDirectory: true),
+            parentURL.appendingPathComponent("apps/macos/.local/ghosttykit", isDirectory: true),
+        ].map(\.path)
+        return Array(NSOrderedSet(array: roots)) as? [String] ?? roots
     }
 
     private static func missingFrameworkReason(searchRoots: [String]) -> String {

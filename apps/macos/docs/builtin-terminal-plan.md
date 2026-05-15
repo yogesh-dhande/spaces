@@ -110,14 +110,12 @@ Possible later additions only if v1 proves they are needed:
 - `show` now asks the running Spaces app to open a native per-session window shell for a given session ID.
 - `show` now registers the native session window as a local owner client and detaches it on close.
 - `list` now surfaces the active owner client ID plus attached-client counts for each session.
-- The current native session window also surfaces its renderer mode so `script-pty` sessions remain explicit shell fallback windows while `ghostty-embedded` sessions use the libghostty-backed window path.
-- Session metadata and runtime state now record an explicit backend kind, and the native window body is selected from that backend rather than inferred from whichever renderer happens to be available locally.
-- The `script-pty` path now lives behind an explicit backend-runtime interface, so the current daemon is one backend implementation instead of the terminal architecture itself.
-- Backend selection now lives in a dedicated `spacesterminalruntime` target so the Ghostty-backed runtime can be integrated without forcing `spacesterminalcore` to depend on libghostty-specific code.
+- The current native session window still surfaces its renderer mode so owner windows stay on libghostty while passive viewer states can fall back to tailed output when the live surface cannot be inspected locally.
+- Session metadata and runtime state now record the built-in Ghostty backend explicitly, and the native window body is selected from renderer availability rather than inferred from whichever local fallback happens to be available.
 - The built `spaces` binary has been verified against a fresh session for `command`, `list`, `send`, and `tail`.
 - The `ghostty-embedded` backend has been verified against a fresh isolated session for `command`, `list`, `send`, and `tail`, with libghostty owning the PTY and feeding `output.log` through the additive raw-output callback.
 - The native `ghostty-embedded` path is now app-hosted so the visible libghostty surface is the same session backend that serves `spaces terminal send`, `spaces terminal key`, and `spaces terminal tail`.
-- `script-pty` remains the fallback window path while the session model is still growing toward multi-client owner or viewer handoff.
+- Tailed-output viewer fallback remains available while the session model continues to grow toward richer multi-client owner or viewer handoff.
 
 ## Open Decisions
 - Persistent store shape for terminal output chunks and snapshots.

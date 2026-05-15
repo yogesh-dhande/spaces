@@ -41,7 +41,7 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(sessions, [metadata])
     }
 
-    func testLaunchConfigurationDefaultsLegacyMetadataToScriptPTY() throws {
+    func testLaunchConfigurationDefaultsLegacyMetadataToGhosttyEmbedded() throws {
         let json = """
             {
               "sessionID": "session-legacy",
@@ -55,11 +55,11 @@ final class TerminalSessionModelTests: XCTestCase {
 
         let decoded = try JSONDecoder().decode(TerminalSessionLaunchConfiguration.self, from: json)
 
-        XCTAssertEqual(decoded.backend, .scriptPTY)
+        XCTAssertEqual(decoded.backend, .ghosttyEmbedded)
         XCTAssertEqual(decoded.sessionID, "session-legacy")
     }
 
-    func testRuntimeStateDefaultsLegacyStateToScriptPTY() throws {
+    func testRuntimeStateDefaultsLegacyStateToGhosttyEmbedded() throws {
         let json = """
             {
               "sessionID": "session-legacy",
@@ -72,7 +72,7 @@ final class TerminalSessionModelTests: XCTestCase {
 
         let decoded = try JSONDecoder().decode(TerminalSessionRuntimeState.self, from: json)
 
-        XCTAssertEqual(decoded.backend, .scriptPTY)
+        XCTAssertEqual(decoded.backend, .ghosttyEmbedded)
         XCTAssertEqual(decoded.childPID, 456)
     }
 

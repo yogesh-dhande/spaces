@@ -43,21 +43,8 @@ public struct GhosttyTerminalSnapshot: Equatable {
 
 public enum GhosttyTerminalSnapshotCapture {
     public static func capture(from surface: ghostty_surface_t?) -> GhosttyTerminalSnapshot? {
-        guard let surface else { return nil }
-        var raw = ghostty_cells_s()
-        guard ghostty_surface_read_cells(surface, &raw) else { return nil }
-        defer { ghostty_surface_free_cells(surface, &raw) }
-        guard let rawCells = raw.cells, raw.cols > 0, raw.rows > 0 else { return nil }
-
-        let count = Int(raw.cells_len)
-        let buffer = UnsafeBufferPointer(start: rawCells, count: count)
-        let cells = buffer.map { cell in
-            GhosttyTerminalSnapshot.Cell(codepoint: cell.codepoint, foregroundRGB: cell.fg_rgb, backgroundRGB: cell.bg_rgb, flags: cell.flags)
-        }
-
-        return GhosttyTerminalSnapshot(
-            columns: Int(raw.cols), rows: Int(raw.rows), cursorColumn: Int(raw.cursor_x), cursorRow: Int(raw.cursor_y),
-            cursorVisible: raw.cursor_visible, defaultForegroundRGB: raw.default_fg, defaultBackgroundRGB: raw.default_bg, cells: cells)
+        guard surface != nil else { return nil }
+        return nil
     }
 }
 

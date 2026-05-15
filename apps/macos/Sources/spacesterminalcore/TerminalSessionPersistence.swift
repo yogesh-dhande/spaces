@@ -10,8 +10,8 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
     public let createdAt: String
 
     public init(
-        sessionID: String, backend: TerminalSessionBackendKind = .scriptPTY, title: String, workingDirectory: String, shell: String, command: String?,
-        createdAt: String
+        sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, title: String, workingDirectory: String, shell: String,
+        command: String?, createdAt: String
     ) {
         self.sessionID = sessionID
         self.backend = backend
@@ -35,7 +35,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sessionID = try container.decode(String.self, forKey: .sessionID)
-        backend = try container.decodeIfPresent(TerminalSessionBackendKind.self, forKey: .backend) ?? .scriptPTY
+        backend = try container.decodeIfPresent(TerminalSessionBackendKind.self, forKey: .backend) ?? .ghosttyEmbedded
         title = try container.decode(String.self, forKey: .title)
         workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
         shell = try container.decode(String.self, forKey: .shell)
@@ -54,7 +54,7 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
     public let exitedAt: String?
 
     public init(
-        sessionID: String, backend: TerminalSessionBackendKind = .scriptPTY, servicePID: Int32, childPID: Int32?, state: TerminalSessionState,
+        sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, servicePID: Int32, childPID: Int32?, state: TerminalSessionState,
         updatedAt: String, exitedAt: String? = nil
     ) {
         self.sessionID = sessionID
@@ -79,7 +79,7 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sessionID = try container.decode(String.self, forKey: .sessionID)
-        backend = try container.decodeIfPresent(TerminalSessionBackendKind.self, forKey: .backend) ?? .scriptPTY
+        backend = try container.decodeIfPresent(TerminalSessionBackendKind.self, forKey: .backend) ?? .ghosttyEmbedded
         servicePID = try container.decode(Int32.self, forKey: .servicePID)
         childPID = try container.decodeIfPresent(Int32.self, forKey: .childPID)
         state = try container.decode(TerminalSessionState.self, forKey: .state)

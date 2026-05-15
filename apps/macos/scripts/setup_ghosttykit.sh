@@ -67,9 +67,12 @@ if [[ -f "$MACOS_LIB_DIR/ghostty-internal.a" && ! -f "$MACOS_LIB_DIR/libghostty-
     echo "==> Normalizing macOS Ghostty static library name for SwiftPM"
     cp "$MACOS_LIB_DIR/ghostty-internal.a" "$MACOS_LIB_DIR/libghostty-internal.a"
 fi
+if [[ -f "$MACOS_LIB_DIR/ghostty-internal.a" && -f "$MACOS_LIB_DIR/libghostty-internal.a" ]]; then
+    rm "$MACOS_LIB_DIR/ghostty-internal.a"
+fi
 if [[ -f "$XCFRAMEWORK_ROOT/Info.plist" ]]; then
-    /usr/libexec/PlistBuddy -c "Set :AvailableLibraries:1:BinaryPath libghostty-internal.a" "$XCFRAMEWORK_ROOT/Info.plist" >/dev/null 2>&1 || true
-    /usr/libexec/PlistBuddy -c "Set :AvailableLibraries:1:LibraryPath libghostty-internal.a" "$XCFRAMEWORK_ROOT/Info.plist" >/dev/null 2>&1 || true
+    /usr/libexec/PlistBuddy -c "Set :AvailableLibraries:2:BinaryPath libghostty-internal.a" "$XCFRAMEWORK_ROOT/Info.plist" >/dev/null 2>&1 || true
+    /usr/libexec/PlistBuddy -c "Set :AvailableLibraries:2:LibraryPath libghostty-internal.a" "$XCFRAMEWORK_ROOT/Info.plist" >/dev/null 2>&1 || true
 fi
 
 if [[ ! -d "$RESOURCES_ROOT/ghostty/shell-integration" || ! -d "$RESOURCES_ROOT/terminfo" ]]; then
