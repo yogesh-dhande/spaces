@@ -692,6 +692,18 @@ import spacesterminalghostty
                     completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
                     return
                 }
+                if let snapshotText = ghosttySessionHost?.snapshotText() {
+                    if snapshotText != lastRenderedOutput {
+                        outputView.string = snapshotText
+                        if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
+                        outputView.sizeToFit()
+                        lastRenderedOutput = snapshotText
+                        didUpdatePassivePresentation = true
+                    }
+                    restoreOutputViewportState(viewportState)
+                    completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot_text", changedOutput: didUpdatePassivePresentation)
+                    return
+                }
                 fallthrough
             case .outputFallback:
                 let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 200)) ?? ""

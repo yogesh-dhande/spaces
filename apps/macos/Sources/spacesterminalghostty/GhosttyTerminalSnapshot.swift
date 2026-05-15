@@ -46,6 +46,29 @@ public enum GhosttyTerminalSnapshotCapture {
         guard surface != nil else { return nil }
         return nil
     }
+
+    public static func captureText(from surface: ghostty_surface_t?) -> String? {
+        guard let surface else { return nil }
+        let size = ghostty_surface_size(surface)
+        guard size.columns > 0, size.rows > 0 else { return nil }
+
+        var text = ghostty_text_s()
+        let selection = wholeSurfaceSelection(columns: size.columns, rows: size.rows)
+        guard ghostty_surface_read_text(surface, selection, &text) else { return nil }
+        defer { ghostty_surface_free_text(surface, &text) }
+        guard let raw = text.text, text.text_len > 0 else { return "" }
+        let bytes = UnsafeRawBufferPointer(start: UnsafeRawPointer(raw), count: Int(text.text_len))
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    private static func wholeSurfaceSelection(columns: UInt16, rows: UInt16) -> ghostty_selection_s {
+        let maxColumn = UInt32(max(Int(columns) - 1, 0))
+        let maxRow = UInt32(max(Int(rows) - 1, 0))
+        return ghostty_selection_s(
+            top_left: ghostty_point_s(tag: GHOSTTY_POINT_SURFACE, coord: GHOSTTY_POINT_COORD_TOP_LEFT, x: 0, y: 0),
+            bottom_right: ghostty_point_s(tag: GHOSTTY_POINT_SURFACE, coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT, x: maxColumn, y: maxRow),
+            rectangle: false)
+    }
 }
 
 public enum GhosttyTerminalSnapshotRenderer {

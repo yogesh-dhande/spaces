@@ -17,6 +17,7 @@ extension Notification.Name {
     func activeOwnerClientID() -> String?
     func hasRenderableSurface() -> Bool
     func snapshot() -> GhosttyTerminalSnapshot?
+    func snapshotText() -> String?
     func copySelectionToPasteboard() -> Bool
     func pasteClipboardContents() -> Bool
     @discardableResult func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool
@@ -200,6 +201,7 @@ extension Notification.Name {
 
     public func hasRenderableSurface() -> Bool { terminalView.surface != nil }
     public func snapshot() -> GhosttyTerminalSnapshot? { terminalView.snapshot() }
+    public func snapshotText() -> String? { terminalView.snapshotText() }
     public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
     public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
     @discardableResult public func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {

@@ -41,6 +41,7 @@ The current forked GhosttyKit build exposes the raw PTY I/O hooks Spaces needs b
 ## Mobile and Remote Control
 - `spaces terminal proxy <session-id> --host ... --port ... --auth-token ...` exposes a local TCP bridge for one session.
 - The proxy reuses the same JSON control protocol as `control.sock`.
+- The proxy is intentionally a per-session bridge and should be treated as an internal integration primitive, not as the final remote-client product surface.
 - Supported control patterns on that TCP seam are:
   - `attach` with an explicit client record and attachment mode
   - `tail` for recent output
@@ -48,6 +49,7 @@ The current forked GhosttyKit build exposes the raw PTY I/O hooks Spaces needs b
   - `key`
   - `takeover`
 - The proxy answers `attach` and `tail` from persisted session state and forwards the remaining commands into the local control socket. That keeps the Mac-owned libghostty host as the PTY owner while still allowing mobile-shaped or remote-shaped clients to view, tail, and take over.
+- If Spaces grows a broader host service for remote iOS/macOS/Android clients, that service should absorb this bridge instead of layering a second ownership model on top of it.
 - The current repository includes `apps/macos/Tests/poc_mobile_terminal_client.py` as a headless mobile-shaped proof of concept over that TCP bridge.
 - `apps/macos/Tests/e2e_terminal_mobile_client.sh` is the maintained regression entry point for that flow. It runs the mobile-shaped POC against an isolated `SpacesApp`, verifies attach, viewer gating, takeover, text input, key input, owner-window close, owner-window reopen, and ownership handoff back to the reopened macOS owner window. It should stay green whenever the Ghostty-owner session boundary changes.
 
@@ -251,7 +253,7 @@ The current branch has verified:
 - stress and soak harnesses for append-only, repaint-heavy, mixed-output, and live passive-viewer repaint sessions
 
 ## Known Constraints
-- Passive viewer windows still use tailed output rather than a second live libghostty surface.
+- Passive viewer windows do not host a second live libghostty surface. They read the live libghostty viewport text first and fall back to tailed output only when surface readback is unavailable.
 - Passive viewer windows still keep the 500 ms poll as a safety fallback, but normal live-session updates now arrive through coalesced output notifications. Remaining viewer latency work is mostly about tuning refresh cadence and measuring end-to-end presentation timing rather than transcript rendering throughput.
 - iPhone or VPN clients are intentionally out of scope for this branch.
 - External iTerm2 and Ghostty hosts remain supported overrides on this branch.

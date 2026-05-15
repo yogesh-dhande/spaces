@@ -111,6 +111,8 @@ apps/macos/Tests/e2e_terminal_mobile_client.sh
 
 Use the shell wrapper when you want one command that exercises the full attach, takeover, owner-close, owner-reopen, send, and key path without remembering the Python invocation.
 
+`spaces terminal proxy` is the current low-level seam for that proof of concept. Treat it as a temporary integration primitive for remote-shaped clients rather than the long-term external API surface.
+
 For repeatable profiling of the built-in terminal owner and viewer flows:
 
 ```bash

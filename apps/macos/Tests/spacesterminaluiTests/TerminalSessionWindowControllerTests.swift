@@ -9,6 +9,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
     @MainActor private final class FakeGhosttySessionHost: TerminalGhosttySessionHosting {
         var hasSurface = true
         var snapshotValue: GhosttyTerminalSnapshot?
+        var snapshotTextValue: String?
         var effectiveTitle = "ghostty"
         var effectiveWorkingDirectory = "/tmp/work"
         var didParkSurface = false
@@ -25,6 +26,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         func activeOwnerClientID() -> String? { nil }
         func hasRenderableSurface() -> Bool { hasSurface }
         func snapshot() -> GhosttyTerminalSnapshot? { snapshotValue }
+        func snapshotText() -> String? { snapshotTextValue }
         func copySelectionToPasteboard() -> Bool {
             copiedSelection = true
             return true
@@ -346,6 +348,44 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugShowsStateLabel)
         XCTAssertFalse(controller.debugShowsRendererLabel)
         XCTAssertFalse(controller.debugShowsHeader)
+    }
+
+    @MainActor func testGhosttyViewerPrefersLiveSurfaceTextSnapshotOverTailOutput() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-viewer-snapshot", backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-15T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-viewer-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-15T00:00:01Z"), paths: paths)
+        try "tail-only-content\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+        let owner = TerminalClient(
+            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-15T00:00:00Z")
+        let viewer = TerminalClient(
+            id: "viewer-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            connectedAt: "2026-05-15T00:00:01Z")
+        try TerminalSessionPersistence.upsertClient(owner, paths: paths)
+        try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-viewer-snapshot", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-15T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-viewer-snapshot", client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-05-15T00:00:01Z")
+
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotTextValue = "live-surface-content"
+        let controller = makeGhosttyController(
+            sessionID: "session-viewer-snapshot", paths: paths, preferredAttachmentMode: .viewer, host: fakeHost, attachClientAction: { _, _ in },
+            detachClientAction: { _ in })
+
+        XCTAssertEqual(controller.debugRenderedOutput, "live-surface-content")
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty snapshot (viewer)")
     }
 
     @MainActor func testGhosttyOwnerWindowHidesInlineControls() throws {
