@@ -25,9 +25,21 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
     }
 
     private final class QueryResponderBox: @unchecked Sendable {
-        private var responder = TerminalQueryResponder()
+        private let lock = NSLock()
+        private var responder = TerminalQueryResponder(
+            columns: ScriptPTYTerminalSessionRuntime.defaultInitialColumns, rows: ScriptPTYTerminalSessionRuntime.defaultInitialRows)
 
-        func responses(for output: Data) -> [Data] { responder.responses(for: output) }
+        func responses(for output: Data) -> [Data] {
+            lock.lock()
+            defer { lock.unlock() }
+            return responder.responses(for: output)
+        }
+
+        func updateTerminalSize(columns: Int, rows: Int) {
+            lock.lock()
+            defer { lock.unlock() }
+            responder.updateTerminalSize(columns: columns, rows: rows)
+        }
     }
 
     public init(
@@ -174,6 +186,7 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
                         success: false, detail: "cols=\(columns) rows=\(rows)")
                     return TerminalSessionHostProtocolSupport.runtimeUnavailable("Unable to resize terminal session.")
                 }
+                queryResponder.updateTerminalSize(columns: columns, rows: rows)
                 TerminalPerformance.logMetric(
                     "terminal_control_resize", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                     success: true, detail: "cols=\(columns) rows=\(rows)")

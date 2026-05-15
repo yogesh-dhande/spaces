@@ -10,6 +10,18 @@ struct TerminalQueryResponder {
 
     private var trailingBytes = [UInt8]()
     private var privateModes = Set<Int>()
+    private var columns: Int
+    private var rows: Int
+
+    init(columns: Int = ScriptPTYTerminalSessionRuntime.defaultInitialColumns, rows: Int = ScriptPTYTerminalSessionRuntime.defaultInitialRows) {
+        self.columns = max(columns, 1)
+        self.rows = max(rows, 1)
+    }
+
+    mutating func updateTerminalSize(columns: Int, rows: Int) {
+        self.columns = max(columns, 1)
+        self.rows = max(rows, 1)
+    }
 
     mutating func responses(for output: Data) -> [Data] {
         guard !output.isEmpty else { return [] }
@@ -67,6 +79,7 @@ struct TerminalQueryResponder {
             case ("", "", "n", "6"): return Data("\u{001B}[1;1R".utf8)
             case ("", "", "c", ""): return Data("\u{001B}[?62;4;22c".utf8)
             case (">", "", "c", ""): return Data("\u{001B}[>0;10;1c".utf8)
+            case ("", "", "t", "18"): return Data("\u{001B}[8;\(rows);\(columns)t".utf8)
             case ("?", "$", "p", _): return modeReportResponse(for: parameters)
             default: return nil
             }

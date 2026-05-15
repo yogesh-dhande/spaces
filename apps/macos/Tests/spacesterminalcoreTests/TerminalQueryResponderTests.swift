@@ -41,6 +41,15 @@ final class TerminalQueryResponderTests: XCTestCase {
         XCTAssertEqual(responses, [Data("\u{001B}[0n".utf8), Data("\u{001B}[>0;10;1c".utf8)])
     }
 
+    func testResponderAnswersTerminalSizeQueryUsingTrackedGeometry() {
+        var responder = TerminalQueryResponder(columns: 120, rows: 40)
+
+        XCTAssertEqual(responder.responses(for: Data("\u{001B}[18t".utf8)), [Data("\u{001B}[8;40;120t".utf8)])
+
+        responder.updateTerminalSize(columns: 132, rows: 44)
+        XCTAssertEqual(responder.responses(for: Data("\u{001B}[18t".utf8)), [Data("\u{001B}[8;44;132t".utf8)])
+    }
+
     func testResponderAnswersPrivateModeReportsUsingObservedModeState() {
         var responder = TerminalQueryResponder()
 

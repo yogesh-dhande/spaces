@@ -315,9 +315,10 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: terminal-status (`CSI 5n`), secondary device-attributes (`CSI > c`), and private-mode report (`DECRQM`) queries for the shared-session modes the host tracks
 - `implemented`: cursor-position query (`CSI 6n`)
 - `implemented`: primary device attributes (`CSI c`)
+- `implemented`: terminal-size query (`CSI 18 t`) using the host's current PTY rows and columns
 - `implemented`: terminal foreground/background color probes (`OSC 10;?`, `OSC 11;?`) plus palette-color probes (`OSC 4;index;?`)
-- `implemented`: broader device and mode query coverage beyond the original status/device/color handshake for the modes and palette surface the shared host understands today, including `DECRQM` for `?1048`
-- `partial`: the wider xterm query surface for advanced clients that probe beyond cursor position, device attributes, tracked private modes, and theme/palette colors
+- `implemented`: broader device and mode query coverage beyond the original status/device/color handshake for the modes and palette surface the shared host understands today, including `DECRQM` for `?1048` and live terminal-size reports
+- `partial`: the wider xterm query surface for advanced clients that probe beyond cursor position, device attributes, terminal-size reports, tracked private modes, and theme/palette colors
 
 ### Input, Paste, and Mouse
 - `implemented`: text input, common navigation keys, and control-chord forwarding over the shared host protocol
