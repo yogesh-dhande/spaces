@@ -259,6 +259,8 @@ import spacesterminalcore
         scrollToVisible(rect)
     }
 
+    func rectForCharacterRange(_ range: NSRange) -> NSRect { boundingRect(for: clampedRange(range)) }
+
     @discardableResult func handleTerminalEvent(_ event: NSEvent) -> Bool {
         guard let input = terminalInput(for: event) else { return false }
         return terminalInputHandler?(input) ?? false

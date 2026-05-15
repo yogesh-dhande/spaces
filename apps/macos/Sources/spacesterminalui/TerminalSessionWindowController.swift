@@ -66,6 +66,8 @@ import spacesterminalghostty
         let horizontalOffset: CGFloat
         let offsetFromBottom: CGFloat
         let selectedRange: NSRange
+        let topVisibleLocation: Int
+        let topVisibleOffset: CGFloat
     }
 
     private let sessionID: String
@@ -1469,9 +1471,13 @@ import spacesterminalghostty
         let visibleRect = outputScrollView.contentView.documentVisibleRect
         let documentHeight = outputView.bounds.height
         let offsetFromBottom = max(0, documentHeight - visibleRect.maxY)
+        let anchorPoint = NSPoint(x: outputView.textContainerInset.width + outputView.lineFragmentPadding + 1, y: visibleRect.minY + 1)
+        let topVisibleLocation = outputView.characterIndex(at: anchorPoint)
+        let anchorRect = outputView.rectForCharacterRange(NSRange(location: topVisibleLocation, length: 0))
         return OutputViewportState(
             wasPinnedToBottom: offsetFromBottom <= 24, horizontalOffset: max(0, visibleRect.minX), offsetFromBottom: offsetFromBottom,
-            selectedRange: outputView.selectedRange())
+            selectedRange: outputView.selectedRange(), topVisibleLocation: topVisibleLocation,
+            topVisibleOffset: max(0, visibleRect.minY - anchorRect.minY))
     }
 
     private func restoreOutputViewportState(_ state: OutputViewportState) {
@@ -1497,7 +1503,13 @@ import spacesterminalghostty
         }
 
         let maxOriginY = max(0, documentView.bounds.height - visibleRect.height)
-        let targetOriginY = max(0, maxOriginY - state.offsetFromBottom)
+        let targetOriginY: CGFloat
+        if state.topVisibleLocation < outputLength {
+            let anchorRect = outputView.rectForCharacterRange(NSRange(location: state.topVisibleLocation, length: 0))
+            targetOriginY = max(0, min(anchorRect.minY + state.topVisibleOffset, maxOriginY))
+        } else {
+            targetOriginY = max(0, maxOriginY - state.offsetFromBottom)
+        }
         outputScrollView.contentView.scroll(to: NSPoint(x: targetOriginX, y: min(targetOriginY, maxOriginY)))
         outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
     }
@@ -1795,6 +1807,11 @@ import spacesterminalghostty
     var debugOutputOffsetFromBottom: CGFloat {
         let visibleRect = outputScrollView.contentView.documentVisibleRect
         return max(0, outputView.bounds.height - visibleRect.maxY)
+    }
+    var debugTopVisibleCharacterIndex: Int {
+        let visibleRect = outputScrollView.contentView.documentVisibleRect
+        let point = NSPoint(x: outputView.textContainerInset.width + outputView.lineFragmentPadding + 1, y: visibleRect.minY + 1)
+        return outputView.characterIndex(at: point)
     }
     func debugScrollOutputHorizontally(to offset: CGFloat) {
         guard let documentView = outputScrollView.documentView else { return }

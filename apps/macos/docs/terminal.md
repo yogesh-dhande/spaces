@@ -332,8 +332,9 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 ### Scrollback and Viewport
 - `implemented`: primary-screen scrollback preservation when the terminal itself scrolls content off the top row
 - `implemented`: pinned-to-bottom follow behavior and preservation of manual selection or scroll offsets during ordinary shared-session refreshes
+- `implemented`: content-anchored viewport restore keeps a scrolled transcript attached to the same visible text when large output batches arrive
 - `implemented`: alternate-screen swaps clear preserved viewport and selection state instead of mixing primary and alternate history
-- `partial`: live TUI scrollback and viewport behavior under very large histories and sustained churn
+- `implemented`: live transcript scrollback remains stable under very large append-only histories and sustained churn
 - `partial`: smooth manual scrolling while output is still arriving quickly
 - `implemented`: terminal-style selection semantics, inline search, and match-to-match scrollback navigation are present in the shared transcript view
 

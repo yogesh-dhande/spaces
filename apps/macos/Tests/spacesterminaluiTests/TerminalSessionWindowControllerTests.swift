@@ -1174,6 +1174,34 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertLessThan(abs(controller.debugOutputOffsetFromBottom - initialOffset), 48)
     }
 
+    @MainActor func testFallbackWindowPreservesTopVisibleAnchorWhenLargeOutputArrives() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-scroll-anchor", title: "scroll-anchor", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "tail -f log",
+                createdAt: "2026-05-14T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-scroll-anchor", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-14T00:00:01Z"), paths: paths)
+        let initialOutput = (0..<400).map { "line-\($0)" }.joined(separator: "\n") + "\n"
+        try initialOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-scroll-anchor", paths: paths)
+        controller.show()
+        controller.debugScrollOutputToOffsetFromBottom(260)
+        let initialTopVisibleIndex = controller.debugTopVisibleCharacterIndex
+
+        let updatedOutput = initialOutput + (400..<520).map { "line-\($0)" }.joined(separator: "\n") + "\n"
+        try updatedOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        controller.debugForceRefresh()
+
+        XCTAssertLessThan(abs(controller.debugTopVisibleCharacterIndex - initialTopVisibleIndex), 24)
+    }
+
     @MainActor func testFallbackWindowPreservesHorizontalScrollOffsetWhenNewOutputArrives() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
