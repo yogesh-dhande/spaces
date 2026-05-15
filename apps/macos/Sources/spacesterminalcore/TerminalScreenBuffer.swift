@@ -73,6 +73,7 @@ public struct TerminalRenderedScreen: Equatable {
     public let cursorVisible: Bool
     public let cursorStyle: TerminalCursorStyle
     public let title: String?
+    public let workingDirectory: String?
     public let usesAlternateScreen: Bool
     public let mouseTrackingMode: TerminalMouseTrackingMode
     public let usesSGRMouseEncoding: Bool
@@ -82,8 +83,8 @@ public struct TerminalRenderedScreen: Equatable {
 
     public init(
         rows: [[TerminalRenderedCell]], cursorRow: Int, cursorColumn: Int, cursorVisible: Bool, cursorStyle: TerminalCursorStyle, title: String?,
-        usesAlternateScreen: Bool, mouseTrackingMode: TerminalMouseTrackingMode, usesSGRMouseEncoding: Bool, usesAlternateScrollMode: Bool,
-        usesBracketedPasteMode: Bool, usesFocusReporting: Bool
+        workingDirectory: String?, usesAlternateScreen: Bool, mouseTrackingMode: TerminalMouseTrackingMode, usesSGRMouseEncoding: Bool,
+        usesAlternateScrollMode: Bool, usesBracketedPasteMode: Bool, usesFocusReporting: Bool
     ) {
         self.rows = rows
         self.cursorRow = cursorRow
@@ -91,6 +92,7 @@ public struct TerminalRenderedScreen: Equatable {
         self.cursorVisible = cursorVisible
         self.cursorStyle = cursorStyle
         self.title = title
+        self.workingDirectory = workingDirectory
         self.usesAlternateScreen = usesAlternateScreen
         self.mouseTrackingMode = mouseTrackingMode
         self.usesSGRMouseEncoding = usesSGRMouseEncoding
@@ -142,6 +144,7 @@ public struct TerminalScreenBuffer {
     private var cursorVisible = true
     private var cursorStyle = TerminalCursorStyle.block
     private var currentTitle: String?
+    private var currentWorkingDirectory: String?
     private var isUsingAlternateScreen = false
     private var mouseTrackingMode = TerminalMouseTrackingMode.disabled
     private var usesSGRMouseEncoding = false
@@ -166,6 +169,7 @@ public struct TerminalScreenBuffer {
         cursorVisible = true
         cursorStyle = .block
         currentTitle = nil
+        currentWorkingDirectory = nil
         isUsingAlternateScreen = false
         mouseTrackingMode = .disabled
         usesSGRMouseEncoding = false
@@ -210,8 +214,9 @@ public struct TerminalScreenBuffer {
         TerminalRenderedScreen(
             rows: renderedRows().map { $0.map { TerminalRenderedCell(character: $0.character, style: $0.style) } }, cursorRow: renderedCursorRow(),
             cursorColumn: cursorColumn, cursorVisible: cursorVisible, cursorStyle: cursorStyle, title: currentTitle,
-            usesAlternateScreen: isUsingAlternateScreen, mouseTrackingMode: mouseTrackingMode, usesSGRMouseEncoding: usesSGRMouseEncoding,
-            usesAlternateScrollMode: usesAlternateScrollMode, usesBracketedPasteMode: usesBracketedPasteMode, usesFocusReporting: usesFocusReporting)
+            workingDirectory: currentWorkingDirectory, usesAlternateScreen: isUsingAlternateScreen, mouseTrackingMode: mouseTrackingMode,
+            usesSGRMouseEncoding: usesSGRMouseEncoding, usesAlternateScrollMode: usesAlternateScrollMode,
+            usesBracketedPasteMode: usesBracketedPasteMode, usesFocusReporting: usesFocusReporting)
     }
 
     private mutating func consumeEscapeSequence(_ scalars: [UnicodeScalar], startingAt index: Int) -> Int {
@@ -291,6 +296,17 @@ public struct TerminalScreenBuffer {
             }
             let title = String(components.last ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             currentTitle = title.isEmpty ? nil : title
+        case "7":
+            guard components.count >= 2 else {
+                currentWorkingDirectory = nil
+                return
+            }
+            let payload = String(components.last ?? "")
+            guard let url = URL(string: payload), url.isFileURL else {
+                currentWorkingDirectory = nil
+                return
+            }
+            currentWorkingDirectory = url.path.isEmpty ? nil : url.path
         case "8":
             guard components.count == 3 else { return }
             let uri = String(components[2])

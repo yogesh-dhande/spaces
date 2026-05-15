@@ -346,6 +346,32 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugWindowTitle, "live-title")
     }
 
+    @MainActor func testFallbackWindowUsesTerminalDrivenOSCWorkingDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let initialWorkingDirectory = root.appendingPathComponent("initial", isDirectory: true)
+        let runtimeWorkingDirectory = root.appendingPathComponent("runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: initialWorkingDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: runtimeWorkingDirectory, withIntermediateDirectories: true)
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-cwd", title: "fallback-title", workingDirectory: initialWorkingDirectory.path, shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-15T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-cwd", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-15T00:00:01Z"), paths: paths)
+        try "\u{001B}]7;file://\(runtimeWorkingDirectory.path)\u{0007}prompt".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-cwd", paths: paths)
+        controller.debugForceRefresh()
+
+        XCTAssertEqual(controller.debugWindowRepresentedPath, runtimeWorkingDirectory.path)
+        XCTAssertTrue(controller.debugSummary.contains("runtime"))
+    }
+
     @MainActor func testControllerLoadsRecentOutputIntoTextView() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

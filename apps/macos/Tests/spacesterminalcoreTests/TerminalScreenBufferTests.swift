@@ -235,6 +235,19 @@ final class TerminalScreenBufferTests: XCTestCase {
         XCTAssertNil(buffer.renderedScreen().title)
     }
 
+    func testIngestTracksOSCWorkingDirectoryUpdates() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("\u{001B}]7;file:///Users/yogesh/projects/spaces\u{0007}")
+        XCTAssertEqual(buffer.renderedScreen().workingDirectory, "/Users/yogesh/projects/spaces")
+
+        buffer.ingest("\u{001B}]7;file://localhost/tmp/runtime\u{0007}")
+        XCTAssertEqual(buffer.renderedScreen().workingDirectory, "/tmp/runtime")
+
+        buffer.ingest("\u{001B}]7;\u{0007}")
+        XCTAssertNil(buffer.renderedScreen().workingDirectory)
+    }
+
     func testIngestTracksDoubleUnderlineAndUnderlineColor() {
         var buffer = TerminalScreenBuffer()
 

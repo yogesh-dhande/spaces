@@ -56,6 +56,7 @@ import spacesterminalghostty
         let cursorRange: NSRange?
         let cursorStyle: TerminalCursorStyle
         let title: String?
+        let workingDirectory: String?
         let replayMode: String
         let replayBytes: Int64
         let usesAlternateScreen: Bool
@@ -127,6 +128,7 @@ import spacesterminalghostty
     private var lastRenderedOutput = ""
     private var lastRenderedAttributedOutput = NSAttributedString()
     private var lastRenderedWindowTitleOverride: String?
+    private var lastRenderedWorkingDirectoryOverride: String?
     private var lastRenderedUsedAlternateScreen = false
     private var lastRenderedMouseTrackingMode = TerminalMouseTrackingMode.disabled
     private var lastRenderedUsesSGRMouseEncoding = false
@@ -871,9 +873,9 @@ import spacesterminalghostty
                         text: fallbackText,
                         attributedText: NSAttributedString(
                             string: fallbackText, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor]), cursorRange: nil,
-                        cursorStyle: .block, title: nil, replayMode: "fallback_recent_output", replayBytes: 0, usesAlternateScreen: false,
-                        mouseTrackingMode: .disabled, usesSGRMouseEncoding: false, usesAlternateScrollMode: false, usesBracketedPasteMode: false,
-                        usesFocusReporting: false)
+                        cursorStyle: .block, title: nil, workingDirectory: nil, replayMode: "fallback_recent_output", replayBytes: 0,
+                        usesAlternateScreen: false, mouseTrackingMode: .disabled, usesSGRMouseEncoding: false, usesAlternateScrollMode: false,
+                        usesBracketedPasteMode: false, usesFocusReporting: false)
                 }
                 TerminalPerformance.logMetric(
                     "terminal_viewer_refresh_render_output", target: "session=\(sessionID)",
@@ -882,6 +884,7 @@ import spacesterminalghostty
                 let assignTextStartedAt = Date()
                 let alternateScreenChanged = renderedOutputResult.usesAlternateScreen != lastRenderedUsedAlternateScreen
                 lastRenderedWindowTitleOverride = renderedOutputResult.title
+                lastRenderedWorkingDirectoryOverride = renderedOutputResult.workingDirectory
                 lastRenderedMouseTrackingMode = renderedOutputResult.mouseTrackingMode
                 lastRenderedUsesSGRMouseEncoding = renderedOutputResult.usesSGRMouseEncoding
                 lastRenderedUsesAlternateScrollMode = renderedOutputResult.usesAlternateScrollMode
@@ -890,6 +893,8 @@ import spacesterminalghostty
                 if let window {
                     let updatedTitle = currentWindowTitle(fallback: currentLaunchConfiguration.title, isOwner: isOwner)
                     if window.title != updatedTitle { window.title = updatedTitle }
+                    window.representedURL = currentRepresentedURL(
+                        workingDirectory: currentSummaryWorkingDirectory(fallback: currentLaunchConfiguration.workingDirectory))
                 }
                 if renderedOutputResult.text != lastRenderedOutput || !renderedOutputResult.attributedText.isEqual(lastRenderedAttributedOutput) {
                     outputView.setRenderedOutput(
@@ -1605,7 +1610,7 @@ import spacesterminalghostty
             let attributedText = NSAttributedString(
                 string: snapshot.recentOutput, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor])
             return TransportRenderedOutput(
-                text: snapshot.recentOutput, attributedText: attributedText, cursorRange: nil, cursorStyle: .block, title: nil,
+                text: snapshot.recentOutput, attributedText: attributedText, cursorRange: nil, cursorStyle: .block, title: nil, workingDirectory: nil,
                 replayMode: "recent_output_empty", replayBytes: 0, usesAlternateScreen: false, mouseTrackingMode: .disabled,
                 usesSGRMouseEncoding: false, usesAlternateScrollMode: false, usesBracketedPasteMode: false, usesFocusReporting: false)
         }
@@ -1633,17 +1638,17 @@ import spacesterminalghostty
                 string: lastTransportOutput, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor])
             return TransportRenderedOutput(
                 text: lastTransportOutput, attributedText: fallback, cursorRange: nil, cursorStyle: .block, title: renderedScreen.title,
-                replayMode: "recent_output_fallback", replayBytes: replayBytes, usesAlternateScreen: renderedScreen.usesAlternateScreen,
-                mouseTrackingMode: renderedScreen.mouseTrackingMode, usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding,
-                usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode, usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode,
-                usesFocusReporting: renderedScreen.usesFocusReporting)
+                workingDirectory: renderedScreen.workingDirectory, replayMode: "recent_output_fallback", replayBytes: replayBytes,
+                usesAlternateScreen: renderedScreen.usesAlternateScreen, mouseTrackingMode: renderedScreen.mouseTrackingMode,
+                usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding, usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode,
+                usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode, usesFocusReporting: renderedScreen.usesFocusReporting)
         }
         return TransportRenderedOutput(
             text: rendered, attributedText: attributed, cursorRange: renderedResult.cursorRange, cursorStyle: renderedResult.cursorStyle,
-            title: renderedScreen.title, replayMode: replayMode, replayBytes: replayBytes, usesAlternateScreen: renderedScreen.usesAlternateScreen,
-            mouseTrackingMode: renderedScreen.mouseTrackingMode, usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding,
-            usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode, usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode,
-            usesFocusReporting: renderedScreen.usesFocusReporting)
+            title: renderedScreen.title, workingDirectory: renderedScreen.workingDirectory, replayMode: replayMode, replayBytes: replayBytes,
+            usesAlternateScreen: renderedScreen.usesAlternateScreen, mouseTrackingMode: renderedScreen.mouseTrackingMode,
+            usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding, usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode,
+            usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode, usesFocusReporting: renderedScreen.usesFocusReporting)
     }
 
     private func rebuildTransportScreenBuffer(totalBytes: Int64) throws -> Int64 {
@@ -1700,8 +1705,8 @@ import spacesterminalghostty
     }
 
     private func currentSummaryWorkingDirectory(fallback: String) -> String {
-        guard backend == .ghosttyEmbedded else { return fallback }
-        return ghosttySessionHost?.effectiveWorkingDirectory ?? fallback
+        if backend == .ghosttyEmbedded { return ghosttySessionHost?.effectiveWorkingDirectory ?? fallback }
+        return lastRenderedWorkingDirectoryOverride ?? fallback
     }
 
     private func currentRepresentedURL(workingDirectory: String) -> URL? {
