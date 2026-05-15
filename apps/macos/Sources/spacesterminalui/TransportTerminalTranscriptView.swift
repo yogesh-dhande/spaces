@@ -92,10 +92,17 @@ import spacesterminalcore
 
     override func mouseDown(with event: NSEvent) {
         if handleTerminalMouseEvent(event, action: .press, button: .left) { return }
-        guard window != nil else { return }
-        let location = convert(event.locationInWindow, from: nil)
+        let location = window != nil ? convert(event.locationInWindow, from: nil) : event.locationInWindow
         let index = characterIndex(at: location)
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift), let anchor = selectionAnchorLocation {
+        if event.clickCount >= 3 {
+            let range = lineSelectionRange(at: index)
+            selectionAnchorLocation = range.location
+            setSelectedRange(range)
+        } else if event.clickCount == 2 {
+            let range = wordSelectionRange(at: index)
+            selectionAnchorLocation = range.location
+            setSelectedRange(range)
+        } else if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift), let anchor = selectionAnchorLocation {
             setSelectedRange(selectionRange(from: anchor, to: index))
         } else {
             selectionAnchorLocation = index
@@ -107,7 +114,7 @@ import spacesterminalcore
     override func mouseDragged(with event: NSEvent) {
         if handleTerminalMouseEvent(event, action: .move, button: .left) { return }
         guard let anchor = selectionAnchorLocation else { return }
-        let location = convert(event.locationInWindow, from: nil)
+        let location = window != nil ? convert(event.locationInWindow, from: nil) : event.locationInWindow
         setSelectedRange(selectionRange(from: anchor, to: characterIndex(at: location)))
     }
 
@@ -368,6 +375,47 @@ import spacesterminalcore
         let lowerBound = min(anchor, current)
         let upperBound = max(anchor, current)
         return NSRange(location: lowerBound, length: upperBound - lowerBound)
+    }
+
+    private func wordSelectionRange(at index: Int) -> NSRange {
+        guard !plainString.isEmpty else { return NSRange(location: 0, length: 0) }
+        let clamped = min(max(index, 0), plainString.utf16.count)
+        guard clamped < plainString.utf16.count else { return NSRange(location: plainString.utf16.count, length: 0) }
+        guard let scalarIndex = String.Index(utf16Offset: clamped, in: plainString).samePosition(in: plainString.unicodeScalars) else {
+            return NSRange(location: clamped, length: 0)
+        }
+        let scalars = plainString.unicodeScalars
+        let target = scalars[scalarIndex]
+        guard isWordScalar(target) else { return NSRange(location: clamped, length: 1) }
+
+        var lower = scalarIndex
+        while lower > scalars.startIndex {
+            let previous = scalars.index(before: lower)
+            guard isWordScalar(scalars[previous]) else { break }
+            lower = previous
+        }
+
+        var upper = scalars.index(after: scalarIndex)
+        while upper < scalars.endIndex, isWordScalar(scalars[upper]) { upper = scalars.index(after: upper) }
+
+        let lowerOffset = lower.utf16Offset(in: plainString)
+        let upperOffset = upper.utf16Offset(in: plainString)
+        return NSRange(location: lowerOffset, length: upperOffset - lowerOffset)
+    }
+
+    private func lineSelectionRange(at index: Int) -> NSRange {
+        let clamped = min(max(index, 0), plainString.utf16.count)
+        let nsString = plainString as NSString
+        if clamped >= plainString.utf16.count {
+            let lineRange = nsString.lineRange(for: NSRange(location: max(plainString.utf16.count - 1, 0), length: 0))
+            return plainString.rangeByTrimmingTrailingNewline(from: lineRange)
+        }
+        let lineRange = nsString.lineRange(for: NSRange(location: clamped, length: 0))
+        return plainString.rangeByTrimmingTrailingNewline(from: lineRange)
+    }
+
+    private func isWordScalar(_ scalar: UnicodeScalar) -> Bool {
+        CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == "-" || scalar == "."
     }
 
     private func selectionRects(for range: NSRange) -> [NSRect] {

@@ -144,6 +144,38 @@ import XCTest
         XCTAssertTrue(received[2].control)
     }
 
+    func testDoubleClickSelectsWordRange() throws {
+        let view = TransportTerminalTranscriptView(frame: NSRect(x: 0, y: 0, width: 300, height: 120))
+        view.string = "alpha-beta gamma"
+        view.sizeToFit()
+
+        let doubleClick = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: NSPoint(x: view.horizontalInsets + view.measuredCellWidth * 7, y: view.verticalInsets + 2),
+                modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 2, pressure: 1))
+
+        view.mouseDown(with: doubleClick)
+
+        XCTAssertEqual(view.selectedRange(), NSRange(location: 0, length: "alpha-beta".utf16.count))
+    }
+
+    func testTripleClickSelectsRenderedLineWithoutTrailingNewline() throws {
+        let view = TransportTerminalTranscriptView(frame: NSRect(x: 0, y: 0, width: 300, height: 140))
+        view.string = "alpha beta\ngamma delta\n"
+        view.sizeToFit()
+
+        let tripleClick = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: NSPoint(x: view.horizontalInsets + view.measuredCellWidth * 2, y: view.verticalInsets + view.measuredLineHeight + 2),
+                modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 3, pressure: 1))
+
+        view.mouseDown(with: tripleClick)
+
+        let lineStart = "alpha beta\n".utf16.count
+        XCTAssertEqual(view.selectedRange(), NSRange(location: lineStart, length: "gamma delta".utf16.count))
+    }
+
     func testHandleTerminalEventLeavesCommandShortcutsToResponderChain() throws {
         let view = TransportTerminalTranscriptView(frame: .zero)
         var received: TransportTerminalTranscriptInput?
