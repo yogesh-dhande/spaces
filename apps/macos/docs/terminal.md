@@ -312,12 +312,12 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `partial`: hyperlink rendering (`OSC 8`) is present in the shared renderer, but richer semantic affordances on top of terminal output are still minimal
 
 ### Queries and Host Responses
-- `implemented`: terminal-status (`CSI 5n`) and secondary device-attributes (`CSI > c`) queries
+- `implemented`: terminal-status (`CSI 5n`), secondary device-attributes (`CSI > c`), and private-mode report (`DECRQM`) queries for the shared-session modes the host tracks
 - `implemented`: cursor-position query (`CSI 6n`)
 - `implemented`: primary device attributes (`CSI c`)
-- `implemented`: terminal foreground/background color probes (`OSC 10;?`, `OSC 11;?`)
-- `partial`: broader device and mode query coverage beyond the current status/device/color handshake
-- `missing`: the wider xterm query surface for advanced clients that probe more than cursor position, device attributes, and theme colors
+- `implemented`: terminal foreground/background color probes (`OSC 10;?`, `OSC 11;?`) plus palette-color probes (`OSC 4;index;?`)
+- `implemented`: broader device and mode query coverage beyond the original status/device/color handshake for the modes and palette surface the shared host understands today
+- `partial`: the wider xterm query surface for advanced clients that probe beyond cursor position, device attributes, tracked private modes, and theme/palette colors
 
 ### Input, Paste, and Mouse
 - `implemented`: text input, common navigation keys, and control-chord forwarding over the shared host protocol

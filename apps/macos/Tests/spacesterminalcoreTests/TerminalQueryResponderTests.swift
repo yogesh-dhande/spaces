@@ -40,4 +40,20 @@ final class TerminalQueryResponderTests: XCTestCase {
 
         XCTAssertEqual(responses, [Data("\u{001B}[0n".utf8), Data("\u{001B}[>0;10;1c".utf8)])
     }
+
+    func testResponderAnswersPrivateModeReportsUsingObservedModeState() {
+        var responder = TerminalQueryResponder()
+
+        let responses = responder.responses(for: Data("\u{001B}[?1004h\u{001B}[?1004$p\u{001B}[?2004$p\u{001B}[?9999$p".utf8))
+
+        XCTAssertEqual(responses, [Data("\u{001B}[?1004;1$y".utf8), Data("\u{001B}[?2004;2$y".utf8), Data("\u{001B}[?9999;0$y".utf8)])
+    }
+
+    func testResponderAnswersPaletteColorQueriesForBothTerminators() {
+        var responder = TerminalQueryResponder()
+
+        let responses = responder.responses(for: Data("\u{001B}]4;2;?\u{0007}\u{001B}]4;196;?\u{001B}\\".utf8))
+
+        XCTAssertEqual(responses, [Data("\u{001B}]4;2;rgb:0000/cdcd/0000\u{0007}".utf8), Data("\u{001B}]4;196;rgb:ffff/0000/0000\u{001B}\\".utf8)])
+    }
 }
