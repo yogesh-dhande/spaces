@@ -12,6 +12,7 @@ This document captures the current libghostty-backed terminal integration in Spa
   - `ghostty_surface_send_input_raw(...)`
 - The pinned fork build tag lives in `apps/macos/ghosttykit-release-tag.txt`, and a scheduled workflow updates that pin to the latest published fork release through a pull request.
 - The fork itself is expected to auto-sync with upstream Ghostty and publish fresh `GhosttyKit` builds on its own cadence; this repo only tracks the published build tag.
+- `apps/macos/scripts/verify_ghosttykit.sh` is the repository-level contract check for that forked artifact. It verifies that the published `GhosttyKit` still declares and exports the two additive PTY I/O hooks Spaces relies on before local setup completes.
 - iTerm2 and Ghostty external-host integrations still exist on this branch and remain selectable overrides.
 - When the configured terminal host is `Spaces`, tracked workspace processes use the built-in session backend directly and do not require tmux.
 

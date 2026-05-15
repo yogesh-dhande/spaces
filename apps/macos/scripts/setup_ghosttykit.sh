@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+VERIFY_SCRIPT="$SCRIPT_DIR/verify_ghosttykit.sh"
 RELEASE_TAG_FILE="$APP_ROOT/ghosttykit-release-tag.txt"
 LOCAL_ROOT="$APP_ROOT/.local/ghosttykit"
 XCFRAMEWORK_ROOT="$LOCAL_ROOT/GhosttyKit.xcframework"
@@ -81,6 +82,11 @@ if [[ ! -d "$RESOURCES_ROOT/ghostty/shell-integration" || ! -d "$RESOURCES_ROOT/
     )
 else
     echo "==> Ghostty runtime resources already present at $RESOURCES_ROOT"
+fi
+
+if [[ -x "$VERIFY_SCRIPT" ]]; then
+    echo "==> Verifying GhosttyKit additive PTY I/O exports"
+    "$VERIFY_SCRIPT" "$XCFRAMEWORK_ROOT"
 fi
 
 echo
