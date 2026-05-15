@@ -49,7 +49,7 @@ The current forked GhosttyKit build exposes the raw PTY I/O hooks Spaces needs b
   - `takeover`
 - The proxy answers `attach` and `tail` from persisted session state and forwards the remaining commands into the local control socket. That keeps the Mac-owned libghostty host as the PTY owner while still allowing mobile-shaped or remote-shaped clients to view, tail, and take over.
 - The current repository includes `apps/macos/Tests/poc_mobile_terminal_client.py` as a headless mobile-shaped proof of concept over that TCP bridge.
-- `apps/macos/Tests/e2e_terminal_mobile_client.sh` is the maintained regression entry point for that flow. It runs the mobile-shaped POC against an isolated `SpacesApp`, verifies attach, viewer gating, takeover, text input, and key input, and should stay green whenever the Ghostty-owner session boundary changes.
+- `apps/macos/Tests/e2e_terminal_mobile_client.sh` is the maintained regression entry point for that flow. It runs the mobile-shaped POC against an isolated `SpacesApp`, verifies attach, viewer gating, takeover, text input, key input, owner-window close, owner-window reopen, and ownership handoff back to the reopened macOS owner window. It should stay green whenever the Ghostty-owner session boundary changes.
 
 ## Session Files
 Each session lives under `~/.spaces/terminal/sessions/<session-id>/` and keeps:

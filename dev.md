@@ -101,7 +101,7 @@ For the headless mobile-shaped control proof of concept against the Ghostty-owne
 python3 apps/macos/Tests/poc_mobile_terminal_client.py --start-app
 ```
 
-That flow launches an isolated `SpacesApp`, starts one `ghostty-embedded` session, exposes it through `spaces terminal proxy`, attaches a synthetic desktop owner plus an iPhone viewer, verifies viewer input rejection before takeover, promotes the mobile client, sends text plus `Enter`, and finally transfers ownership back to the desktop client.
+That flow launches an isolated `SpacesApp`, starts one `ghostty-embedded` session, exposes it through `spaces terminal proxy`, attaches an iPhone-shaped viewer, verifies viewer input rejection before takeover, closes the real macOS owner window, promotes the mobile client, sends text plus `Enter`, reopens the native owner window for the same session, and finally transfers ownership back to that reopened macOS owner.
 
 For the maintained E2E wrapper around that same flow:
 
@@ -109,7 +109,7 @@ For the maintained E2E wrapper around that same flow:
 apps/macos/Tests/e2e_terminal_mobile_client.sh
 ```
 
-Use the shell wrapper when you want one command that exercises the full attach, takeover, send, and key path without remembering the Python invocation.
+Use the shell wrapper when you want one command that exercises the full attach, takeover, owner-close, owner-reopen, send, and key path without remembering the Python invocation.
 
 For repeatable profiling of the built-in terminal owner and viewer flows:
 
