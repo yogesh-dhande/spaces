@@ -44,6 +44,7 @@ import spacesterminalghostty
         let usesSGRMouseEncoding: Bool
         let usesAlternateScrollMode: Bool
         let usesBracketedPasteMode: Bool
+        let usesFocusReporting: Bool
     }
 
     private struct OutputViewportState {
@@ -103,6 +104,8 @@ import spacesterminalghostty
     private var lastRenderedUsesSGRMouseEncoding = false
     private var lastRenderedUsesAlternateScrollMode = false
     private var lastRenderedUsesBracketedPasteMode = false
+    private var lastRenderedUsesFocusReporting = false
+    private var lastReportedTranscriptFocusState: Bool?
     private var lastTransportOutput = ""
     private var transportScreenBuffer = TerminalScreenBuffer()
     private var transportScreenBufferByteCount: Int64 = 0
@@ -272,16 +275,24 @@ import spacesterminalghostty
         onWindowClose?(sessionID, client.id)
     }
 
-    public func windowDidBecomeKey(_ notification: Notification) { syncGhosttyOwnerFocus(reason: "window_key", requestWindowFocus: true) }
+    public func windowDidBecomeKey(_ notification: Notification) {
+        syncGhosttyOwnerFocus(reason: "window_key", requestWindowFocus: true)
+        syncTranscriptFocusIfNeeded(focused: true)
+    }
 
     public func windowDidResignKey(_ notification: Notification) {
         syncGhosttyOwnerFocus(reason: "window_key_lost", requestWindowFocus: false, focused: false)
+        syncTranscriptFocusIfNeeded(focused: false)
     }
 
-    public func windowDidBecomeMain(_ notification: Notification) { syncGhosttyOwnerFocus(reason: "window_main", requestWindowFocus: true) }
+    public func windowDidBecomeMain(_ notification: Notification) {
+        syncGhosttyOwnerFocus(reason: "window_main", requestWindowFocus: true)
+        syncTranscriptFocusIfNeeded(focused: true)
+    }
 
     public func windowDidResignMain(_ notification: Notification) {
         syncGhosttyOwnerFocus(reason: "window_main_lost", requestWindowFocus: false, focused: false)
+        syncTranscriptFocusIfNeeded(focused: false)
     }
 
     public func windowDidMove(_ notification: Notification) { persistCurrentWindowFrame() }
@@ -714,6 +725,8 @@ import spacesterminalghostty
                     lastRenderedUsesSGRMouseEncoding = false
                     lastRenderedUsesAlternateScrollMode = false
                     lastRenderedUsesBracketedPasteMode = false
+                    lastRenderedUsesFocusReporting = false
+                    lastReportedTranscriptFocusState = nil
                     restoreOutputViewportState(viewportState)
                     didUpdatePassivePresentation = true
                     completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
@@ -731,7 +744,7 @@ import spacesterminalghostty
                         attributedText: NSAttributedString(
                             string: fallbackText, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor]),
                         replayMode: "fallback_recent_output", replayBytes: 0, usesAlternateScreen: false, mouseTrackingMode: .disabled,
-                        usesSGRMouseEncoding: false, usesAlternateScrollMode: false, usesBracketedPasteMode: false)
+                        usesSGRMouseEncoding: false, usesAlternateScrollMode: false, usesBracketedPasteMode: false, usesFocusReporting: false)
                 }
                 TerminalPerformance.logMetric(
                     "terminal_viewer_refresh_render_output", target: "session=\(sessionID)",
@@ -743,6 +756,7 @@ import spacesterminalghostty
                 lastRenderedUsesSGRMouseEncoding = renderedOutputResult.usesSGRMouseEncoding
                 lastRenderedUsesAlternateScrollMode = renderedOutputResult.usesAlternateScrollMode
                 lastRenderedUsesBracketedPasteMode = renderedOutputResult.usesBracketedPasteMode
+                lastRenderedUsesFocusReporting = renderedOutputResult.usesFocusReporting
                 if renderedOutputResult.text != lastRenderedOutput || !renderedOutputResult.attributedText.isEqual(lastRenderedAttributedOutput) {
                     outputView.setRenderedOutput(plainText: renderedOutputResult.text, attributedText: renderedOutputResult.attributedText)
                     TerminalPerformance.logMetric(
@@ -765,6 +779,7 @@ import spacesterminalghostty
                         elapsedMS: TerminalPerformance.elapsedMS(since: assignTextStartedAt), success: true,
                         detail: "renderer=transport_canvas changed=0 chars=\(renderedOutputResult.text.count)")
                 }
+                syncTranscriptFocusIfNeeded()
                 let restoreViewportStartedAt = Date()
                 if alternateScreenChanged {
                     outputView.setSelectedRange(NSRange(location: 0, length: 0))
@@ -799,6 +814,8 @@ import spacesterminalghostty
             lastRenderedUsesSGRMouseEncoding = false
             lastRenderedUsesAlternateScrollMode = false
             lastRenderedUsesBracketedPasteMode = false
+            lastRenderedUsesFocusReporting = false
+            lastReportedTranscriptFocusState = nil
             lastTransportOutput = ""
         }
     }
@@ -876,9 +893,16 @@ import spacesterminalghostty
         guard shouldForwardTranscriptMouseInput(for: input) else { return false }
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else { return false }
         guard preferredAttachmentMode == .owner else { return false }
-        let sequence = TerminalMouseInput.sgrSequence(
-            action: input.action, button: input.button, column: input.column, row: input.row, shift: input.shift, option: input.option,
-            control: input.control)
+        let sequence: String
+        if lastRenderedUsesSGRMouseEncoding {
+            sequence = TerminalMouseInput.sgrSequence(
+                action: input.action, button: input.button, column: input.column, row: input.row, shift: input.shift, option: input.option,
+                control: input.control)
+        } else {
+            sequence = TerminalMouseInput.x10Sequence(
+                action: input.action, button: input.button, column: input.column, row: input.row, shift: input.shift, option: input.option,
+                control: input.control)
+        }
         do {
             let response = try transport.sendMouse(sequence, client.id)
             if !response.ok { updateInputStatus(message: response.message, isError: true) }
@@ -892,7 +916,6 @@ import spacesterminalghostty
 
     private func shouldForwardTranscriptMouseInput(for input: TransportTerminalTranscriptMouseInput) -> Bool {
         guard visibleRenderer == .outputFallback else { return false }
-        guard lastRenderedUsesSGRMouseEncoding else { return false }
         guard lastRenderedMouseTrackingMode != .disabled else { return false }
         switch input.action {
         case .scrollUp, .scrollDown: return true
@@ -912,6 +935,44 @@ import spacesterminalghostty
         case .scrollUp, .scrollDown: return true
         case .press, .release, .move: return false
         }
+    }
+
+    private func syncTranscriptFocusIfNeeded(focused explicitFocused: Bool? = nil) {
+        guard visibleRenderer == .outputFallback else {
+            lastReportedTranscriptFocusState = nil
+            return
+        }
+        guard preferredAttachmentMode == .owner else {
+            lastReportedTranscriptFocusState = nil
+            return
+        }
+        guard isInteractiveRuntimeState(lastObservedRuntimeState) else {
+            lastReportedTranscriptFocusState = nil
+            return
+        }
+        guard lastRenderedUsesFocusReporting else {
+            lastReportedTranscriptFocusState = nil
+            return
+        }
+
+        let focused = explicitFocused ?? currentTranscriptFocusState()
+        if let lastReportedTranscriptFocusState {
+            guard lastReportedTranscriptFocusState != focused else { return }
+        } else if !focused {
+            lastReportedTranscriptFocusState = false
+            return
+        }
+
+        let sequence = focused ? "\u{001B}[I" : "\u{001B}[O"
+        do {
+            let response = try transport.sendInput(sequence, false, client.id)
+            if response.ok { lastReportedTranscriptFocusState = focused } else { updateInputStatus(message: response.message, isError: true) }
+        } catch { updateInputStatus(message: String(describing: error), isError: true) }
+    }
+
+    private func currentTranscriptFocusState() -> Bool {
+        guard let window else { return false }
+        return window.isKeyWindow || window.isMainWindow
     }
 
     @discardableResult private func sendFallbackPasteFromClipboard() -> Bool {
@@ -1324,7 +1385,7 @@ import spacesterminalghostty
             return TransportRenderedOutput(
                 text: snapshot.recentOutput, attributedText: attributedText, replayMode: "recent_output_empty", replayBytes: 0,
                 usesAlternateScreen: false, mouseTrackingMode: .disabled, usesSGRMouseEncoding: false, usesAlternateScrollMode: false,
-                usesBracketedPasteMode: false)
+                usesBracketedPasteMode: false, usesFocusReporting: false)
         }
 
         var replayMode = "reuse"
@@ -1351,13 +1412,13 @@ import spacesterminalghostty
                 text: lastTransportOutput, attributedText: fallback, replayMode: "recent_output_fallback", replayBytes: replayBytes,
                 usesAlternateScreen: renderedScreen.usesAlternateScreen, mouseTrackingMode: renderedScreen.mouseTrackingMode,
                 usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding, usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode,
-                usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode)
+                usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode, usesFocusReporting: renderedScreen.usesFocusReporting)
         }
         return TransportRenderedOutput(
             text: rendered, attributedText: attributed, replayMode: replayMode, replayBytes: replayBytes,
             usesAlternateScreen: renderedScreen.usesAlternateScreen, mouseTrackingMode: renderedScreen.mouseTrackingMode,
             usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding, usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode,
-            usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode)
+            usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode, usesFocusReporting: renderedScreen.usesFocusReporting)
     }
 
     private func rebuildTransportScreenBuffer(totalBytes: Int64) throws -> Int64 {

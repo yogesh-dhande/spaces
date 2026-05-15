@@ -10,6 +10,19 @@ public enum TerminalMouseInput {
         return "\u{001B}[<\(encodedButton);\(max(column, 1));\(max(row, 1))\(terminator)"
     }
 
+    public static func x10Sequence(
+        action: TerminalMouseAction, button: TerminalMouseButton, column: Int, row: Int, shift: Bool = false, option: Bool = false,
+        control: Bool = false
+    ) -> String {
+        let encodedButton = sgrButtonCode(action: action, button: button, shift: shift, option: option, control: control)
+        let clampedColumn = min(max(column, 1), 223)
+        let clampedRow = min(max(row, 1), 223)
+        let cb = UnicodeScalar(encodedButton + 32) ?? " "
+        let cx = UnicodeScalar(clampedColumn + 32) ?? "!"
+        let cy = UnicodeScalar(clampedRow + 32) ?? "!"
+        return "\u{001B}[M\(Character(cb))\(Character(cx))\(Character(cy))"
+    }
+
     private static func sgrButtonCode(action: TerminalMouseAction, button: TerminalMouseButton, shift: Bool, option: Bool, control: Bool) -> Int {
         var code: Int
         switch action {

@@ -59,10 +59,12 @@ public struct TerminalRenderedScreen: Equatable {
     public let usesSGRMouseEncoding: Bool
     public let usesAlternateScrollMode: Bool
     public let usesBracketedPasteMode: Bool
+    public let usesFocusReporting: Bool
 
     public init(
         rows: [[TerminalRenderedCell]], cursorRow: Int, cursorColumn: Int, cursorVisible: Bool, usesAlternateScreen: Bool,
-        mouseTrackingMode: TerminalMouseTrackingMode, usesSGRMouseEncoding: Bool, usesAlternateScrollMode: Bool, usesBracketedPasteMode: Bool
+        mouseTrackingMode: TerminalMouseTrackingMode, usesSGRMouseEncoding: Bool, usesAlternateScrollMode: Bool, usesBracketedPasteMode: Bool,
+        usesFocusReporting: Bool
     ) {
         self.rows = rows
         self.cursorRow = cursorRow
@@ -73,6 +75,7 @@ public struct TerminalRenderedScreen: Equatable {
         self.usesSGRMouseEncoding = usesSGRMouseEncoding
         self.usesAlternateScrollMode = usesAlternateScrollMode
         self.usesBracketedPasteMode = usesBracketedPasteMode
+        self.usesFocusReporting = usesFocusReporting
     }
 
     public var plainText: String {
@@ -112,6 +115,7 @@ public struct TerminalScreenBuffer {
     private var usesSGRMouseEncoding = false
     private var usesAlternateScrollMode = false
     private var usesBracketedPasteMode = false
+    private var usesFocusReporting = false
     private var scrollRegionTop = 0
     private var scrollRegionBottom: Int?
 
@@ -135,6 +139,7 @@ public struct TerminalScreenBuffer {
         usesSGRMouseEncoding = false
         usesAlternateScrollMode = false
         usesBracketedPasteMode = false
+        usesFocusReporting = false
         scrollRegionTop = 0
         scrollRegionBottom = nil
     }
@@ -174,7 +179,7 @@ public struct TerminalScreenBuffer {
             rows: renderedRows().map { $0.map { TerminalRenderedCell(character: $0.character, style: $0.style) } }, cursorRow: renderedCursorRow(),
             cursorColumn: cursorColumn, cursorVisible: cursorVisible, usesAlternateScreen: isUsingAlternateScreen,
             mouseTrackingMode: mouseTrackingMode, usesSGRMouseEncoding: usesSGRMouseEncoding, usesAlternateScrollMode: usesAlternateScrollMode,
-            usesBracketedPasteMode: usesBracketedPasteMode)
+            usesBracketedPasteMode: usesBracketedPasteMode, usesFocusReporting: usesFocusReporting)
     }
 
     private mutating func consumeEscapeSequence(_ scalars: [UnicodeScalar], startingAt index: Int) -> Int {
@@ -321,6 +326,7 @@ public struct TerminalScreenBuffer {
             case 1003: mouseTrackingMode = enabled ? .move : .disabled
             case 1006: usesSGRMouseEncoding = enabled
             case 1007: usesAlternateScrollMode = enabled
+            case 1004: usesFocusReporting = enabled
             case 2004: usesBracketedPasteMode = enabled
             default: break
             }

@@ -22,18 +22,22 @@ import spacesterminalcore
     var terminalPasteHandler: (() -> Bool)?
     var terminalMouseHandler: ((TransportTerminalTranscriptMouseInput) -> Bool)?
 
-    var font: NSFont = .monospacedSystemFont(ofSize: 12, weight: .regular) { didSet { invalidateLayoutAndDisplay() } }
-
-    var textColor: NSColor = .textColor { didSet { needsDisplay = true } }
-
+    var font: NSFont = .monospacedSystemFont(ofSize: 12, weight: .regular) {
+        didSet {
+            syncCompositionProxy()
+            invalidateLayoutAndDisplay()
+        }
+    }
+    var textColor: NSColor = .textColor {
+        didSet {
+            syncCompositionProxy()
+            needsDisplay = true
+        }
+    }
     var backgroundColor: NSColor = .textBackgroundColor { didSet { needsDisplay = true } }
-
     var drawsBackground = true { didSet { needsDisplay = true } }
-
     var textContainerInset = NSSize(width: 8, height: 10) { didSet { invalidateLayoutAndDisplay() } }
-
     var lineFragmentPadding: CGFloat = 5 { didSet { invalidateLayoutAndDisplay() } }
-
     var minSize: NSSize = .zero
     var maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
 
@@ -45,14 +49,18 @@ import spacesterminalcore
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { drawsBackground }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     private var plainString = ""
     private var attributedString = NSAttributedString(string: "")
+    private var markedTextValue = NSAttributedString(string: "")
+    private var markedSelectionRange = NSRange(location: 0, length: 0)
     private var selectedRangeValue = NSRange(location: 0, length: 0)
     private var selectionAnchorLocation: Int?
+    private var trackingAreaRef: NSTrackingArea?
+    private let compositionProxy = TransportTerminalTranscriptCompositionProxy(frame: .zero)
 
     private var defaultTextAttributes: [NSAttributedString.Key: Any] { [.font: font, .foregroundColor: textColor] }
-
     private var characterCellWidth: CGFloat { max(1, ("W" as NSString).size(withAttributes: [.font: font]).width) }
 
     private var lineHeight: CGFloat {
@@ -65,11 +73,21 @@ import spacesterminalcore
         return max(1, layoutManager.defaultLineHeight(for: font))
     }
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        commonInit()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        commonInit()
+    }
+
     override func keyDown(with event: NSEvent) {
-        guard handleTerminalEvent(event) else {
-            super.keyDown(with: event)
-            return
-        }
+        if handleImmediateTerminalEvent(event) { return }
+        if compositionProxy.handle(event) { return }
+        if handleTerminalEvent(event) { return }
+        super.keyDown(with: event)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -93,6 +111,41 @@ import spacesterminalcore
         setSelectedRange(selectionRange(from: anchor, to: characterIndex(at: location)))
     }
 
+    override func rightMouseDown(with event: NSEvent) {
+        if handleTerminalMouseEvent(event, action: .press, button: .right) { return }
+        super.rightMouseDown(with: event)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        if handleTerminalMouseEvent(event, action: .move, button: .right) { return }
+        super.rightMouseDragged(with: event)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        if handleTerminalMouseEvent(event, action: .release, button: .right) { return }
+        super.rightMouseUp(with: event)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        if handleTerminalMouseEvent(event, action: .press, button: .middle) { return }
+        super.otherMouseDown(with: event)
+    }
+
+    override func otherMouseDragged(with event: NSEvent) {
+        if handleTerminalMouseEvent(event, action: .move, button: .middle) { return }
+        super.otherMouseDragged(with: event)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        if handleTerminalMouseEvent(event, action: .release, button: .middle) { return }
+        super.otherMouseUp(with: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        if handleTerminalMouseEvent(event, action: .move, button: .none) { return }
+        super.mouseMoved(with: event)
+    }
+
     override func mouseUp(with event: NSEvent) {
         if handleTerminalMouseEvent(event, action: .release, button: .left) { return }
         super.mouseUp(with: event)
@@ -102,6 +155,15 @@ import spacesterminalcore
         if event.scrollingDeltaY > 0, handleTerminalMouseEvent(event, action: .scrollUp, button: .none) { return }
         if event.scrollingDeltaY < 0, handleTerminalMouseEvent(event, action: .scrollDown, button: .none) { return }
         super.scrollWheel(with: event)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaRef { removeTrackingArea(trackingAreaRef) }
+        let options: NSTrackingArea.Options = [.activeInKeyWindow, .mouseMoved, .inVisibleRect, .enabledDuringMouseDrag]
+        let trackingArea = NSTrackingArea(rect: .zero, options: options, owner: self, userInfo: nil)
+        addTrackingArea(trackingArea)
+        trackingAreaRef = trackingArea
     }
 
     @objc func paste(_ sender: Any?) {
@@ -124,7 +186,6 @@ import spacesterminalcore
             backgroundColor.setFill()
             dirtyRect.fill()
         }
-
         drawSelectionHighlights()
         drawContent()
     }
@@ -139,12 +200,44 @@ import spacesterminalcore
     }
 
     func attributedStringValue() -> NSAttributedString { attributedString }
-
     func selectedRange() -> NSRange { selectedRangeValue }
 
     func setSelectedRange(_ range: NSRange) {
         selectedRangeValue = clampedRange(range)
         needsDisplay = true
+    }
+
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        let text = attributedText(from: string)
+        markedTextValue = text
+        let length = text.string.utf16.count
+        let location = min(max(selectedRange.location, 0), length)
+        let markedLength = min(max(selectedRange.length, 0), length - location)
+        markedSelectionRange = NSRange(location: location, length: markedLength)
+        invalidateLayoutAndDisplay()
+    }
+
+    func insertText(_ insertString: Any, replacementRange: NSRange) {
+        let text = plainText(from: insertString)
+        guard !text.isEmpty else { return }
+        clearMarkedText()
+        _ = terminalInputHandler?(.text(text))
+    }
+
+    func hasMarkedText() -> Bool { markedTextValue.length > 0 }
+    func markedRange() -> NSRange {
+        hasMarkedText() ? NSRange(location: plainString.utf16.count, length: markedTextValue.length) : NSRange(location: NSNotFound, length: 0)
+    }
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        let clamped = clampedRange(range)
+        actualRange?.pointee = clamped
+        guard clamped.length > 0, let stringRange = Range(clamped, in: plainString) else { return nil }
+        return NSAttributedString(string: String(plainString[stringRange]), attributes: defaultTextAttributes)
+    }
+
+    func markedTextScreenRect() -> NSRect {
+        guard let window else { return markedTextRect() }
+        return window.convertToScreen(convert(markedTextRect(), to: nil))
     }
 
     func sizeToFit() {
@@ -170,16 +263,57 @@ import spacesterminalcore
     var measuredCellWidth: CGFloat { characterCellWidth }
 
     private var contentSize: NSSize {
-        let lines = plainString.split(separator: "\n", omittingEmptySubsequences: false)
+        let lines = displayedPlainString.split(separator: "\n", omittingEmptySubsequences: false)
         let maxColumns = lines.map(\.count).max() ?? 0
         let width = horizontalInsets + CGFloat(maxColumns) * characterCellWidth
         let height = verticalInsets + CGFloat(max(lines.count, 1)) * lineHeight
         return NSSize(width: max(width, 1), height: max(height, 1))
     }
 
+    private var displayedPlainString: String { plainString + markedTextValue.string }
+
+    private var displayedAttributedString: NSAttributedString {
+        guard hasMarkedText() else { return attributedString }
+        let rendered = NSMutableAttributedString(attributedString: attributedString)
+        let marked = NSMutableAttributedString(attributedString: markedTextValue)
+        if marked.length > 0 {
+            marked.addAttributes(
+                [.font: font, .underlineStyle: NSUnderlineStyle.single.rawValue], range: NSRange(location: 0, length: marked.length))
+        }
+        rendered.append(marked)
+        return rendered
+    }
+
+    private func commonInit() {
+        addSubview(compositionProxy)
+        compositionProxy.isHidden = true
+        compositionProxy.commitTextHandler = { [weak self] text in self?.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+        }
+        compositionProxy.markedTextHandler = { [weak self] text, selectedRange in
+            self?.setMarkedText(text, selectedRange: selectedRange, replacementRange: NSRange(location: NSNotFound, length: 0))
+        }
+        compositionProxy.unmarkTextHandler = { [weak self] in self?.clearMarkedText() }
+        syncCompositionProxy()
+    }
+
+    private func syncCompositionProxy() {
+        compositionProxy.font = font
+        compositionProxy.textColor = textColor
+        compositionProxy.insertionPointColor = textColor
+        compositionProxy.backgroundColor = .clear
+        compositionProxy.frame = markedTextRect()
+    }
+
     private func invalidateLayoutAndDisplay() {
+        syncCompositionProxy()
         needsDisplay = true
         sizeToFit()
+    }
+
+    private func clearMarkedText() {
+        markedTextValue = NSAttributedString(string: "")
+        markedSelectionRange = NSRange(location: 0, length: 0)
+        invalidateLayoutAndDisplay()
     }
 
     private func clampSelection() { selectedRangeValue = clampedRange(selectedRangeValue) }
@@ -192,18 +326,19 @@ import spacesterminalcore
     }
 
     private func drawContent() {
-        let fullRange = NSRange(location: 0, length: attributedString.length)
-        let lineRanges = attributedString.string.lineRanges(for: fullRange)
+        let displayed = displayedAttributedString
+        let fullRange = NSRange(location: 0, length: displayed.length)
+        let lineRanges = displayed.string.lineRanges(for: fullRange)
         let origin = NSPoint(x: textContainerInset.width + lineFragmentPadding, y: textContainerInset.height)
 
         if lineRanges.isEmpty {
-            attributedString.draw(at: origin)
+            displayed.draw(at: origin)
             return
         }
 
         for (index, lineRange) in lineRanges.enumerated() {
-            let trimmedRange = attributedString.string.rangeByTrimmingTrailingNewline(from: lineRange)
-            let attributedLine = attributedString.attributedSubstring(from: trimmedRange)
+            let trimmedRange = displayed.string.rangeByTrimmingTrailingNewline(from: lineRange)
+            let attributedLine = displayed.attributedSubstring(from: trimmedRange)
             attributedLine.draw(at: NSPoint(x: origin.x, y: origin.y + CGFloat(index) * lineHeight))
         }
     }
@@ -272,17 +407,38 @@ import spacesterminalcore
         return NSRect(x: 0, y: 0, width: bounds.width, height: lineHeight + 4)
     }
 
+    private func caretRect() -> NSRect {
+        let lines = displayedPlainString.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let lineIndex = max(lines.count - 1, 0)
+        let lineLength = lines.last?.utf16.count ?? 0
+        return NSRect(
+            x: textContainerInset.width + lineFragmentPadding + CGFloat(lineLength) * characterCellWidth,
+            y: textContainerInset.height + CGFloat(lineIndex) * lineHeight, width: max(characterCellWidth, 2), height: lineHeight)
+    }
+
+    private func markedTextRect() -> NSRect {
+        let base = caretRect()
+        return NSRect(x: base.minX, y: base.minY, width: CGFloat(max(markedTextValue.length, 1)) * characterCellWidth, height: lineHeight)
+    }
+
     private func substring(in range: NSRange) -> String {
         guard let stringRange = Range(range, in: plainString) else { return "" }
         return String(plainString[stringRange])
     }
 
-    private func terminalInput(for event: NSEvent) -> TransportTerminalTranscriptInput? {
+    private func handleImmediateTerminalEvent(_ event: NSEvent) -> Bool {
+        guard let input = immediateTerminalInput(for: event) else { return false }
+        return terminalInputHandler?(input) ?? false
+    }
+
+    private func immediateTerminalInput(for event: NSEvent) -> TransportTerminalTranscriptInput? {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if flags.contains(.command) { return nil }
+        if let modifiedNamedKey = modifiedNamedKey(for: event, flags: flags) { return .key(modifiedNamedKey) }
 
         switch Int(event.keyCode) {
-        case kVK_Return, kVK_ANSI_KeypadEnter: return .key("enter")
+        case kVK_Return: return .key("enter")
+        case kVK_ANSI_KeypadEnter: return .key("kpenter")
         case kVK_Tab: return .key(flags.contains(.shift) ? "backtab" : "tab")
         case kVK_Delete: return .key("backspace")
         case kVK_ForwardDelete: return .key("forwarddelete")
@@ -307,6 +463,70 @@ import spacesterminalcore
         case kVK_F10: return .key("f10")
         case kVK_F11: return .key("f11")
         case kVK_F12: return .key("f12")
+        case kVK_F13: return .key("f13")
+        case kVK_F14: return .key("f14")
+        case kVK_F15: return .key("f15")
+        case kVK_F16: return .key("f16")
+        case kVK_F17: return .key("f17")
+        case kVK_F18: return .key("f18")
+        case kVK_F19: return .key("f19")
+        case kVK_F20: return .key("f20")
+        case kVK_ANSI_KeypadClear: return .key("kpclear")
+        case kVK_Help: return .key("insert")
+        default: break
+        }
+
+        if flags.contains(.control), let scalar = event.charactersIgnoringModifiers?.unicodeScalars.only, scalar.properties.isAlphabetic {
+            return .key("ctrl+\(String(scalar).lowercased())")
+        }
+
+        if flags.contains(.option) || flags.contains(.control) { return terminalInput(for: event) }
+        return nil
+    }
+
+    private func terminalInput(for event: NSEvent) -> TransportTerminalTranscriptInput? {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.command) { return nil }
+
+        if let modifiedNamedKey = modifiedNamedKey(for: event, flags: flags) { return .key(modifiedNamedKey) }
+
+        switch Int(event.keyCode) {
+        case kVK_Return: return .key("enter")
+        case kVK_ANSI_KeypadEnter: return .key("kpenter")
+        case kVK_Tab: return .key(flags.contains(.shift) ? "backtab" : "tab")
+        case kVK_Delete: return .key("backspace")
+        case kVK_ForwardDelete: return .key("forwarddelete")
+        case kVK_Escape: return .key("esc")
+        case kVK_UpArrow: return .key("up")
+        case kVK_DownArrow: return .key("down")
+        case kVK_LeftArrow: return .key("left")
+        case kVK_RightArrow: return .key("right")
+        case kVK_Home: return .key("home")
+        case kVK_End: return .key("end")
+        case kVK_PageUp: return .key("pageup")
+        case kVK_PageDown: return .key("pagedown")
+        case kVK_F1: return .key("f1")
+        case kVK_F2: return .key("f2")
+        case kVK_F3: return .key("f3")
+        case kVK_F4: return .key("f4")
+        case kVK_F5: return .key("f5")
+        case kVK_F6: return .key("f6")
+        case kVK_F7: return .key("f7")
+        case kVK_F8: return .key("f8")
+        case kVK_F9: return .key("f9")
+        case kVK_F10: return .key("f10")
+        case kVK_F11: return .key("f11")
+        case kVK_F12: return .key("f12")
+        case kVK_F13: return .key("f13")
+        case kVK_F14: return .key("f14")
+        case kVK_F15: return .key("f15")
+        case kVK_F16: return .key("f16")
+        case kVK_F17: return .key("f17")
+        case kVK_F18: return .key("f18")
+        case kVK_F19: return .key("f19")
+        case kVK_F20: return .key("f20")
+        case kVK_ANSI_KeypadClear: return .key("kpclear")
+        case kVK_Help: return .key("insert")
         default: break
         }
 
@@ -318,6 +538,68 @@ import spacesterminalcore
         guard let text = event.characters, !text.isEmpty else { return nil }
         guard text.unicodeScalars.contains(where: { !CharacterSet.controlCharacters.contains($0) }) else { return nil }
         return .text(text)
+    }
+
+    private func modifiedNamedKey(for event: NSEvent, flags: NSEvent.ModifierFlags) -> String? {
+        let modifiers = keyModifiers(for: flags)
+        guard !modifiers.isEmpty else { return nil }
+        guard let keyName = namedKeyForModifiedSequence(keyCode: Int(event.keyCode), shift: flags.contains(.shift)) else { return nil }
+        return (modifiers + [keyName]).joined(separator: "+")
+    }
+
+    private func keyModifiers(for flags: NSEvent.ModifierFlags) -> [String] {
+        var parts: [String] = []
+        if flags.contains(.shift) { parts.append("shift") }
+        if flags.contains(.option) { parts.append("alt") }
+        if flags.contains(.control) { parts.append("ctrl") }
+        return parts
+    }
+
+    private func namedKeyForModifiedSequence(keyCode: Int, shift: Bool) -> String? {
+        switch keyCode {
+        case kVK_UpArrow: return "up"
+        case kVK_DownArrow: return "down"
+        case kVK_RightArrow: return "right"
+        case kVK_LeftArrow: return "left"
+        case kVK_Home: return "home"
+        case kVK_End: return "end"
+        case kVK_PageUp: return "pageup"
+        case kVK_PageDown: return "pagedown"
+        case kVK_ForwardDelete: return "forwarddelete"
+        case kVK_Help: return "insert"
+        case kVK_F1: return "f1"
+        case kVK_F2: return "f2"
+        case kVK_F3: return "f3"
+        case kVK_F4: return "f4"
+        case kVK_F5: return "f5"
+        case kVK_F6: return "f6"
+        case kVK_F7: return "f7"
+        case kVK_F8: return "f8"
+        case kVK_F9: return "f9"
+        case kVK_F10: return "f10"
+        case kVK_F11: return "f11"
+        case kVK_F12: return "f12"
+        case kVK_F13: return "f13"
+        case kVK_F14: return "f14"
+        case kVK_F15: return "f15"
+        case kVK_F16: return "f16"
+        case kVK_F17: return "f17"
+        case kVK_F18: return "f18"
+        case kVK_F19: return "f19"
+        case kVK_F20: return "f20"
+        default: return nil
+        }
+    }
+
+    private func plainText(from string: Any) -> String {
+        if let attributedString = string as? NSAttributedString { return attributedString.string }
+        if let string = string as? String { return string }
+        return "\(string)"
+    }
+
+    private func attributedText(from string: Any) -> NSAttributedString {
+        if let attributedString = string as? NSAttributedString { return attributedString }
+        return NSAttributedString(string: plainText(from: string), attributes: defaultTextAttributes)
     }
 
     private func handleTerminalMouseEvent(_ event: NSEvent, action: TerminalMouseAction, button: TerminalMouseButton) -> Bool {
@@ -335,6 +617,62 @@ import spacesterminalcore
         return TransportTerminalTranscriptMouseInput(
             action: action, button: button, column: column, row: row, shift: flags.contains(.shift), option: flags.contains(.option),
             control: flags.contains(.control))
+    }
+}
+
+private final class TransportTerminalTranscriptCompositionProxy: NSTextView {
+    var commitTextHandler: ((String) -> Void)?
+    var markedTextHandler: ((NSAttributedString, NSRange) -> Void)?
+    var unmarkTextHandler: (() -> Void)?
+    private var didHandleInput = false
+
+    override init(frame frameRect: NSRect) {
+        let textStorage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        let textContainer = NSTextContainer(size: NSSize(width: 1, height: 1))
+        textContainer.lineFragmentPadding = 0
+        layoutManager.addTextContainer(textContainer)
+        textStorage.addLayoutManager(layoutManager)
+        super.init(frame: frameRect, textContainer: textContainer)
+        isEditable = true
+        isSelectable = false
+        drawsBackground = false
+        textContainerInset = .zero
+        string = ""
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func handle(_ event: NSEvent) -> Bool {
+        didHandleInput = false
+        interpretKeyEvents([event])
+        return didHandleInput
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        didHandleInput = true
+        commitTextHandler?(plainText(from: insertString))
+    }
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        didHandleInput = true
+        markedTextHandler?(attributedText(from: string), selectedRange)
+    }
+
+    override func unmarkText() {
+        didHandleInput = true
+        unmarkTextHandler?()
+    }
+
+    private func plainText(from string: Any) -> String {
+        if let attributedString = string as? NSAttributedString { return attributedString.string }
+        if let string = string as? String { return string }
+        return "\(string)"
+    }
+
+    private func attributedText(from string: Any) -> NSAttributedString {
+        if let attributedString = string as? NSAttributedString { return attributedString }
+        return NSAttributedString(string: plainText(from: string))
     }
 }
 

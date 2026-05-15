@@ -5,7 +5,10 @@ public enum TerminalKeyInput {
         let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        switch trimmed.lowercased() {
+        let normalized = trimmed.lowercased().replacingOccurrences(of: "-", with: "+")
+        if let modified = bytesForModifiedKey(spec: normalized) { return modified }
+
+        switch normalized {
         case "enter", "return": return [0x0D]
         case "tab": return [0x09]
         case "backtab": return Array("\u{1B}[Z".utf8)
@@ -33,16 +36,111 @@ public enum TerminalKeyInput {
         case "f10": return Array("\u{1B}[21~".utf8)
         case "f11": return Array("\u{1B}[23~".utf8)
         case "f12": return Array("\u{1B}[24~".utf8)
+        case "f13": return Array("\u{1B}[25~".utf8)
+        case "f14": return Array("\u{1B}[26~".utf8)
+        case "f15": return Array("\u{1B}[28~".utf8)
+        case "f16": return Array("\u{1B}[29~".utf8)
+        case "f17": return Array("\u{1B}[31~".utf8)
+        case "f18": return Array("\u{1B}[32~".utf8)
+        case "f19": return Array("\u{1B}[33~".utf8)
+        case "f20": return Array("\u{1B}[34~".utf8)
+        case "kpenter": return [0x0D]
+        case "kpclear": return Array("\u{1B}[E".utf8)
         default: break
         }
 
-        let normalized = trimmed.replacingOccurrences(of: "-", with: "+")
         let parts = normalized.split(separator: "+").map { $0.lowercased() }
         guard parts.count == 2, parts[0] == "ctrl", let scalar = parts[1].unicodeScalars.only else { return nil }
         guard scalar.properties.isAlphabetic else { return nil }
         let uppercase = String(parts[1]).uppercased().unicodeScalars.first?.value ?? scalar.value
         let controlValue = uppercase & 0x1F
         return [UInt8(controlValue)]
+    }
+
+    private static func bytesForModifiedKey(spec: String) -> [UInt8]? {
+        let parts = spec.split(separator: "+").map(String.init)
+        guard parts.count >= 2 else { return nil }
+        let key = parts.last ?? ""
+        let modifiers = Set(parts.dropLast())
+        guard modifiers.allSatisfy({ ["shift", "alt", "option", "meta", "ctrl", "control"].contains($0) }) else { return nil }
+        guard !modifiers.isEmpty else { return nil }
+
+        let normalizedModifiers = NormalizedModifiers(
+            shift: modifiers.contains("shift"), alt: modifiers.contains("alt") || modifiers.contains("option") || modifiers.contains("meta"),
+            control: modifiers.contains("ctrl") || modifiers.contains("control"))
+        guard let parameter = normalizedModifiers.xtermParameter else { return nil }
+
+        if let cursorFinal = modifiedCursorFinal(for: key) { return Array("\u{1B}[1;\(parameter)\(cursorFinal)".utf8) }
+        if let tildeCode = modifiedTildeCode(for: key) { return Array("\u{1B}[\(tildeCode);\(parameter)~".utf8) }
+        if let functionFinal = modifiedFunctionFinal(for: key) { return Array("\u{1B}[1;\(parameter)\(functionFinal)".utf8) }
+        return nil
+    }
+
+    private static func modifiedCursorFinal(for key: String) -> String? {
+        switch key {
+        case "up": return "A"
+        case "down": return "B"
+        case "right": return "C"
+        case "left": return "D"
+        case "home": return "H"
+        case "end": return "F"
+        default: return nil
+        }
+    }
+
+    private static func modifiedTildeCode(for key: String) -> String? {
+        switch key {
+        case "insert": return "2"
+        case "forwarddelete": return "3"
+        case "pageup": return "5"
+        case "pagedown": return "6"
+        case "f5": return "15"
+        case "f6": return "17"
+        case "f7": return "18"
+        case "f8": return "19"
+        case "f9": return "20"
+        case "f10": return "21"
+        case "f11": return "23"
+        case "f12": return "24"
+        case "f13": return "25"
+        case "f14": return "26"
+        case "f15": return "28"
+        case "f16": return "29"
+        case "f17": return "31"
+        case "f18": return "32"
+        case "f19": return "33"
+        case "f20": return "34"
+        default: return nil
+        }
+    }
+
+    private static func modifiedFunctionFinal(for key: String) -> String? {
+        switch key {
+        case "f1": return "P"
+        case "f2": return "Q"
+        case "f3": return "R"
+        case "f4": return "S"
+        default: return nil
+        }
+    }
+}
+
+private struct NormalizedModifiers {
+    let shift: Bool
+    let alt: Bool
+    let control: Bool
+
+    var xtermParameter: Int? {
+        switch (shift, alt, control) {
+        case (false, false, false): return nil
+        case (true, false, false): return 2
+        case (false, true, false): return 3
+        case (true, true, false): return 4
+        case (false, false, true): return 5
+        case (true, false, true): return 6
+        case (false, true, true): return 7
+        case (true, true, true): return 8
+        }
     }
 }
 

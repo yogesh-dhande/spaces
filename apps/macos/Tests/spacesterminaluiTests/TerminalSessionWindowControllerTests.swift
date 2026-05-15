@@ -13,6 +13,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
     private final class InputCapture: @unchecked Sendable {
         var text: String?
+        var texts: [String] = []
         var appendNewline: Bool?
         var key: String?
         var mouseSequence: String?
@@ -233,6 +234,34 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(capture.mouseSequence, "\u{001B}[<65;8;3M")
     }
 
+    @MainActor func testFallbackOwnerForwardsClassicXtermMouseWhenSGRModeIsDisabled() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-mouse-x10", title: "session-mouse-x10", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-14T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-mouse-x10", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-14T00:00:01Z"), paths: paths)
+        try "\u{001B}[?1000hready".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+        let capture = InputCapture()
+
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-mouse-x10", paths: paths,
+            sendMouseAction: { sequence, _ in
+                capture.mouseSequence = sequence
+                return .init(ok: true, message: "Sent mouse input.")
+            })
+
+        controller.show()
+
+        XCTAssertTrue(controller.debugSendTranscriptMouse(action: .press, column: 8, row: 3))
+        XCTAssertEqual(capture.mouseSequence, "\u{001B}[M#(#")
+    }
+
     @MainActor func testFallbackOwnerTranslatesMouseWheelToArrowKeysWhenAlternateScrollModeIsEnabled() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -263,6 +292,38 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertTrue(controller.debugSendTranscriptMouse(action: TerminalMouseAction.scrollUp, column: 8, row: 3))
         XCTAssertEqual(capture.key, "up")
+    }
+
+    @MainActor func testFallbackOwnerSendsFocusInAndOutWhenTerminalEnablesFocusReporting() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-focus-reporting", title: "session-focus-reporting", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-14T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-focus-reporting", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-14T00:00:01Z"), paths: paths)
+        try "\u{001B}[?1004hready".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+        let capture = InputCapture()
+
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-focus-reporting", paths: paths,
+            sendInputAction: { text, newline in
+                capture.text = text
+                capture.texts.append(text)
+                capture.appendNewline = newline
+                return .init(ok: true, message: "Sent input.")
+            })
+
+        controller.show()
+        controller.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification))
+        controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification))
+
+        XCTAssertEqual(capture.texts, ["\u{001B}[I", "\u{001B}[O"])
+        XCTAssertEqual(capture.appendNewline, false)
     }
 
     @MainActor func testControllerLoadsRecentOutputIntoTextView() throws {

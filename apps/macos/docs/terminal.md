@@ -323,10 +323,10 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: bracketed paste mode (`?2004h`, `?2004l`)
 - `implemented`: xterm mouse reporting enablement tracking and event forwarding
 - `implemented`: alternate scroll mode (`?1007h`, `?1007l`) with wheel-to-navigation translation in alternate screen
-- `partial`: complete function-key, modifier, and keypad parity with a mature local terminal
-- `partial`: mouse reporting coverage beyond the modes already exercised by current TUIs, including exact drag and move behavior across all xterm variants
-- `missing`: focus in/out reporting (`?1004h`, `?1004l`)
-- `missing`: IME and composition-aware text input fidelity
+- `implemented`: focus in or focus out reporting (`?1004h`, `?1004l`)
+- `implemented`: function-key, modifier, and keypad forwarding for the current shared transcript client, including extended function keys and xterm-style modifier sequences
+- `implemented`: classic xterm and SGR mouse reporting coverage for click, drag, move, release, and wheel events in the shared transcript client
+- `implemented`: IME and composition-aware text input fidelity for the shared transcript client
 
 ### Scrollback and Viewport
 - `implemented`: primary-screen scrollback preservation when the terminal itself scrolls content off the top row
@@ -350,7 +350,6 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `missing`: complete renderer parity with local `ghostty-embedded` under high-churn TUI workloads
 
 ## Remaining Parity Work
-- Fill the missing input and reporting modes that mature TUIs expect, starting with focus reporting and broader function-key or modifier coverage.
 - Tighten viewport and scrollback behavior under very large or long-lived TUI sessions so manual scroll and selection stay predictable while output continues.
 - Expand SGR and style fidelity until uncommon attribute combinations stop depending on text-only fallback behavior.
 - Keep profiling ANSI-heavy and captured real-TUI fixtures while each fidelity slice lands, so parity work does not silently regress repaint latency or scrollback behavior.
