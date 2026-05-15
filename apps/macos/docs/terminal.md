@@ -289,6 +289,73 @@ Those numbers matter differently depending on the caller:
 
 That split means the current tail implementation is no longer the dominant cost for normal append-only or repaint-heavy tails. A fresh CLI invocation still pays process-launch overhead even when the underlying tail logic is only a few milliseconds.
 
+## Shared-Session Compatibility Checklist
+This is the parity checklist for the `script-pty` shared-session terminal path. Status values are:
+- `implemented`: covered in the shared renderer today
+- `partial`: supported for common cases, but not yet complete enough to treat as terminal parity
+- `missing`: not yet implemented in the shared-session path
+
+### Screen and Cursor Semantics
+- `implemented`: basic cursor motion and positioning (`CUU`, `CUD`, `CUF`, `CUB`, `CUP`, `HVP`, `CR`, `LF`, save and restore cursor)
+- `implemented`: erase and edit commands used by modern TUIs (`ED`, `EL`, `ICH`, `DCH`, `IL`, `DL`, `ECH`)
+- `implemented`: scroll regions and reverse index (`DECSTBM`, `RI`)
+- `implemented`: alternate screen enter and exit (`?47`, `?1047`, `?1049`)
+- `implemented`: cursor visibility (`?25h`, `?25l`)
+- `partial`: full terminal state reset behavior across every alternate-screen or private-mode combination
+- `missing`: horizontal tab stop management and tab clear sequences
+
+### Styling and Color
+- `implemented`: ANSI SGR reset plus common style toggles used by shells and TUIs
+- `implemented`: palette colors, 256 colors, and truecolor foreground/background rendering
+- `implemented`: inverse-style cursor rendering in the shared-session canvas
+- `partial`: complete SGR coverage for the broader xterm attribute set, especially less common attributes and exact reset edge cases
+- `missing`: hyperlink rendering (`OSC 8`) and any richer semantic text affordances on top of terminal output
+
+### Queries and Host Responses
+- `implemented`: cursor-position query (`CSI 6n`)
+- `implemented`: primary device attributes (`CSI c`)
+- `implemented`: terminal foreground/background color probes (`OSC 10;?`, `OSC 11;?`)
+- `partial`: broader device and mode query coverage beyond the handshake that `codex` and similar TUIs already require
+- `missing`: the wider xterm query surface for advanced clients that probe more than cursor position, device attributes, and theme colors
+
+### Input, Paste, and Mouse
+- `implemented`: text input, common navigation keys, and control-chord forwarding over the shared host protocol
+- `implemented`: bracketed paste mode (`?2004h`, `?2004l`)
+- `implemented`: xterm mouse reporting enablement tracking and event forwarding
+- `implemented`: alternate scroll mode (`?1007h`, `?1007l`) with wheel-to-navigation translation in alternate screen
+- `partial`: complete function-key, modifier, and keypad parity with a mature local terminal
+- `partial`: mouse reporting coverage beyond the modes already exercised by current TUIs, including exact drag and move behavior across all xterm variants
+- `missing`: focus in/out reporting (`?1004h`, `?1004l`)
+- `missing`: IME and composition-aware text input fidelity
+
+### Scrollback and Viewport
+- `implemented`: primary-screen scrollback preservation when the terminal itself scrolls content off the top row
+- `implemented`: pinned-to-bottom follow behavior and preservation of manual selection or scroll offsets during ordinary shared-session refreshes
+- `implemented`: alternate-screen swaps clear preserved viewport and selection state instead of mixing primary and alternate history
+- `partial`: live TUI scrollback and viewport behavior under very large histories and sustained churn
+- `partial`: smooth manual scrolling while output is still arriving quickly
+- `missing`: search, structured scrollback navigation, and richer terminal-style selection semantics beyond AppKit text-view behavior
+
+### Window, Host, and Session Semantics
+- `implemented`: owner or viewer attachment, takeover, and owner-only input enforcement
+- `implemented`: session persistence across Spaces app restarts
+- `implemented`: local socket and TCP protocol support for attach, replay, input, resize, takeover, and termination
+- `partial`: real mobile client and remote Linux host implementations on top of the existing protocol
+- `missing`: production-grade reconnect, auth, and discovery UX for off-box remote sessions
+
+### Performance and Smoothness Targets
+- `implemented`: dedicated profiling lanes for repaint churn, scrollback churn, ANSI-heavy repaint, and captured `codex` replay
+- `implemented`: stage-level metrics for render replay, text assignment, layout, viewport restore, and end-to-end passive viewer presentation
+- `partial`: shared-session passive viewer smoothness still trails the local `ghostty-embedded` baseline under the heaviest repaint workloads
+- `missing`: complete renderer parity with local `ghostty-embedded` under high-churn TUI workloads
+
+## Remaining Parity Work
+- Fill the missing input and reporting modes that mature TUIs expect, starting with focus reporting and broader function-key or modifier coverage.
+- Tighten viewport and scrollback behavior under very large or long-lived TUI sessions so manual scroll and selection stay predictable while output continues.
+- Expand SGR and style fidelity until uncommon attribute combinations stop depending on text-only fallback behavior.
+- Keep profiling ANSI-heavy and captured real-TUI fixtures while each fidelity slice lands, so parity work does not silently regress repaint latency or scrollback behavior.
+- Build the native mobile client and remote-host path on the same protocol once the macOS shared renderer behaves like a complete local terminal.
+
 ## Current Verification Baseline
 The current branch has verified:
 - `spaces terminal command`
