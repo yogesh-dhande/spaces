@@ -93,7 +93,7 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
   terminal takeover <session-id> <viewer-client-id>
 ```
 
-For owner or viewer verification, keep exactly one `SpacesApp` process running for the chosen `SPACES_DB_PATH`. The current `ghostty-embedded` slice supports one live libghostty owner window plus one or more passive viewer windows that follow `output.log` and can take over ownership without restarting the session.
+For owner or viewer verification, keep exactly one `SpacesApp` process running for the chosen `SPACES_DB_PATH`. The current `ghostty-embedded` slice supports one live libghostty owner window plus one or more passive viewer windows that wait for live libghostty viewport readback while the session is active, then show persisted final output after exit, and can take over ownership without restarting the session.
 
 For the headless mobile-shaped control proof of concept against the Ghostty-owner path:
 

@@ -34,9 +34,9 @@ The `ghostty-embedded` session path is:
 2. The running app creates or reuses a `GhosttyEmbeddedSessionHost`.
 3. The host starts one `GhosttyEmbeddedTerminalView`, one control socket, one output log, and one runtime-state refresh loop.
 4. Owner windows attach the live libghostty surface.
-5. Viewer windows stay passive and read from the tailed session output until they take over.
+5. Viewer windows stay passive, wait for live libghostty viewport readback while the session is running, and switch to persisted final output after exit until they take over.
 
-The current forked GhosttyKit build exposes the raw PTY I/O hooks Spaces needs but does not expose the older cell-snapshot inspection API, so passive viewers currently go straight to tailed output instead of a rendered live-surface snapshot.
+The current forked GhosttyKit build exposes the raw PTY I/O hooks Spaces needs but does not expose the older styled cell-snapshot inspection API, so passive macOS viewers read back live viewport text from the libghostty surface while the session is running and switch to persisted final output after exit.
 
 ## Mobile and Remote Control
 - `spaces terminal proxy <session-id> --host ... --port ... --auth-token ...` exposes a local TCP bridge for one session.
@@ -90,14 +90,15 @@ These hooks are important because snapshot-style render reads are not enough for
   - stay passive
   - show owner identity
   - can request takeover
-  - continue using tailed output until ownership changes
-- Once a session is no longer running, passive viewer windows stop presenting takeover affordances, tail-fallback windows disable their inline send controls, and owner-window paste actions stop claiming the session is still interactive.
+  - wait for live libghostty readback while the session is active
+  - show persisted final output after the session exits
+- Once a session is no longer running, passive viewer windows stop presenting takeover affordances, post-exit views stop claiming the session is interactive, and owner-window paste actions stop claiming the session is still interactive.
 
 The takeover path updates `attachments.json`, moves ownership to the requested client, and rehosts the active libghostty surface without restarting the session.
 Local macOS windows also react to ownership changes immediately through an in-process attachment-state notification, so owner and viewer chrome does not wait for the polling loop to catch up after takeover.
 Live libghostty title and working-directory updates also propagate through an in-process metadata notification so the owner window title and summary stay in sync without waiting for the refresh loop.
 Live runtime-state changes also propagate through an in-process notification so owner windows update compact state text, including the visible child PID, as soon as the session host persists a new runtime signature.
-Active owner windows keep a slower two-second safety poll because the libghostty path already delivers direct attachment, metadata, and runtime-state notifications. Viewer and fallback windows stay on the faster 500 ms poll because they still depend on tailed output refresh.
+Active owner windows keep a slower two-second safety poll because the libghostty path already delivers direct attachment, metadata, and runtime-state notifications. Viewer and fallback windows stay on the faster 500 ms poll because they still depend on live viewport refresh or post-exit output refresh.
 Passive viewers also listen for output-change notifications from the session host and coalesce refreshes onto a short timer, so visible output no longer waits for the 500 ms poll in the normal case. The poll remains as a safety fallback when notifications are missed or the host is not live in-process.
 
 ## Native Window Behavior
@@ -135,8 +136,8 @@ The active owner surface currently supports:
 The owner window controller also routes standard AppKit edit actions to the active terminal session:
 - `Copy` reads from the live libghostty selection when the window owns the session
 - `Paste` sends pasteboard text into the owner session rather than the hidden inline input field
-- fallback or viewer windows keep using the text-output or inline-input path instead of pretending they own the live terminal surface
-- fallback or viewer windows preserve selection plus both horizontal and vertical scroll position when new tailed output arrives, including when the transcript is pinned to the bottom
+- fallback windows keep using the text-output or inline-input path instead of pretending they own the live terminal surface
+- viewer windows preserve selection plus both horizontal and vertical scroll position when new live readback or post-exit output arrives, including when the transcript is pinned to the bottom
 - fallback transcript output disables smart quotes, dashes, spell correction, text replacement, and text completion so AppKit editing helpers do not mutate copied terminal text
 - fallback windows choose a focused first responder on show: interactive inline-input sessions land in the input field, while passive viewer transcripts land directly in the output view for keyboard selection and scrolling
 
@@ -179,7 +180,7 @@ Current performance decisions:
 - Session output still streams directly to `output.log`, but session runtime-state persistence is coalesced so steady-state windows are not constantly paying synchronous metadata write costs.
 - Built-in process sessions use a lighter readiness policy than ad hoc terminals. Workspace-process launch waits only for the embedded session control socket plus `state.json` to exist, then lets later runtime-state refreshes reconcile a child PID after the window is already visible.
 - Owner-surface attach forces one immediate layout + surface refresh, and later PTY output or local input coalesces explicit surface refresh requests. That keeps first-open prompts and command output visible on live `ghostty-embedded` process windows instead of relying on a close/reopen cycle to reveal buffered content.
-- Ghostty owner windows suppress inline non-error send-status text because the live terminal surface is the interactive input path. The inline status area stays available for real errors and for fallback/viewer flows.
+- Ghostty owner windows suppress inline non-error send-status text because the live terminal surface is the interactive input path. The inline status area stays available for real errors, loading viewers, and post-exit output views.
 - App-side open/focus actions distinguish built-in `Spaces` terminal windows from external apps. Built-in terminal windows stay visible with the main app, while external terminal/browser/editor actions still use the hide-after-success behavior.
 - Global app-toggle behavior also distinguishes the primary main window from auxiliary built-in windows. `Cmd+Opt+=` depends only on the main window's visible state, not on whether a built-in terminal or the command palette is focused. Toggling the app summons or hides only the main Spaces window instead of unhiding or fronting every Spaces-owned window in the process. `Cmd+Opt+-` similarly depends only on the command palette's visible state and shows or hides only the palette panel, so the main window and built-in terminal windows stay in their existing visibility state.
 - Built-in terminal summon/focus flows keep the tracked workspace association in the `windows` table through the terminal session ID. That lets the main window restore the owning workspace detail view when the user toggles back from a focused built-in terminal, even before yabai has supplied or refreshed a native window ID.
@@ -253,7 +254,7 @@ The current branch has verified:
 - stress and soak harnesses for append-only, repaint-heavy, mixed-output, and live passive-viewer repaint sessions
 
 ## Known Constraints
-- Passive viewer windows do not host a second live libghostty surface. They read the live libghostty viewport text first and fall back to tailed output only when surface readback is unavailable.
+- Passive viewer windows do not host a second live libghostty surface. They wait for live libghostty viewport readback while the session is running and show persisted final output only after the session exits.
 - Passive viewer windows still keep the 500 ms poll as a safety fallback, but normal live-session updates now arrive through coalesced output notifications. Remaining viewer latency work is mostly about tuning refresh cadence and measuring end-to-end presentation timing rather than transcript rendering throughput.
 - iPhone or VPN clients are intentionally out of scope for this branch.
 - External iTerm2 and Ghostty hosts remain supported overrides on this branch.

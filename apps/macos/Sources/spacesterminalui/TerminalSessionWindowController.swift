@@ -27,7 +27,9 @@ import spacesterminalghostty
 
     private enum VisibleRenderer {
         case ghosttyOwner
+        case ghosttyViewerLoading
         case ghosttyViewerSnapshot
+        case ghosttyViewerExitedOutput
         case outputFallback
     }
 
@@ -109,6 +111,7 @@ import spacesterminalghostty
     private var pendingPassiveOutputStartedAt: Date?
     private var pendingPassiveOutputByteCount = 0
     private var pendingPassiveOutputNotificationCount = 0
+    private var lastGhosttyViewerSnapshotText: String?
 
     public convenience init(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
@@ -279,13 +282,14 @@ import spacesterminalghostty
         case #selector(NSText.copy(_:)):
             switch visibleRenderer {
             case .ghosttyOwner: return preferredAttachmentMode == .owner
-            case .ghosttyViewerSnapshot: return true
+            case .ghosttyViewerLoading: return false
+            case .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput: return true
             case .outputFallback: return true
             }
         case #selector(NSText.paste(_:)):
             switch visibleRenderer {
             case .ghosttyOwner: return preferredAttachmentMode == .owner && isInteractiveRuntimeState(lastObservedRuntimeState)
-            case .ghosttyViewerSnapshot: return false
+            case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput: return false
             case .outputFallback: return !inputRowStackView.isHidden && inputField.isEnabled
             }
         case #selector(selectAll(_:)): return visibleRenderer != .ghosttyOwner
@@ -305,7 +309,7 @@ import spacesterminalghostty
                 NSSound.beep()
                 return
             }
-        case .ghosttyViewerSnapshot, .outputFallback: outputView.copy(sender)
+        case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput, .outputFallback: outputView.copy(sender)
         }
     }
 
@@ -326,7 +330,7 @@ import spacesterminalghostty
                 NSSound.beep()
                 return
             }
-        case .ghosttyViewerSnapshot:
+        case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput:
             updateInputStatus(message: "Viewer windows cannot paste into the terminal. Take over ownership first.", isError: true)
             NSSound.beep()
             return
@@ -646,6 +650,7 @@ import spacesterminalghostty
                 workingDirectory: currentWorkingDirectory, shell: currentLaunchConfiguration.shell, command: currentLaunchConfiguration.command)
             let stateText = runtimeStateText(runtimeState: runtimeState, ownerClient: currentOwnerClient, isOwner: isOwner)
             stateLabel.stringValue = stateText
+            if isInteractiveRuntimeState(runtimeState) == false { lastGhosttyViewerSnapshotText = nil }
 
             if backend == .ghosttyEmbedded {
                 let activeAttachment = attachmentSnapshot?.attachments.last(where: { $0.clientID == client.id && $0.detachedAt == nil })
@@ -680,13 +685,14 @@ import spacesterminalghostty
             let viewportState = captureOutputViewportState()
             var didUpdatePassivePresentation = false
             switch visibleRenderer {
-            case .ghosttyViewerSnapshot:
+            case .ghosttyViewerLoading:
                 if let snapshot = ghosttySessionHost?.snapshot() {
                     outputView.textStorage?.setAttributedString(
                         GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
                     if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
                     outputView.sizeToFit()
                     lastRenderedOutput = outputView.string
+                    lastGhosttyViewerSnapshotText = outputView.string
                     restoreOutputViewportState(viewportState)
                     didUpdatePassivePresentation = true
                     completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
@@ -700,11 +706,68 @@ import spacesterminalghostty
                         lastRenderedOutput = snapshotText
                         didUpdatePassivePresentation = true
                     }
+                    lastGhosttyViewerSnapshotText = snapshotText
                     restoreOutputViewportState(viewportState)
                     completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot_text", changedOutput: didUpdatePassivePresentation)
                     return
                 }
-                fallthrough
+                let loadingMessage = "Waiting for live terminal surface…"
+                if loadingMessage != lastRenderedOutput {
+                    outputView.string = loadingMessage
+                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
+                    outputView.sizeToFit()
+                    lastRenderedOutput = loadingMessage
+                    didUpdatePassivePresentation = true
+                }
+                restoreOutputViewportState(viewportState)
+                completePendingPassiveOutputMeasurement(renderer: "viewer_loading", changedOutput: didUpdatePassivePresentation)
+            case .ghosttyViewerSnapshot:
+                if let snapshot = ghosttySessionHost?.snapshot() {
+                    outputView.textStorage?.setAttributedString(
+                        GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
+                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
+                    outputView.sizeToFit()
+                    lastRenderedOutput = outputView.string
+                    lastGhosttyViewerSnapshotText = outputView.string
+                    restoreOutputViewportState(viewportState)
+                    didUpdatePassivePresentation = true
+                    completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
+                    return
+                }
+                if let snapshotText = ghosttySessionHost?.snapshotText() {
+                    if snapshotText != lastRenderedOutput {
+                        outputView.string = snapshotText
+                        if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
+                        outputView.sizeToFit()
+                        lastRenderedOutput = snapshotText
+                        didUpdatePassivePresentation = true
+                    }
+                    lastGhosttyViewerSnapshotText = snapshotText
+                    restoreOutputViewportState(viewportState)
+                    completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot_text", changedOutput: didUpdatePassivePresentation)
+                    return
+                }
+                let loadingMessage = "Waiting for live terminal surface…"
+                if loadingMessage != lastRenderedOutput {
+                    outputView.string = loadingMessage
+                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
+                    outputView.sizeToFit()
+                    lastRenderedOutput = loadingMessage
+                    didUpdatePassivePresentation = true
+                }
+                restoreOutputViewportState(viewportState)
+                completePendingPassiveOutputMeasurement(renderer: "viewer_loading", changedOutput: didUpdatePassivePresentation)
+            case .ghosttyViewerExitedOutput:
+                let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 400)) ?? lastGhosttyViewerSnapshotText ?? ""
+                if output != lastRenderedOutput {
+                    outputView.string = output
+                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
+                    outputView.sizeToFit()
+                    lastRenderedOutput = output
+                    didUpdatePassivePresentation = true
+                }
+                restoreOutputViewportState(viewportState)
+                completePendingPassiveOutputMeasurement(renderer: "viewer_exited_output", changedOutput: didUpdatePassivePresentation)
             case .outputFallback:
                 let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 200)) ?? ""
                 if output != lastRenderedOutput {
@@ -908,7 +971,7 @@ import spacesterminalghostty
         case .ghosttyOwner:
             terminalContainer.isHidden = false
             outputScrollView.isHidden = true
-        case .ghosttyViewerSnapshot, .outputFallback:
+        case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput, .outputFallback:
             outputScrollView.isHidden = false
             terminalContainer.isHidden = true
         }
@@ -970,7 +1033,7 @@ import spacesterminalghostty
         guard let window else { return }
         switch visibleRenderer {
         case .ghosttyOwner: break
-        case .ghosttyViewerSnapshot, .outputFallback:
+        case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput, .outputFallback:
             if !inputRowStackView.isHidden, inputField.isEnabled {
                 window.makeFirstResponder(inputField)
             } else {
@@ -1062,7 +1125,8 @@ import spacesterminalghostty
         guard case .ghosttyEmbedded = rendererMode else { return .outputFallback }
         if isOwner == true { return ghosttySessionHost?.hasRenderableSurface() == true ? .ghosttyOwner : .outputFallback }
         if ghosttySessionHost?.hasRenderableSurface() == true { return .ghosttyViewerSnapshot }
-        return .outputFallback
+        if isInteractiveRuntimeState(lastObservedRuntimeState) { return .ghosttyViewerLoading }
+        return .ghosttyViewerExitedOutput
     }
 
     private func currentRefreshInterval() -> Duration {
@@ -1072,14 +1136,18 @@ import spacesterminalghostty
     private func rendererSummary(isOwner: Bool?) -> String {
         guard isOwner == true else {
             switch visibleRenderer {
+            case .ghosttyViewerLoading: return "Renderer: libghostty loading (viewer)"
             case .ghosttyViewerSnapshot: return "Renderer: libghostty snapshot (viewer)"
-            case .outputFallback: return "Renderer: viewer tail"
+            case .ghosttyViewerExitedOutput: return "Renderer: final output (viewer)"
+            case .outputFallback: return "Renderer: viewer output"
             case .ghosttyOwner: return "Renderer: libghostty (owner)"
             }
         }
         switch visibleRenderer {
         case .ghosttyOwner: return "Renderer: libghostty (owner)"
+        case .ghosttyViewerLoading: return "Renderer: libghostty loading (viewer)"
         case .ghosttyViewerSnapshot: return "Renderer: libghostty snapshot (viewer)"
+        case .ghosttyViewerExitedOutput: return "Renderer: final output (viewer)"
         case .outputFallback: return "Renderer: output tail (owner fallback)"
         }
     }
