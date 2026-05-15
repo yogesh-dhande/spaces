@@ -19,6 +19,7 @@ trap report_elapsed_time EXIT
 
 echo "Running swift test with coverage..."
 workers="${SPACES_TEST_WORKERS:-}"
+max_auto_workers="${SPACES_TEST_MAX_AUTO_WORKERS:-8}"
 if [ -z "$workers" ]; then
     detected_workers="$(sysctl -n hw.logicalcpu 2>/dev/null || echo "")"
     case "$detected_workers" in
@@ -27,6 +28,15 @@ if [ -z "$workers" ]; then
             ;;
         *)
             workers="$detected_workers"
+            case "$max_auto_workers" in
+                ''|*[!0-9]*)
+                    ;;
+                *)
+                    if [ "$max_auto_workers" -gt 0 ] && [ "$workers" -gt "$max_auto_workers" ]; then
+                        workers="$max_auto_workers"
+                    fi
+                    ;;
+            esac
             ;;
     esac
 fi
@@ -34,6 +44,9 @@ fi
 set -- test --parallel --enable-code-coverage --disable-sandbox
 if [ -n "$workers" ]; then
     echo "Using parallel test workers: $workers"
+    if [ -n "${detected_workers:-}" ] && [ "$workers" != "${detected_workers:-}" ]; then
+        echo "Auto worker count capped from $detected_workers to $workers"
+    fi
     set -- "$@" --num-workers "$workers"
 fi
 if [ "${SPACES_TEST_SKIP_BUILD:-0}" = "1" ]; then

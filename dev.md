@@ -28,14 +28,20 @@ Build, test, and release workflows for the Spaces monorepo. For product overview
 Run from the repository root:
 
 ```bash
+scripts/format.sh
 scripts/swiftpm.sh build
 scripts/swiftpm.sh test --parallel
 scripts/format-staged-swift.sh
 scripts/lint.sh
 scripts/coverage.sh
+scripts/verify.sh
 ```
 
-`scripts/lint.sh` auto-formats `apps/macos/Sources` and `apps/macos/Tests` with `swift format` before running lint so formatter-driven warnings do not drown out real issues.
+`scripts/format.sh` performs an explicit tree-wide `swift format` pass across `apps/macos/Sources` and `apps/macos/Tests`.
+`scripts/lint.sh` is read-only and checks formatting without mutating files, so build artifacts are not invalidated by lint.
+`scripts/coverage.sh` runs SwiftPM tests in parallel by default and caps auto-detected workers at `8` unless you override it with `SPACES_TEST_WORKERS` or change the cap with `SPACES_TEST_MAX_AUTO_WORKERS`.
+`scripts/verify.sh` is the canonical sequential local verification path: lint, build, then coverage.
+`scripts/swiftpm.sh` also uses a fail-fast lock around SwiftPM itself so overlapping build, test, or coverage commands stop immediately with a clear message instead of silently contending on the shared `.build` directory.
 
 Useful local entry points:
 
@@ -245,7 +251,7 @@ Expected output:
 
 The pre-commit hook does three things:
 - formats staged macOS Swift source and test files with `swift format`
-- runs `scripts/lint.sh`, which also auto-formats the full macOS Swift source and test tree before linting
+- runs `scripts/lint.sh`
 - runs `scripts/coverage.sh`
 
 Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](.github/workflows/pr-checks.yml), which runs the same Swift lint/build/coverage flow plus the static website build.
