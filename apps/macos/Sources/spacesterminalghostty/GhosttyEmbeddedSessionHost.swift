@@ -276,6 +276,22 @@ import spacesterminalcore
                             "terminal_control_key", target: "session=\(self.launchConfiguration.sessionID)",
                             elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "key=\(key)")
                         return TerminalControlResponse(ok: true, message: "Sent key.")
+                    case "mouse":
+                        let startedAt = Date()
+                        if let clientID = request.clientID, !self.isOwner(clientID: clientID) {
+                            TerminalPerformance.logMetric(
+                                "terminal_control_mouse", target: "session=\(self.launchConfiguration.sessionID)",
+                                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+                            return TerminalSessionHostProtocolSupport.ownerRequired("Only the active owner can send mouse input.")
+                        }
+                        guard let sequence = request.mouseSequence else {
+                            return TerminalSessionHostProtocolSupport.missingParameter("Missing terminal mouse payload.")
+                        }
+                        self.terminalView.sendRawBytes(Data(sequence.utf8))
+                        TerminalPerformance.logMetric(
+                            "terminal_control_mouse", target: "session=\(self.launchConfiguration.sessionID)",
+                            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(sequence.utf8.count)")
+                        return TerminalControlResponse(ok: true, message: "Sent mouse input.")
                     case "takeover":
                         let startedAt = Date()
                         guard let clientID = request.clientID else {

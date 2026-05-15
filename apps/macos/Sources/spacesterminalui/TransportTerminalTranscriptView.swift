@@ -1,14 +1,26 @@
 import AppKit
 import Carbon
+import spacesterminalcore
 
 @MainActor enum TransportTerminalTranscriptInput: Equatable {
     case text(String)
     case key(String)
 }
 
+@MainActor struct TransportTerminalTranscriptMouseInput: Equatable {
+    let action: TerminalMouseAction
+    let button: TerminalMouseButton
+    let column: Int
+    let row: Int
+    let shift: Bool
+    let option: Bool
+    let control: Bool
+}
+
 @MainActor final class TransportTerminalTranscriptView: NSView {
     var terminalInputHandler: ((TransportTerminalTranscriptInput) -> Bool)?
     var terminalPasteHandler: (() -> Bool)?
+    var terminalMouseHandler: ((TransportTerminalTranscriptMouseInput) -> Bool)?
 
     var font: NSFont = .monospacedSystemFont(ofSize: 12, weight: .regular) { didSet { invalidateLayoutAndDisplay() } }
 
@@ -61,6 +73,7 @@ import Carbon
     }
 
     override func mouseDown(with event: NSEvent) {
+        if handleTerminalMouseEvent(event, action: .press, button: .left) { return }
         guard window != nil else { return }
         let location = convert(event.locationInWindow, from: nil)
         let index = characterIndex(at: location)
@@ -74,9 +87,21 @@ import Carbon
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if handleTerminalMouseEvent(event, action: .move, button: .left) { return }
         guard let anchor = selectionAnchorLocation else { return }
         let location = convert(event.locationInWindow, from: nil)
         setSelectedRange(selectionRange(from: anchor, to: characterIndex(at: location)))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if handleTerminalMouseEvent(event, action: .release, button: .left) { return }
+        super.mouseUp(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        if event.scrollingDeltaY > 0, handleTerminalMouseEvent(event, action: .scrollUp, button: .none) { return }
+        if event.scrollingDeltaY < 0, handleTerminalMouseEvent(event, action: .scrollDown, button: .none) { return }
+        super.scrollWheel(with: event)
     }
 
     @objc func paste(_ sender: Any?) {
@@ -293,6 +318,23 @@ import Carbon
         guard let text = event.characters, !text.isEmpty else { return nil }
         guard text.unicodeScalars.contains(where: { !CharacterSet.controlCharacters.contains($0) }) else { return nil }
         return .text(text)
+    }
+
+    private func handleTerminalMouseEvent(_ event: NSEvent, action: TerminalMouseAction, button: TerminalMouseButton) -> Bool {
+        guard let input = terminalMouseInput(for: event, action: action, button: button) else { return false }
+        return terminalMouseHandler?(input) ?? false
+    }
+
+    private func terminalMouseInput(for event: NSEvent, action: TerminalMouseAction, button: TerminalMouseButton)
+        -> TransportTerminalTranscriptMouseInput?
+    {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let location = convert(event.locationInWindow, from: nil)
+        let column = max(1, Int(floor((location.x - textContainerInset.width - lineFragmentPadding) / characterCellWidth)) + 1)
+        let row = max(1, Int(floor((location.y - textContainerInset.height) / lineHeight)) + 1)
+        return TransportTerminalTranscriptMouseInput(
+            action: action, button: button, column: column, row: row, shift: flags.contains(.shift), option: flags.contains(.option),
+            control: flags.contains(.control))
     }
 }
 

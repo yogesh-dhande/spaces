@@ -141,6 +141,22 @@ public final class ScriptPTYTerminalSessionRuntime: TerminalSessionBackendRuntim
                     "terminal_control_key", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
                     detail: "key=\(key)")
                 return TerminalControlResponse(ok: true, message: "Sent key.")
+            case "mouse":
+                let startedAt = Date()
+                if let clientID = request.clientID, !isActiveOwner(clientID) {
+                    TerminalPerformance.logMetric(
+                        "terminal_control_mouse", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: false)
+                    return TerminalSessionHostProtocolSupport.ownerRequired("Only the active owner can send mouse input.")
+                }
+                guard let sequence = request.mouseSequence, let data = sequence.data(using: .utf8) else {
+                    return TerminalControlResponse(ok: false, message: "Missing terminal mouse payload.", errorCode: .missingParameter)
+                }
+                try scriptInputHandle.write(contentsOf: data)
+                TerminalPerformance.logMetric(
+                    "terminal_control_mouse", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                    success: true, detail: "bytes=\(data.count)")
+                return TerminalControlResponse(ok: true, message: "Sent mouse input.")
             case "resize":
                 let startedAt = Date()
                 if let clientID = request.clientID, !isActiveOwner(clientID) {

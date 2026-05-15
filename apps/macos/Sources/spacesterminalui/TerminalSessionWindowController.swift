@@ -40,6 +40,9 @@ import spacesterminalghostty
         let replayMode: String
         let replayBytes: Int64
         let usesAlternateScreen: Bool
+        let mouseTrackingMode: TerminalMouseTrackingMode
+        let usesSGRMouseEncoding: Bool
+        let usesAlternateScrollMode: Bool
     }
 
     private struct OutputViewportState {
@@ -95,6 +98,9 @@ import spacesterminalghostty
     private var lastRenderedOutput = ""
     private var lastRenderedAttributedOutput = NSAttributedString()
     private var lastRenderedUsedAlternateScreen = false
+    private var lastRenderedMouseTrackingMode = TerminalMouseTrackingMode.disabled
+    private var lastRenderedUsesSGRMouseEncoding = false
+    private var lastRenderedUsesAlternateScrollMode = false
     private var lastTransportOutput = ""
     private var transportScreenBuffer = TerminalScreenBuffer()
     private var transportScreenBufferByteCount: Int64 = 0
@@ -129,6 +135,7 @@ import spacesterminalghostty
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
         transport: TerminalSessionClientTransport? = nil, sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
+        sendMouseAction: (@Sendable (String, String) throws -> TerminalControlResponse)? = nil,
         resizeAction: (@Sendable (Int, Int, String) throws -> TerminalControlResponse)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         terminateSessionAction: (@Sendable (String?) throws -> TerminalControlResponse)? = nil,
@@ -192,9 +199,10 @@ import spacesterminalghostty
             transport
             ?? .local(
                 sessionID: sessionID, paths: paths, sendInputAction: resolvedSendInputAction, sendKeyAction: resolvedSendKeyAction,
-                resizeAction: resolvedResizeAction, takeoverAction: resolvedTakeoverAction, terminateAction: resolvedTerminateAction,
-                attachClientAction: resolvedAttachClientAction, detachClientAction: resolvedDetachClientAction,
-                loadWindowFrameAction: loadWindowFrameAction, saveWindowFrameAction: saveWindowFrameAction)
+                sendMouseAction: sendMouseAction, resizeAction: resolvedResizeAction, takeoverAction: resolvedTakeoverAction,
+                terminateAction: resolvedTerminateAction, attachClientAction: resolvedAttachClientAction,
+                detachClientAction: resolvedDetachClientAction, loadWindowFrameAction: loadWindowFrameAction,
+                saveWindowFrameAction: saveWindowFrameAction)
         self.copySelectionAction = copySelectionAction
         self.pasteClipboardAction = pasteClipboardAction
         self.ownerWindowFocusAction = ownerWindowFocusAction
@@ -494,6 +502,7 @@ import spacesterminalghostty
         outputView.enclosingScrollView?.drawsBackground = false
         outputView.terminalInputHandler = { [weak self] input in self?.sendFallbackTranscriptInput(input) ?? false }
         outputView.terminalPasteHandler = { [weak self] in self?.sendFallbackPasteFromClipboard() ?? false }
+        outputView.terminalMouseHandler = { [weak self] input in self?.sendFallbackTranscriptMouse(input) ?? false }
 
         outputScrollView.translatesAutoresizingMaskIntoConstraints = false
         outputScrollView.borderType = .bezelBorder
@@ -700,6 +709,9 @@ import spacesterminalghostty
                     lastRenderedOutput = plainSnapshot
                     lastRenderedAttributedOutput = renderedSnapshot
                     lastRenderedUsedAlternateScreen = false
+                    lastRenderedMouseTrackingMode = .disabled
+                    lastRenderedUsesSGRMouseEncoding = false
+                    lastRenderedUsesAlternateScrollMode = false
                     restoreOutputViewportState(viewportState)
                     didUpdatePassivePresentation = true
                     completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
@@ -716,7 +728,8 @@ import spacesterminalghostty
                         text: fallbackText,
                         attributedText: NSAttributedString(
                             string: fallbackText, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor]),
-                        replayMode: "fallback_recent_output", replayBytes: 0, usesAlternateScreen: false)
+                        replayMode: "fallback_recent_output", replayBytes: 0, usesAlternateScreen: false, mouseTrackingMode: .disabled,
+                        usesSGRMouseEncoding: false, usesAlternateScrollMode: false)
                 }
                 TerminalPerformance.logMetric(
                     "terminal_viewer_refresh_render_output", target: "session=\(sessionID)",
@@ -724,6 +737,9 @@ import spacesterminalghostty
                     detail: "renderer=transport_canvas mode=\(renderedOutputResult.replayMode) replay_bytes=\(renderedOutputResult.replayBytes)")
                 let assignTextStartedAt = Date()
                 let alternateScreenChanged = renderedOutputResult.usesAlternateScreen != lastRenderedUsedAlternateScreen
+                lastRenderedMouseTrackingMode = renderedOutputResult.mouseTrackingMode
+                lastRenderedUsesSGRMouseEncoding = renderedOutputResult.usesSGRMouseEncoding
+                lastRenderedUsesAlternateScrollMode = renderedOutputResult.usesAlternateScrollMode
                 if renderedOutputResult.text != lastRenderedOutput || !renderedOutputResult.attributedText.isEqual(lastRenderedAttributedOutput) {
                     outputView.setRenderedOutput(plainText: renderedOutputResult.text, attributedText: renderedOutputResult.attributedText)
                     TerminalPerformance.logMetric(
@@ -776,6 +792,9 @@ import spacesterminalghostty
             lastRenderedOutput = ""
             lastRenderedAttributedOutput = NSAttributedString()
             lastRenderedUsedAlternateScreen = false
+            lastRenderedMouseTrackingMode = .disabled
+            lastRenderedUsesSGRMouseEncoding = false
+            lastRenderedUsesAlternateScrollMode = false
             lastTransportOutput = ""
         }
     }
@@ -842,6 +861,52 @@ import spacesterminalghostty
         } catch {
             updateInputStatus(message: String(describing: error), isError: true)
             return false
+        }
+    }
+
+    @discardableResult private func sendFallbackTranscriptMouse(_ input: TransportTerminalTranscriptMouseInput) -> Bool {
+        if shouldTranslateTranscriptScrollToAlternateNavigation(for: input) {
+            let key = input.action == .scrollUp ? "up" : "down"
+            return sendFallbackTranscriptInput(.key(key))
+        }
+        guard shouldForwardTranscriptMouseInput(for: input) else { return false }
+        guard isInteractiveRuntimeState(lastObservedRuntimeState) else { return false }
+        guard preferredAttachmentMode == .owner else { return false }
+        let sequence = TerminalMouseInput.sgrSequence(
+            action: input.action, button: input.button, column: input.column, row: input.row, shift: input.shift, option: input.option,
+            control: input.control)
+        do {
+            let response = try transport.sendMouse(sequence, client.id)
+            if !response.ok { updateInputStatus(message: response.message, isError: true) }
+            refreshNow()
+            return response.ok
+        } catch {
+            updateInputStatus(message: String(describing: error), isError: true)
+            return false
+        }
+    }
+
+    private func shouldForwardTranscriptMouseInput(for input: TransportTerminalTranscriptMouseInput) -> Bool {
+        guard visibleRenderer == .outputFallback else { return false }
+        guard lastRenderedUsesSGRMouseEncoding else { return false }
+        guard lastRenderedMouseTrackingMode != .disabled else { return false }
+        switch input.action {
+        case .scrollUp, .scrollDown: return true
+        case .press, .release: return lastRenderedMouseTrackingMode != .disabled
+        case .move: return lastRenderedMouseTrackingMode == .drag || lastRenderedMouseTrackingMode == .move
+        }
+    }
+
+    private func shouldTranslateTranscriptScrollToAlternateNavigation(for input: TransportTerminalTranscriptMouseInput) -> Bool {
+        guard visibleRenderer == .outputFallback else { return false }
+        guard preferredAttachmentMode == .owner else { return false }
+        guard isInteractiveRuntimeState(lastObservedRuntimeState) else { return false }
+        guard lastRenderedUsedAlternateScreen else { return false }
+        guard lastRenderedUsesAlternateScrollMode else { return false }
+        guard lastRenderedMouseTrackingMode == .disabled else { return false }
+        switch input.action {
+        case .scrollUp, .scrollDown: return true
+        case .press, .release, .move: return false
         }
     }
 
@@ -1253,7 +1318,7 @@ import spacesterminalghostty
                 string: snapshot.recentOutput, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor])
             return TransportRenderedOutput(
                 text: snapshot.recentOutput, attributedText: attributedText, replayMode: "recent_output_empty", replayBytes: 0,
-                usesAlternateScreen: false)
+                usesAlternateScreen: false, mouseTrackingMode: .disabled, usesSGRMouseEncoding: false, usesAlternateScrollMode: false)
         }
 
         var replayMode = "reuse"
@@ -1278,11 +1343,13 @@ import spacesterminalghostty
                 string: lastTransportOutput, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor])
             return TransportRenderedOutput(
                 text: lastTransportOutput, attributedText: fallback, replayMode: "recent_output_fallback", replayBytes: replayBytes,
-                usesAlternateScreen: renderedScreen.usesAlternateScreen)
+                usesAlternateScreen: renderedScreen.usesAlternateScreen, mouseTrackingMode: renderedScreen.mouseTrackingMode,
+                usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding, usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode)
         }
         return TransportRenderedOutput(
             text: rendered, attributedText: attributed, replayMode: replayMode, replayBytes: replayBytes,
-            usesAlternateScreen: renderedScreen.usesAlternateScreen)
+            usesAlternateScreen: renderedScreen.usesAlternateScreen, mouseTrackingMode: renderedScreen.mouseTrackingMode,
+            usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding, usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode)
     }
 
     private func rebuildTransportScreenBuffer(totalBytes: Int64) throws -> Int64 {
@@ -1439,6 +1506,12 @@ import spacesterminalghostty
     var debugInputFieldValue: String { inputField.stringValue }
     @discardableResult func debugSendTranscriptText(_ text: String) -> Bool { sendFallbackTranscriptInput(.text(text)) }
     @discardableResult func debugSendTranscriptKey(_ key: String) -> Bool { sendFallbackTranscriptInput(.key(key)) }
+    @discardableResult func debugSendTranscriptMouse(
+        action: TerminalMouseAction, button: TerminalMouseButton = .none, column: Int = 1, row: Int = 1, shift: Bool = false, option: Bool = false,
+        control: Bool = false
+    ) -> Bool {
+        sendFallbackTranscriptMouse(.init(action: action, button: button, column: column, row: row, shift: shift, option: option, control: control))
+    }
     func debugSimulateApplicationDidBecomeActive() { NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp) }
     func debugSimulateApplicationDidResignActive() { NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp) }
     func debugSimulateAttachmentStateDidChange() {

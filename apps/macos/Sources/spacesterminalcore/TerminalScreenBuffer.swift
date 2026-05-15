@@ -42,19 +42,35 @@ public struct TerminalRenderedCell: Equatable {
     }
 }
 
+public enum TerminalMouseTrackingMode: Equatable {
+    case disabled
+    case click
+    case drag
+    case move
+}
+
 public struct TerminalRenderedScreen: Equatable {
     public let rows: [[TerminalRenderedCell]]
     public let cursorRow: Int
     public let cursorColumn: Int
     public let cursorVisible: Bool
     public let usesAlternateScreen: Bool
+    public let mouseTrackingMode: TerminalMouseTrackingMode
+    public let usesSGRMouseEncoding: Bool
+    public let usesAlternateScrollMode: Bool
 
-    public init(rows: [[TerminalRenderedCell]], cursorRow: Int, cursorColumn: Int, cursorVisible: Bool, usesAlternateScreen: Bool) {
+    public init(
+        rows: [[TerminalRenderedCell]], cursorRow: Int, cursorColumn: Int, cursorVisible: Bool, usesAlternateScreen: Bool,
+        mouseTrackingMode: TerminalMouseTrackingMode, usesSGRMouseEncoding: Bool, usesAlternateScrollMode: Bool
+    ) {
         self.rows = rows
         self.cursorRow = cursorRow
         self.cursorColumn = cursorColumn
         self.cursorVisible = cursorVisible
         self.usesAlternateScreen = usesAlternateScreen
+        self.mouseTrackingMode = mouseTrackingMode
+        self.usesSGRMouseEncoding = usesSGRMouseEncoding
+        self.usesAlternateScrollMode = usesAlternateScrollMode
     }
 
     public var plainText: String {
@@ -70,6 +86,7 @@ public struct TerminalRenderedScreen: Equatable {
 
 public struct TerminalScreenBuffer {
     private static let maxColumnCount = 240
+    private static let maxScrollbackRowCount = 10_000
 
     private struct Cell: Equatable {
         var character: Character
@@ -77,16 +94,21 @@ public struct TerminalScreenBuffer {
     }
 
     private var rows: [[Cell]] = [[]]
+    private var scrollbackRows: [[Cell]] = []
     private var cursorRow = 0
     private var cursorColumn = 0
     private var savedCursorRow = 0
     private var savedCursorColumn = 0
     private var primaryRows: [[Cell]]?
+    private var primaryScrollbackRows: [[Cell]]?
     private var primaryCursorRow = 0
     private var primaryCursorColumn = 0
     private var currentStyle = TerminalTextStyle()
     private var cursorVisible = true
     private var isUsingAlternateScreen = false
+    private var mouseTrackingMode = TerminalMouseTrackingMode.disabled
+    private var usesSGRMouseEncoding = false
+    private var usesAlternateScrollMode = false
     private var scrollRegionTop = 0
     private var scrollRegionBottom: Int?
 
@@ -94,16 +116,21 @@ public struct TerminalScreenBuffer {
 
     public mutating func reset() {
         rows = [[]]
+        scrollbackRows = []
         cursorRow = 0
         cursorColumn = 0
         savedCursorRow = 0
         savedCursorColumn = 0
         primaryRows = nil
+        primaryScrollbackRows = nil
         primaryCursorRow = 0
         primaryCursorColumn = 0
         currentStyle = TerminalTextStyle()
         cursorVisible = true
         isUsingAlternateScreen = false
+        mouseTrackingMode = .disabled
+        usesSGRMouseEncoding = false
+        usesAlternateScrollMode = false
         scrollRegionTop = 0
         scrollRegionBottom = nil
     }
@@ -140,8 +167,9 @@ public struct TerminalScreenBuffer {
 
     public func renderedScreen() -> TerminalRenderedScreen {
         TerminalRenderedScreen(
-            rows: rows.map { $0.map { TerminalRenderedCell(character: $0.character, style: $0.style) } }, cursorRow: cursorRow,
-            cursorColumn: cursorColumn, cursorVisible: cursorVisible, usesAlternateScreen: isUsingAlternateScreen)
+            rows: renderedRows().map { $0.map { TerminalRenderedCell(character: $0.character, style: $0.style) } }, cursorRow: renderedCursorRow(),
+            cursorColumn: cursorColumn, cursorVisible: cursorVisible, usesAlternateScreen: isUsingAlternateScreen,
+            mouseTrackingMode: mouseTrackingMode, usesSGRMouseEncoding: usesSGRMouseEncoding, usesAlternateScrollMode: usesAlternateScrollMode)
     }
 
     private mutating func consumeEscapeSequence(_ scalars: [UnicodeScalar], startingAt index: Int) -> Int {
@@ -283,6 +311,11 @@ public struct TerminalScreenBuffer {
             switch value {
             case 25: cursorVisible = enabled
             case 47, 1047, 1049: setAlternateScreen(enabled)
+            case 1000: mouseTrackingMode = enabled ? .click : .disabled
+            case 1002: mouseTrackingMode = enabled ? .drag : .disabled
+            case 1003: mouseTrackingMode = enabled ? .move : .disabled
+            case 1006: usesSGRMouseEncoding = enabled
+            case 1007: usesAlternateScrollMode = enabled
             default: break
             }
         }
@@ -292,9 +325,11 @@ public struct TerminalScreenBuffer {
         if enabled {
             guard !isUsingAlternateScreen else { return }
             primaryRows = rows
+            primaryScrollbackRows = scrollbackRows
             primaryCursorRow = cursorRow
             primaryCursorColumn = cursorColumn
             rows = [[]]
+            scrollbackRows = []
             cursorRow = 0
             cursorColumn = 0
             savedCursorRow = 0
@@ -305,9 +340,11 @@ public struct TerminalScreenBuffer {
         } else {
             guard isUsingAlternateScreen else { return }
             rows = primaryRows ?? [[]]
+            scrollbackRows = primaryScrollbackRows ?? []
             cursorRow = primaryCursorRow
             cursorColumn = primaryCursorColumn
             primaryRows = nil
+            primaryScrollbackRows = nil
             primaryCursorRow = 0
             primaryCursorColumn = 0
             scrollRegionTop = 0
@@ -481,6 +518,7 @@ public struct TerminalScreenBuffer {
     private mutating func scrollUp(_ count: Int) {
         guard count > 0, !rows.isEmpty else { return }
         let amount = min(count, rows.count)
+        appendToScrollback(rows.prefix(amount))
         rows.removeFirst(amount)
         rows.append(contentsOf: repeatElement([], count: amount))
         cursorRow = min(cursorRow, max(rows.count - 1, 0))
@@ -521,6 +559,7 @@ public struct TerminalScreenBuffer {
         guard count > 0, top <= bottom else { return }
         ensureRowExists(bottom)
         let amount = min(count, bottom - top + 1)
+        if shouldAppendRegionScrollToScrollback() { appendToScrollback(rows[top..<(top + amount)]) }
         rows.removeSubrange(top..<(top + amount))
         rows.insert(contentsOf: repeatElement([], count: amount), at: bottom - amount + 1)
     }
@@ -546,6 +585,18 @@ public struct TerminalScreenBuffer {
     private mutating func ensureRowExists(_ row: Int) {
         guard row >= rows.count else { return }
         rows.append(contentsOf: repeatElement([], count: row - rows.count + 1))
+    }
+
+    private func renderedRows() -> [[Cell]] { isUsingAlternateScreen ? rows : scrollbackRows + rows }
+
+    private func renderedCursorRow() -> Int { isUsingAlternateScreen ? cursorRow : scrollbackRows.count + cursorRow }
+
+    private func shouldAppendRegionScrollToScrollback() -> Bool { !isUsingAlternateScreen }
+
+    private mutating func appendToScrollback<S: Sequence>(_ cells: S) where S.Element == [Cell] {
+        guard !isUsingAlternateScreen else { return }
+        scrollbackRows.append(contentsOf: cells)
+        if scrollbackRows.count > Self.maxScrollbackRowCount { scrollbackRows.removeFirst(scrollbackRows.count - Self.maxScrollbackRowCount) }
     }
 
     private mutating func trimTrailingSpaces(on row: Int) {

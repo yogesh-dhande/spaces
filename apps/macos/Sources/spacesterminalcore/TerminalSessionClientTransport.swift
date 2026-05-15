@@ -77,6 +77,7 @@ public struct TerminalSessionClientTransport {
     public let readOutputChunk: @Sendable (Int64, Int) throws -> TerminalOutputChunk?
     public let sendInput: @Sendable (String, Bool, String) throws -> TerminalControlResponse
     public let sendKey: @Sendable (String, String) throws -> TerminalControlResponse
+    public let sendMouse: @Sendable (String, String) throws -> TerminalControlResponse
     public let resize: @Sendable (Int, Int, String) throws -> TerminalControlResponse
     public let takeover: @Sendable (String) throws -> TerminalControlResponse
     public let terminate: @Sendable (String?) throws -> TerminalControlResponse
@@ -91,6 +92,7 @@ public struct TerminalSessionClientTransport {
         readOutputChunk: @escaping @Sendable (Int64, Int) throws -> TerminalOutputChunk?,
         sendInput: @escaping @Sendable (String, Bool, String) throws -> TerminalControlResponse,
         sendKey: @escaping @Sendable (String, String) throws -> TerminalControlResponse,
+        sendMouse: @escaping @Sendable (String, String) throws -> TerminalControlResponse,
         resize: @escaping @Sendable (Int, Int, String) throws -> TerminalControlResponse,
         takeover: @escaping @Sendable (String) throws -> TerminalControlResponse,
         terminate: @escaping @Sendable (String?) throws -> TerminalControlResponse,
@@ -105,6 +107,7 @@ public struct TerminalSessionClientTransport {
         self.readOutputChunk = readOutputChunk
         self.sendInput = sendInput
         self.sendKey = sendKey
+        self.sendMouse = sendMouse
         self.resize = resize
         self.takeover = takeover
         self.terminate = terminate
@@ -119,6 +122,7 @@ public struct TerminalSessionClientTransport {
         sessionID: String, paths: TerminalSessionPaths, outputLineCount: Int = 200, notificationCenter: NotificationCenter = .default,
         sendInputAction: (@Sendable (String, Bool, String) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String, String) throws -> TerminalControlResponse)? = nil,
+        sendMouseAction: (@Sendable (String, String) throws -> TerminalControlResponse)? = nil,
         resizeAction: (@Sendable (Int, Int, String) throws -> TerminalControlResponse)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         terminateAction: (@Sendable (String?) throws -> TerminalControlResponse)? = nil,
@@ -143,8 +147,8 @@ public struct TerminalSessionClientTransport {
 
         return hostBacked(
             sessionID: sessionID, paths: paths, hostConnection: hostConnection, outputLineCount: outputLineCount,
-            notificationCenter: notificationCenter, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, resizeAction: resizeAction,
-            takeoverAction: takeoverAction, terminateAction: terminateAction, attachClientAction: attachClientAction,
+            notificationCenter: notificationCenter, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, sendMouseAction: sendMouseAction,
+            resizeAction: resizeAction, takeoverAction: takeoverAction, terminateAction: terminateAction, attachClientAction: attachClientAction,
             detachClientAction: detachClientAction, loadWindowFrameAction: loadWindowFrameAction, saveWindowFrameAction: saveWindowFrameAction,
             loadSnapshotFromFiles: loadSnapshotFromFiles)
     }
@@ -154,6 +158,7 @@ public struct TerminalSessionClientTransport {
         notificationCenter: NotificationCenter = .default,
         sendInputAction: (@Sendable (String, Bool, String) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String, String) throws -> TerminalControlResponse)? = nil,
+        sendMouseAction: (@Sendable (String, String) throws -> TerminalControlResponse)? = nil,
         resizeAction: (@Sendable (Int, Int, String) throws -> TerminalControlResponse)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         terminateAction: (@Sendable (String?) throws -> TerminalControlResponse)? = nil,
@@ -214,6 +219,9 @@ public struct TerminalSessionClientTransport {
                 try hostConnection.send(TerminalControlRequest(command: "send", text: text, clientID: clientID, appendNewline: appendNewline))
             },
             sendKey: sendKeyAction ?? { key, clientID in try hostConnection.send(TerminalControlRequest(command: "key", key: key, clientID: clientID))
+            },
+            sendMouse: sendMouseAction ?? { sequence, clientID in
+                try hostConnection.send(TerminalControlRequest(command: "mouse", clientID: clientID, mouseSequence: sequence))
             },
             resize: resizeAction ?? { columns, rows, clientID in
                 try hostConnection.send(TerminalControlRequest(command: "resize", clientID: clientID, columns: columns, rows: rows))

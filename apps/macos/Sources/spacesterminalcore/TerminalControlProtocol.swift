@@ -23,11 +23,27 @@ public enum TerminalControlCapability: String, Codable, Sendable, Equatable {
     case readOutputChunk = "read_output_chunk"
     case send
     case key
+    case mouse
     case resize
     case takeover
     case terminate
     case ping
     case hello
+}
+
+public enum TerminalMouseAction: String, Codable, Sendable, Equatable {
+    case press
+    case release
+    case move
+    case scrollUp = "scroll_up"
+    case scrollDown = "scroll_down"
+}
+
+public enum TerminalMouseButton: String, Codable, Sendable, Equatable {
+    case none
+    case left
+    case middle
+    case right
 }
 
 public struct TerminalControlServerHello: Codable, Sendable, Equatable {
@@ -82,6 +98,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let appendNewline: Bool
     public let columns: Int?
     public let rows: Int?
+    public let mouseSequence: String?
     public let offset: Int64?
     public let maximumBytes: Int?
     public let recentOutputLineCount: Int?
@@ -90,8 +107,8 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         command: String, protocolVersion: Int? = TerminalControlProtocolVersion.current,
         minimumSupportedProtocolVersion: Int? = TerminalControlProtocolVersion.minimumSupported, authToken: String? = nil, text: String? = nil,
         key: String? = nil, clientID: String? = nil, client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil,
-        appendNewline: Bool = false, columns: Int? = nil, rows: Int? = nil, offset: Int64? = nil, maximumBytes: Int? = nil,
-        recentOutputLineCount: Int? = nil
+        appendNewline: Bool = false, columns: Int? = nil, rows: Int? = nil, mouseSequence: String? = nil, offset: Int64? = nil,
+        maximumBytes: Int? = nil, recentOutputLineCount: Int? = nil
     ) {
         self.command = command
         self.protocolVersion = protocolVersion
@@ -105,6 +122,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         self.appendNewline = appendNewline
         self.columns = columns
         self.rows = rows
+        self.mouseSequence = mouseSequence
         self.offset = offset
         self.maximumBytes = maximumBytes
         self.recentOutputLineCount = recentOutputLineCount
@@ -123,6 +141,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         case appendNewline
         case columns
         case rows
+        case mouseSequence
         case offset
         case maximumBytes
         case recentOutputLineCount
@@ -143,6 +162,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
         columns = try container.decodeIfPresent(Int.self, forKey: .columns)
         rows = try container.decodeIfPresent(Int.self, forKey: .rows)
+        mouseSequence = try container.decodeIfPresent(String.self, forKey: .mouseSequence)
         offset = try container.decodeIfPresent(Int64.self, forKey: .offset)
         maximumBytes = try container.decodeIfPresent(Int.self, forKey: .maximumBytes)
         recentOutputLineCount = try container.decodeIfPresent(Int.self, forKey: .recentOutputLineCount)

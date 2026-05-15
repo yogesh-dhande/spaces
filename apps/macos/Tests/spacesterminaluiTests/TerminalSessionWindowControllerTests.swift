@@ -15,6 +15,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         var text: String?
         var appendNewline: Bool?
         var key: String?
+        var mouseSequence: String?
         var columns: Int?
         var rows: Int?
     }
@@ -202,6 +203,66 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertNotNil(capture.rows)
         XCTAssertGreaterThan(capture.columns ?? 0, 0)
         XCTAssertGreaterThan(capture.rows ?? 0, 0)
+    }
+
+    @MainActor func testFallbackOwnerForwardsMouseWheelWhenTerminalEnablesMouseReporting() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-mouse", title: "session-mouse", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-14T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-mouse", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-14T00:00:01Z"), paths: paths)
+        try "\u{001B}[?1006h\u{001B}[?1000hready".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+        let capture = InputCapture()
+
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-mouse", paths: paths,
+            sendMouseAction: { sequence, _ in
+                capture.mouseSequence = sequence
+                return .init(ok: true, message: "Sent mouse input.")
+            })
+
+        controller.show()
+
+        XCTAssertTrue(controller.debugSendTranscriptMouse(action: .scrollDown, column: 8, row: 3))
+        XCTAssertEqual(capture.mouseSequence, "\u{001B}[<65;8;3M")
+    }
+
+    @MainActor func testFallbackOwnerTranslatesMouseWheelToArrowKeysWhenAlternateScrollModeIsEnabled() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-alt-scroll", title: "session-alt-scroll", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-14T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-alt-scroll", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-14T00:00:01Z"), paths: paths)
+        try "\u{001B}[?1049h\u{001B}[?1007hready".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+        let capture = InputCapture()
+
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-alt-scroll", paths: paths,
+            sendKeyAction: { key in
+                capture.key = key
+                return .init(ok: true, message: "Sent key.")
+            },
+            sendMouseAction: { _, _ in
+                XCTFail("alternate scroll mode should translate wheel input to keys before mouse reporting")
+                return .init(ok: false, message: "unexpected mouse send")
+            })
+
+        controller.show()
+
+        XCTAssertTrue(controller.debugSendTranscriptMouse(action: TerminalMouseAction.scrollUp, column: 8, row: 3))
+        XCTAssertEqual(capture.key, "up")
     }
 
     @MainActor func testControllerLoadsRecentOutputIntoTextView() throws {
@@ -1123,6 +1184,42 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugSelectedRange.length, 0)
         XCTAssertEqual(controller.debugOutputHorizontalOffset, 0, accuracy: 1)
         XCTAssertTrue(controller.debugRenderedOutput.contains("FULLSCREEN APP"))
+    }
+
+    @MainActor func testFallbackWindowAllowsScrollingPrimaryScreenRegionHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-region-scrollback", title: "region-scrollback", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "printf ''", createdAt: "2026-05-14T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-region-scrollback", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-14T00:00:01Z"),
+            paths: paths)
+
+        var transcript = "\u{001B}[1;4r"
+        for index in 1...16 {
+            if index > 1 { transcript += "\u{001B}[4;1H\n" }
+            transcript += "line-\(index)"
+        }
+        try transcript.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-region-scrollback", paths: paths)
+        controller.show()
+        controller.window?.setContentSize(NSSize(width: 520, height: 180))
+        controller.window?.layoutIfNeeded()
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        controller.debugForceRefresh()
+
+        XCTAssertTrue(controller.debugRenderedOutput.contains("line-1"))
+        XCTAssertTrue(controller.debugRenderedOutput.contains("line-16"))
+
+        controller.debugScrollOutputToOffsetFromBottom(80)
+
+        XCTAssertGreaterThan(controller.debugOutputOffsetFromBottom, 40)
     }
 
     @MainActor func testFallbackTranscriptDisablesSmartTextEditingFeatures() throws {

@@ -197,6 +197,11 @@ public final class GhosttyEmbeddedTerminalSessionRuntime: TerminalSessionBackend
                     return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .missingParameter)
                 }
                 return self.sendRawBytes(Data(bytes), successMessage: "Sent key.")
+            case "mouse":
+                guard let sequence = request.mouseSequence else {
+                    return TerminalSessionHostProtocolSupport.missingParameter("Missing terminal mouse payload.")
+                }
+                return self.sendRawBytes(Data(sequence.utf8), successMessage: "Sent mouse input.")
             default: return TerminalSessionHostProtocolSupport.unsupportedCommand(request.command)
             }
         }

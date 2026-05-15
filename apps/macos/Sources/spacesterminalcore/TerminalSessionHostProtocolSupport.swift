@@ -2,7 +2,7 @@ import Foundation
 
 public enum TerminalSessionHostProtocolSupport {
     public static let serverCapabilities: [TerminalControlCapability] = [
-        .hello, .ping, .attach, .detach, .snapshot, .outputSize, .readOutputChunk, .send, .key, .resize, .takeover, .terminate,
+        .hello, .ping, .attach, .detach, .snapshot, .outputSize, .readOutputChunk, .send, .key, .mouse, .resize, .takeover, .terminate,
     ]
 
     public static func hello(sessionID: String, backend: TerminalSessionBackendKind) -> TerminalControlResponse {

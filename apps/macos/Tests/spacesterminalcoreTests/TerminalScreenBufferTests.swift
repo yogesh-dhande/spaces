@@ -3,6 +3,13 @@ import XCTest
 @testable import spacesterminalcore
 
 final class TerminalScreenBufferTests: XCTestCase {
+    private func fixture(named name: String) throws -> String {
+        let fixturesRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(
+            "fixtures", isDirectory: true)
+        let data = try Data(contentsOf: fixturesRoot.appendingPathComponent(name))
+        return String(decoding: data, as: UTF8.self)
+    }
+
     func testIngestBuildsVisibleScreenAcrossChunks() {
         var buffer = TerminalScreenBuffer()
 
@@ -92,5 +99,78 @@ final class TerminalScreenBufferTests: XCTestCase {
         buffer.ingest("inserted")
 
         XCTAssertEqual(buffer.renderedText(), "top\ninserted\none\nbottom")
+    }
+
+    func testIngestTracksMouseReportingModes() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("\u{001B}[?1006h\u{001B}[?1000h")
+        XCTAssertEqual(buffer.renderedScreen().mouseTrackingMode, .click)
+        XCTAssertTrue(buffer.renderedScreen().usesSGRMouseEncoding)
+
+        buffer.ingest("\u{001B}[?1002h")
+        XCTAssertEqual(buffer.renderedScreen().mouseTrackingMode, .drag)
+
+        buffer.ingest("\u{001B}[?1003h")
+        XCTAssertEqual(buffer.renderedScreen().mouseTrackingMode, .move)
+
+        buffer.ingest("\u{001B}[?1007h")
+        XCTAssertTrue(buffer.renderedScreen().usesAlternateScrollMode)
+
+        buffer.ingest("\u{001B}[?1003l\u{001B}[?1006l\u{001B}[?1007l")
+        XCTAssertEqual(buffer.renderedScreen().mouseTrackingMode, .disabled)
+        XCTAssertFalse(buffer.renderedScreen().usesSGRMouseEncoding)
+        XCTAssertFalse(buffer.renderedScreen().usesAlternateScrollMode)
+    }
+
+    func testPrimaryScreenFullRegionScrollPreservesScrollbackHistory() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("\u{001B}[1;4r")
+        buffer.ingest("one\ntwo\nthree\nfour")
+        buffer.ingest("\u{001B}[4;1H")
+        buffer.ingest("\nfive")
+
+        XCTAssertEqual(buffer.renderedText(), "one\ntwo\nthree\nfour\nfive")
+    }
+
+    func testPrimaryScreenSubregionScrollPreservesScrollbackHistory() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("header")
+        buffer.ingest("\u{001B}[2;4r")
+        buffer.ingest("\u{001B}[2;1H")
+        buffer.ingest("one\ntwo\nthree")
+        buffer.ingest("\u{001B}[4;1H")
+        buffer.ingest("\nfour")
+
+        XCTAssertEqual(buffer.renderedText(), "one\nheader\ntwo\nthree\nfour")
+    }
+
+    func testAlternateScreenScrollDoesNotLeakIntoPrimaryScrollback() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("shell")
+        buffer.ingest("\u{001B}[?1049h")
+        buffer.ingest("\u{001B}[1;4r")
+        buffer.ingest("one\ntwo\nthree\nfour")
+        buffer.ingest("\u{001B}[4;1H")
+        buffer.ingest("\nfive")
+        XCTAssertEqual(buffer.renderedText(), "two\nthree\nfour\nfive")
+
+        buffer.ingest("\u{001B}[?1049l")
+
+        XCTAssertEqual(buffer.renderedText(), "shell")
+    }
+
+    func testCodexSessionFixtureProducesScrollableHistory() throws {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest(try fixture(named: "codex_session_120x40.ansi"))
+
+        let renderedLines = buffer.renderedText().split(separator: "\n", omittingEmptySubsequences: false)
+        XCTAssertEqual(renderedLines.count, 8)
+        XCTAssertTrue(buffer.renderedText().contains("OpenAI Codex"))
+        XCTAssertFalse(buffer.renderedText().contains("Context 0% used"))
     }
 }
