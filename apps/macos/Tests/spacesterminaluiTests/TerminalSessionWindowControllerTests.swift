@@ -1315,6 +1315,69 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertGreaterThan(controller.debugOutputOffsetFromBottom, 40)
     }
 
+    @MainActor func testFallbackWindowSearchSelectsAndNavigatesMatches() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-search", title: "search", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-14T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-search", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-14T00:00:01Z"), paths: paths)
+        try "alpha\nbeta\nalpha\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-search", paths: paths)
+        controller.show()
+        controller.debugShowSearch(seed: "alpha")
+
+        XCTAssertTrue(controller.debugShowsSearchBar)
+        XCTAssertEqual(controller.debugSelectedRange, NSRange(location: 0, length: 5))
+        XCTAssertEqual(controller.debugSearchStatus, "1 of 2")
+
+        controller.debugSearchNext()
+        XCTAssertEqual(controller.debugSelectedRange, NSRange(location: 11, length: 5))
+        XCTAssertEqual(controller.debugSearchStatus, "2 of 2")
+
+        controller.debugSearchPrevious()
+        XCTAssertEqual(controller.debugSelectedRange, NSRange(location: 0, length: 5))
+        XCTAssertEqual(controller.debugSearchStatus, "1 of 2")
+
+        controller.debugHideSearch()
+        XCTAssertFalse(controller.debugShowsSearchBar)
+        XCTAssertEqual(controller.debugSearchFieldValue, "")
+    }
+
+    @MainActor func testFallbackWindowSearchRecomputesMatchesAfterRefresh() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-search-refresh", title: "search-refresh", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-14T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-search-refresh", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-14T00:00:01Z"), paths: paths)
+        try "alpha\nbeta\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-search-refresh", paths: paths)
+        controller.show()
+        controller.debugShowSearch(seed: "alpha")
+
+        XCTAssertEqual(controller.debugSearchStatus, "1 of 1")
+
+        try "alpha\nbeta\nalpha\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+        controller.debugForceRefresh()
+        controller.debugSearchNext()
+
+        XCTAssertEqual(controller.debugSelectedRange, NSRange(location: 11, length: 5))
+        XCTAssertEqual(controller.debugSearchStatus, "2 of 2")
+    }
+
     @MainActor func testFallbackTranscriptDisablesSmartTextEditingFeatures() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

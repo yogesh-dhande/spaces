@@ -334,7 +334,7 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: alternate-screen swaps clear preserved viewport and selection state instead of mixing primary and alternate history
 - `partial`: live TUI scrollback and viewport behavior under very large histories and sustained churn
 - `partial`: smooth manual scrolling while output is still arriving quickly
-- `partial`: richer terminal-style selection semantics, including word and line selection, are present in the shared transcript view, but search and structured scrollback navigation are still missing
+- `implemented`: terminal-style selection semantics, inline search, and match-to-match scrollback navigation are present in the shared transcript view
 
 ### Window, Host, and Session Semantics
 - `implemented`: owner or viewer attachment, takeover, and owner-only input enforcement

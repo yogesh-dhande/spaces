@@ -8,12 +8,26 @@ import spacesterminalghostty
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.type == .keyDown else { return super.performKeyEquivalent(with: event) }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard flags == [.command] else { return super.performKeyEquivalent(with: event) }
-
-        switch Int(event.keyCode) {
-        case kVK_ANSI_Q, kVK_ANSI_W:
-            performClose(nil)
-            return true
+        switch flags {
+        case [.command]:
+            switch Int(event.keyCode) {
+            case kVK_ANSI_Q, kVK_ANSI_W:
+                performClose(nil)
+                return true
+            case kVK_ANSI_F:
+                (windowController as? TerminalSessionWindowController)?.showSearch(nil)
+                return true
+            case kVK_ANSI_G:
+                (windowController as? TerminalSessionWindowController)?.findNext(nil)
+                return true
+            default: return super.performKeyEquivalent(with: event)
+            }
+        case [.command, .shift]:
+            if Int(event.keyCode) == kVK_ANSI_G {
+                (windowController as? TerminalSessionWindowController)?.findPrevious(nil)
+                return true
+            }
+            return super.performKeyEquivalent(with: event)
         default: return super.performKeyEquivalent(with: event)
         }
     }
@@ -72,6 +86,12 @@ import spacesterminalghostty
     private let interruptButton = NSButton(title: "Ctrl+C", target: nil, action: nil)
     private let newlineButton = NSButton(title: "Enter", target: nil, action: nil)
     private let takeoverButton = NSButton(title: "Take Over", target: nil, action: nil)
+    private let searchField = NSSearchField(string: "")
+    private let searchStatusLabel = NSTextField(labelWithString: "")
+    private let searchNextButton = NSButton(title: "Next", target: nil, action: nil)
+    private let searchPreviousButton = NSButton(title: "Prev", target: nil, action: nil)
+    private let searchCloseButton = NSButton(title: "Done", target: nil, action: nil)
+    private let searchRowStackView = NSStackView()
     private let inputRowStackView = NSStackView()
     private let actionButtonStackView = NSStackView()
     private let takeoverRowStackView = NSStackView()
@@ -135,6 +155,9 @@ import spacesterminalghostty
     private var pendingPassiveOutputNotificationCount = 0
     private var isApplicationTerminating = false
     private var lastSentTranscriptSize: (columns: Int, rows: Int)?
+    private var searchMatches: [NSRange] = []
+    private var currentSearchMatchIndex: Int?
+    private var searchUIRequested = false
 
     public init(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
@@ -324,6 +347,9 @@ import spacesterminalghostty
             case .outputFallback: return preferredAttachmentMode == .owner && isInteractiveRuntimeState(lastObservedRuntimeState)
             }
         case #selector(selectAll(_:)): return visibleRenderer != .ghosttyOwner
+        case #selector(showSearch(_:)): return visibleRenderer != .ghosttyOwner
+        case #selector(findNext(_:)), #selector(findPrevious(_:)): return visibleRenderer != .ghosttyOwner && !searchMatches.isEmpty
+        case #selector(hideSearch(_:)): return visibleRenderer != .ghosttyOwner && !searchRowStackView.isHidden
         default: return true
         }
     }
@@ -390,6 +416,59 @@ import spacesterminalghostty
         }
         window?.makeFirstResponder(outputView)
         outputView.selectAll(sender)
+    }
+
+    @objc public func showSearch(_ sender: Any?) {
+        guard visibleRenderer != .ghosttyOwner else {
+            NSSound.beep()
+            return
+        }
+        searchUIRequested = true
+        searchRowStackView.isHidden = false
+        updateSearchMatches(selectFirstMatch: !searchField.stringValue.isEmpty)
+        window?.makeFirstResponder(searchField)
+        if searchField.stringValue.isEmpty, outputView.selectedRange().length > 0 {
+            searchField.stringValue = outputView.attributedStringValue().attributedSubstring(from: outputView.selectedRange()).string
+            updateSearchMatches(selectFirstMatch: true)
+        }
+    }
+
+    @objc public func hideSearch(_ sender: Any?) {
+        searchUIRequested = false
+        searchField.stringValue = ""
+        searchMatches.removeAll()
+        currentSearchMatchIndex = nil
+        searchStatusLabel.stringValue = ""
+        searchRowStackView.isHidden = true
+        window?.makeFirstResponder(outputView)
+    }
+
+    @objc public func findNext(_ sender: Any?) {
+        guard visibleRenderer != .ghosttyOwner else {
+            NSSound.beep()
+            return
+        }
+        if searchRowStackView.isHidden { showSearch(sender) }
+        guard !searchMatches.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        let nextIndex = currentSearchMatchIndex.map { ($0 + 1) % searchMatches.count } ?? 0
+        selectSearchMatch(at: nextIndex)
+    }
+
+    @objc public func findPrevious(_ sender: Any?) {
+        guard visibleRenderer != .ghosttyOwner else {
+            NSSound.beep()
+            return
+        }
+        if searchRowStackView.isHidden { showSearch(sender) }
+        guard !searchMatches.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        let previousIndex = currentSearchMatchIndex.map { ($0 - 1 + searchMatches.count) % searchMatches.count } ?? max(searchMatches.count - 1, 0)
+        selectSearchMatch(at: previousIndex)
     }
 
     public func takeOverOwnership() {
@@ -489,6 +568,32 @@ import spacesterminalghostty
         inputStatusLabel.translatesAutoresizingMaskIntoConstraints = false
         inputStatusLabel.isHidden = true
 
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchField.font = .systemFont(ofSize: 12)
+        searchField.placeholderString = "Find in terminal output"
+        searchField.sendsSearchStringImmediately = true
+        searchField.sendsWholeSearchString = false
+        searchField.target = self
+        searchField.action = #selector(searchFieldChanged)
+
+        searchStatusLabel.font = .systemFont(ofSize: 12)
+        searchStatusLabel.textColor = .secondaryLabelColor
+        searchStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        searchStatusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        searchStatusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        searchStatusLabel.stringValue = ""
+
+        for button in [searchNextButton, searchPreviousButton, searchCloseButton] {
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.bezelStyle = .rounded
+        }
+        searchNextButton.target = self
+        searchNextButton.action = #selector(findNext)
+        searchPreviousButton.target = self
+        searchPreviousButton.action = #selector(findPrevious)
+        searchCloseButton.target = self
+        searchCloseButton.action = #selector(hideSearch)
+
         for button in [sendButton, interruptButton, newlineButton, takeoverButton] {
             button.translatesAutoresizingMaskIntoConstraints = false
             button.bezelStyle = .rounded
@@ -541,6 +646,18 @@ import spacesterminalghostty
         inputRowStackView.addArrangedSubview(inputField)
         inputRowStackView.addArrangedSubview(actionButtonStackView)
 
+        searchRowStackView.translatesAutoresizingMaskIntoConstraints = false
+        searchRowStackView.orientation = .horizontal
+        searchRowStackView.alignment = .centerY
+        searchRowStackView.spacing = 8
+        searchRowStackView.addArrangedSubview(searchField)
+        searchRowStackView.addArrangedSubview(searchStatusLabel)
+        searchRowStackView.addArrangedSubview(searchPreviousButton)
+        searchRowStackView.addArrangedSubview(searchNextButton)
+        searchRowStackView.addArrangedSubview(searchCloseButton)
+        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+        searchRowStackView.isHidden = true
+
         takeoverRowStackView.translatesAutoresizingMaskIntoConstraints = false
         takeoverRowStackView.orientation = .horizontal
         takeoverRowStackView.alignment = .centerY
@@ -561,7 +678,7 @@ import spacesterminalghostty
         headerStackView.alignment = .leading
         headerStackView.distribution = .fill
         headerStackView.spacing = 6
-        for view in [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel] {
+        for view in [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel, searchRowStackView] {
             headerStackView.addArrangedSubview(view)
         }
 
@@ -720,6 +837,7 @@ import spacesterminalghostty
                     outputView.sizeToFit()
                     lastRenderedOutput = plainSnapshot
                     lastRenderedAttributedOutput = renderedSnapshot
+                    if !searchRowStackView.isHidden { updateSearchMatches(selectFirstMatch: false) }
                     lastRenderedUsedAlternateScreen = false
                     lastRenderedMouseTrackingMode = .disabled
                     lastRenderedUsesSGRMouseEncoding = false
@@ -771,6 +889,7 @@ import spacesterminalghostty
                     )
                     lastRenderedOutput = renderedOutputResult.text
                     lastRenderedAttributedOutput = renderedOutputResult.attributedText
+                    if !searchRowStackView.isHidden { updateSearchMatches(selectFirstMatch: false) }
                     lastRenderedUsedAlternateScreen = renderedOutputResult.usesAlternateScreen
                     didUpdatePassivePresentation = true
                 } else {
@@ -809,6 +928,7 @@ import spacesterminalghostty
             outputView.string = ""
             lastRenderedOutput = ""
             lastRenderedAttributedOutput = NSAttributedString()
+            if !searchRowStackView.isHidden { updateSearchMatches(selectFirstMatch: false) }
             lastRenderedUsedAlternateScreen = false
             lastRenderedMouseTrackingMode = .disabled
             lastRenderedUsesSGRMouseEncoding = false
@@ -1001,6 +1121,61 @@ import spacesterminalghostty
             return true
         default: return false
         }
+    }
+
+    @objc private func searchFieldChanged() { updateSearchMatches(selectFirstMatch: true) }
+
+    private func updateSearchMatches(selectFirstMatch: Bool) {
+        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            searchMatches.removeAll()
+            currentSearchMatchIndex = nil
+            searchStatusLabel.stringValue = ""
+            return
+        }
+
+        let previousRange = currentSearchMatchIndex.flatMap { searchMatches.indices.contains($0) ? searchMatches[$0] : nil }
+        searchMatches = allSearchMatches(for: query, in: outputView.string)
+        guard !searchMatches.isEmpty else {
+            currentSearchMatchIndex = nil
+            searchStatusLabel.stringValue = "No matches"
+            return
+        }
+
+        if let previousRange, let reusedIndex = searchMatches.firstIndex(of: previousRange) {
+            selectSearchMatch(at: reusedIndex)
+        } else if selectFirstMatch {
+            selectSearchMatch(at: 0)
+        } else if let currentSearchMatchIndex, searchMatches.indices.contains(currentSearchMatchIndex) {
+            selectSearchMatch(at: currentSearchMatchIndex)
+        } else {
+            currentSearchMatchIndex = nil
+            searchStatusLabel.stringValue = "\(searchMatches.count) matches"
+        }
+    }
+
+    private func allSearchMatches(for query: String, in text: String) -> [NSRange] {
+        let nsText = text as NSString
+        var matches: [NSRange] = []
+        var searchRange = NSRange(location: 0, length: nsText.length)
+        while searchRange.length > 0 {
+            let match = nsText.range(of: query, options: [.caseInsensitive, .diacriticInsensitive], range: searchRange)
+            guard match.location != NSNotFound, match.length > 0 else { break }
+            matches.append(match)
+            let nextLocation = match.location + match.length
+            searchRange = NSRange(location: nextLocation, length: nsText.length - nextLocation)
+        }
+        return matches
+    }
+
+    private func selectSearchMatch(at index: Int) {
+        guard searchMatches.indices.contains(index) else { return }
+        currentSearchMatchIndex = index
+        let range = searchMatches[index]
+        outputView.setSelectedRange(range)
+        outputView.scrollRangeToVisible(range)
+        searchStatusLabel.stringValue = "\(index + 1) of \(searchMatches.count)"
+        window?.makeFirstResponder(outputView)
     }
 
     private func scrollOutputByViewportPages(_ pageDelta: Int) {
@@ -1211,6 +1386,7 @@ import spacesterminalghostty
             outputScrollView.isHidden = false
             terminalContainer.isHidden = true
         }
+        searchRowStackView.isHidden = !searchUIRequested || visibleRenderer == .ghosttyOwner
         let isGhosttyOwner = visibleRenderer == .ghosttyOwner && preferredAttachmentMode == .owner
         let isGhosttyViewer = backend == .ghosttyEmbedded && preferredAttachmentMode != .owner
         let isTransportCanvas = visibleRenderer == .outputFallback
@@ -1267,9 +1443,8 @@ import spacesterminalghostty
     }
 
     private func updateHeaderLayoutVisibility() {
-        let hasVisibleHeaderContent = [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel].contains {
-            !$0.isHidden
-        }
+        let hasVisibleHeaderContent = [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel, searchRowStackView]
+            .contains { !$0.isHidden }
         headerStackView.isHidden = !hasVisibleHeaderContent
         bodyTopToHeaderConstraint?.isActive = hasVisibleHeaderContent
         bodyTopToContentConstraint?.isActive = !hasVisibleHeaderContent
@@ -1571,6 +1746,9 @@ import spacesterminalghostty
     var debugShowsHeader: Bool { !headerStackView.isHidden }
     var debugInputStatus: String { inputStatusLabel.stringValue }
     var debugShowsInputStatus: Bool { !inputStatusLabel.isHidden }
+    var debugShowsSearchBar: Bool { !searchRowStackView.isHidden }
+    var debugSearchStatus: String { searchStatusLabel.stringValue }
+    var debugSearchFieldValue: String { searchField.stringValue }
     func debugSubmitInput() { submitInput() }
     var debugInputFieldValue: String { inputField.stringValue }
     @discardableResult func debugSendTranscriptText(_ text: String) -> Bool { sendFallbackTranscriptInput(.text(text)) }
@@ -1599,6 +1777,13 @@ import spacesterminalghostty
     }
     func debugSelectRenderedRange(_ range: NSRange) { outputView.setSelectedRange(range) }
     var debugSelectedRange: NSRange { outputView.selectedRange() }
+    func debugShowSearch(seed: String? = nil) {
+        if let seed { searchField.stringValue = seed }
+        showSearch(nil)
+    }
+    func debugHideSearch() { hideSearch(nil) }
+    func debugSearchNext() { findNext(nil) }
+    func debugSearchPrevious() { findPrevious(nil) }
     func debugScrollOutputToOffsetFromBottom(_ offset: CGFloat) {
         guard let documentView = outputScrollView.documentView else { return }
         let visibleRect = outputScrollView.contentView.documentVisibleRect
