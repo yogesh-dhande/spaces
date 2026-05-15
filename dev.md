@@ -113,6 +113,14 @@ Use the shell wrapper when you want one command that exercises the full attach, 
 
 `spaces terminal proxy` is the current low-level seam for that proof of concept. Treat it as a temporary integration primitive for remote-shaped clients rather than the long-term external API surface.
 
+For direct CLI verification of the Ghostty-backed terminal commands:
+
+```bash
+apps/macos/Tests/e2e_terminal_cli_commands.sh
+```
+
+That script exercises `spaces terminal command`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Ghostty-backed session.
+
 For repeatable profiling of the built-in terminal owner and viewer flows:
 
 ```bash
