@@ -43,6 +43,7 @@ import spacesterminalghostty
         let mouseTrackingMode: TerminalMouseTrackingMode
         let usesSGRMouseEncoding: Bool
         let usesAlternateScrollMode: Bool
+        let usesBracketedPasteMode: Bool
     }
 
     private struct OutputViewportState {
@@ -101,6 +102,7 @@ import spacesterminalghostty
     private var lastRenderedMouseTrackingMode = TerminalMouseTrackingMode.disabled
     private var lastRenderedUsesSGRMouseEncoding = false
     private var lastRenderedUsesAlternateScrollMode = false
+    private var lastRenderedUsesBracketedPasteMode = false
     private var lastTransportOutput = ""
     private var transportScreenBuffer = TerminalScreenBuffer()
     private var transportScreenBufferByteCount: Int64 = 0
@@ -363,11 +365,10 @@ import spacesterminalghostty
                 NSSound.beep()
                 return
             }
-            guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+            guard sendFallbackPasteFromClipboard() else {
                 NSSound.beep()
                 return
             }
-            _ = sendFallbackTranscriptInput(.text(text))
         }
     }
 
@@ -712,6 +713,7 @@ import spacesterminalghostty
                     lastRenderedMouseTrackingMode = .disabled
                     lastRenderedUsesSGRMouseEncoding = false
                     lastRenderedUsesAlternateScrollMode = false
+                    lastRenderedUsesBracketedPasteMode = false
                     restoreOutputViewportState(viewportState)
                     didUpdatePassivePresentation = true
                     completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
@@ -729,7 +731,7 @@ import spacesterminalghostty
                         attributedText: NSAttributedString(
                             string: fallbackText, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor]),
                         replayMode: "fallback_recent_output", replayBytes: 0, usesAlternateScreen: false, mouseTrackingMode: .disabled,
-                        usesSGRMouseEncoding: false, usesAlternateScrollMode: false)
+                        usesSGRMouseEncoding: false, usesAlternateScrollMode: false, usesBracketedPasteMode: false)
                 }
                 TerminalPerformance.logMetric(
                     "terminal_viewer_refresh_render_output", target: "session=\(sessionID)",
@@ -740,6 +742,7 @@ import spacesterminalghostty
                 lastRenderedMouseTrackingMode = renderedOutputResult.mouseTrackingMode
                 lastRenderedUsesSGRMouseEncoding = renderedOutputResult.usesSGRMouseEncoding
                 lastRenderedUsesAlternateScrollMode = renderedOutputResult.usesAlternateScrollMode
+                lastRenderedUsesBracketedPasteMode = renderedOutputResult.usesBracketedPasteMode
                 if renderedOutputResult.text != lastRenderedOutput || !renderedOutputResult.attributedText.isEqual(lastRenderedAttributedOutput) {
                     outputView.setRenderedOutput(plainText: renderedOutputResult.text, attributedText: renderedOutputResult.attributedText)
                     TerminalPerformance.logMetric(
@@ -795,6 +798,7 @@ import spacesterminalghostty
             lastRenderedMouseTrackingMode = .disabled
             lastRenderedUsesSGRMouseEncoding = false
             lastRenderedUsesAlternateScrollMode = false
+            lastRenderedUsesBracketedPasteMode = false
             lastTransportOutput = ""
         }
     }
@@ -915,7 +919,8 @@ import spacesterminalghostty
             NSSound.beep()
             return false
         }
-        return sendFallbackTranscriptInput(.text(text))
+        let prepared = TerminalPasteInput.wrapped(text, usesBracketedPasteMode: lastRenderedUsesBracketedPasteMode)
+        return sendFallbackTranscriptInput(.text(prepared))
     }
 
     private func handleViewerLocalNavigation(key: String) -> Bool {
@@ -1318,7 +1323,8 @@ import spacesterminalghostty
                 string: snapshot.recentOutput, attributes: [.font: outputView.font, .foregroundColor: outputView.textColor])
             return TransportRenderedOutput(
                 text: snapshot.recentOutput, attributedText: attributedText, replayMode: "recent_output_empty", replayBytes: 0,
-                usesAlternateScreen: false, mouseTrackingMode: .disabled, usesSGRMouseEncoding: false, usesAlternateScrollMode: false)
+                usesAlternateScreen: false, mouseTrackingMode: .disabled, usesSGRMouseEncoding: false, usesAlternateScrollMode: false,
+                usesBracketedPasteMode: false)
         }
 
         var replayMode = "reuse"
@@ -1344,12 +1350,14 @@ import spacesterminalghostty
             return TransportRenderedOutput(
                 text: lastTransportOutput, attributedText: fallback, replayMode: "recent_output_fallback", replayBytes: replayBytes,
                 usesAlternateScreen: renderedScreen.usesAlternateScreen, mouseTrackingMode: renderedScreen.mouseTrackingMode,
-                usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding, usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode)
+                usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding, usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode,
+                usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode)
         }
         return TransportRenderedOutput(
             text: rendered, attributedText: attributed, replayMode: replayMode, replayBytes: replayBytes,
             usesAlternateScreen: renderedScreen.usesAlternateScreen, mouseTrackingMode: renderedScreen.mouseTrackingMode,
-            usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding, usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode)
+            usesSGRMouseEncoding: renderedScreen.usesSGRMouseEncoding, usesAlternateScrollMode: renderedScreen.usesAlternateScrollMode,
+            usesBracketedPasteMode: renderedScreen.usesBracketedPasteMode)
     }
 
     private func rebuildTransportScreenBuffer(totalBytes: Int64) throws -> Int64 {

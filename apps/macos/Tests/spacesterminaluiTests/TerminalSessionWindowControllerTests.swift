@@ -878,6 +878,38 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
     }
 
+    @MainActor func testFallbackWindowPasteUsesBracketedPasteWhenTerminalEnablesIt() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-bracketed-paste", title: "bracketed-paste", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-14T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-bracketed-paste", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-14T00:00:01Z"), paths: paths)
+        try "\u{001B}[?2004hready".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("paste-from-test", forType: .string)
+        let capture = InputCapture()
+
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-bracketed-paste", paths: paths,
+            sendInputAction: { text, newline in
+                capture.text = text
+                capture.appendNewline = newline
+                return .init(ok: true, message: "Sent input.")
+            })
+
+        controller.show()
+        controller.paste(nil)
+
+        XCTAssertEqual(capture.text, "\u{001B}[200~paste-from-test\u{001B}[201~")
+        XCTAssertEqual(capture.appendNewline, false)
+    }
+
     @MainActor func testFallbackWindowShowPrefersTranscriptAsFirstResponder() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

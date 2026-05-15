@@ -117,10 +117,14 @@ final class TerminalScreenBufferTests: XCTestCase {
         buffer.ingest("\u{001B}[?1007h")
         XCTAssertTrue(buffer.renderedScreen().usesAlternateScrollMode)
 
-        buffer.ingest("\u{001B}[?1003l\u{001B}[?1006l\u{001B}[?1007l")
+        buffer.ingest("\u{001B}[?2004h")
+        XCTAssertTrue(buffer.renderedScreen().usesBracketedPasteMode)
+
+        buffer.ingest("\u{001B}[?1003l\u{001B}[?1006l\u{001B}[?1007l\u{001B}[?2004l")
         XCTAssertEqual(buffer.renderedScreen().mouseTrackingMode, .disabled)
         XCTAssertFalse(buffer.renderedScreen().usesSGRMouseEncoding)
         XCTAssertFalse(buffer.renderedScreen().usesAlternateScrollMode)
+        XCTAssertFalse(buffer.renderedScreen().usesBracketedPasteMode)
     }
 
     func testPrimaryScreenFullRegionScrollPreservesScrollbackHistory() {
