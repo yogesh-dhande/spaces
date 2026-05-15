@@ -67,8 +67,8 @@ enum TerminalRenderedScreenAttributedRenderer {
     private static func shouldKeep(cell: TerminalRenderedCell) -> Bool {
         if cell.character != " " { return true }
         let style = cell.style
-        return style.foreground != nil || style.background != nil || style.bold || style.italic || style.faint || style.underline || style.inverse
-            || style.hidden || style.strikethrough || style.hyperlink != nil
+        return style.foreground != nil || style.background != nil || style.underlineColor != nil || style.bold || style.italic || style.faint
+            || style.underlineStyle != .none || style.inverse || style.hidden || style.strikethrough || style.hyperlink != nil
     }
 
     private static func attributes(
@@ -86,9 +86,10 @@ enum TerminalRenderedScreenAttributedRenderer {
         let font = NSFontManager.shared.convert(baseFont, toHaveTrait: traits)
 
         var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: foreground, .backgroundColor: background]
-        if style.underline {
-            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
-            attributes[.underlineColor] = foreground
+        if style.underlineStyle != .none {
+            let underlineStyle: NSUnderlineStyle = style.underlineStyle == .double ? .double : .single
+            attributes[.underlineStyle] = underlineStyle.rawValue
+            attributes[.underlineColor] = resolveColor(style.underlineColor, fallback: foreground)
         }
         if style.strikethrough {
             attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue

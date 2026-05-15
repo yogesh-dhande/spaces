@@ -182,6 +182,20 @@ final class TerminalScreenBufferTests: XCTestCase {
         XCTAssertNil(screen.rows.first?[5].style.hyperlink)
     }
 
+    func testIngestTracksDoubleUnderlineAndUnderlineColor() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("\u{001B}[4;58;5;196mred\u{001B}[21;58;2;10;20;30mdouble\u{001B}[24;59mplain")
+
+        let screen = buffer.renderedScreen()
+        XCTAssertEqual(screen.rows.first?[0].style.underlineStyle, .single)
+        XCTAssertEqual(screen.rows.first?[0].style.underlineColor, .palette(196))
+        XCTAssertEqual(screen.rows.first?[3].style.underlineStyle, .double)
+        XCTAssertEqual(screen.rows.first?[3].style.underlineColor, .rgb(10, 20, 30))
+        XCTAssertEqual(screen.rows.first?[9].style.underlineStyle, .some(TerminalUnderlineStyle.none))
+        XCTAssertNil(screen.rows.first?[9].style.underlineColor)
+    }
+
     func testPrimaryScreenFullRegionScrollPreservesScrollbackHistory() {
         var buffer = TerminalScreenBuffer()
 

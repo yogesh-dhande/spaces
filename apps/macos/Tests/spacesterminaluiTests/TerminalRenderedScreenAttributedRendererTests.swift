@@ -46,4 +46,16 @@ import XCTest
         XCTAssertEqual(rendered.attribute(.link, at: 0, effectiveRange: nil) as? URL, URL(string: "https://example.com"))
         XCTAssertNil(rendered.attribute(.link, at: rendered.length - 1, effectiveRange: nil))
     }
+
+    func testRendererMapsUnderlineVariantsAndUnderlineColor() {
+        var buffer = TerminalScreenBuffer()
+        buffer.ingest("\u{001B}[21;58;2;10;20;30mwide\u{001B}[0m")
+
+        let rendered = TerminalRenderedScreenAttributedRenderer.render(
+            buffer.renderedScreen(), defaultForeground: .textColor, defaultBackground: .textBackgroundColor)
+
+        XCTAssertEqual(rendered.string, "wide ")
+        XCTAssertEqual(rendered.attribute(.underlineStyle, at: 0, effectiveRange: nil) as? Int, NSUnderlineStyle.double.rawValue)
+        XCTAssertNotNil(rendered.attribute(.underlineColor, at: 0, effectiveRange: nil) as? NSColor)
+    }
 }

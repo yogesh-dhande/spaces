@@ -5,29 +5,38 @@ public enum TerminalANSIColor: Equatable {
     case rgb(UInt8, UInt8, UInt8)
 }
 
+public enum TerminalUnderlineStyle: Equatable {
+    case none
+    case single
+    case double
+}
+
 public struct TerminalTextStyle: Equatable {
     public var foreground: TerminalANSIColor?
     public var background: TerminalANSIColor?
+    public var underlineColor: TerminalANSIColor?
     public var hyperlink: String?
     public var bold = false
     public var italic = false
     public var faint = false
-    public var underline = false
+    public var underlineStyle: TerminalUnderlineStyle = .none
     public var inverse = false
     public var hidden = false
     public var strikethrough = false
 
     public init(
-        foreground: TerminalANSIColor? = nil, background: TerminalANSIColor? = nil, hyperlink: String? = nil, bold: Bool = false,
-        italic: Bool = false, faint: Bool = false, underline: Bool = false, inverse: Bool = false, hidden: Bool = false, strikethrough: Bool = false
+        foreground: TerminalANSIColor? = nil, background: TerminalANSIColor? = nil, underlineColor: TerminalANSIColor? = nil,
+        hyperlink: String? = nil, bold: Bool = false, italic: Bool = false, faint: Bool = false, underlineStyle: TerminalUnderlineStyle = .none,
+        inverse: Bool = false, hidden: Bool = false, strikethrough: Bool = false
     ) {
         self.foreground = foreground
         self.background = background
+        self.underlineColor = underlineColor
         self.hyperlink = hyperlink
         self.bold = bold
         self.italic = italic
         self.faint = faint
-        self.underline = underline
+        self.underlineStyle = underlineStyle
         self.inverse = inverse
         self.hidden = hidden
         self.strikethrough = strikethrough
@@ -320,15 +329,16 @@ public struct TerminalScreenBuffer {
             case 1: currentStyle.bold = true
             case 2: currentStyle.faint = true
             case 3: currentStyle.italic = true
-            case 4: currentStyle.underline = true
+            case 4: currentStyle.underlineStyle = .single
             case 7: currentStyle.inverse = true
             case 8: currentStyle.hidden = true
             case 9: currentStyle.strikethrough = true
             case 22:
                 currentStyle.bold = false
                 currentStyle.faint = false
+            case 21: currentStyle.underlineStyle = .double
             case 23: currentStyle.italic = false
-            case 24: currentStyle.underline = false
+            case 24: currentStyle.underlineStyle = .none
             case 27: currentStyle.inverse = false
             case 28: currentStyle.hidden = false
             case 29: currentStyle.strikethrough = false
@@ -338,8 +348,10 @@ public struct TerminalScreenBuffer {
             case 49: currentStyle.background = nil
             case 90...97: currentStyle.foreground = .palette(value - 90 + 8)
             case 100...107: currentStyle.background = .palette(value - 100 + 8)
-            case 38: index = applyExtendedColor(params, startingAt: index, isForeground: true)
-            case 48: index = applyExtendedColor(params, startingAt: index, isForeground: false)
+            case 38: index = applyExtendedColor(params, startingAt: index, colorTarget: .foreground)
+            case 48: index = applyExtendedColor(params, startingAt: index, colorTarget: .background)
+            case 58: index = applyExtendedColor(params, startingAt: index, colorTarget: .underline)
+            case 59: currentStyle.underlineColor = nil
             default: break
             }
             index += 1
@@ -395,28 +407,38 @@ public struct TerminalScreenBuffer {
         }
     }
 
-    private mutating func applyExtendedColor(_ params: [Int], startingAt index: Int, isForeground: Bool) -> Int {
+    private enum ExtendedColorTarget {
+        case foreground
+        case background
+        case underline
+    }
+
+    private mutating func applyExtendedColor(_ params: [Int], startingAt index: Int, colorTarget: ExtendedColorTarget) -> Int {
         let markerIndex = index + 1
         guard markerIndex < params.count else { return index }
         switch params[markerIndex] {
         case 5:
             let paletteIndex = markerIndex + 1
             guard paletteIndex < params.count else { return markerIndex }
-            setColor(.palette(max(0, min(params[paletteIndex], 255))), isForeground: isForeground)
+            setColor(.palette(max(0, min(params[paletteIndex], 255))), target: colorTarget)
             return paletteIndex
         case 2:
             let blueIndex = markerIndex + 3
             guard blueIndex < params.count else { return markerIndex }
             let color = TerminalANSIColor.rgb(
                 UInt8(clamping: params[markerIndex + 1]), UInt8(clamping: params[markerIndex + 2]), UInt8(clamping: params[blueIndex]))
-            setColor(color, isForeground: isForeground)
+            setColor(color, target: colorTarget)
             return blueIndex
         default: return markerIndex
         }
     }
 
-    private mutating func setColor(_ color: TerminalANSIColor, isForeground: Bool) {
-        if isForeground { currentStyle.foreground = color } else { currentStyle.background = color }
+    private mutating func setColor(_ color: TerminalANSIColor, target: ExtendedColorTarget) {
+        switch target {
+        case .foreground: currentStyle.foreground = color
+        case .background: currentStyle.background = color
+        case .underline: currentStyle.underlineColor = color
+        }
     }
 
     private mutating func write(_ character: Character) {
