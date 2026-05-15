@@ -368,6 +368,7 @@ public struct TerminalScreenBuffer {
             switch value {
             case 25: cursorVisible = enabled
             case 47, 1047, 1049: setAlternateScreen(enabled)
+            case 1048: if enabled { saveCursor() } else { restoreCursor() }
             case 1000: mouseTrackingMode = enabled ? .click : .disabled
             case 1002: mouseTrackingMode = enabled ? .drag : .disabled
             case 1003: mouseTrackingMode = enabled ? .move : .disabled

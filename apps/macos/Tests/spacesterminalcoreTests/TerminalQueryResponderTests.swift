@@ -44,9 +44,12 @@ final class TerminalQueryResponderTests: XCTestCase {
     func testResponderAnswersPrivateModeReportsUsingObservedModeState() {
         var responder = TerminalQueryResponder()
 
-        let responses = responder.responses(for: Data("\u{001B}[?1004h\u{001B}[?1004$p\u{001B}[?2004$p\u{001B}[?9999$p".utf8))
+        let responses = responder.responses(
+            for: Data("\u{001B}[?1004h\u{001B}[?1048h\u{001B}[?1004$p\u{001B}[?1048$p\u{001B}[?2004$p\u{001B}[?9999$p".utf8))
 
-        XCTAssertEqual(responses, [Data("\u{001B}[?1004;1$y".utf8), Data("\u{001B}[?2004;2$y".utf8), Data("\u{001B}[?9999;0$y".utf8)])
+        XCTAssertEqual(
+            responses,
+            [Data("\u{001B}[?1004;1$y".utf8), Data("\u{001B}[?1048;1$y".utf8), Data("\u{001B}[?2004;2$y".utf8), Data("\u{001B}[?9999;0$y".utf8)])
     }
 
     func testResponderAnswersPaletteColorQueriesForBothTerminators() {

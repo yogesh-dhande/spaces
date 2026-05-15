@@ -89,6 +89,17 @@ final class TerminalScreenBufferTests: XCTestCase {
         XCTAssertEqual(buffer.renderedText(), "one\ntXo\nthree")
     }
 
+    func testPrivateMode1048RestoresSavedCursorPosition() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("one\ntwo")
+        buffer.ingest("\u{001B}[2;2H\u{001B}[?1048h")
+        buffer.ingest("\u{001B}[1;1H")
+        buffer.ingest("\u{001B}[?1048lX")
+
+        XCTAssertEqual(buffer.renderedText(), "one\ntXo")
+    }
+
     func testIngestTracksCursorVisibilityModes() {
         var buffer = TerminalScreenBuffer()
 

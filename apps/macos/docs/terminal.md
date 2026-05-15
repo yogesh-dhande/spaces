@@ -301,7 +301,7 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: scroll regions and reverse index (`DECSTBM`, `RI`)
 - `implemented`: alternate screen enter and exit (`?47`, `?1047`, `?1049`)
 - `implemented`: cursor visibility (`?25h`, `?25l`)
-- `partial`: full terminal state reset behavior across every alternate-screen or private-mode combination; primary saved-cursor and scroll-region state now survive alternate-screen round trips, but uncommon private-mode combinations are still incomplete
+- `implemented`: modern alternate-screen and private-mode state flows used by TUIs (`?47`, `?1047`, `?1048`, `?1049`) preserve primary cursor and scroll-region state across screen swaps
 - `implemented`: horizontal tab stop management, tab clear sequences, and hard/soft terminal reset basics
 
 ### Styling and Color
@@ -316,7 +316,7 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: cursor-position query (`CSI 6n`)
 - `implemented`: primary device attributes (`CSI c`)
 - `implemented`: terminal foreground/background color probes (`OSC 10;?`, `OSC 11;?`) plus palette-color probes (`OSC 4;index;?`)
-- `implemented`: broader device and mode query coverage beyond the original status/device/color handshake for the modes and palette surface the shared host understands today
+- `implemented`: broader device and mode query coverage beyond the original status/device/color handshake for the modes and palette surface the shared host understands today, including `DECRQM` for `?1048`
 - `partial`: the wider xterm query surface for advanced clients that probe beyond cursor position, device attributes, tracked private modes, and theme/palette colors
 
 ### Input, Paste, and Mouse

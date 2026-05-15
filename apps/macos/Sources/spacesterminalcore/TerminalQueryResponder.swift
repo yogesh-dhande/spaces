@@ -1,7 +1,7 @@
 import Foundation
 
 struct TerminalQueryResponder {
-    private static let supportedPrivateModes: Set<Int> = [25, 47, 1000, 1002, 1003, 1004, 1006, 1007, 1047, 1049, 2004]
+    private static let supportedPrivateModes: Set<Int> = [25, 47, 1000, 1002, 1003, 1004, 1006, 1007, 1047, 1048, 1049, 2004]
     private static let foregroundResponseST = Data("\u{001B}]10;rgb:dddd/dddd/dddd\u{001B}\\".utf8)
     private static let foregroundResponseBEL = Data("\u{001B}]10;rgb:dddd/dddd/dddd\u{0007}".utf8)
     private static let backgroundResponseST = Data("\u{001B}]11;rgb:1111/1111/1111\u{001B}\\".utf8)
