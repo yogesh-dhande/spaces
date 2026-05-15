@@ -21,6 +21,7 @@ import spacesterminalcore
     var terminalInputHandler: ((TransportTerminalTranscriptInput) -> Bool)?
     var terminalPasteHandler: (() -> Bool)?
     var terminalMouseHandler: ((TransportTerminalTranscriptMouseInput) -> Bool)?
+    var localScrollInteractionHandler: (() -> Void)?
 
     var font: NSFont = .monospacedSystemFont(ofSize: 12, weight: .regular) {
         didSet {
@@ -161,6 +162,7 @@ import spacesterminalcore
     override func scrollWheel(with event: NSEvent) {
         if event.scrollingDeltaY > 0, handleTerminalMouseEvent(event, action: .scrollUp, button: .none) { return }
         if event.scrollingDeltaY < 0, handleTerminalMouseEvent(event, action: .scrollDown, button: .none) { return }
+        localScrollInteractionHandler?()
         super.scrollWheel(with: event)
     }
 

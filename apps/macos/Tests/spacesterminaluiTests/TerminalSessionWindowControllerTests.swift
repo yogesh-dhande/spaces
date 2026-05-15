@@ -1202,6 +1202,50 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertLessThan(abs(controller.debugTopVisibleCharacterIndex - initialTopVisibleIndex), 24)
     }
 
+    @MainActor func testFallbackWindowDefersPassiveRefreshWhileUserScrollsBack() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-scroll-defer", title: "scroll-defer", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "tail -f log",
+                createdAt: "2026-05-15T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-scroll-defer", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-15T00:00:01Z"), paths: paths)
+        let initialOutput = (0..<260).map { "line-\($0)" }.joined(separator: "\n") + "\n"
+        try initialOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-scroll-defer", paths: paths)
+        controller.show()
+        controller.debugScrollOutputToOffsetFromBottom(180)
+        controller.debugNoteOutputScrollInteraction()
+
+        XCTAssertEqual(controller.debugPassiveOutputRefreshInterval, .milliseconds(75))
+    }
+
+    @MainActor func testFallbackWindowKeepsFastPassiveRefreshWhenPinnedToBottom() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-scroll-bottom", title: "scroll-bottom", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "tail -f log",
+                createdAt: "2026-05-15T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-scroll-bottom", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-15T00:00:01Z"), paths: paths)
+        try "line\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-scroll-bottom", paths: paths)
+        controller.show()
+        controller.debugNoteOutputScrollInteraction()
+
+        XCTAssertEqual(controller.debugPassiveOutputRefreshInterval, .milliseconds(16))
+    }
+
     @MainActor func testFallbackWindowPreservesHorizontalScrollOffsetWhenNewOutputArrives() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

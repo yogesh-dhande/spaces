@@ -38,6 +38,8 @@ import spacesterminalghostty
     private static let fallbackRefreshInterval: Duration = .milliseconds(100)
     private static let passiveOutputRefreshCoalescingInterval: Duration = .milliseconds(16)
     private static let passiveOutputRefreshHighChurnInterval: Duration = .milliseconds(2)
+    private static let passiveOutputRefreshManualScrollInterval: Duration = .milliseconds(75)
+    private static let passiveOutputRefreshManualScrollGracePeriod: Duration = .milliseconds(200)
     private static let passiveOutputRefreshHighChurnNotificationThreshold = 3
     private static let passiveOutputRefreshHighChurnByteThreshold = 16 * 1024
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
@@ -155,6 +157,7 @@ import spacesterminalghostty
     private var pendingPassiveOutputStartedAt: Date?
     private var pendingPassiveOutputByteCount = 0
     private var pendingPassiveOutputNotificationCount = 0
+    private var lastLocalOutputScrollInteractionAt: Date?
     private var isApplicationTerminating = false
     private var lastSentTranscriptSize: (columns: Int, rows: Int)?
     private var searchMatches: [NSRange] = []
@@ -622,6 +625,7 @@ import spacesterminalghostty
         outputView.terminalInputHandler = { [weak self] input in self?.sendFallbackTranscriptInput(input) ?? false }
         outputView.terminalPasteHandler = { [weak self] in self?.sendFallbackPasteFromClipboard() ?? false }
         outputView.terminalMouseHandler = { [weak self] input in self?.sendFallbackTranscriptMouse(input) ?? false }
+        outputView.localScrollInteractionHandler = { [weak self] in self?.noteLocalOutputScrollInteraction() }
 
         outputScrollView.translatesAutoresizingMaskIntoConstraints = false
         outputScrollView.borderType = .bezelBorder
@@ -1108,6 +1112,7 @@ import spacesterminalghostty
 
     private func handleViewerLocalNavigation(key: String) -> Bool {
         guard visibleRenderer != .ghosttyOwner else { return false }
+        noteLocalOutputScrollInteraction()
         switch key {
         case "pageup":
             scrollOutputByViewportPages(-1)
@@ -1305,7 +1310,8 @@ import spacesterminalghostty
         guard visibleRenderer != .ghosttyOwner else { return }
         let refreshInterval = passiveOutputRefreshInterval()
         if let existingInterval = pendingPassiveOutputRefreshInterval {
-            guard refreshInterval < existingInterval else { return }
+            if refreshInterval == existingInterval { return }
+            if refreshInterval > existingInterval, !shouldDeferPassiveRefreshForLocalScroll() { return }
             pendingPassiveOutputRefreshTask?.cancel()
             pendingPassiveOutputRefreshTask = nil
         } else if pendingPassiveOutputRefreshTask != nil {
@@ -1345,12 +1351,29 @@ import spacesterminalghostty
     }
 
     private func passiveOutputRefreshInterval() -> Duration {
+        if shouldDeferPassiveRefreshForLocalScroll() { return Self.passiveOutputRefreshManualScrollInterval }
         if pendingPassiveOutputNotificationCount >= Self.passiveOutputRefreshHighChurnNotificationThreshold
             || pendingPassiveOutputByteCount >= Self.passiveOutputRefreshHighChurnByteThreshold
         {
             return Self.passiveOutputRefreshHighChurnInterval
         }
         return Self.passiveOutputRefreshCoalescingInterval
+    }
+
+    private func shouldDeferPassiveRefreshForLocalScroll(now: Date = Date()) -> Bool {
+        guard visibleRenderer != .ghosttyOwner else { return false }
+        guard let lastLocalOutputScrollInteractionAt else { return false }
+        guard !isOutputPinnedToBottom() else { return false }
+        return now.timeIntervalSince(lastLocalOutputScrollInteractionAt) <= milliseconds(for: Self.passiveOutputRefreshManualScrollGracePeriod) / 1000
+    }
+
+    private func noteLocalOutputScrollInteraction(at date: Date = Date()) { lastLocalOutputScrollInteractionAt = date }
+
+    private func isOutputPinnedToBottom() -> Bool { debugOutputOffsetFromBottom <= 24 }
+
+    private func milliseconds(for duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return TimeInterval(components.seconds * 1000) + TimeInterval(components.attoseconds) / 1_000_000_000_000_000
     }
 
     private func logPendingPassiveOutputWaitToRender(startedAt: Date, renderer: String) {
@@ -1813,6 +1836,8 @@ import spacesterminalghostty
         let point = NSPoint(x: outputView.textContainerInset.width + outputView.lineFragmentPadding + 1, y: visibleRect.minY + 1)
         return outputView.characterIndex(at: point)
     }
+    func debugNoteOutputScrollInteraction() { noteLocalOutputScrollInteraction() }
+    var debugPassiveOutputRefreshInterval: Duration { passiveOutputRefreshInterval() }
     func debugScrollOutputHorizontally(to offset: CGFloat) {
         guard let documentView = outputScrollView.documentView else { return }
         let visibleRect = outputScrollView.contentView.documentVisibleRect

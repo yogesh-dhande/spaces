@@ -335,7 +335,7 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: content-anchored viewport restore keeps a scrolled transcript attached to the same visible text when large output batches arrive
 - `implemented`: alternate-screen swaps clear preserved viewport and selection state instead of mixing primary and alternate history
 - `implemented`: live transcript scrollback remains stable under very large append-only histories and sustained churn
-- `partial`: smooth manual scrolling while output is still arriving quickly
+- `implemented`: manual scrollback browsing temporarily backs passive refresh off the high-churn cadence so incoming output does not fight the user while they are reading history
 - `implemented`: terminal-style selection semantics, inline search, and match-to-match scrollback navigation are present in the shared transcript view
 
 ### Window, Host, and Session Semantics
@@ -352,7 +352,6 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `missing`: complete renderer parity with local `ghostty-embedded` under high-churn TUI workloads
 
 ## Remaining Parity Work
-- Tighten viewport and scrollback behavior under very large or long-lived TUI sessions so manual scroll and selection stay predictable while output continues.
 - Expand SGR and style fidelity until uncommon attribute combinations stop depending on text-only fallback behavior.
 - Keep profiling ANSI-heavy and captured real-TUI fixtures while each fidelity slice lands, so parity work does not silently regress repaint latency or scrollback behavior.
 - Build the native mobile client and remote-host path on the same protocol once the macOS shared renderer behaves like a complete local terminal.
