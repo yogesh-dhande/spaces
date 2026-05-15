@@ -311,7 +311,7 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: ANSI SGR reset plus common style toggles used by shells and TUIs
 - `implemented`: palette colors, 256 colors, and truecolor foreground/background rendering
 - `implemented`: inverse-style cursor rendering in the shared-session canvas
-- `partial`: broader xterm styling coverage now includes double underline and underline-color rendering, but less common attributes and exact reset edge cases are still incomplete
+- `implemented`: modern xterm styling coverage in the shared renderer includes faint, italic, hidden, strikethrough, double underline, underline color, and the common reset semantics exercised by modern shells and TUIs
 - `partial`: hyperlink rendering (`OSC 8`) is present in the shared renderer and command-click can open captured links, but richer semantic affordances on top of terminal output are still minimal
 
 ### Queries and Host Responses

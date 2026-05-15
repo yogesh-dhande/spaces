@@ -84,4 +84,28 @@ import XCTest
         XCTAssertEqual(rendered.attribute(.underlineStyle, at: 0, effectiveRange: nil) as? Int, NSUnderlineStyle.double.rawValue)
         XCTAssertNotNil(rendered.attribute(.underlineColor, at: 0, effectiveRange: nil) as? NSColor)
     }
+
+    func testRendererMapsModernStyleStackAndResets() throws {
+        var buffer = TerminalScreenBuffer()
+        buffer.ingest("\u{001B}[2mfaint\u{001B}[0m \u{001B}[3mitalic\u{001B}[0m \u{001B}[8mhidden\u{001B}[0m \u{001B}[9mstrike\u{001B}[0m plain")
+
+        let rendered = TerminalRenderedScreenAttributedRenderer.render(
+            buffer.renderedScreen(), defaultForeground: .textColor, defaultBackground: .textBackgroundColor)
+
+        XCTAssertEqual(rendered.string, "faint italic hidden strike plain ")
+
+        let faintColor = try XCTUnwrap(rendered.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor)
+        XCTAssertLessThan(faintColor.alphaComponent, 1)
+
+        let italicFont = try XCTUnwrap(rendered.attribute(.font, at: 6, effectiveRange: nil) as? NSFont)
+        XCTAssertTrue(italicFont.fontDescriptor.symbolicTraits.contains(.italic))
+
+        let hiddenForeground = try XCTUnwrap(rendered.attribute(.foregroundColor, at: 13, effectiveRange: nil) as? NSColor)
+        let hiddenBackground = try XCTUnwrap(rendered.attribute(.backgroundColor, at: 13, effectiveRange: nil) as? NSColor)
+        XCTAssertEqual(hiddenForeground, hiddenBackground)
+
+        XCTAssertEqual(rendered.attribute(.strikethroughStyle, at: 20, effectiveRange: nil) as? Int, NSUnderlineStyle.single.rawValue)
+        XCTAssertNil(rendered.attribute(.strikethroughStyle, at: 27, effectiveRange: nil))
+        XCTAssertNil(rendered.attribute(.underlineStyle, at: 27, effectiveRange: nil))
+    }
 }
