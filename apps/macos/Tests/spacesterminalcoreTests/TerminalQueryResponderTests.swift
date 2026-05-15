@@ -50,6 +50,18 @@ final class TerminalQueryResponderTests: XCTestCase {
         XCTAssertEqual(responder.responses(for: Data("\u{001B}[18t".utf8)), [Data("\u{001B}[8;44;132t".utf8)])
     }
 
+    func testResponderAnswersWindowAndIconTitleQueriesUsingObservedOSCState() {
+        var responder = TerminalQueryResponder()
+
+        XCTAssertEqual(
+            responder.responses(for: Data("\u{001B}]0;workspace\u{0007}\u{001B}[20t\u{001B}[21t".utf8)),
+            [Data("\u{001B}]Lworkspace\u{001B}\\".utf8), Data("\u{001B}]lworkspace\u{001B}\\".utf8)])
+
+        XCTAssertEqual(
+            responder.responses(for: Data("\u{001B}]1;icon-only\u{0007}\u{001B}]2;window-only\u{0007}\u{001B}[20t\u{001B}[21t".utf8)),
+            [Data("\u{001B}]Licon-only\u{001B}\\".utf8), Data("\u{001B}]lwindow-only\u{001B}\\".utf8)])
+    }
+
     func testResponderAnswersPrivateModeReportsUsingObservedModeState() {
         var responder = TerminalQueryResponder()
 

@@ -12,6 +12,8 @@ struct TerminalQueryResponder {
     private var privateModes = Set<Int>()
     private var columns: Int
     private var rows: Int
+    private var iconLabel: String?
+    private var windowTitle: String?
 
     init(columns: Int = ScriptPTYTerminalSessionRuntime.defaultInitialColumns, rows: Int = ScriptPTYTerminalSessionRuntime.defaultInitialRows) {
         self.columns = max(columns, 1)
@@ -52,6 +54,7 @@ struct TerminalQueryResponder {
                     return responses
                 }
                 if parsed.range.upperBound > prefixCount, let response = response(for: parsed.sequence) { responses.append(response) }
+                applySideEffects(for: parsed.sequence)
                 index = parsed.range.upperBound
             default: index += 1
             }
@@ -62,12 +65,15 @@ struct TerminalQueryResponder {
     }
 
     private mutating func applySideEffects(for sequence: ControlSequence) {
-        guard case .csi(let parameters, let marker, _, let finalByte) = sequence else { return }
-        guard marker == "?" else { return }
-        guard finalByte == "h" || finalByte == "l" else { return }
-        let enabled = finalByte == "h"
-        for value in parameters.split(separator: ";").compactMap({ Int($0) }) {
-            if enabled { privateModes.insert(value) } else { privateModes.remove(value) }
+        switch sequence {
+        case .csi(let parameters, let marker, _, let finalByte):
+            guard marker == "?" else { return }
+            guard finalByte == "h" || finalByte == "l" else { return }
+            let enabled = finalByte == "h"
+            for value in parameters.split(separator: ";").compactMap({ Int($0) }) {
+                if enabled { privateModes.insert(value) } else { privateModes.remove(value) }
+            }
+        case .osc(let sequence): applyObservedOSC(payload: sequence.payload)
         }
     }
 
@@ -80,6 +86,8 @@ struct TerminalQueryResponder {
             case ("", "", "c", ""): return Data("\u{001B}[?62;4;22c".utf8)
             case (">", "", "c", ""): return Data("\u{001B}[>0;10;1c".utf8)
             case ("", "", "t", "18"): return Data("\u{001B}[8;\(rows);\(columns)t".utf8)
+            case ("", "", "t", "20"): return Data("\u{001B}]L\(iconLabel ?? "")\u{001B}\\".utf8)
+            case ("", "", "t", "21"): return Data("\u{001B}]l\(windowTitle ?? "")\u{001B}\\".utf8)
             case ("?", "$", "p", _): return modeReportResponse(for: parameters)
             default: return nil
             }
@@ -135,6 +143,21 @@ struct TerminalQueryResponder {
     }
 
     private static func hex16(_ component: Int) -> String { String(format: "%04x", component * 257) }
+
+    private mutating func applyObservedOSC(payload: String) {
+        let components = payload.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let command = components.first else { return }
+        let value = components.count > 1 ? String(components[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        switch command {
+        case "0":
+            let normalized = value.isEmpty ? nil : value
+            iconLabel = normalized
+            windowTitle = normalized
+        case "1": iconLabel = value.isEmpty ? nil : value
+        case "2": windowTitle = value.isEmpty ? nil : value
+        default: break
+        }
+    }
 
     private func parseCSI(in bytes: [UInt8], startingAt start: Int) -> ParsedSequence? {
         var index = start + 2

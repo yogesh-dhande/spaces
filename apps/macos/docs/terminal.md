@@ -319,6 +319,7 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: primary device attributes (`CSI c`)
 - `implemented`: terminal-size query (`CSI 18 t`) using the host's current PTY rows and columns
 - `implemented`: terminal foreground/background color probes (`OSC 10;?`, `OSC 11;?`) plus palette-color probes (`OSC 4;index;?`)
+- `implemented`: xterm title and icon-label report queries (`CSI 20 t`, `CSI 21 t`) backed by observed `OSC 0`, `OSC 1`, and `OSC 2` state in the PTY host
 - `implemented`: broader device and mode query coverage beyond the original status/device/color handshake for the modes and palette surface the shared host understands today, including `DECRQM` for `?1048` and live terminal-size reports
 - `partial`: the wider xterm query surface for advanced clients that probe beyond cursor position, device attributes, terminal-size reports, tracked private modes, and theme/palette colors
 
