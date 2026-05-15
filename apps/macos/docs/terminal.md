@@ -309,7 +309,7 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: palette colors, 256 colors, and truecolor foreground/background rendering
 - `implemented`: inverse-style cursor rendering in the shared-session canvas
 - `partial`: broader xterm styling coverage now includes double underline and underline-color rendering, but less common attributes and exact reset edge cases are still incomplete
-- `partial`: hyperlink rendering (`OSC 8`) is present in the shared renderer, but richer semantic affordances on top of terminal output are still minimal
+- `partial`: hyperlink rendering (`OSC 8`) is present in the shared renderer and command-click can open captured links, but richer semantic affordances on top of terminal output are still minimal
 
 ### Queries and Host Responses
 - `implemented`: terminal-status (`CSI 5n`), secondary device-attributes (`CSI > c`), and private-mode report (`DECRQM`) queries for the shared-session modes the host tracks

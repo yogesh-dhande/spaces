@@ -22,6 +22,7 @@ import spacesterminalcore
     var terminalPasteHandler: (() -> Bool)?
     var terminalMouseHandler: ((TransportTerminalTranscriptMouseInput) -> Bool)?
     var localScrollInteractionHandler: (() -> Void)?
+    var linkOpenHandler: ((URL) -> Bool)?
 
     var font: NSFont = .monospacedSystemFont(ofSize: 12, weight: .regular) {
         didSet {
@@ -95,6 +96,9 @@ import spacesterminalcore
         if handleTerminalMouseEvent(event, action: .press, button: .left) { return }
         let location = window != nil ? convert(event.locationInWindow, from: nil) : event.locationInWindow
         let index = characterIndex(at: location)
+        if event.clickCount == 1, event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command), let link = link(at: index) {
+            if linkOpenHandler?(link) ?? NSWorkspace.shared.open(link) { return }
+        }
         if event.clickCount >= 3 {
             let range = lineSelectionRange(at: index)
             selectionAnchorLocation = range.location
@@ -476,6 +480,18 @@ import spacesterminalcore
     private func substring(in range: NSRange) -> String {
         guard let stringRange = Range(range, in: plainString) else { return "" }
         return String(plainString[stringRange])
+    }
+
+    private func link(at index: Int) -> URL? {
+        guard attributedString.length > 0 else { return nil }
+        let clampedIndex = min(max(index, 0), max(attributedString.length - 1, 0))
+        let value = attributedString.attribute(.link, at: clampedIndex, effectiveRange: nil)
+        switch value {
+        case let url as URL: return url
+        case let string as String: return URL(string: string)
+        case let nsString as NSString: return URL(string: nsString as String)
+        default: return nil
+        }
     }
 
     private func handleImmediateTerminalEvent(_ event: NSEvent) -> Bool {

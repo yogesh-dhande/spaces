@@ -176,6 +176,28 @@ import XCTest
         XCTAssertEqual(view.selectedRange(), NSRange(location: lineStart, length: "gamma delta".utf16.count))
     }
 
+    func testCommandClickOpensAttributedLink() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.com"))
+        let view = TransportTerminalTranscriptView(frame: NSRect(x: 0, y: 0, width: 240, height: 80))
+        view.setAttributedString(NSAttributedString(string: "link", attributes: [.link: url]))
+        view.sizeToFit()
+        var openedURL: URL?
+        view.linkOpenHandler = {
+            openedURL = $0
+            return true
+        }
+
+        let commandClick = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: NSPoint(x: view.horizontalInsets + view.measuredCellWidth, y: view.verticalInsets + 2),
+                modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+
+        view.mouseDown(with: commandClick)
+
+        XCTAssertEqual(openedURL, url)
+        XCTAssertEqual(view.selectedRange(), NSRange(location: 0, length: 0))
+    }
+
     func testHandleTerminalEventLeavesCommandShortcutsToResponderChain() throws {
         let view = TransportTerminalTranscriptView(frame: .zero)
         var received: TransportTerminalTranscriptInput?
