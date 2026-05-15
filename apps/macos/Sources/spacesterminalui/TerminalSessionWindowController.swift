@@ -1170,6 +1170,7 @@ import spacesterminalghostty
     }
     func debugSimulateOutputDidChange() {
         NotificationCenter.default.post(name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": sessionID, "byteCount": 1])
+        refreshNow()
     }
     func debugSelectRenderedRange(_ range: NSRange) { outputView.setSelectedRange(range) }
     var debugSelectedRange: NSRange { outputView.selectedRange() }
