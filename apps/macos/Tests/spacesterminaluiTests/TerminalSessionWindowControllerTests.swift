@@ -1049,6 +1049,19 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(viewerController.debugWindowTitle, "frontend")
         XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty (owner)")
         XCTAssertFalse(viewerController.debugShowsTakeoverButton)
+
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: "session-6", newOwnerClientID: owner.id, paths: paths, transferredAt: "2026-05-09T00:00:03Z")
+
+        ownerController.debugForceRefresh()
+        viewerController.debugForceRefresh()
+
+        XCTAssertEqual(ownerController.debugWindowTitle, "frontend")
+        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: libghostty (owner)")
+        XCTAssertFalse(ownerController.debugShowsTakeoverButton)
+        XCTAssertEqual(viewerController.debugWindowTitle, "frontend (viewer)")
+        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty snapshot (viewer)")
+        XCTAssertTrue(viewerController.debugShowsTakeoverButton)
     }
 
     @MainActor func testGhosttyControllersRefreshOwnershipImmediatelyFromAttachmentChangeNotification() throws {

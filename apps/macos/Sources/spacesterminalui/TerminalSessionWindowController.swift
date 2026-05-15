@@ -33,6 +33,11 @@ import spacesterminalghostty
         case outputFallback
     }
 
+    private enum OwnershipTransitionTarget: String {
+        case owner
+        case viewer
+    }
+
     private struct OutputViewportState {
         let wasPinnedToBottom: Bool
         let horizontalOffset: CGFloat
@@ -112,6 +117,9 @@ import spacesterminalghostty
     private var pendingPassiveOutputByteCount = 0
     private var pendingPassiveOutputNotificationCount = 0
     private var lastGhosttyViewerSnapshotText: String?
+    private var pendingOwnershipTransitionStartedAt: Date?
+    private var pendingOwnershipTransitionTarget: OwnershipTransitionTarget?
+    private var pendingOwnershipTransitionReason: String?
 
     public convenience init(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
@@ -592,8 +600,26 @@ import spacesterminalghostty
             lastObservedAttachmentMode = preferredAttachmentMode
             lastObservedOwnerClientID = host.activeOwnerClientID()
             syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: preferredAttachmentMode == .owner)
+            completeOwnershipTransitionIfNeeded(target: .owner, renderer: "ghostty_owner")
             updateRendererVisibility()
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
+    }
+
+    private func beginOwnershipTransition(_ target: OwnershipTransitionTarget, reason: String) {
+        pendingOwnershipTransitionStartedAt = Date()
+        pendingOwnershipTransitionTarget = target
+        pendingOwnershipTransitionReason = reason
+    }
+
+    private func completeOwnershipTransitionIfNeeded(target: OwnershipTransitionTarget, renderer: String) {
+        guard pendingOwnershipTransitionTarget == target, let startedAt = pendingOwnershipTransitionStartedAt else { return }
+        let reason = pendingOwnershipTransitionReason ?? "unknown"
+        pendingOwnershipTransitionStartedAt = nil
+        pendingOwnershipTransitionTarget = nil
+        pendingOwnershipTransitionReason = nil
+        TerminalPerformance.logMetric(
+            "terminal_ownership_transition", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            success: true, detail: "target=\(target.rawValue) renderer=\(renderer) reason=\(reason)")
     }
 
     private func isWindowPresented(_ window: NSWindow) -> Bool {
@@ -657,6 +683,7 @@ import spacesterminalghostty
                 if let activeAttachment {
                     preferredAttachmentMode = activeAttachment.mode
                     if lastObservedAttachmentMode != activeAttachment.mode {
+                        beginOwnershipTransition(activeAttachment.mode == .owner ? .owner : .viewer, reason: "attachment_mode_changed")
                         lastObservedAttachmentMode = activeAttachment.mode
                         if activeAttachment.mode == .owner {
                             if allowGhosttyOwnerAttach { ensureGhosttyHostAttached() }
@@ -666,6 +693,11 @@ import spacesterminalghostty
                     }
                 }
                 if lastObservedOwnerClientID != currentOwnerClient?.id {
+                    if isOwner {
+                        beginOwnershipTransition(.owner, reason: "ownership_promoted")
+                    } else if lastObservedOwnerClientID == client.id {
+                        beginOwnershipTransition(.viewer, reason: "ownership_demoted")
+                    }
                     lastObservedOwnerClientID = currentOwnerClient?.id
                     if isOwner { syncGhosttyOwnerFocus(reason: "ownership_promoted", requestWindowFocus: true) }
                 }
@@ -696,6 +728,7 @@ import spacesterminalghostty
                     restoreOutputViewportState(viewportState)
                     didUpdatePassivePresentation = true
                     completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
+                    completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_snapshot")
                     return
                 }
                 if let snapshotText = ghosttySessionHost?.snapshotText() {
@@ -709,6 +742,7 @@ import spacesterminalghostty
                     lastGhosttyViewerSnapshotText = snapshotText
                     restoreOutputViewportState(viewportState)
                     completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot_text", changedOutput: didUpdatePassivePresentation)
+                    completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_snapshot_text")
                     return
                 }
                 let loadingMessage = "Waiting for live terminal surface…"
@@ -721,6 +755,7 @@ import spacesterminalghostty
                 }
                 restoreOutputViewportState(viewportState)
                 completePendingPassiveOutputMeasurement(renderer: "viewer_loading", changedOutput: didUpdatePassivePresentation)
+                completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_loading")
             case .ghosttyViewerSnapshot:
                 if let snapshot = ghosttySessionHost?.snapshot() {
                     outputView.textStorage?.setAttributedString(
@@ -732,6 +767,7 @@ import spacesterminalghostty
                     restoreOutputViewportState(viewportState)
                     didUpdatePassivePresentation = true
                     completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
+                    completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_snapshot")
                     return
                 }
                 if let snapshotText = ghosttySessionHost?.snapshotText() {
@@ -745,6 +781,7 @@ import spacesterminalghostty
                     lastGhosttyViewerSnapshotText = snapshotText
                     restoreOutputViewportState(viewportState)
                     completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot_text", changedOutput: didUpdatePassivePresentation)
+                    completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_snapshot_text")
                     return
                 }
                 let loadingMessage = "Waiting for live terminal surface…"
@@ -757,6 +794,7 @@ import spacesterminalghostty
                 }
                 restoreOutputViewportState(viewportState)
                 completePendingPassiveOutputMeasurement(renderer: "viewer_loading", changedOutput: didUpdatePassivePresentation)
+                completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_loading")
             case .ghosttyViewerExitedOutput:
                 let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 400)) ?? lastGhosttyViewerSnapshotText ?? ""
                 if output != lastRenderedOutput {
@@ -768,6 +806,7 @@ import spacesterminalghostty
                 }
                 restoreOutputViewportState(viewportState)
                 completePendingPassiveOutputMeasurement(renderer: "viewer_exited_output", changedOutput: didUpdatePassivePresentation)
+                completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_exited_output")
             case .outputFallback:
                 let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 200)) ?? ""
                 if output != lastRenderedOutput {
@@ -779,6 +818,7 @@ import spacesterminalghostty
                 }
                 restoreOutputViewportState(viewportState)
                 completePendingPassiveOutputMeasurement(renderer: "output_tail", changedOutput: didUpdatePassivePresentation)
+                completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "output_tail")
             case .ghosttyOwner: break
             }
         } catch {

@@ -47,21 +47,23 @@ extract_session_id() {
   printf '%s\n' "$output" | grep -Eo '[0-9A-F-]{36}' | tail -n 1
 }
 
-active_viewer_client_id() {
+active_attachment_client_id() {
   local session_id="$1"
+  local mode="$2"
   local attachments_path
   attachments_path="$(dirname "$DB_PATH")/terminal/sessions/$session_id/attachments.json"
-  python3 - "$attachments_path" <<'PY'
+  python3 - "$attachments_path" "$mode" <<'PY'
 import json, sys
 path = sys.argv[1]
+mode = sys.argv[2]
 with open(path, "r", encoding="utf-8") as handle:
     attachments = json.load(handle)
 for attachment in attachments:
-    if attachment.get("mode") == "viewer" and attachment.get("detachedAt") is None:
+    if attachment.get("mode") == mode and attachment.get("detachedAt") is None:
         print(attachment["clientID"])
         break
 else:
-    raise SystemExit("no active viewer attachment found")
+    raise SystemExit(f"no active {mode} attachment found")
 PY
 }
 
@@ -111,9 +113,13 @@ for iteration in $(seq 1 "$ITERATIONS"); do
   env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal send "$session_id" "$viewer_payload" --newline >/dev/null
   wait_for_log_pattern "spaces: perf metric=terminal_viewer_output_present .*target=session=${session_id} .*success=1"
 
-  viewer_client_id="$(active_viewer_client_id "$session_id")"
+  viewer_client_id="$(active_attachment_client_id "$session_id" viewer)"
+  owner_client_id="$(active_attachment_client_id "$session_id" owner)"
   env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal takeover "$session_id" "$viewer_client_id" >/dev/null
   wait_for_log_pattern "spaces: perf metric=terminal_control_takeover .*target=session=${session_id} client=${viewer_client_id} .*success=1"
+
+  env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal takeover "$session_id" "$owner_client_id" >/dev/null
+  wait_for_log_pattern "spaces: perf metric=terminal_control_takeover .*target=session=${session_id} client=${owner_client_id} .*success=1"
 done
 
 python3 - "$APP_LOG" "$ITERATIONS" "$SESSION_METRICS_JSON" >"$SESSION_SUMMARY" <<'PY'
@@ -126,6 +132,7 @@ json_path = sys.argv[3]
 pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<target>.*?) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
 samples = {}
 focus_reason_samples = {}
+transition_target_samples = {}
 
 with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
     for raw_line in handle:
@@ -144,6 +151,13 @@ with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
                     reason = part.split("=", 1)[1]
                     break
             focus_reason_samples.setdefault(reason, []).append(elapsed)
+        if metric == "terminal_ownership_transition":
+            target = "unknown"
+            for part in detail.split():
+                if part.startswith("target="):
+                    target = part.split("=", 1)[1]
+                    break
+            transition_target_samples.setdefault(target, []).append(elapsed)
 
 def summarize(values):
     avg = round(statistics.mean(values), 1)
@@ -164,6 +178,7 @@ ordered_metrics = [
     "terminal_surface_create",
     "terminal_window_attach",
     "terminal_window_summon",
+    "terminal_ownership_transition",
     "terminal_owner_focus_sync",
     "terminal_control_send",
     "terminal_viewer_output_present",
@@ -190,6 +205,13 @@ for metric in ordered_metrics:
             print(
                 f"  reason={reason}: count={reason_summary['count']} min={reason_summary['min_ms']}ms "
                 f"avg={reason_summary['avg_ms']}ms p95={reason_summary['p95_ms']}ms max={reason_summary['max_ms']}ms")
+    if metric == "terminal_ownership_transition" and transition_target_samples:
+        for target in sorted(transition_target_samples):
+            target_summary = summarize(transition_target_samples[target])
+            metrics_payload[f"{metric}:{target}"] = target_summary
+            print(
+                f"  target={target}: count={target_summary['count']} min={target_summary['min_ms']}ms "
+                f"avg={target_summary['avg_ms']}ms p95={target_summary['p95_ms']}ms max={target_summary['max_ms']}ms")
 
 with open(json_path, "w", encoding="utf-8") as handle:
     json.dump(
