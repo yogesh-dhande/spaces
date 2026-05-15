@@ -110,16 +110,24 @@ public struct TerminalScreenBuffer {
         var style: TerminalTextStyle
     }
 
+    private struct StoredScreenState {
+        var rows: [[Cell]]
+        var scrollbackRows: [[Cell]]
+        var cursorRow: Int
+        var cursorColumn: Int
+        var savedCursorRow: Int
+        var savedCursorColumn: Int
+        var scrollRegionTop: Int
+        var scrollRegionBottom: Int?
+    }
+
     private var rows: [[Cell]] = [[]]
     private var scrollbackRows: [[Cell]] = []
     private var cursorRow = 0
     private var cursorColumn = 0
     private var savedCursorRow = 0
     private var savedCursorColumn = 0
-    private var primaryRows: [[Cell]]?
-    private var primaryScrollbackRows: [[Cell]]?
-    private var primaryCursorRow = 0
-    private var primaryCursorColumn = 0
+    private var primaryScreenState: StoredScreenState?
     private var currentStyle = TerminalTextStyle()
     private var cursorVisible = true
     private var isUsingAlternateScreen = false
@@ -141,10 +149,7 @@ public struct TerminalScreenBuffer {
         cursorColumn = 0
         savedCursorRow = 0
         savedCursorColumn = 0
-        primaryRows = nil
-        primaryScrollbackRows = nil
-        primaryCursorRow = 0
-        primaryCursorColumn = 0
+        primaryScreenState = nil
         currentStyle = TerminalTextStyle()
         cursorVisible = true
         isUsingAlternateScreen = false
@@ -378,33 +383,43 @@ public struct TerminalScreenBuffer {
     private mutating func setAlternateScreen(_ enabled: Bool) {
         if enabled {
             guard !isUsingAlternateScreen else { return }
-            primaryRows = rows
-            primaryScrollbackRows = scrollbackRows
-            primaryCursorRow = cursorRow
-            primaryCursorColumn = cursorColumn
-            rows = [[]]
-            scrollbackRows = []
-            cursorRow = 0
-            cursorColumn = 0
-            savedCursorRow = 0
-            savedCursorColumn = 0
-            scrollRegionTop = 0
-            scrollRegionBottom = nil
+            primaryScreenState = captureCurrentScreenState()
+            resetCurrentScreenState()
             isUsingAlternateScreen = true
         } else {
             guard isUsingAlternateScreen else { return }
-            rows = primaryRows ?? [[]]
-            scrollbackRows = primaryScrollbackRows ?? []
-            cursorRow = primaryCursorRow
-            cursorColumn = primaryCursorColumn
-            primaryRows = nil
-            primaryScrollbackRows = nil
-            primaryCursorRow = 0
-            primaryCursorColumn = 0
-            scrollRegionTop = 0
-            scrollRegionBottom = nil
+            if let primaryScreenState { restoreScreenState(primaryScreenState) } else { resetCurrentScreenState() }
+            primaryScreenState = nil
             isUsingAlternateScreen = false
         }
+    }
+
+    private func captureCurrentScreenState() -> StoredScreenState {
+        StoredScreenState(
+            rows: rows, scrollbackRows: scrollbackRows, cursorRow: cursorRow, cursorColumn: cursorColumn, savedCursorRow: savedCursorRow,
+            savedCursorColumn: savedCursorColumn, scrollRegionTop: scrollRegionTop, scrollRegionBottom: scrollRegionBottom)
+    }
+
+    private mutating func restoreScreenState(_ state: StoredScreenState) {
+        rows = state.rows
+        scrollbackRows = state.scrollbackRows
+        cursorRow = state.cursorRow
+        cursorColumn = state.cursorColumn
+        savedCursorRow = state.savedCursorRow
+        savedCursorColumn = state.savedCursorColumn
+        scrollRegionTop = state.scrollRegionTop
+        scrollRegionBottom = state.scrollRegionBottom
+    }
+
+    private mutating func resetCurrentScreenState() {
+        rows = [[]]
+        scrollbackRows = []
+        cursorRow = 0
+        cursorColumn = 0
+        savedCursorRow = 0
+        savedCursorColumn = 0
+        scrollRegionTop = 0
+        scrollRegionBottom = nil
     }
 
     private enum ExtendedColorTarget {

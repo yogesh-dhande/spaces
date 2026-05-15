@@ -301,7 +301,7 @@ This is the parity checklist for the `script-pty` shared-session terminal path. 
 - `implemented`: scroll regions and reverse index (`DECSTBM`, `RI`)
 - `implemented`: alternate screen enter and exit (`?47`, `?1047`, `?1049`)
 - `implemented`: cursor visibility (`?25h`, `?25l`)
-- `partial`: full terminal state reset behavior across every alternate-screen or private-mode combination
+- `partial`: full terminal state reset behavior across every alternate-screen or private-mode combination; primary saved-cursor and scroll-region state now survive alternate-screen round trips, but uncommon private-mode combinations are still incomplete
 - `implemented`: horizontal tab stop management, tab clear sequences, and hard/soft terminal reset basics
 
 ### Styling and Color

@@ -76,6 +76,19 @@ final class TerminalScreenBufferTests: XCTestCase {
         XCTAssertEqual(buffer.renderedText(), "shell prompt")
     }
 
+    func testAlternateScreenRestorePreservesPrimarySavedCursorState() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("one\ntwo\nthree")
+        buffer.ingest("\u{001B}[2;2H\u{001B}7")
+        buffer.ingest("\u{001B}[?1049h")
+        buffer.ingest("\u{001B}[1;1H\u{001B}7")
+        buffer.ingest("\u{001B}[?1049l")
+        buffer.ingest("\u{001B}8X")
+
+        XCTAssertEqual(buffer.renderedText(), "one\ntXo\nthree")
+    }
+
     func testIngestTracksCursorVisibilityModes() {
         var buffer = TerminalScreenBuffer()
 
@@ -234,6 +247,19 @@ final class TerminalScreenBufferTests: XCTestCase {
         buffer.ingest("\u{001B}[?1049l")
 
         XCTAssertEqual(buffer.renderedText(), "shell")
+    }
+
+    func testAlternateScreenRestorePreservesPrimaryScrollRegionState() {
+        var buffer = TerminalScreenBuffer()
+
+        buffer.ingest("1\n2\n3\n4")
+        buffer.ingest("\u{001B}[2;3r")
+        buffer.ingest("\u{001B}[3;1H")
+        buffer.ingest("\u{001B}[?1049halt\u{001B}[?1049l")
+        buffer.ingest("\nX")
+
+        XCTAssertTrue(buffer.renderedText().contains("X\n4"))
+        XCTAssertTrue(buffer.renderedText().hasPrefix("2\n1\n3\n"))
     }
 
     func testCodexSessionFixtureProducesScrollableHistory() throws {
