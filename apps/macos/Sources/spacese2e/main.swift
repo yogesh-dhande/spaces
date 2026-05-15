@@ -14,9 +14,9 @@ struct MXE2ECommand: ParsableCommand {
             ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, SelectWorkspaceDetailCommand.self,
             OpenWorkspaceTerminalCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
             StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
-            SetWorkspaceStopScriptCommand.self, SetTerminalHostCommand.self, TerminalHostAvailableCommand.self, FocusWorkspaceWindowIndexCommand.self,
-            CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
-            CloseWorkspaceProcessWindowCommand.self, CloseTerminalSessionWindowCommand.self, RecordScreenCommand.self,
+            SetWorkspaceStopScriptCommand.self, FocusWorkspaceWindowIndexCommand.self, CycleWorkspaceWindowCommand.self,
+            FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self,
+            CloseTerminalSessionWindowCommand.self, RecordScreenCommand.self,
         ])
 }
 
@@ -388,9 +388,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
         guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
             throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
         }
-        let appConfig = try orchestrator.appConfig()
         let payload = WorkspaceDumpPayload(
-            appTerminalHost: appConfig.terminalHost.rawValue,
             workspace: .init(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
                 notes: workspace.notes),
@@ -691,47 +689,12 @@ private struct SetWorkspaceBrowserSessionURLsCommand: ParsableCommand {
     }
 }
 
-private struct SetTerminalHostCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "set-terminal-host")
-
-    @Argument var host: String
-
-    /// Updates the persisted default terminal host without routing through the
-    /// user-facing CLI, keeping this helper focused on manual test setup.
-    func run() throws {
-        let orchestrator = try makeOrchestrator()
-        guard let terminalHost = TerminalHost(rawValue: host.lowercased()) else { throw ValidationError("Unsupported terminal host: \(host)") }
-        let config = try orchestrator.updateTerminalHost(terminalHost)
-        try emitJSON(["terminalHost": config.terminalHost.rawValue])
-    }
-}
-
-private struct TerminalHostAvailableCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "terminal-host-available")
-
-    @Argument var host: String
-
-    /// Reports whether one concrete terminal host is available using the same
-    /// adapter-level availability checks the app relies on for setup/runtime.
-    func run() throws {
-        guard let terminalHost = TerminalHost(rawValue: host.lowercased()) else { throw ValidationError("Unsupported terminal host: \(host)") }
-        let available = SetupChecker().isTerminalHostAvailable(named: terminalHost.rawValue)
-        try emitJSON(TerminalHostAvailabilityPayload(host: terminalHost.rawValue, available: available))
-    }
-}
-
 private struct SeedFixturePayload: Codable {
     let projectID: String
     let defaultWorkspace: WorkspaceSummaryPayload?
 }
 
-private struct TerminalHostAvailabilityPayload: Codable {
-    let host: String
-    let available: Bool
-}
-
 private struct WorkspaceDumpPayload: Codable {
-    let appTerminalHost: String
     let workspace: WorkspaceSummaryPayload
     let settings: WorkspaceSettingsPayload?
     let runningProcesses: [RunningProcessPayload]

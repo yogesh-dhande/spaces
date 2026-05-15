@@ -1084,9 +1084,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let db = try DatabaseLocator.defaultPath()
                 let store = try SQLiteStore(path: db)
                 let orchestrator = WorkspaceOrchestrator(store: store)
-                let terminalHost = try store.appConfig().terminalHost
                 try orchestrator.openWorkspaceTerminal(workspaceID: workspaceID)
-                return .success(.open(hidesApp: terminalHost != .spaces))
+                return .success(.open(hidesApp: false))
             } catch { return .failure(error) }
         }.value
     }
@@ -1175,9 +1174,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
                     return .success(.focus(hidesApp: process?.terminalApp != TerminalHost.spaces.appName))
                 case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
-                    let terminalHost = try store.appConfig().terminalHost
                     try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-                    return .success(.open(hidesApp: terminalHost != .spaces))
+                    return .success(.open(hidesApp: false))
                 case .workspaceAgentLauncher(let workspaceID, let name):
                     _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
                     return .success(.open(hidesApp: true))
@@ -1228,13 +1226,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     nonisolated static func recoveredProcessWindowDetail(title: String, terminalApp: String?) -> String {
-        let destination: String
-        switch terminalApp {
-        case TerminalHost.spaces.appName: destination = "a new Spaces window"
-        case TerminalHost.ghostty.appName: destination = "a new Ghostty window"
-        case TerminalHost.iterm2.appName: destination = "a new iTerm2 window"
-        default: destination = "a new terminal window"
-        }
+        let destination = terminalApp == TerminalHost.spaces.appName ? "a new Spaces window" : "a new terminal window"
         return "\(title) reopened in \(destination)."
     }
 
@@ -1299,9 +1291,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                                 kind: "alerts_process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
                                 hidesApp: process?.terminalApp != TerminalHost.spaces.appName))
                     case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
-                        let terminalHost = try store.appConfig().terminalHost
                         try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-                        return .success(.opened(kind: "alerts_process", hidesApp: terminalHost != .spaces))
+                        return .success(.opened(kind: "alerts_process", hidesApp: false))
                     case .workspaceAgentLauncher(let workspaceID, let name):
                         _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
                         return .success(.opened(kind: "alerts_agent_launcher", hidesApp: true))
@@ -1359,9 +1350,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                             hidesApp: targetWindow?.app != TerminalHost.spaces.appName))
                 case .missingConfiguredProcess:
                     guard let processKey = target.processKey else { return .success(.noMatch) }
-                    let terminalHost = try store.appConfig().terminalHost
                     try orchestrator.recoverMissingConfiguredProcess(workspaceID: selectedWorkspaceID, processKey: processKey)
-                    return .success(.opened(kind: "process", hidesApp: terminalHost != .spaces))
+                    return .success(.opened(kind: "process", hidesApp: false))
                 case .agentLauncher:
                     guard let launcherName = target.launcherName else { return .success(.noMatch) }
                     _ = try orchestrator.launchAgentLauncher(workspaceID: selectedWorkspaceID, name: launcherName)
@@ -1744,7 +1734,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     nonisolated static func agentTerminalTrackingKeys(for record: AgentWindowRecord) -> Set<String> {
         var keys = Set<String>()
         if let trackingKey = record.terminalTrackingKey, !trackingKey.isEmpty { keys.insert(trackingKey) }
-        if [.ghostty, .spaces].contains(record.provider), let sessionID = record.terminalTrackingID, !sessionID.isEmpty {
+        if record.provider == .spaces, let sessionID = record.terminalTrackingID, !sessionID.isEmpty {
             keys.insert(TerminalTrackingIdentity.session(sessionID).trackingKey)
         }
         return keys
@@ -3138,22 +3128,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         editorPopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
         editorPopUp.setAccessibilityIdentifier("settings-editor")
 
-        let terminalPopUp = NSPopUpButton()
-        terminalPopUp.translatesAutoresizingMaskIntoConstraints = false
-        for host in TerminalHost.allCases {
-            terminalPopUp.addItem(withTitle: host.displayName)
-            terminalPopUp.itemArray.last?.representedObject = host
-        }
-        if let currentHost = configCache?.terminalHost,
-            let item = terminalPopUp.itemArray.first(where: { ($0.representedObject as? TerminalHost) == currentHost })
-        {
-            terminalPopUp.select(item)
-        }
-        terminalPopUp.setAccessibilityIdentifier("settings-terminal-host")
-        terminalPopUp.target = self
-        terminalPopUp.action = #selector(terminalHostChanged(_:))
-        terminalPopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
         let processShellPopUp = NSPopUpButton()
         processShellPopUp.translatesAutoresizingMaskIntoConstraints = false
         for shell in ProcessShell.allCases {
@@ -3173,7 +3147,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var editorContentViews: [NSView] = [
             settingsLabeledField(
                 name: "Preferred editor", hint: "Opened when you use the editor shortcut from inside a workspace", control: editorPopUp),
-            settingsLabeledField(name: "Terminal host", hint: "Used for process panes and coding agents", control: terminalPopUp),
             settingsLabeledField(
                 name: "Shell for shell-mode processes", hint: "Applies only when a process row uses Shell execution mode", control: processShellPopUp),
         ]
@@ -3181,7 +3154,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let note = helpTextLabel("Saved editor \"\(editorDisplayName(current))\" is not installed.")
             editorContentViews.append(note)
         }
-        let editorCard = formSectionCard(icon: "square.and.pencil", title: "Editor & terminal", contentViews: editorContentViews)
+        let editorCard = formSectionCard(icon: "square.and.pencil", title: "Editor & shell", contentViews: editorContentViews)
         stack.addArrangedSubview(editorCard)
         constrainFormFieldToFillWidth(editorCard, in: stack)
 
@@ -3432,7 +3405,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let browserSessionsSection = BrowserSessionsSection(
             sessions: fullProject?.browserSessions ?? [], subtitle: "Optional names with URL prefixes to open automatically.")
         let agentLaunchersSection = AgentLaunchersSection(
-            launchers: fullProject?.agentLaunchers ?? [], subtitle: "Named interactive coding agents that open outside tmux.")
+            launchers: fullProject?.agentLaunchers ?? [], subtitle: "Named interactive coding agents that open in the built-in Spaces terminal.")
 
         setupScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
         stopScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
@@ -3711,7 +3684,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let portsSection = PortsSection(subtitle: "Named ports allocated per workspace, available as env vars.")
         let processesSection = ProcessesSection(subtitle: "Commands that run inside each workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(subtitle: "Browser windows opened automatically on launch.")
-        let agentLaunchersSection = AgentLaunchersSection(subtitle: "Interactive coding agents that open outside tmux.")
+        let agentLaunchersSection = AgentLaunchersSection(subtitle: "Interactive coding agents that open in the built-in Spaces terminal.")
 
         // --- Source section: segmented control on top, input below ---
         let localSourceSection = NSStackView()
@@ -5765,12 +5738,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let preference = sender.selectedItem?.representedObject as? EditorPreference else { return }
         if configCache?.editor == preference { return }
         do { configCache = try orchestrator.updateEditorPreference(preference) } catch { showError(error) }
-    }
-
-    @objc private func terminalHostChanged(_ sender: NSPopUpButton) {
-        guard let terminalHost = sender.selectedItem?.representedObject as? TerminalHost else { return }
-        if configCache?.terminalHost == terminalHost { return }
-        do { configCache = try orchestrator.updateTerminalHost(terminalHost) } catch { showError(error) }
     }
 
     @objc private func processShellChanged(_ sender: NSPopUpButton) {

@@ -9,10 +9,10 @@ func makeTempDirectory() throws -> URL {
     return base
 }
 
-func makeTemporaryStore(defaultTerminalHostResolver: @escaping @Sendable () -> TerminalHost = { .spaces }) throws -> SQLiteStore {
+func makeTemporaryStore() throws -> SQLiteStore {
     let dir = try makeTempDirectory()
     let dbURL = dir.appendingPathComponent("spaces-test.db")
-    return try SQLiteStore(path: dbURL.path, defaultTerminalHostResolver: defaultTerminalHostResolver)
+    return try SQLiteStore(path: dbURL.path)
 }
 
 func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRecord {

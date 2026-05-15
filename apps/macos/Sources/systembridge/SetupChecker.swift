@@ -4,8 +4,6 @@ private let setupProfileEnabled = ProcessInfo.processInfo.environment["SPACES_ST
 
 /// Identifies each prerequisite check in display order.
 public enum SetupCheckID: String, CaseIterable, Sendable {
-    case terminalInstalled
-    case tmuxInstalled
     case yabaiInstalled
     case yabaiServiceRunning
     case yabaiAccessibility
@@ -22,28 +20,17 @@ public struct SetupCheckResult {
     }
 }
 
-/// Runs prerequisite checks for Spaces dependencies and optional external hosts.
-/// Injecting custom adapter subclasses enables unit testing without real apps.
+/// Runs prerequisite checks for Spaces dependencies.
 public final class SetupChecker {
     public static var startupBlockingCheckIDs: [SetupCheckID] { [.yabaiInstalled] }
 
-    private let iterm2: Iterm2Adapter
-    private let ghostty: GhosttyAdapter
-    private let tmux: TmuxAdapter
-
-    public init(iterm2: Iterm2Adapter = Iterm2Adapter(), ghostty: GhosttyAdapter = GhosttyAdapter(), tmux: TmuxAdapter = TmuxAdapter()) {
-        self.iterm2 = iterm2
-        self.ghostty = ghostty
-        self.tmux = tmux
-    }
+    public init() {}
 
     /// Runs a single check and returns whether it passed.
     public func run(_ id: SetupCheckID) -> Bool {
         let startedAt = ProcessInfo.processInfo.systemUptime
         let passed =
             switch id {
-            case .terminalInstalled: isTerminalInstalled()
-            case .tmuxInstalled: isTmuxInstalled()
             case .yabaiInstalled: isYabaiInstalled()
             case .yabaiServiceRunning: isYabaiServiceRunning()
             case .yabaiAccessibility: hasYabaiAccessibility()
@@ -77,19 +64,6 @@ public final class SetupChecker {
     private func run(_ ids: [SetupCheckID]) -> [SetupCheckResult] { ids.map { id in SetupCheckResult(id: id, passed: run(id)) } }
 
     // MARK: - Individual checks
-
-    public func isTerminalHostAvailable(named host: String) -> Bool {
-        switch host.lowercased() {
-        case "spaces": true
-        case "iterm2": iterm2.isAvailable()
-        case "ghostty": ghostty.isAvailable()
-        default: false
-        }
-    }
-
-    private func isTerminalInstalled() -> Bool { true }
-
-    private func isTmuxInstalled() -> Bool { tmux.isAvailable() }
 
     private func isYabaiInstalled() -> Bool {
         guard let yabai = ExecutableLocator.resolve(.yabai) else { return false }

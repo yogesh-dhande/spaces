@@ -22,7 +22,7 @@ public struct SpacesCommand: ParsableCommand {
               - `start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
               - `restart` forces a full stop and relaunch for a workspace.
               - `open <name>` resolves one named tracked browser, process, or coding-agent target in the workspace and brings it to the foreground.
-              - Agent events stay explicit. `import`, `start`, and `restart` do not imply agent lifecycle. `signal <event>` records those lifecycle transitions. Events from unsupported terminal hosts are dropped. Agent events fired from tmux are rejected because Spaces does not support coding agents running inside tmux.
+              - Agent events stay explicit. `import`, `start`, and `restart` do not imply agent lifecycle. `signal <event>` records those lifecycle transitions. Only built-in Spaces terminal sessions are accepted as coding-agent sources.
             """, version: AppVersion.current,
         subcommands: [
             ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, OpenCommand.self, SignalCommand.self,
@@ -34,7 +34,7 @@ public struct SpacesCommand: ParsableCommand {
 
 struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "terminal", abstract: "Manage tmux-free Spaces terminal sessions.",
+        commandName: "terminal", abstract: "Manage Spaces terminal sessions.",
         subcommands: [
             TerminalListCommand.self, TerminalCommandCommand.self, TerminalSendCommand.self, TerminalKeyCommand.self, TerminalTailCommand.self,
             TerminalShowCommand.self, TerminalTakeoverCommand.self, TerminalProxyCommand.self,
@@ -73,7 +73,7 @@ private func isProcessAlive(pid: Int32) -> Bool {
 }
 
 struct TerminalCommandCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "command", abstract: "Start a tmux-free terminal session in the background.")
+    static let configuration = CommandConfiguration(commandName: "command", abstract: "Start a terminal session in the background.")
 
     @Option(name: .long, help: "Shell command to run inside the terminal session. If omitted, starts a login shell.") var command: String?
 
@@ -118,7 +118,7 @@ struct TerminalCommandCommand: ParsableCommand {
 
         guard FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) else {
             throw WorkspaceError.invalidArgument(
-                message: "Timed out waiting for SpacesApp to create the Ghostty terminal session. Ensure the app is running.")
+                message: "Timed out waiting for SpacesApp to create the Spaces terminal session. Ensure the app is running.")
         }
 
         print("Started terminal session \(sessionID)\ttitle=\(resolvedTitle)\tbackend=\(backend.rawValue)\tcwd=\(workingDirectory)")
@@ -471,32 +471,13 @@ func resolveAgentInvocationContext(workspaceID: String, environment: [String: St
 {
     guard let resolvedProvider = resolveProvider(environment: environment) else { return nil }
     let focusedWindowID = context.currentYabaiWindowID()
-    let adapter = terminalAdapter(for: resolvedProvider)
-    let attributionIdentity = try adapter?.resolveCurrentAttributionIdentity(environment: environment, yabaiFocusedWindowID: focusedWindowID)
     let spacesTrackingID = environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let fallbackTrackingIdentity: TerminalTrackingIdentity? =
+    let trackingIdentity: TerminalTrackingIdentity? =
         if resolvedProvider == .spaces, let spacesTrackingID, !spacesTrackingID.isEmpty { .session(spacesTrackingID) } else { nil }
-    let trackingIdentity = attributionIdentity ?? fallbackTrackingIdentity
     let splitIdentity = splitTrackingIdentity(trackingIdentity)
-    if resolvedProvider == .ghostty, splitIdentity.sessionID?.isEmpty != false { return nil }
-    if resolvedProvider == .iterm2, splitIdentity.sessionID?.isEmpty != false { return nil }
-    let terminalNativeID =
-        resolvedProvider == .ghostty
-        ? try resolveTrackedGhosttyNativeTerminalID(workspaceID: workspaceID, terminalTrackingID: splitIdentity.sessionID, orchestrator: orchestrator)
-        : resolvedProvider == .spaces ? splitIdentity.sessionID : nil
-    let resolvedYabaiWindowID: Int?
-    if resolvedProvider == .ghostty {
-        resolvedYabaiWindowID = splitIdentity.windowID
-    } else if resolvedProvider == .spaces {
-        resolvedYabaiWindowID = splitIdentity.windowID ?? focusedWindowID
-    } else if splitIdentity.sessionID?.isEmpty == false {
-        // iTerm session IDs are already stable terminal identities. Falling back
-        // to whichever yabai window happens to be focused at event time can
-        // misattribute agent events to the Spaces app window.
-        resolvedYabaiWindowID = nil
-    } else {
-        resolvedYabaiWindowID = splitIdentity.windowID ?? focusedWindowID
-    }
+    guard splitIdentity.sessionID?.isEmpty == false else { return nil }
+    let terminalNativeID = splitIdentity.sessionID
+    let resolvedYabaiWindowID = splitIdentity.windowID ?? focusedWindowID
     return AgentInvocationContext(
         provider: resolvedProvider, label: inferredAgentLabel(environment: environment), terminalTrackingID: splitIdentity.sessionID,
         terminalNativeID: terminalNativeID, codexThreadID: environment["CODEX_THREAD_ID"], yabaiWindowID: resolvedYabaiWindowID,
@@ -522,49 +503,22 @@ private func requireWorkspace(path: String?, orchestrator: WorkspaceOrchestrator
 private func resolveProvider(environment: [String: String]) -> AgentProvider? {
     let spacesTerminalHost = environment["SPACES_TERMINAL_HOST"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
     if spacesTerminalHost == TerminalHost.spaces.rawValue { return .spaces }
-
-    let bundleIdentifier = environment["__CFBundleIdentifier"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    if bundleIdentifier == TerminalHost.iterm2.bundleIdentifier { return .iterm2 }
-    if bundleIdentifier == TerminalHost.ghostty.bundleIdentifier { return .ghostty }
-
-    let itermSessionID = environment["ITERM_SESSION_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    if !itermSessionID.isEmpty { return .iterm2 }
-
-    let termProgram = environment["TERM_PROGRAM"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-    if termProgram == "iterm.app" { return .iterm2 }
-    if termProgram == "ghostty" { return .ghostty }
-
-    let term = environment["TERM"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-    if term.contains("ghostty") { return .ghostty }
-
     return nil
 }
 
 func agentEventDropResult(type: AgentEventType, environment: [String: String], context: CLIContext) -> (
     text: String, payload: MutationResultPayload<[String: String]>
 )? {
-    if context.currentTmuxWindowID(environment: environment) != nil {
-        return (
-            "Dropped agent event \(type.rawValue): coding agents run from tmux are not supported by Spaces",
-            MutationResultPayload<[String: String]>(message: "Dropped tmux-backed agent event.", resource: nil)
-        )
-    }
     guard let provider = resolveProvider(environment: environment) else {
         return (
-            "Dropped agent event \(type.rawValue): unsupported terminal host",
-            MutationResultPayload<[String: String]>(message: "Dropped unsupported agent event.", resource: nil)
+            "Dropped agent event \(type.rawValue): non-Spaces terminal",
+            MutationResultPayload<[String: String]>(message: "Dropped non-Spaces agent event.", resource: nil)
         )
     }
-    if provider == .ghostty, environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.isEmpty != false {
+    if provider == .spaces, environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.isEmpty != false {
         return (
-            "Dropped agent event \(type.rawValue): untracked Ghostty terminal",
-            MutationResultPayload<[String: String]>(message: "Dropped untracked Ghostty agent event.", resource: nil)
-        )
-    }
-    if provider == .iterm2, environment["ITERM_SESSION_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
-        return (
-            "Dropped agent event \(type.rawValue): untracked iTerm2 terminal",
-            MutationResultPayload<[String: String]>(message: "Dropped untracked iTerm2 agent event.", resource: nil)
+            "Dropped agent event \(type.rawValue): untracked Spaces terminal",
+            MutationResultPayload<[String: String]>(message: "Dropped untracked Spaces agent event.", resource: nil)
         )
     }
     return nil
@@ -583,18 +537,8 @@ private func inferredAgentLabel(environment: [String: String]) -> String? {
 
 private func agentProvider(for terminalApp: String?) -> AgentProvider? {
     switch terminalApp {
-    case TerminalHost.iterm2.appName: return .iterm2
-    case TerminalHost.ghostty.appName: return .ghostty
     case TerminalHost.spaces.appName: return .spaces
     default: return nil
-    }
-}
-
-private func terminalAdapter(for provider: AgentProvider) -> (any TerminalAdapter)? {
-    switch provider {
-    case .iterm2: return Iterm2Adapter()
-    case .ghostty: return GhosttyAdapter()
-    case .spaces: return nil
     }
 }
 
@@ -604,38 +548,6 @@ private func splitTrackingIdentity(_ identity: TerminalTrackingIdentity?) -> (se
     case .window(let id): return (nil, id)
     case .tmux, nil: return (nil, nil)
     }
-}
-
-private func resolveTrackedGhosttyNativeTerminalID(workspaceID: String, terminalTrackingID: String?, orchestrator: WorkspaceOrchestrator) throws
-    -> String?
-{
-    guard let terminalTrackingID, !terminalTrackingID.isEmpty else { return nil }
-
-    // Ghostty hooks only know the Spaces-issued tracking token. Recover the host-native terminal ID
-    // only when tracked rows already agree on a single value; otherwise return nil and let the
-    // event stay unbound rather than guessing from frontmost Ghostty state.
-    let windowNativeIDs = try orchestrator.store.windows(workspaceID: workspaceID).compactMap { window -> String? in
-        guard window.role == "terminal", window.app == TerminalHost.ghostty.appName else { return nil }
-        guard window.terminalTrackingID == terminalTrackingID else { return nil }
-        guard let nativeID = window.terminalNativeID, !nativeID.isEmpty else { return nil }
-        return nativeID
-    }
-    let processNativeIDs = try orchestrator.store.runningProcesses(workspaceID: workspaceID).compactMap { process -> String? in
-        guard process.terminalApp == TerminalHost.ghostty.appName else { return nil }
-        guard process.terminalTrackingID == terminalTrackingID else { return nil }
-        guard let nativeID = process.terminalNativeID, !nativeID.isEmpty else { return nil }
-        return nativeID
-    }
-    let agentNativeIDs = try orchestrator.store.agentWindows(workspaceID: workspaceID).compactMap { record -> String? in
-        guard record.provider == .ghostty else { return nil }
-        guard record.terminalTrackingID == terminalTrackingID else { return nil }
-        guard let nativeID = record.terminalNativeID, !nativeID.isEmpty else { return nil }
-        return nativeID
-    }
-
-    let nativeIDs = Set(windowNativeIDs + processNativeIDs + agentNativeIDs)
-    guard nativeIDs.count == 1 else { return nil }
-    return nativeIDs.first
 }
 
 private func terminalShellPath(_ explicitPath: String?) -> String {

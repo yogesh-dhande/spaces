@@ -12,8 +12,9 @@ This document captures the current libghostty-backed terminal integration in Spa
 - The fork itself is expected to auto-sync with upstream Ghostty and publish fresh `GhosttyKit` builds on its own cadence; this repo only tracks the published build tag.
 - `apps/macos/scripts/verify_ghosttykit.sh` is the repository-level contract check for that forked artifact. It verifies that the published `GhosttyKit` still declares and exports the two additive PTY I/O hooks Spaces relies on before local setup completes.
 - `apps/macos/scripts/setup_ghosttyvt.sh` installs a pinned local `ghostty` checkout plus Zig toolchain under `apps/macos/.local/ghosttyvt/` and builds `libghostty-vt` for the replay path.
-- iTerm2 and Ghostty external-host integrations still exist on this branch and remain selectable overrides.
-- When the configured terminal host is `Spaces`, tracked workspace processes use the built-in session backend directly and do not require tmux.
+- Spaces terminal is the only supported terminal host on this branch.
+- Terminal tracking is stored directly on `runtime_targets.tracking_id`; there is no separate terminal-target table in the built-in-only schema.
+- Tracked workspace processes use the built-in session backend directly and do not require tmux.
 
 ## Why libghostty Owns the Session
 - A built-in owner window cannot be just a renderer wrapped around an unrelated PTY daemon.
@@ -266,7 +267,6 @@ The current branch has verified:
 - Passive viewer windows do not host a second live libghostty surface. They wait for live libghostty viewport readback while the session is running and show persisted final output only after the session exits.
 - Passive viewer windows still keep the 500 ms poll as a safety fallback, but normal live-session updates now arrive through coalesced output notifications. Remaining viewer latency work is mostly about tuning refresh cadence and measuring end-to-end presentation timing rather than transcript rendering throughput.
 - iPhone or VPN clients are intentionally out of scope for this branch.
-- External iTerm2 and Ghostty hosts remain supported overrides on this branch.
 - The Ghostty static archive still emits non-fatal linker warnings about ImGui-related symbols during build.
 
 ## Manual Verification
@@ -429,10 +429,9 @@ That profile shows the dominant process-launch overhead has moved off the built-
 
 The real-system E2E harness also asserts the macOS window-manager behavior behind those hotkeys. `apps/macos/Tests/e2e_real_system.sh` now checks that:
 - a built-in terminal can hide and reshow the main window without changing the toggle semantics
-- an untracked external app such as Ghostty or Chrome can summon the main window directly
+- an untracked external app such as Chrome can summon the main window directly
 - the second `Cmd+Opt+=` hides only the main window and returns focus to that external app
 
 ## What This Branch Does Not Decide
-- whether external hosts are removed in a later PR
 - whether remote viewer clients should render via libghostty cells, byte streams, or another transport
 - whether one session should ever have more than one simultaneously renderable libghostty surface on macOS

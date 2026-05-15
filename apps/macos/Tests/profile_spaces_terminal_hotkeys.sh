@@ -191,7 +191,6 @@ env SPACES_DB_PATH="$DB_PATH" "$MX_E2E_BIN" seed-fixture \
   --workspace-title "spaces-terminal-hotkey-profile" \
   --docs-url 'http://localhost:$APP_PORT/docs/' \
   --admin-url 'http://localhost:$APP_PORT/admin/' >/dev/null
-env SPACES_DB_PATH="$DB_PATH" "$MX_E2E_BIN" set-terminal-host spaces >/dev/null
 env SPACES_DB_PATH="$DB_PATH" "$MX_E2E_BIN" lookup-workspace --project-dir "$PROJECT_DIR" --title "spaces-terminal-hotkey-profile" >"$WORKSPACE_INFO_JSON"
 
 WORKSPACE_DIR="$(json_get "$WORKSPACE_INFO_JSON" "dir")"

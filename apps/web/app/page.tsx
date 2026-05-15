@@ -85,20 +85,7 @@ const faqItems: FaqItem[] = [
           </a>{" "}
           — an open-source window manager used for window tracking and focus switching
         </li>
-        <li>
-          <a href="https://iterm2.com" className="text-accent hover:underline">
-            iTerm2
-          </a>
-        </li>
-        <li>
-          <a
-            href="https://github.com/tmux/tmux"
-            className="text-accent hover:underline"
-          >
-            tmux
-          </a>{" "}
-          — used to back workspace terminal sessions
-        </li>
+        <li>Spaces ships its own built-in terminal, so workspaces do not depend on external terminal apps.</li>
       </ul>
     ),
   },

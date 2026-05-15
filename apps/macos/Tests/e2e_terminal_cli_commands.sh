@@ -116,4 +116,4 @@ wait_for_log_pattern "spaces: perf metric=terminal_control_takeover .*target=ses
 env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal takeover "$session_id" "$owner_client_id" >/dev/null
 wait_for_log_pattern "spaces: perf metric=terminal_control_takeover .*target=session=${session_id} client=${owner_client_id} .*success=1"
 
-echo "Ghostty terminal CLI E2E passed for session $session_id"
+echo "Spaces terminal CLI E2E passed for session $session_id"

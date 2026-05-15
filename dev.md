@@ -19,7 +19,6 @@ Build, test, and release workflows for the Spaces monorepo. For product overview
 ## Requirements
 - macOS 14+
 - `yabai`
-- `tmux` when testing or using external process hosts such as iTerm2 or Ghostty
 - Google Chrome
 - Accessibility permission (handled via the in-app setup flow on first launch)
 
@@ -119,15 +118,15 @@ Use the shell wrapper when you want one command that exercises the full attach, 
 
 `spaces terminal proxy` is the current low-level seam for that proof of concept. Treat it as a temporary integration primitive for remote-shaped clients rather than the long-term external API surface.
 
-For direct CLI verification of the Ghostty-backed terminal commands:
+For direct CLI verification of Spaces terminal commands:
 
 ```bash
 apps/macos/Tests/e2e_terminal_cli_commands.sh
 ```
 
-That script exercises `spaces terminal command`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Ghostty-backed session.
+That script exercises `spaces terminal command`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Spaces terminal session.
 
-The Ghostty-backed `tail` path also depends on a local `libghostty-vt` build. Set that up before building or profiling terminal changes:
+The Spaces terminal `tail` path also depends on a local `libghostty-vt` build. Set that up before building or profiling terminal changes:
 
 ```bash
 apps/macos/scripts/setup_ghosttyvt.sh
@@ -280,13 +279,13 @@ To prepare the same fixture projects, localhost browser-session servers, and wor
 apps/macos/Tests/e2e_real_system.sh --setup-fixtures-only
 ```
 
-This suite is manual by design. It drives the real app, `spaces`, `yabai`, Chrome, and the configured terminal host in an interactive macOS session instead of XCTest.
+This suite is manual by design. It drives the real app, `spaces`, `yabai`, Chrome, and the built-in Spaces terminal in an interactive macOS session instead of XCTest.
 
 Primary coverage:
 - adding and archiving a workspace
 - overriding workspace settings after creation
 - launch, stop, restart, and dead-process recovery
-- Spaces, iTerm2, and Ghostty default terminal coverage
+- built-in Spaces terminal coverage
 - extra user-added Chrome and terminal tabs
 - workspace-detail numbered focus shortcuts
 - forward/back workspace window cycling
@@ -300,13 +299,12 @@ Repeated real-system profiling also covers:
 - built-in `Spaces terminal -> main window -> tracked process terminal` focus loops
 - built-in `Spaces terminal -> command palette -> tracked process terminal` focus loops
 
-When the suite finishes with recorded metrics, it appends aggregated metric history to `apps/macos/.artifacts/real-system-profiles/metrics-history.csv` and regenerates `apps/macos/.artifacts/real-system-profiles/report.html` with `best`, `previous`, and `latest` comparisons for each tracked metric. Metric names use `start.action.end`, such as `browser_untracked_tab.cli_window_focus.browser_tracked_tab`, and the start and end tokens refer to concrete visible surfaces rather than app-level state. Scenario context like terminal host and workspace scope is stored alongside each row. Dirty worktrees are recorded alongside clean runs by pairing the base `HEAD` commit with a worktree fingerprint, so the report can distinguish two different uncommitted snapshots on the same branch.
+When the suite finishes with recorded metrics, it appends aggregated metric history to `apps/macos/.artifacts/real-system-profiles/metrics-history.csv` and regenerates `apps/macos/.artifacts/real-system-profiles/report.html` with `best`, `previous`, and `latest` comparisons for each tracked metric. Metric names use `start.action.end`, such as `browser_untracked_tab.cli_window_focus.browser_tracked_tab`, and the start and end tokens refer to concrete visible surfaces rather than app-level state. Scenario context like workspace scope is stored alongside each row. Dirty worktrees are recorded alongside clean runs by pairing the base `HEAD` commit with a worktree fingerprint, so the report can distinguish two different uncommitted snapshots on the same branch.
 
 The manual suite depends on a small set of debug-log lines from the app and CLI helpers. Treat these as test contracts when changing debug logging:
 - `spaces: perf metric=...`
 - `spaces: workspace_detail_ipc selecting ...` / `selected ...`
 - `spaces: workspace_run_view workspace=... selected=... agents=... coding_entries=...`
-- `spaces: iterm session_verification_succeeded ...` is used as an optional extra confirmation path for iTerm2 focus checks
 
 ## Website
 

@@ -10,13 +10,11 @@ import workspacecore
                 == "frontend reopened in a new Spaces window.")
     }
 
-    @Test func recoveredProcessWindowDetailUsesExplicitExternalHostLabels() {
+    @Test func recoveredProcessWindowDetailUsesGenericTerminalLabelForNonSpacesApps() {
         #expect(
-            AppKitController.recoveredProcessWindowDetail(title: "frontend", terminalApp: TerminalHost.ghostty.appName)
-                == "frontend reopened in a new Ghostty window.")
+            AppKitController.recoveredProcessWindowDetail(title: "frontend", terminalApp: "Ghostty") == "frontend reopened in a new terminal window.")
         #expect(
-            AppKitController.recoveredProcessWindowDetail(title: "frontend", terminalApp: TerminalHost.iterm2.appName)
-                == "frontend reopened in a new iTerm2 window.")
+            AppKitController.recoveredProcessWindowDetail(title: "frontend", terminalApp: "iTerm2") == "frontend reopened in a new terminal window.")
     }
 
     @Test func recoveredProcessWindowDetailFallsBackToGenericTerminalWindow() {

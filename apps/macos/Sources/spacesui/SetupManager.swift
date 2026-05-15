@@ -34,9 +34,6 @@ private enum SetupStepAction {
     // "service running" and "accessibility granted" cannot be detected independently.
     private let steps: [SetupStep] = [
         SetupStep(
-            ids: [.tmuxInstalled], icon: "rectangle.split.1x2", title: "Install tmux",
-            body: "Spaces uses tmux to keep process sessions recoverable when terminal windows close.", action: .copyCommand("brew install tmux")),
-        SetupStep(
             ids: [.yabaiInstalled], icon: "hammer", title: "Install yabai",
             body: "yabai is a window manager Spaces uses to capture and focus windows.",
             action: .commandAndURL(

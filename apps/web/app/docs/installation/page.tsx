@@ -75,12 +75,10 @@ export default function InstallationDocsPage() {
               </a>
             </div>
           </li>
-          <li>• <strong>tmux</strong> — keeps workspace processes alive when their terminal window is closed. Install with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install tmux</code>.</li>
-          <li>• <strong>Ghostty or iTerm2</strong> — the terminal app Spaces uses for workspace processes. If both are installed, Spaces defaults to Ghostty. Install Ghostty with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install --cask ghostty</code> or iTerm2 from <a href="https://iterm2.com" className="text-accent hover:underline" target="_blank" rel="noopener noreferrer">iterm2.com</a> / <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install --cask iterm2</code>.</li>
           <li>• <strong>Google Chrome</strong> — required for browser sessions. Download from <a href="https://www.google.com/chrome/" className="text-accent hover:underline" target="_blank" rel="noopener noreferrer">google.com/chrome</a> or install with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install --cask google-chrome</code>.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          On first launch, Spaces walks you through anything that is missing in a guided setup flow.
+          Spaces includes its own built-in terminal runtime. On first launch, it walks you through anything that is missing in a guided setup flow.
         </p>
       </article>
 
@@ -91,7 +89,7 @@ export default function InstallationDocsPage() {
         </p>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>1. Open <strong>System Settings → Privacy &amp; Security → Accessibility</strong>.</li>
-          <li>2. Enable <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Spaces</code> and <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">yabai</code>, plus your terminal app if macOS prompts for it.</li>
+          <li>2. Enable <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Spaces</code> and <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">yabai</code>.</li>
         </ol>
       </article>
 

@@ -5,29 +5,16 @@ import workspacecore
 struct CLIContext {
     let output = CLITextOrJSONOutput()
     private let storeFactory: () throws -> SQLiteStore
-    private let itermFactory: () -> Iterm2Adapter
-
     init(
         storeFactory: @escaping () throws -> SQLiteStore = {
             let db = try DatabaseLocator.defaultPath()
             return try SQLiteStore(path: db)
-        },
-        itermFactory: @escaping () -> Iterm2Adapter = {
-            Iterm2Adapter(scheduleVerificationWork: { work in
-                // Short-lived CLI commands can exit immediately after focus returns, so keep
-                // iTerm's exact-session verification on the current process lifetime.
-                work()
-            })
         }
-    ) {
-        self.storeFactory = storeFactory
-        self.itermFactory = itermFactory
-    }
+    ) { self.storeFactory = storeFactory }
 
     func makeOrchestrator() throws -> WorkspaceOrchestrator {
         let store = try storeFactory()
-        let iterm = itermFactory()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: iterm)
+        let orchestrator = WorkspaceOrchestrator(store: store)
         _ = try orchestrator.syncConfig()
         return orchestrator
     }
@@ -44,12 +31,6 @@ struct CLIContext {
         else { return nil }
 
         return id
-    }
-
-    func currentTmuxWindowID(environment: [String: String]) -> String? {
-        guard let tmuxEnv = environment["TMUX"], !tmuxEnv.isEmpty else { return nil }
-        guard let window = try? TmuxAdapter().currentWindow() else { return tmuxEnv }
-        return window.id
     }
 
     func fireAgentEventNotification() {

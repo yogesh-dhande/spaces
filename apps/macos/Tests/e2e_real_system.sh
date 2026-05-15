@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # Manual real-system E2E coverage for Spaces.
 # This script intentionally runs outside XCTest so it can drive the real app,
-# terminals, Chrome, yabai, and tmux on an interactive desktop session.
+# the built-in Spaces terminal runtime, Chrome, and yabai on an interactive desktop session.
 
 ROOT_DIR="$(cd "$(dirname "$0")/../../.." && pwd -P)"
 MACOS_DIR="$ROOT_DIR/apps/macos"
@@ -20,7 +20,6 @@ DEBUG_LOG="${DEBUG_LOG:-/tmp/spaces-e2e-debug.log}"
 RESULTS_LOG="${RESULTS_LOG:-/tmp/spaces-e2e-results.log}"
 RECORDER_LOG="${RECORDER_LOG:-/tmp/spaces-e2e-recorder.log}"
 ACTION_TIMEOUT_SECONDS="${ACTION_TIMEOUT_SECONDS:-20}"
-HOSTS_CSV="${HOSTS_CSV:-iterm2,ghostty,spaces}"
 SEED_FILE="${SEED_FILE:-/tmp/spaces-e2e-seed.json}"
 SECOND_SEED_FILE="${SECOND_SEED_FILE:-/tmp/spaces-e2e-seed-2.json}"
 THIRD_SEED_FILE="${THIRD_SEED_FILE:-/tmp/spaces-e2e-seed-3.json}"
@@ -2903,7 +2902,6 @@ wait_for_workspace_terminal_tracking_id() {
 }
 
 run_launch_and_focus_assertions() {
-  # Run the same functional checks against each supported default terminal host.
   local host="$1"
   local workspace_dir="$2"
   local dump_file="$TMP_ROOT/$host-dump.json"
@@ -2934,15 +2932,9 @@ run_launch_and_focus_assertions() {
   local workspace_title
   workspace_id="$(json_get "$dump_file" "workspace.id")"
   workspace_title="$(json_get "$dump_file" "workspace.title")"
-  assert_equals "$host" "$(json_get "$dump_file" "appTerminalHost")" "terminal host persisted"
   local terminal_app
   terminal_app="$(json_get "$dump_file" "runningProcesses[0].terminalApp")"
-  case "$host" in
-    iterm2) assert_equals "iTerm2" "$terminal_app" "iTerm2 launch" ;;
-    ghostty) assert_equals "Ghostty" "$terminal_app" "Ghostty launch" ;;
-    spaces) assert_equals "Spaces" "$terminal_app" "Spaces launch" ;;
-    *) fail "unsupported terminal host '$host'" ;;
-  esac
+  assert_equals "Spaces" "$terminal_app" "Spaces launch"
   ensure_workspace_http_ready "$workspace_dir" "$PRIMARY_DOCS_URL" "Beacon docs sentinel" "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "beacon-status"'
   pass_case
 
@@ -3101,20 +3093,42 @@ PY
     pass_case
 
     begin_case "$host: closing ad hoc Spaces terminal removes runtime row"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" open-workspace-terminal --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-open-adhoc-terminal.json
-    transition_pause "$host open ad hoc Spaces terminal"
     dump_workspace "$workspace_dir" "$dump_file"
-    local adhoc_session_id
-    adhoc_session_id="$(python3 - "$dump_file" <<'PY'
+    local adhoc_sessions_before
+    adhoc_sessions_before="$(python3 - "$dump_file" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for window in data["windows"]:
-    if window.get("app") == "Spaces" and window.get("role") == "terminal" and (window.get("name") or "").startswith("shell-"):
-        print(window.get("terminalTrackingID") or window.get("terminalNativeID") or "")
+    if window.get("role") == "terminal":
+        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        if session_id:
+            print(session_id)
+PY
+)"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" open-workspace-terminal --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-open-adhoc-terminal.json
+    transition_pause "$host open ad hoc Spaces terminal"
+    local adhoc_session_id
+    local adhoc_open_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+    while (( SECONDS < adhoc_open_deadline )); do
+      dump_workspace "$workspace_dir" "$dump_file"
+      adhoc_session_id="$(python3 - "$dump_file" "$adhoc_sessions_before" <<'PY'
+import json, sys
+known = {line.strip() for line in sys.argv[2].splitlines() if line.strip()}
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for window in data["windows"]:
+    if window.get("role") != "terminal":
+        continue
+    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    if session_id and session_id not in known:
+        print(session_id)
         break
 PY
 )"
+      [[ -n "$adhoc_session_id" ]] && break
+      sleep 0.2
+    done
     [[ -n "$adhoc_session_id" ]] || fail "expected ad hoc Spaces terminal session"
     env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" close-terminal-session-window --session-id "$adhoc_session_id" >/tmp/spaces-e2e-close-adhoc-terminal.json
     transition_pause "$host close ad hoc Spaces terminal"
@@ -3180,20 +3194,6 @@ PY
     wait_for_condition "spaces_front_window_title" "frontend"
     pass_case
 
-    begin_case "$host: toggle main window round-trips back to Spaces terminal viewer"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_BIN" terminal show "$frontend_session_before_close" --viewer >/tmp/spaces-e2e-open-frontend-viewer.log 2>&1
-    transition_pause "$host open frontend viewer window"
-    wait_for_condition "spaces_built_in_terminal_focus_state" "viewer"
-    wait_for_condition "spaces_front_window_title" "frontend (viewer)"
-    send_spaces_toggle_hotkey_with_ack
-    wait_for_condition "spaces_main_window_visible" "1"
-    wait_for_condition "spaces_main_window_key" "1"
-    wait_for_condition "spaces_built_in_terminal_focus_state" "none"
-    send_spaces_toggle_hotkey_with_ack
-    wait_for_condition "spaces_main_window_visible" "0"
-    wait_for_condition "spaces_built_in_terminal_focus_state" "viewer"
-    wait_for_condition "spaces_front_window_title" "frontend (viewer)"
-    pass_case
   fi
 
   # The Run tab numbers shortcuts in on-screen order:
@@ -3357,10 +3357,9 @@ PY
 
 ensure_configured_terminal_host() {
   local host="$1"
-  log_step "switching terminal host to $host"
-  "$MX_E2E_BIN" set-terminal-host "$host" >/tmp/spaces-e2e-terminal-host.json
-  sleep 0.5
-  transition_pause "switch terminal host to $host"
+  if [[ "$host" != "spaces" ]]; then
+    fail "Unsupported terminal host for this branch: $host"
+  fi
 }
 
 run_hotkey_visibility_profiling() {
@@ -3859,13 +3858,6 @@ run_agent_status_assertions() {
   pass_case
 }
 
-host_available() {
-  local host="$1"
-  local out="$TMP_ROOT/terminal-host-available-$host.json"
-  "$MX_E2E_BIN" terminal-host-available "$host" >"$out" 2>/dev/null || return 1
-  [[ "$(json_get "$out" "available")" == "true" ]]
-}
-
 main() {
   # These checks are intentionally explicit because this script targets the real
   # machine, not the hermetic unit-test environment.
@@ -3873,7 +3865,6 @@ main() {
   require_cmd git
   require_cmd osascript
   require_cmd python3
-  require_cmd tmux
   require_cmd uv
   require_cmd yabai
 
@@ -3951,21 +3942,11 @@ EOF
     return 0
   fi
 
-  IFS=',' read -r -a hosts <<<"$HOSTS_CSV"
-  for host in "${hosts[@]}"; do
-    if host_available "$host"; then
-      run_launch_and_focus_assertions "$host" "$workspace_dir"
-      if [[ "$host" != "spaces" ]]; then
-        run_hotkey_visibility_profiling "$host" "$workspace_dir"
-      fi
-      run_multi_workspace_focus_and_cycle_assertions "$host" "$workspace_dir" "$second_workspace_dir"
-      run_agent_status_assertions "$host" "$workspace_dir"
-      assert_file_contains "$EVENT_LOG" "$stop_marker"
-    else
-      printf 'SKIP: terminal host %s is not available on this machine\n' "$host"
-      skip_case "$host: host availability" "terminal host not installed"
-    fi
-  done
+  local host="spaces"
+  run_launch_and_focus_assertions "$host" "$workspace_dir"
+  run_multi_workspace_focus_and_cycle_assertions "$host" "$workspace_dir" "$second_workspace_dir"
+  run_agent_status_assertions "$host" "$workspace_dir"
+  assert_file_contains "$EVENT_LOG" "$stop_marker"
 
   begin_case "branch and tertiary workspaces serve correct content"
   local branch_check_out="$TMP_ROOT/branch-content-check.json"

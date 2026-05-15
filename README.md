@@ -35,7 +35,7 @@ spaces restart             # full stop + launch
 spaces open <name>         # focus a tracked window by name
 spaces signal <event>      # coding-agent lifecycle: init|start|waiting|done|exit
 spaces update --notes "…"  # edit workspace metadata
-spaces terminal command --command "cat"   # start a tmux-free PTY session
+spaces terminal command --command "cat"   # start a Spaces terminal session
 spaces terminal list                      # inspect live session IDs and working directories
 spaces terminal send <session> "hello"    # write input to a session
 spaces terminal key <session> ctrl+c      # send a named key or control chord
@@ -65,15 +65,13 @@ Coding agents emit `spaces signal` events from their terminals so the GUI knows 
 ## How it works
 
 - [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
-- External-host process terminals run under [tmux](https://github.com/tmux/tmux) so closing an iTerm2 or Ghostty terminal window does not kill the process; built-in `Spaces` terminal sessions keep their own session runtime and reattach without tmux.
-- The built-in Spaces terminal is the default host. [iTerm2](https://iterm2.com) and [Ghostty](https://ghostty.org) remain optional host overrides.
+- Built-in process and ad hoc terminals run inside the Spaces app through the built-in Spaces terminal runtime, so session lifetime, takeover, and `spaces terminal` controls share one session boundary.
 - Browser sessions automate Google Chrome so you can quickly switch to view output without typing the URL or clicking through tabs.
 
 ## Requirements
 
 - macOS 14+
 - [`yabai`](https://github.com/koekeishiya/yabai)
-- [`tmux`](https://github.com/tmux/tmux) only when using external process hosts such as iTerm2 or Ghostty
 - Google Chrome (for browser-session focus)
 - Accessibility permission, granted via the in-app setup flow on first launch
 
