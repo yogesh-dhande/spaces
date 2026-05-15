@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
+source "$SCRIPT_DIR/terminal_harness_lock.sh"
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 MX_E2E_BIN="$BUILD_DIR/spacese2e"
@@ -20,6 +21,7 @@ PROJECT_DIR="$WORK_ROOT/repo"
 APP_PID=""
 
 cleanup() {
+  release_terminal_harness_lock
   if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" >/dev/null 2>&1; then
     kill "$APP_PID" >/dev/null 2>&1 || true
     wait "$APP_PID" >/dev/null 2>&1 || true
@@ -89,6 +91,7 @@ mkdir -p "$(dirname "$DB_PATH")"
 touch "$APP_LOG"
 
 cd "$REPO_ROOT"
+acquire_terminal_harness_lock
 "$SETUP_GHOSTTYKIT"
 
 rm -rf "$PROJECT_DIR"

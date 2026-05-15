@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
+source "$SCRIPT_DIR/terminal_harness_lock.sh"
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
@@ -26,6 +27,7 @@ SOAK_MODE="${SOAK_MODE:-repaint_viewer}"
 APP_PID=""
 
 cleanup() {
+  release_terminal_harness_lock
   if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" >/dev/null 2>&1; then
     kill "$APP_PID" >/dev/null 2>&1 || true
     wait "$APP_PID" >/dev/null 2>&1 || true
@@ -92,6 +94,7 @@ require_binary "$SPACES_CLI"
 [[ -x "$FIXTURE_SCRIPT" ]] || chmod +x "$FIXTURE_SCRIPT"
 
 cd "$REPO_ROOT"
+acquire_terminal_harness_lock
 "$SETUP_GHOSTTYKIT"
 
 pkill -x SpacesApp >/dev/null 2>&1 || true

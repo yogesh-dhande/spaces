@@ -121,6 +121,8 @@ apps/macos/Tests/e2e_terminal_cli_commands.sh
 
 That script exercises `spaces terminal command`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Ghostty-backed session.
 
+The terminal E2E, profiling, and soak scripts that launch `SpacesApp` acquire a shared harness lock before they run `setup_ghosttykit`, kill existing app instances, or launch a new app instance. Running them at the same time should serialize rather than tearing each other down mid-run.
+
 For repeatable profiling of the built-in terminal owner and viewer flows:
 
 ```bash
