@@ -24,13 +24,14 @@ file_contains_fixed() {
     grep -Fq "$needle" "$path"
 }
 
-stream_matches_regex() {
+text_matches_regex() {
     local pattern="$1"
+    local text="$2"
     if command -v rg >/dev/null 2>&1; then
-        rg -q "$pattern"
+        rg -q "$pattern" <<<"$text"
         return
     fi
-    grep -Eq "$pattern"
+    grep -Eq "$pattern" <<<"$text"
 }
 
 if [[ ! -d "$XCFRAMEWORK_ROOT" ]]; then
@@ -52,13 +53,15 @@ else
     exit 1
 fi
 
+LIBRARY_SYMBOLS="$(nm -gU "$LIBRARY_PATH")"
+
 for export_name in "${REQUIRED_EXPORTS[@]}"; do
     if ! file_contains_fixed "$export_name" "$HEADER_PATH"; then
         echo "Missing GhosttyKit declaration for ${export_name} in $HEADER_PATH" >&2
         exit 1
     fi
 
-    if ! nm -gU "$LIBRARY_PATH" | stream_matches_regex "_${export_name}$"; then
+    if ! text_matches_regex "_${export_name}$" "$LIBRARY_SYMBOLS"; then
         echo "Missing GhosttyKit export for ${export_name} in $LIBRARY_PATH" >&2
         exit 1
     fi
