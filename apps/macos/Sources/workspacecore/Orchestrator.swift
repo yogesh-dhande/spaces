@@ -1632,6 +1632,7 @@ public final class WorkspaceOrchestrator {
         }.map(\.id)
         guard !matchingWindowIDs.isEmpty else { return false }
         for windowID in matchingWindowIDs { try store.deleteWindow(id: windowID) }
+        try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
         return true
     }
 
@@ -5747,9 +5748,12 @@ public final class WorkspaceOrchestrator {
 
         try store.deleteRunningProcess(id: process.id)
 
-        if try !hasTrackedRuntimeIndicators(workspaceID: workspaceID), let workspace = try store.workspace(id: workspaceID) {
-            try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
-        }
+        try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
+    }
+
+    private func clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: String) throws {
+        guard try !hasTrackedRuntimeIndicators(workspaceID: workspaceID), let workspace = try store.workspace(id: workspaceID) else { return }
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
     }
 
     private func recoverRunningProcessTerminalIfPossible(workspaceID: String, process: RunningProcessRecord) throws -> Bool {

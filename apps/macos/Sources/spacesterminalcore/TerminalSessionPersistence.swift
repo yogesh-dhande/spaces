@@ -107,6 +107,8 @@ public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
 }
 
 public enum TerminalSessionPersistence {
+    public static let remoteClientLeaseInterval: TimeInterval = 60
+
     public static func writeLaunchConfiguration(_ configuration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) throws {
         try paths.ensureDirectories()
         try writeJSON(configuration, to: paths.metadataPath)
@@ -138,6 +140,17 @@ public enum TerminalSessionPersistence {
         } else {
             snapshot.clients.append(client)
         }
+        try writeAttachmentSnapshot(snapshot, paths: paths)
+    }
+
+    public static func touchClient(id clientID: String, paths: TerminalSessionPaths, touchedAt: String) throws {
+        var snapshot = try readAttachmentSnapshot(paths: paths)
+        guard let clientIndex = snapshot.clients.firstIndex(where: { $0.id == clientID }) else {
+            throw TerminalSessionPersistenceError.unknownClient(clientID)
+        }
+        let client = snapshot.clients[clientIndex]
+        snapshot.clients[clientIndex] = TerminalClient(
+            id: client.id, kind: client.kind, identity: client.identity, connectedAt: touchedAt, disconnectedAt: client.disconnectedAt)
         try writeAttachmentSnapshot(snapshot, paths: paths)
     }
 
@@ -194,6 +207,27 @@ public enum TerminalSessionPersistence {
 
     public static func activeAttachments(paths: TerminalSessionPaths) throws -> [TerminalAttachment] {
         try readAttachmentSnapshot(paths: paths).attachments.filter { $0.detachedAt == nil }
+    }
+
+    public static func liveAttachments(
+        paths: TerminalSessionPaths, now: Date = Date(),
+        remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval
+    ) throws -> [TerminalAttachment] {
+        let snapshot = try readAttachmentSnapshot(paths: paths)
+        let clientsByID = Dictionary(uniqueKeysWithValues: snapshot.clients.map { ($0.id, $0) })
+        let staleRemoteClientIDs = Set(staleRemoteClientIDs(snapshot: snapshot, now: now, remoteClientLeaseInterval: remoteClientLeaseInterval))
+        return snapshot.attachments.filter { attachment in
+            guard attachment.detachedAt == nil, let client = clientsByID[attachment.clientID], client.disconnectedAt == nil else { return false }
+            return !staleRemoteClientIDs.contains(attachment.clientID)
+        }
+    }
+
+    public static func staleRemoteClientIDs(
+        paths: TerminalSessionPaths, now: Date = Date(),
+        remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval
+    ) throws -> [String] {
+        let snapshot = try readAttachmentSnapshot(paths: paths)
+        return staleRemoteClientIDs(snapshot: snapshot, now: now, remoteClientLeaseInterval: remoteClientLeaseInterval)
     }
 
     public static func transferOwnership(sessionID: String, newOwnerClientID: String, paths: TerminalSessionPaths, transferredAt: String) throws {
@@ -268,6 +302,18 @@ public enum TerminalSessionPersistence {
     private static func readJSONIfExists<Value: Decodable>(_ type: Value.Type, from path: String) throws -> Value? {
         guard FileManager.default.fileExists(atPath: path) else { return nil }
         return try readJSON(type, from: path)
+    }
+
+    private static func staleRemoteClientIDs(snapshot: TerminalSessionAttachmentSnapshot, now: Date, remoteClientLeaseInterval: TimeInterval)
+        -> [String]
+    {
+        let activeClientIDs = Set(snapshot.attachments.filter { $0.detachedAt == nil }.map(\.clientID))
+        let cutoff = now.addingTimeInterval(-remoteClientLeaseInterval)
+        return snapshot.clients.compactMap { client in
+            guard activeClientIDs.contains(client.id), client.kind != .localWindow, client.disconnectedAt == nil else { return nil }
+            guard let lastSeenAt = ISO8601DateFormatter().date(from: client.connectedAt) else { return client.id }
+            return lastSeenAt < cutoff ? client.id : nil
+        }
     }
 
     private static func writeAttachmentSnapshot(_ snapshot: TerminalSessionAttachmentSnapshot, paths: TerminalSessionPaths) throws {

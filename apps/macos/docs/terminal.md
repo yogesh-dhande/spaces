@@ -46,11 +46,13 @@ The current forked GhosttyKit build exposes the raw PTY I/O hooks Spaces needs b
 - The proxy is intentionally a per-session bridge and should be treated as an internal integration primitive, not as the final remote-client product surface.
 - Supported control patterns on that TCP seam are:
   - `attach` with an explicit client record and attachment mode
+  - `detach` with the attached client ID
   - `tail` for recent output
   - `send`
   - `key`
   - `takeover`
-- The proxy answers `attach` and `tail` from persisted session state and forwards the remaining commands into the local control socket. That keeps the Mac-owned libghostty host as the PTY owner while still allowing mobile-shaped or remote-shaped clients to view, tail, and take over.
+- The proxy answers `tail` from persisted session state and forwards attachment lifecycle plus the remaining commands into the local control socket. That keeps the Mac-owned libghostty host as the PTY owner while still allowing mobile-shaped or remote-shaped clients to view, tail, detach, and take over.
+- Remote and mobile attachments are lease-based rather than permanent. Attach requests stamp the lease from host time instead of trusting caller clocks, client-identified proxy and control activity refreshes only that remote client's lease through the app-owned control socket, and the session host expires stale remote attachments automatically so a crashed viewer does not keep an ad-hoc session alive forever.
 - If Spaces grows a broader host service for remote iOS/macOS/Android clients, that service should absorb this bridge instead of layering a second ownership model on top of it.
 - The current repository includes `apps/macos/Tests/poc_mobile_terminal_client.py` as a headless mobile-shaped proof of concept over that TCP bridge.
 - `apps/macos/Tests/e2e_terminal_mobile_client.sh` is the maintained regression entry point for that flow. It runs the mobile-shaped POC against an isolated `SpacesApp`, verifies attach, viewer gating, takeover, text input, key input, owner-window close, owner-window reopen, and ownership handoff back to the reopened macOS owner window. It should stay green whenever the Ghostty-owner session boundary changes.

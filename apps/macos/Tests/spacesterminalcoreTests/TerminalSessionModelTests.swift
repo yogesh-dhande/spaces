@@ -105,6 +105,52 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertTrue(try TerminalSessionPersistence.activeAttachments(paths: sessionPaths).isEmpty)
     }
 
+    func testLiveAttachmentsIgnoreLeaseExpiredRemoteViewer() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
+
+        let sessionPaths = try TerminalSessionPaths.forSession(id: "session-stale-remote")
+        let remoteClient = TerminalClient(
+            id: "remote-client", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-05-08T00:00:00Z")
+
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-stale-remote", client: remoteClient, mode: .viewer, paths: sessionPaths, attachedAt: "2026-05-08T00:00:00Z")
+
+        let now = ISO8601DateFormatter().date(from: "2026-05-08T00:01:01Z")!
+        XCTAssertTrue(try TerminalSessionPersistence.liveAttachments(paths: sessionPaths, now: now).isEmpty)
+        XCTAssertEqual(try TerminalSessionPersistence.staleRemoteClientIDs(paths: sessionPaths, now: now), ["remote-client"])
+    }
+
+    func testTouchClientKeepsOnlySpecifiedRemoteViewerLeaseAlive() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
+
+        let sessionPaths = try TerminalSessionPaths.forSession(id: "session-targeted-remote")
+        let remoteClient = TerminalClient(
+            id: "remote-client", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-05-08T00:00:00Z")
+        let staleRemoteClient = TerminalClient(
+            id: "stale-remote-client", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad"), connectedAt: "2026-05-08T00:00:00Z")
+
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-targeted-remote", client: remoteClient, mode: .viewer, paths: sessionPaths, attachedAt: "2026-05-08T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-targeted-remote", client: staleRemoteClient, mode: .viewer, paths: sessionPaths, attachedAt: "2026-05-08T00:00:00Z")
+        try TerminalSessionPersistence.touchClient(id: remoteClient.id, paths: sessionPaths, touchedAt: "2026-05-08T00:00:45Z")
+
+        let now = ISO8601DateFormatter().date(from: "2026-05-08T00:01:01Z")!
+        XCTAssertEqual(try TerminalSessionPersistence.liveAttachments(paths: sessionPaths, now: now).map(\.clientID), [remoteClient.id])
+        XCTAssertEqual(try TerminalSessionPersistence.staleRemoteClientIDs(paths: sessionPaths, now: now), [staleRemoteClient.id])
+        let snapshot = try TerminalSessionPersistence.readAttachmentSnapshot(paths: sessionPaths)
+        XCTAssertEqual(snapshot.clients.first(where: { $0.id == remoteClient.id })?.connectedAt, "2026-05-08T00:00:45Z")
+        XCTAssertEqual(snapshot.clients.first(where: { $0.id == staleRemoteClient.id })?.connectedAt, "2026-05-08T00:00:00Z")
+    }
+
     func testTransferOwnershipDemotesOldOwnerToViewer() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

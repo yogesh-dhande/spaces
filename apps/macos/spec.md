@@ -127,6 +127,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - When the active `ghostty-embedded` owner window has no warning or non-running state to show, its inline header band should collapse so the terminal surface fills the content area instead of leaving a dead strip of chrome above the terminal.
 - When Spaces focuses an already-open built-in process window from the normal workspace flow, the owner terminal surface should be ready for immediate typing without requiring an extra click inside the window.
 - A terminal session may have one active owner client and one or more passive viewer clients attached at the same time.
+- Ad hoc built-in terminal sessions should stay alive while any local client or recently active remote/mobile client remains attached and should clean up once the final live attachment detaches or expires.
 - Only the active owner client may send input or control PTY size.
 - Viewer windows should remain readable, be able to take over ownership without restarting the underlying shell session, and keep passive chrome minimal: the native titlebar may identify the session, but the in-window experience should prioritize the terminal content plus a clear takeover action.
 - For git projects, new workspaces are branch-oriented and should support an existing-branch picker, a new-branch entry path, target branch, directory name, title, and notes inputs.

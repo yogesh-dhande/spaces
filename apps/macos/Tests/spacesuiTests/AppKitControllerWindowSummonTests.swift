@@ -339,4 +339,75 @@ import spacesterminalcore
         #expect(selected?.controller === ownerController)
         #expect(selected?.route == "in_memory_owner")
     }
+
+    @MainActor @Test func adHocTerminationWaitsForAllPersistedAttachmentsToDetach() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let localClient = TerminalClient(
+            id: "local-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-17T18:00:00Z")
+        let remoteClient = TerminalClient(
+            id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", hostName: "phone", deviceName: "Remote Client"),
+            connectedAt: "2026-05-17T18:00:01Z")
+
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-remote", client: localClient, mode: .owner, paths: paths, attachedAt: "2026-05-17T18:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-remote", client: remoteClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T18:00:01Z")
+        try TerminalSessionPersistence.detachClient(id: localClient.id, paths: paths, detachedAt: "2026-05-17T18:00:02Z")
+        let now = ISO8601DateFormatter().date(from: "2026-05-17T18:00:03Z")!
+
+        #expect(!AppKitController.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: false, now: now))
+    }
+
+    @MainActor @Test func adHocTerminationResumesAfterRemoteViewerDetaches() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let remoteClient = TerminalClient(
+            id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", hostName: "phone", deviceName: "Remote Client"),
+            connectedAt: "2026-05-17T18:00:01Z")
+        let now = ISO8601DateFormatter().date(from: "2026-05-17T18:00:03Z")!
+
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-remote", client: remoteClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T18:00:01Z")
+        #expect(!AppKitController.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: false, now: now))
+
+        try TerminalSessionPersistence.detachClient(id: remoteClient.id, paths: paths, detachedAt: "2026-05-17T18:00:02Z")
+        #expect(AppKitController.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: false, now: now))
+    }
+
+    @MainActor @Test func adHocTerminationIgnoresLeaseExpiredRemoteViewer() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let remoteClient = TerminalClient(
+            id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", hostName: "phone", deviceName: "Remote Client"),
+            connectedAt: "2026-05-17T18:00:01Z")
+
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-remote", client: remoteClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T18:00:01Z")
+        let now = ISO8601DateFormatter().date(from: "2026-05-17T18:01:05Z")!
+
+        #expect(AppKitController.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: false, now: now))
+    }
+
+    @MainActor @Test func adHocTerminationRequiresNoAttachmentsAndNoConfiguredProcessOwner() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        #expect(AppKitController.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: false))
+        #expect(!AppKitController.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: true))
+        #expect(!AppKitController.shouldTerminateAdHocBuiltInTerminalSession(paths: nil, isConfiguredProcessSession: false))
+    }
 }

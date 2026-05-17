@@ -216,6 +216,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var closeTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
+    private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
     private var setupManager: SetupManager?
     private var sidebarReloadTask: Task<Void, Never>?
@@ -348,6 +349,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupFocusTerminalSessionWindowIPCObserver()
         setupCloseTerminalSessionWindowIPCObserver()
         setupAppActivationObservers()
+        setupTerminalAttachmentStateObserver()
         logStartupProfile("ipc_observers_ready")
         Self.scheduleAfterNextRunLoopTurn { [weak self] in
             Task { @MainActor [weak self] in
@@ -438,6 +440,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let appDidResignActiveObserver {
             NotificationCenter.default.removeObserver(appDidResignActiveObserver)
             self.appDidResignActiveObserver = nil
+        }
+        if let terminalAttachmentStateDidChangeObserver {
+            NotificationCenter.default.removeObserver(terminalAttachmentStateDidChangeObserver)
+            self.terminalAttachmentStateDidChangeObserver = nil
         }
         commandPaletteLoadTask?.cancel()
         commandPaletteLoadTask = nil
@@ -742,6 +748,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return ownerAttachment.clientID
     }
 
+    static func shouldTerminateAdHocBuiltInTerminalSession(paths: TerminalSessionPaths?, isConfiguredProcessSession: Bool, now: Date = Date()) -> Bool
+    {
+        guard !isConfiguredProcessSession, let paths, let activeAttachments = try? TerminalSessionPersistence.liveAttachments(paths: paths, now: now)
+        else { return false }
+        return activeAttachments.isEmpty
+    }
+
     private func removeTerminalSessionWindowController(sessionID: String, clientID: String) {
         guard var controllers = terminalSessionWindowControllers[sessionID] else { return }
         controllers.removeAll { $0.clientID == clientID }
@@ -753,13 +766,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: String) {
+    private func terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: String, now: Date = Date()) {
         let workspaceID = try? orchestrator.workspaceIDForTerminalSession(sessionID)
         guard let workspaceID else { return }
         let isConfiguredProcessSession = ((try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? []).contains {
             ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
         }
-        guard !isConfiguredProcessSession else { return }
+        let paths = try? TerminalSessionPaths.forSession(id: sessionID)
+        guard Self.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: isConfiguredProcessSession, now: now) else {
+            return
+        }
         GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
         if (try? orchestrator.removeAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
     }
@@ -803,6 +819,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 self.activeWindowShortcutProfile = nil
             }
         }
+    }
+
+    private func setupTerminalAttachmentStateObserver() {
+        terminalAttachmentStateDidChangeObserver = NotificationCenter.default.addObserver(
+            forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main
+        ) { [weak self] notification in
+            let changedSessionID = notification.userInfo?["sessionID"] as? String
+            MainActor.assumeIsolated {
+                guard let self, let changedSessionID else { return }
+                self.handleTerminalAttachmentStateDidChange(sessionID: changedSessionID)
+            }
+        }
+    }
+
+    private func handleTerminalAttachmentStateDidChange(sessionID: String) {
+        guard terminalSessionWindowControllers[sessionID] == nil else { return }
+        terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
     }
 
     private func startPeriodicWorkspaceWindowRefresh() {

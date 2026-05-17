@@ -1633,6 +1633,42 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.workspaceIDForTerminalSession("session-456"), workspace.id)
     }
 
+    func testRemoveAdHocBuiltInTerminalSessionClearsRunningWhenSessionWasLastRuntimeIndicator() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let dbPath = root.appendingPathComponent("spaces.db").path
+
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { sessionID, mode in
+                XCTAssertEqual(mode, .owner)
+                let paths = try! TerminalSessionPaths.forSession(id: sessionID)
+                try! paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try! TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 4321, state: .running,
+                        updatedAt: "2026-05-17T18:00:00Z"), paths: paths)
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
+            }
+        }
+
+        let sessionID = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" })?.terminalTrackingID)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+
+        XCTAssertTrue(try orchestrator.removeAdHocBuiltInTerminalSession(sessionID: sessionID))
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+    }
+
     // Tests focus workspace skips failed window and sets active workspace by arranging representative inputs and asserting the expected result.
     func testFocusWorkspaceSkipsFailedWindowAndSetsActiveWorkspace() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
@@ -2331,6 +2367,48 @@ final class OrchestratorTests: XCTestCase {
                 client: TerminalClient(
                     id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
                     connectedAt: "now"), mode: .owner, paths: paths, attachedAt: "now")
+
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
+            }
+        }
+
+        let windows = try orchestrator.windows(workspaceID: workspace.id)
+        XCTAssertEqual(windows.filter { $0.role == "terminal" }.map(\.id), ["window-spaces-shell-1"])
+        XCTAssertEqual(windows.first?.name, "shell-1")
+    }
+
+    func testRefreshWorkspaceWindowsPreservesAdHocBuiltInTerminalWindowUntilHostDetachesStaleRemoteAttachment() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db")
+        let store = try SQLiteStore(path: dbPath.path, )
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        let sessionID = "spaces-ad-hoc-session-stale-remote"
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil,
+                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+            try TerminalSessionPersistence.writeRuntimeState(
+                .init(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
+                    state: .running, updatedAt: "now"), paths: paths)
+            try TerminalSessionPersistence.attachClient(
+                sessionID: sessionID,
+                client: TerminalClient(
+                    id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", hostName: "phone", deviceName: "Remote Client"),
+                    connectedAt: "2000-01-01T00:00:00Z"), mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
 
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
                 try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }

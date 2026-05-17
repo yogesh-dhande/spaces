@@ -30,16 +30,16 @@ Run from the repository root:
 scripts/format.sh
 scripts/swiftpm.sh build
 scripts/swiftpm.sh test --parallel
-scripts/format-staged-swift.sh
 scripts/lint.sh
 scripts/coverage.sh
 scripts/verify.sh
 ```
 
 `scripts/format.sh` performs an explicit tree-wide `swift format` pass across `apps/macos/Sources` and `apps/macos/Tests`.
-`scripts/lint.sh` is read-only and checks formatting without mutating files, so build artifacts are not invalidated by lint.
+`scripts/format-staged-swift.sh` formats staged macOS Swift source and test files in place and re-stages them.
+`scripts/lint.sh` runs `scripts/format-staged-swift.sh` and then `SwiftLint` when `swiftlint` is available.
 `scripts/coverage.sh` runs SwiftPM tests in parallel by default and caps auto-detected workers at `8` unless you override it with `SPACES_TEST_WORKERS` or change the cap with `SPACES_TEST_MAX_AUTO_WORKERS`.
-`scripts/verify.sh` is the canonical sequential local verification path: lint, build, then coverage.
+`scripts/verify.sh` is the canonical sequential local verification path: staged formatting and lint, build, then coverage.
 `scripts/swiftpm.sh` also uses a fail-fast lock around SwiftPM itself so overlapping build, test, or coverage commands stop immediately with a clear message instead of silently contending on the shared `.build` directory.
 
 Useful local entry points:
@@ -250,9 +250,8 @@ Expected output:
 .githooks
 ```
 
-The pre-commit hook does three things:
-- formats staged macOS Swift source and test files with `swift format`
-- runs `scripts/lint.sh`
+The pre-commit hook does two things:
+- runs `scripts/lint.sh`, which formats staged macOS Swift source and test files and then runs any additional lint checks
 - runs `scripts/coverage.sh`
 
 Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](.github/workflows/pr-checks.yml), which runs the same Swift lint/build/coverage flow plus the static website build.

@@ -184,9 +184,13 @@ extension Notification.Name {
     }
 
     public func detach(clientID: String) throws {
+        let detachedClientWasOwner = isOwner(clientID: clientID)
         try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
-        if !isOwner(clientID: clientID) { terminalView.setFocused(false) }
-        if activeOwnerClientID() == nil, hasRenderableSurface() { terminalView.parkInHiddenHostWindowIfNeeded() }
+        let remainingOwnerClientID = activeOwnerClientID()
+        if Self.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: detachedClientWasOwner, remainingOwnerClientID: remainingOwnerClientID) {
+            terminalView.setFocused(false)
+        }
+        if remainingOwnerClientID == nil, hasRenderableSurface() { terminalView.parkInHiddenHostWindowIfNeeded() }
         postAttachmentStateDidChange()
         refreshRuntimeState(force: true)
     }
@@ -266,62 +270,7 @@ extension Notification.Name {
             DispatchQueue.main.sync {
                 MainActor.assumeIsolated {
                     guard let self else { return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.") }
-                    switch request.command {
-                    case "send":
-                        let startedAt = Date()
-                        if let clientID = request.clientID, !self.isOwner(clientID: clientID) {
-                            TerminalPerformance.logMetric(
-                                "terminal_control_send", target: "session=\(self.launchConfiguration.sessionID)",
-                                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                            return TerminalControlResponse(ok: false, message: "Only the active owner can send input.")
-                        }
-                        guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
-                        let payload = text + (request.appendNewline ? "\n" : "")
-                        self.terminalView.sendRawBytes(Data(payload.utf8))
-                        TerminalPerformance.logMetric(
-                            "terminal_control_send", target: "session=\(self.launchConfiguration.sessionID)",
-                            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.utf8.count)")
-                        return TerminalControlResponse(ok: true, message: "Sent input.")
-                    case "key":
-                        let startedAt = Date()
-                        if let clientID = request.clientID, !self.isOwner(clientID: clientID) {
-                            TerminalPerformance.logMetric(
-                                "terminal_control_key", target: "session=\(self.launchConfiguration.sessionID)",
-                                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                            return TerminalControlResponse(ok: false, message: "Only the active owner can send keys.")
-                        }
-                        guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
-                            TerminalPerformance.logMetric(
-                                "terminal_control_key", target: "session=\(self.launchConfiguration.sessionID)",
-                                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                            return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
-                        }
-                        self.terminalView.sendRawBytes(Data(bytes))
-                        TerminalPerformance.logMetric(
-                            "terminal_control_key", target: "session=\(self.launchConfiguration.sessionID)",
-                            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "key=\(key)")
-                        return TerminalControlResponse(ok: true, message: "Sent key.")
-                    case "takeover":
-                        let startedAt = Date()
-                        guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
-                        do {
-                            try TerminalSessionPersistence.transferOwnership(
-                                sessionID: self.launchConfiguration.sessionID, newOwnerClientID: clientID, paths: self.paths,
-                                transferredAt: ISO8601DateFormatter().string(from: Date()))
-                            self.postAttachmentStateDidChange()
-                            self.refreshRuntimeState(force: true)
-                            TerminalPerformance.logMetric(
-                                "terminal_control_takeover", target: "session=\(self.launchConfiguration.sessionID) client=\(clientID)",
-                                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
-                            return TerminalControlResponse(ok: true, message: "Transferred terminal ownership.")
-                        } catch {
-                            TerminalPerformance.logMetric(
-                                "terminal_control_takeover", target: "session=\(self.launchConfiguration.sessionID) client=\(clientID)",
-                                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                            return TerminalControlResponse(ok: false, message: String(describing: error))
-                        }
-                    default: return TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
-                    }
+                    return self.handleControlRequest(request)
                 }
             }
         }
@@ -329,11 +278,165 @@ extension Notification.Name {
         self.controlServer = controlServer
     }
 
+    func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        switch request.command {
+        case "attach": controlResponseForAttachRequest(request)
+        case "detach": controlResponseForDetachRequest(request)
+        case "heartbeat": controlResponseForHeartbeatRequest(request)
+        case "send": controlResponseForSendRequest(request)
+        case "key": controlResponseForKeyRequest(request)
+        case "takeover": controlResponseForTakeoverRequest(request)
+        default: TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
+        }
+    }
+
+    private func controlResponseForAttachRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        let startedAt = Date()
+        guard let client = request.client else {
+            TerminalPerformance.logMetric(
+                "terminal_control_attach", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            return TerminalControlResponse(ok: false, message: "Missing client payload.")
+        }
+        let mode = request.attachmentMode ?? .viewer
+        let attachedAt = nowISO8601()
+        let authoritativeClient = Self.clientForAttachLease(client, attachedAt: attachedAt)
+        do {
+            try TerminalSessionPersistence.upsertClient(authoritativeClient, paths: paths)
+            let currentAttachment = try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == authoritativeClient.id }
+            if currentAttachment?.mode != mode {
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: launchConfiguration.sessionID, client: authoritativeClient, mode: mode, paths: paths, attachedAt: attachedAt)
+                postAttachmentStateDidChange()
+            }
+            refreshRuntimeState(force: true)
+            TerminalPerformance.logMetric(
+                "terminal_control_attach", target: "session=\(launchConfiguration.sessionID) client=\(authoritativeClient.id)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "mode=\(mode.rawValue)")
+            return TerminalControlResponse(ok: true, message: "Attached \(mode.rawValue) client.")
+        } catch {
+            TerminalPerformance.logMetric(
+                "terminal_control_attach", target: "session=\(launchConfiguration.sessionID) client=\(authoritativeClient.id)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "mode=\(mode.rawValue)")
+            return TerminalControlResponse(ok: false, message: String(describing: error))
+        }
+    }
+
+    private func controlResponseForDetachRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        let startedAt = Date()
+        guard let clientID = request.clientID else {
+            TerminalPerformance.logMetric(
+                "terminal_control_detach", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            return TerminalControlResponse(ok: false, message: "Missing client ID.")
+        }
+        do {
+            let hasActiveAttachment = try TerminalSessionPersistence.activeAttachments(paths: paths).contains { $0.clientID == clientID }
+            if hasActiveAttachment { try detach(clientID: clientID) }
+            TerminalPerformance.logMetric(
+                "terminal_control_detach", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
+            return TerminalControlResponse(ok: true, message: "Detached terminal client.")
+        } catch {
+            TerminalPerformance.logMetric(
+                "terminal_control_detach", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            return TerminalControlResponse(ok: false, message: String(describing: error))
+        }
+    }
+
+    private func controlResponseForHeartbeatRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        let startedAt = Date()
+        guard let clientID = request.clientID else {
+            TerminalPerformance.logMetric(
+                "terminal_control_heartbeat", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            return TerminalControlResponse(ok: false, message: "Missing client ID.")
+        }
+        do {
+            try TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+            TerminalPerformance.logMetric(
+                "terminal_control_heartbeat", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
+            return TerminalControlResponse(ok: true, message: "Refreshed terminal client lease.")
+        } catch {
+            TerminalPerformance.logMetric(
+                "terminal_control_heartbeat", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            return TerminalControlResponse(ok: false, message: String(describing: error))
+        }
+    }
+
+    private func controlResponseForSendRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        let startedAt = Date()
+        if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
+        if let clientID = request.clientID, !isOwner(clientID: clientID) {
+            TerminalPerformance.logMetric(
+                "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            return TerminalControlResponse(ok: false, message: "Only the active owner can send input.")
+        }
+        guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
+        let payload = text + (request.appendNewline ? "\n" : "")
+        terminalView.sendRawBytes(Data(payload.utf8))
+        TerminalPerformance.logMetric(
+            "terminal_control_send", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            success: true, detail: "bytes=\(payload.utf8.count)")
+        return TerminalControlResponse(ok: true, message: "Sent input.")
+    }
+
+    private func controlResponseForKeyRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        let startedAt = Date()
+        if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
+        if let clientID = request.clientID, !isOwner(clientID: clientID) {
+            TerminalPerformance.logMetric(
+                "terminal_control_key", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            return TerminalControlResponse(ok: false, message: "Only the active owner can send keys.")
+        }
+        guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
+            TerminalPerformance.logMetric(
+                "terminal_control_key", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
+        }
+        terminalView.sendRawBytes(Data(bytes))
+        TerminalPerformance.logMetric(
+            "terminal_control_key", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            success: true, detail: "key=\(key)")
+        return TerminalControlResponse(ok: true, message: "Sent key.")
+    }
+
+    private func controlResponseForTakeoverRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        let startedAt = Date()
+        guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
+        do {
+            try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+            try TerminalSessionPersistence.transferOwnership(
+                sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths,
+                transferredAt: ISO8601DateFormatter().string(from: Date()))
+            postAttachmentStateDidChange()
+            refreshRuntimeState(force: true)
+            TerminalPerformance.logMetric(
+                "terminal_control_takeover", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
+            return TerminalControlResponse(ok: true, message: "Transferred terminal ownership.")
+        } catch {
+            TerminalPerformance.logMetric(
+                "terminal_control_takeover", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            return TerminalControlResponse(ok: false, message: String(describing: error))
+        }
+    }
+
     private func startRuntimeStateTimer() {
         runtimeStateTimer?.invalidate()
         runtimeStateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self else { return }
-            MainActor.assumeIsolated { self.refreshRuntimeState(force: false) }
+            MainActor.assumeIsolated {
+                self.expireStaleRemoteClientsIfNeeded()
+                self.refreshRuntimeState(force: false)
+            }
         }
         if let runtimeStateTimer { RunLoop.main.add(runtimeStateTimer, forMode: .common) }
     }
@@ -352,6 +455,22 @@ extension Notification.Name {
         lastPersistedRuntimeState = state
         lastRuntimeStateWriteAt = now
         if previousSignature != nextSignature { postRuntimeStateDidChange() }
+    }
+
+    @discardableResult func expireStaleRemoteClientsIfNeeded(now: Date = Date()) -> [String] {
+        guard let staleClientIDs = try? TerminalSessionPersistence.staleRemoteClientIDs(paths: paths, now: now), !staleClientIDs.isEmpty else {
+            return []
+        }
+        let detachedAt = ISO8601DateFormatter().string(from: now)
+        for clientID in staleClientIDs { try? TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: detachedAt) }
+        let remainingOwnerClientID = activeOwnerClientID()
+        if Self.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: false, remainingOwnerClientID: remainingOwnerClientID) {
+            terminalView.setFocused(false)
+        }
+        if remainingOwnerClientID == nil, hasRenderableSurface() { terminalView.parkInHiddenHostWindowIfNeeded() }
+        postAttachmentStateDidChange()
+        refreshRuntimeState(force: true)
+        return staleClientIDs
     }
 
     private func appendOutput(_ data: Data) {
@@ -436,6 +555,17 @@ extension Notification.Name {
     private func postOutputDidChange(byteCount: Int) {
         NotificationCenter.default.post(
             name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID, "byteCount": byteCount])
+    }
+
+    private func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
+
+    private static func clientForAttachLease(_ client: TerminalClient, attachedAt: String) -> TerminalClient {
+        guard client.kind != .localWindow else { return client }
+        return TerminalClient(id: client.id, kind: client.kind, identity: client.identity, connectedAt: attachedAt, disconnectedAt: nil)
+    }
+
+    nonisolated static func shouldClearFocusAfterDetachingClient(detachedClientWasOwner: Bool, remainingOwnerClientID: String?) -> Bool {
+        detachedClientWasOwner || remainingOwnerClientID == nil
     }
 
     private func shouldPersistRuntimeState(_ state: TerminalSessionRuntimeState, now: Date) -> Bool {

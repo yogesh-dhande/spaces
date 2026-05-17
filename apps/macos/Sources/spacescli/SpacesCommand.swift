@@ -237,13 +237,11 @@ struct TerminalProxyCommand: ParsableCommand {
         let queue = DispatchQueue(label: "spaces.terminal.proxy.\(sessionID)")
         let server = TerminalControlTCPServer(host: host, port: port, authToken: authToken, queue: queue) { request in
             switch request.command {
-            case "attach":
-                guard let client = request.client else { return TerminalControlResponse(ok: false, message: "Missing client payload.") }
-                let mode = request.attachmentMode ?? .viewer
-                try TerminalSessionPersistence.attachClient(
-                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: ISO8601DateFormatter().string(from: Date()))
-                return TerminalControlResponse(ok: true, message: "Attached \(mode.rawValue) client.")
             case "tail":
+                if let clientID = request.clientID {
+                    _ = try? TerminalControlClient.send(
+                        request: TerminalControlRequest(command: "heartbeat", clientID: clientID), socketPath: paths.controlSocketPath)
+                }
                 let tailed = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: max(request.lineCount ?? 40, 1))
                 return TerminalControlResponse(ok: true, message: tailed)
             default: return try TerminalControlClient.send(request: request, socketPath: paths.controlSocketPath)

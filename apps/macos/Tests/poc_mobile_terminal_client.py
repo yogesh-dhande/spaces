@@ -47,11 +47,14 @@ def wait_for_proxy_ready(process: subprocess.Popen[str], timeout: float = 10) ->
     raise RuntimeError("Timed out waiting for terminal proxy to become ready.")
 
 
-def wait_for_tail_contains(send_request, needle: str, timeout: float = 10, line_count: int = 120) -> str:
+def wait_for_tail_contains(send_request, needle: str, client_id: str | None = None, timeout: float = 10, line_count: int = 120) -> str:
     deadline = time.time() + timeout
     last_output = ""
     while time.time() < deadline:
-        response = send_request({"command": "tail", "lineCount": line_count})
+        request = {"command": "tail", "lineCount": line_count}
+        if client_id:
+            request["clientID"] = client_id
+        response = send_request(request)
         if not response.get("ok"):
             raise RuntimeError(f"Tail request failed: {response}")
         last_output = response.get("message", "")
@@ -140,6 +143,8 @@ def main() -> int:
     app_process = None
     proxy_process = None
     session_id = None
+    mobile_client = None
+    send_request = None
     try:
         if args.start_app:
             app_process = start_spaces_app(spaces_app, env)
@@ -201,7 +206,7 @@ def main() -> int:
         if not response.get("ok"):
             raise RuntimeError(f"Attach failed: {response}")
 
-        initial_tail = wait_for_tail_contains(send_request, "ready")
+        initial_tail = wait_for_tail_contains(send_request, "ready", client_id=mobile_client["id"])
         initial_owner_client_id = wait_for_active_owner(temp_root, session_id, excluded_client_ids={mobile_client["id"]})
 
         blocked = send_request(
@@ -229,7 +234,7 @@ def main() -> int:
         key = send_request({"command": "key", "key": "enter", "clientID": mobile_client["id"]})
         if not key.get("ok"):
             raise RuntimeError(f"Mobile key failed: {key}")
-        second_tail = wait_for_tail_contains(send_request, "line0:mobile-hello")
+        second_tail = wait_for_tail_contains(send_request, "line0:mobile-hello", client_id=mobile_client["id"])
 
         show_result = subprocess.run(
             [str(spaces_cli), "terminal", "show", session_id],
@@ -261,7 +266,7 @@ def main() -> int:
         owner_key = send_request({"command": "key", "key": "enter", "clientID": reopened_owner_client_id})
         if not owner_key.get("ok"):
             raise RuntimeError(f"Reopened owner key failed: {owner_key}")
-        final_tail = wait_for_tail_contains(send_request, "line1:desktop-return")
+        final_tail = wait_for_tail_contains(send_request, "line1:desktop-return", client_id=mobile_client["id"])
 
         print(
             "Mobile terminal client POC passed "
@@ -270,6 +275,11 @@ def main() -> int:
         )
         return 0
     finally:
+        if send_request is not None and mobile_client is not None:
+            try:
+                send_request({"command": "detach", "clientID": mobile_client["id"]})
+            except Exception:
+                pass
         if proxy_process is not None:
             proxy_process.terminate()
             try:
