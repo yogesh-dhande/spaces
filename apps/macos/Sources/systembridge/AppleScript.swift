@@ -2,7 +2,8 @@ import Foundation
 
 public enum AppleScript {
     @discardableResult public static func run(_ script: String) throws -> String {
-        if NSClassFromString("XCTest") != nil, ProcessInfo.processInfo.environment["SPACES_ALLOW_TEST_APPLESCRIPT"] != "1" {
+        let isRunningTests = NSClassFromString("XCTest") != nil
+        if isRunningTests, ProcessInfo.processInfo.environment["SPACES_ALLOW_TEST_APPLESCRIPT"] != "1" {
             throw NSError(
                 domain: "spaces.applescript", code: 1,
                 userInfo: [
@@ -10,8 +11,19 @@ public enum AppleScript {
                 ])
         }
         do {
-            let output = try Shell.runAndCapture(["osascript", "-e", script])
-            return output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if isRunningTests {
+                let output = try Shell.runAndCapture(["osascript", "-e", script])
+                return output.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard let appleScript = NSAppleScript(source: script) else {
+                throw NSError(domain: "spaces.applescript", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to compile AppleScript source."])
+            }
+            var executionError: NSDictionary?
+            let result = appleScript.executeAndReturnError(&executionError)
+            if let executionError {
+                throw NSError(domain: "spaces.applescript", code: 3, userInfo: [NSLocalizedDescriptionKey: executionError.description])
+            }
+            return (result.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             fputs("spaces: AppleScript failed.\n", stderr)
             fputs("spaces: script begin\n", stderr)
