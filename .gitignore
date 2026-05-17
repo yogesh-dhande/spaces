@@ -18,6 +18,7 @@ apps/web/public/releases/*
 # Release artifacts
 *.zip
 .env
+apps/macos/.local/
 
 .venv
 __pycache__

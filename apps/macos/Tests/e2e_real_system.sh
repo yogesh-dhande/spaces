@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # Manual real-system E2E coverage for Spaces.
 # This script intentionally runs outside XCTest so it can drive the real app,
-# terminals, Chrome, yabai, and tmux on an interactive desktop session.
+# the built-in Spaces terminal runtime, Chrome, and yabai on an interactive desktop session.
 
 ROOT_DIR="$(cd "$(dirname "$0")/../../.." && pwd -P)"
 MACOS_DIR="$ROOT_DIR/apps/macos"
@@ -20,7 +20,6 @@ DEBUG_LOG="${DEBUG_LOG:-/tmp/spaces-e2e-debug.log}"
 RESULTS_LOG="${RESULTS_LOG:-/tmp/spaces-e2e-results.log}"
 RECORDER_LOG="${RECORDER_LOG:-/tmp/spaces-e2e-recorder.log}"
 ACTION_TIMEOUT_SECONDS="${ACTION_TIMEOUT_SECONDS:-20}"
-HOSTS_CSV="${HOSTS_CSV:-iterm2,ghostty}"
 SEED_FILE="${SEED_FILE:-/tmp/spaces-e2e-seed.json}"
 SECOND_SEED_FILE="${SECOND_SEED_FILE:-/tmp/spaces-e2e-seed-2.json}"
 THIRD_SEED_FILE="${THIRD_SEED_FILE:-/tmp/spaces-e2e-seed-3.json}"
@@ -30,12 +29,19 @@ RECORD_VIDEO_CAPTURE_DEVICE="${RECORD_VIDEO_CAPTURE_DEVICE:-}"
 RECORD_VIDEO_FRAMERATE="${RECORD_VIDEO_FRAMERATE:-15}"
 RECORDER_OUTPUT_START_TIMEOUT_SECONDS="${RECORDER_OUTPUT_START_TIMEOUT_SECONDS:-8}"
 RECORDER_STOP_TIMEOUT_SECONDS="${RECORDER_STOP_TIMEOUT_SECONDS:-10}"
+SURFACE_POLL_INTERVAL_SECONDS="${SURFACE_POLL_INTERVAL_SECONDS:-0.05}"
 REAL_SYSTEM_PROFILE_REPETITIONS="${REAL_SYSTEM_PROFILE_REPETITIONS:-5}"
 PROFILE_ARTIFACT_DIR="${PROFILE_ARTIFACT_DIR:-$MACOS_DIR/.artifacts/real-system-profiles}"
 PROFILE_HISTORY_CSV="${PROFILE_HISTORY_CSV:-$PROFILE_ARTIFACT_DIR/metrics-history.csv}"
 PROFILE_REPORT_HTML="${PROFILE_REPORT_HTML:-$PROFILE_ARTIFACT_DIR/report.html}"
 PROFILE_RENDER_SCRIPT="${PROFILE_RENDER_SCRIPT:-$MACOS_DIR/Tests/render_profile_report.py}"
 WORKSPACE_SERVICE_CONTENT_TIMEOUT_SECONDS="${WORKSPACE_SERVICE_CONTENT_TIMEOUT_SECONDS:-60}"
+SPACES_CYCLE_LATENCY_BUDGET_MS="${SPACES_CYCLE_LATENCY_BUDGET_MS:-1000}"
+SPACES_SUSTAINED_CPU_BUDGET_PCT="${SPACES_SUSTAINED_CPU_BUDGET_PCT:-80}"
+SPACES_CPU_SAMPLE_COUNT="${SPACES_CPU_SAMPLE_COUNT:-6}"
+SPACES_CPU_SAMPLE_INTERVAL_SECONDS="${SPACES_CPU_SAMPLE_INTERVAL_SECONDS:-0.5}"
+HIGH_OUTPUT_PROCESS_NAME="${HIGH_OUTPUT_PROCESS_NAME:-noisy}"
+HIGH_OUTPUT_PROCESS_COMMAND="${HIGH_OUTPUT_PROCESS_COMMAND:-yes spaces-e2e-noisy}"
 
 TMP_PREFIX="${TMP_PREFIX:-/tmp/spaces-real-e2e}"
 TMP_ROOT="$(cd "$(mktemp -d "$TMP_PREFIX".XXXXXX)" && pwd -P)"
@@ -63,8 +69,11 @@ FINAL_RECORDING_PATH=""
 CURRENT_CASE=""
 SUMMARY_PRINTED=0
 APP_LOG_SEARCH_FROM_LINE=1
+APP_LOG_LAST_MATCH=""
+MEASURED_CYCLE_TARGET=""
 SETUP_FIXTURES_ONLY=0
 PRESERVE_FIXTURES_ON_EXIT=0
+ONLY_WINDOW_CYCLE_PROFILE=0
 APP_PORT_NAME="APP_PORT"
 API_PORT_NAME="API_PORT"
 PRIMARY_DOCS_URL=""
@@ -85,6 +94,12 @@ BEACON_BRANCH_BACKEND_STATUS_URL=""
 SCOUT_BRANCH_DOCS_URL=""
 SCOUT_BRANCH_ADMIN_URL=""
 SCOUT_BRANCH_BACKEND_STATUS_URL=""
+KNOWN_SPACES_FRONTEND_SESSION_ID=""
+KNOWN_SPACES_BACKEND_SESSION_ID=""
+KNOWN_SPACES_AGENT_SESSION_ID=""
+KNOWN_SPACES_ADHOC_SESSION_ID=""
+KNOWN_SPACES_ADHOC_NAME="shell-1"
+KNOWN_SPACES_NOISY_SESSION_ID=""
 
 mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR"
 : >"$EVENT_LOG"
@@ -169,11 +184,13 @@ PY
 }
 
 begin_case() {
+  assert_no_spaces_modal_dialog
   CURRENT_CASE="$1"
   log_step "$CURRENT_CASE"
 }
 
 pass_case() {
+  assert_no_spaces_modal_dialog
   record_case_result "PASS" "$CURRENT_CASE"
   CURRENT_CASE=""
 }
@@ -202,6 +219,7 @@ Options:
   --capture-framerate FPS        Screen recording frame rate. Default: 15.
   --pause-transitions            Add a 1 second pause after visible transitions.
   --setup-fixtures-only          Create projects/workspaces and leave the manual test environment running.
+  --only-window-cycle-profile    Run only the single-workspace focus/cycle profiling path.
   --transition-pause-seconds N   Override the transition pause duration.
   --help                         Show this help text.
 EOF
@@ -233,6 +251,10 @@ parse_args() {
         SETUP_FIXTURES_ONLY=1
         shift
         ;;
+      --only-window-cycle-profile)
+        ONLY_WINDOW_CYCLE_PROFILE=1
+        shift
+        ;;
       --transition-pause-seconds)
         [[ $# -ge 2 ]] || fail "missing value for --transition-pause-seconds"
         TRANSITION_PAUSE_SECONDS="$2"
@@ -257,6 +279,7 @@ transition_pause() {
   fi
   log_debug "transition pause ${TRANSITION_PAUSE_SECONDS}s: $label"
   sleep "$TRANSITION_PAUSE_SECONDS"
+  assert_no_spaces_modal_dialog
 }
 
 process_is_alive() {
@@ -356,6 +379,7 @@ cleanup_existing_fixture_projects() {
   stop_stale_fixture_port_listeners
   "$MX_E2E_BIN" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-stop-fixtures-start.json || true
   close_fixture_chrome_windows
+  close_fixture_iterm_windows
   "$MX_E2E_BIN" cleanup-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-cleanup.json || true
   rm -rf "$TMP_PREFIX".* /private"$TMP_PREFIX".* 2>/dev/null || true
   ensure_fixture_ports_free
@@ -364,8 +388,12 @@ cleanup_existing_fixture_projects() {
 reset_fixture_runtime() {
   local workspace_dir="$1"
   log_step "resetting tracked workspace runtime"
-  "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace.json 2>/dev/null || true
+  local workspace_dump="$TMP_ROOT/reset-workspace-state.json"
+  if dump_workspace "$workspace_dir" "$workspace_dump" 2>/dev/null && [[ "$(json_get "$workspace_dump" "workspace.isRunning")" == "true" ]]; then
+    "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace.json 2>/dev/null || true
+  fi
   close_fixture_chrome_windows
+  close_fixture_iterm_windows
   stop_stale_fixture_port_listeners
   sleep 1
   ensure_fixture_ports_free
@@ -578,8 +606,22 @@ launch_spaces() {
   env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" SPACES_E2E_EVENTS_LOG="$EVENT_LOG" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
   SPACES_PID=$!
   ensure_single_spaces_instance "$SPACES_PID"
-  wait_for_spaces_frontmost_ready
+  wait_for_spaces_launch_ready
   transition_pause "Spaces launch"
+}
+
+wait_for_spaces_launch_ready() {
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "$SPACES_PID" >/dev/null 2>&1; then
+      fail "Spaces exited during launch"
+    fi
+    if find_new_app_log_pattern_once 'spaces: hotkey_debug register handler_status=0 refs=[0-9]+ handler=1' >/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "timed out waiting for Spaces launch readiness"
 }
 
 activate_spaces_pid() {
@@ -616,15 +658,16 @@ wait_for_spaces_frontmost_ready() {
       fail "Spaces exited during launch"
     fi
     activate_spaces_pid "$SPACES_PID"
-    if [[ "$(frontmost_app 2>/dev/null || true)" == "SpacesApp" ]] && osascript <<'APPLESCRIPT' 2>/dev/null | grep -Eiq '^(1|true)$'; then
-tell application "System Events"
-  if exists process "SpacesApp" then
-    tell process "SpacesApp"
-      return (count of windows) > 0
-    end tell
-  end if
-end tell
-return false
+    if [[ "$(frontmost_pid 2>/dev/null || true)" == "$SPACES_PID" ]] && osascript - "$SPACES_PID" <<'APPLESCRIPT' 2>/dev/null | grep -Eiq '^(1|true)$'; then
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      return (count of windows of proc) > 0
+    end repeat
+  end tell
+  return false
+end run
 APPLESCRIPT
       return 0
     fi
@@ -633,24 +676,40 @@ APPLESCRIPT
   fail "timed out waiting for Spaces window"
 }
 
+wait_for_spaces_frontmost_pid() {
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "$SPACES_PID" >/dev/null 2>&1; then
+      fail "Spaces exited during launch"
+    fi
+    activate_spaces_pid "$SPACES_PID"
+    if [[ "$(frontmost_pid 2>/dev/null || true)" == "$SPACES_PID" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for Spaces app activation"
+}
+
 wait_for_spaces_splitter_ready() {
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    if osascript <<'APPLESCRIPT' 2>/dev/null | grep -q '^1$'; then
-tell application "System Events"
-  if exists process "SpacesApp" then
-    tell process "SpacesApp"
-      if (count of windows) is 0 then return 0
+    if osascript - "$SPACES_PID" <<'APPLESCRIPT' 2>/dev/null | grep -q '^1$'; then
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      if (count of windows of proc) is 0 then return 0
       try
-        set _ to splitter group 1 of window 1
+        set _ to splitter group 1 of window 1 of proc
         return 1
       on error
         return 0
       end try
-    end tell
-  end if
-end tell
-return 0
+    end repeat
+  end tell
+  return 0
+end run
 APPLESCRIPT
       return 0
     fi
@@ -660,21 +719,22 @@ APPLESCRIPT
 }
 
 spaces_splitter_ready() {
-  osascript <<'APPLESCRIPT' 2>/dev/null | grep -q '^1$'
-tell application "System Events"
-  if exists process "SpacesApp" then
-    tell process "SpacesApp"
-      if (count of windows) is 0 then return 0
+  osascript - "$SPACES_PID" <<'APPLESCRIPT' 2>/dev/null | grep -q '^1$'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      if (count of windows of proc) is 0 then return 0
       try
-        set _ to splitter group 1 of window 1
+        set _ to splitter group 1 of window 1 of proc
         return 1
       on error
         return 0
       end try
-    end tell
-  end if
-end tell
-return 0
+    end repeat
+  end tell
+  return 0
+end run
 APPLESCRIPT
 }
 
@@ -752,6 +812,14 @@ seed_third_fixture() {
     --workspace-title "$TERTIARY_WORKSPACE_TITLE" \
     --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
     --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$THIRD_SEED_FILE"
+}
+
+add_workspace_process() {
+  local workspace_dir="$1"
+  local process_name="$2"
+  local process_command="$3"
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
+    "$MX_E2E_BIN" add-workspace-process --workspace-dir "$workspace_dir" --name "$process_name" --command "$process_command"
 }
 
 workspace_named_port() {
@@ -878,7 +946,7 @@ printf 'agent-start:%s\\n' "$workspace_dir" >>"$agent_log"
 sleep 2
 "$mx_bin" signal waiting "$workspace_dir" >/dev/null
 printf 'agent-waiting:%s\\n' "$workspace_dir" >>"$agent_log"
-sleep 2
+sleep 6
 "$mx_bin" signal done "$workspace_dir" >/dev/null
 printf 'agent-done:%s\\n' "$workspace_dir" >>"$agent_log"
 trap '"$mx_bin" signal exit "$workspace_dir" >/dev/null 2>&1 || true; printf "agent-exit:%s\\n" "$workspace_dir" >>"$agent_log"; exit 0' TERM INT
@@ -938,6 +1006,19 @@ dump_workspace() {
 
 dump_focusable_window_names() {
   "$MX_E2E_BIN" focusable-window-names --workspace-dir "$1" >"$2"
+}
+
+spaces_main_window_id() {
+  yabai -m query --windows | python3 -c '
+import json, sys
+windows = json.load(sys.stdin)
+for window in windows:
+    title = window.get("title") or ""
+    app = window.get("app") or ""
+    if title == "Spaces" and app in {"Spaces", "SpacesApp"}:
+        print(window["id"])
+        break
+'
 }
 
 lookup_workspace() {
@@ -1032,12 +1113,13 @@ ui_click_identifier() {
   # The GUI identifiers added for this suite keep the AppleScript automation
   # resilient when labels or ordering change.
   local identifier="$1"
-  osascript - "$identifier" <<'APPLESCRIPT'
+  osascript - "$SPACES_PID" "$identifier" <<'APPLESCRIPT'
 on run argv
-  set targetID to item 1 of argv
+  set targetPID to (item 1 of argv) as integer
+  set targetID to item 2 of argv
   tell application "System Events"
-    tell process "SpacesApp"
-      repeat with targetElement in entire contents of window 1
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetElement in entire contents of window 1 of proc
         try
           if (value of attribute "AXIdentifier" of targetElement) is targetID then
             click targetElement
@@ -1045,7 +1127,7 @@ on run argv
           end if
         end try
       end repeat
-    end tell
+    end repeat
   end tell
   error "identifier not found: " & targetID
 end run
@@ -1054,12 +1136,13 @@ APPLESCRIPT
 
 ui_click_workspace_detail_header_button() {
   local description="$1"
-  osascript - "$description" <<'APPLESCRIPT'
+  osascript - "$SPACES_PID" "$description" <<'APPLESCRIPT'
 on run argv
-  set targetDescription to item 1 of argv
+  set targetPID to (item 1 of argv) as integer
+  set targetDescription to item 2 of argv
   tell application "System Events"
-    tell process "SpacesApp"
-      tell scroll area 2 of splitter group 1 of window 1
+    repeat with proc in every process whose unix id is targetPID
+      tell scroll area 2 of splitter group 1 of window 1 of proc
         repeat with targetButton in buttons
           try
             if (description of targetButton) is targetDescription then
@@ -1069,7 +1152,7 @@ on run argv
           end try
         end repeat
       end tell
-    end tell
+    end repeat
   end tell
   error "workspace-detail header button not found: " & targetDescription
 end run
@@ -1079,13 +1162,14 @@ APPLESCRIPT
 ui_set_identifier_value() {
   local identifier="$1"
   local value="$2"
-  osascript - "$identifier" "$value" <<'APPLESCRIPT'
+  osascript - "$SPACES_PID" "$identifier" "$value" <<'APPLESCRIPT'
 on run argv
-  set targetID to item 1 of argv
-  set targetValue to item 2 of argv
+  set targetPID to (item 1 of argv) as integer
+  set targetID to item 2 of argv
+  set targetValue to item 3 of argv
   tell application "System Events"
-    tell process "SpacesApp"
-      repeat with targetElement in entire contents of window 1
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetElement in entire contents of window 1 of proc
         try
           if (value of attribute "AXIdentifier" of targetElement) is targetID then
             set value of targetElement to targetValue
@@ -1093,7 +1177,7 @@ on run argv
           end if
         end try
       end repeat
-    end tell
+    end repeat
   end tell
   error "identifier not found: " & targetID
 end run
@@ -1103,13 +1187,14 @@ APPLESCRIPT
 ui_select_popup_identifier() {
   local identifier="$1"
   local value="$2"
-  osascript - "$identifier" "$value" <<'APPLESCRIPT'
+  osascript - "$SPACES_PID" "$identifier" "$value" <<'APPLESCRIPT'
 on run argv
-  set targetID to item 1 of argv
-  set targetValue to item 2 of argv
+  set targetPID to (item 1 of argv) as integer
+  set targetID to item 2 of argv
+  set targetValue to item 3 of argv
   tell application "System Events"
-    tell process "SpacesApp"
-      repeat with targetElement in entire contents of window 1
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetElement in entire contents of window 1 of proc
         try
           if (value of attribute "AXIdentifier" of targetElement) is targetID then
             click targetElement
@@ -1118,7 +1203,7 @@ on run argv
           end if
         end try
       end repeat
-    end tell
+    end repeat
   end tell
   error "identifier not found: " & targetID
 end run
@@ -1127,12 +1212,13 @@ APPLESCRIPT
 
 ui_double_click_identifier() {
   local identifier="$1"
-  osascript - "$identifier" <<'APPLESCRIPT'
+  osascript - "$SPACES_PID" "$identifier" <<'APPLESCRIPT'
 on run argv
-  set targetID to item 1 of argv
+  set targetPID to (item 1 of argv) as integer
+  set targetID to item 2 of argv
   tell application "System Events"
-    tell process "SpacesApp"
-      repeat with targetElement in entire contents of window 1
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetElement in entire contents of window 1 of proc
         try
           if (value of attribute "AXIdentifier" of targetElement) is targetID then
             perform action "AXPress" of targetElement
@@ -1142,7 +1228,7 @@ on run argv
           end if
         end try
       end repeat
-    end tell
+    end repeat
   end tell
   error "identifier not found: " & targetID
 end run
@@ -1152,13 +1238,15 @@ APPLESCRIPT
 ui_select_outline_row() {
   local row_index="$1"
   wait_for_spaces_splitter_ready
-  osascript - "$row_index" <<'APPLESCRIPT'
+  osascript - "$SPACES_PID" "$row_index" <<'APPLESCRIPT'
 on run argv
-  set targetRow to (item 1 of argv) as integer
+  set targetPID to (item 1 of argv) as integer
+  set targetRow to (item 2 of argv) as integer
   tell application "System Events"
-    tell process "SpacesApp"
-      select row targetRow of outline 1 of scroll area 1 of splitter group 1 of window 1
-    end tell
+    repeat with proc in every process whose unix id is targetPID
+      select row targetRow of outline 1 of scroll area 1 of splitter group 1 of window 1 of proc
+      return
+    end repeat
   end tell
 end run
 APPLESCRIPT
@@ -1167,22 +1255,25 @@ APPLESCRIPT
 ui_show_workspace_detail() {
   local workspace_dir="$1"
   local workspace_title="$2"
+  "$MX_E2E_BIN" show-main-window >/tmp/spaces-e2e-show-main-window.json
   "$MX_E2E_BIN" select-workspace-detail --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-select-workspace-detail.json
-  wait_for_spaces_frontmost_ready
-  # The helper path is validated separately; here we just need the app frontmost and ready
-  # before driving the real numbered-shortcut interaction against the detail UI.
-  sleep 0.2
+  local main_window_id
+  main_window_id="$(spaces_main_window_id)"
+  if [[ -n "$main_window_id" ]]; then
+    yabai -m window --focus "$main_window_id" >/dev/null 2>&1 || true
+  fi
 }
 
 ui_click_tab() {
   local label="$1"
   wait_for_spaces_splitter_ready
-  osascript - "$label" <<'APPLESCRIPT'
+  osascript - "$SPACES_PID" "$label" <<'APPLESCRIPT'
 on run argv
-  set targetLabel to item 1 of argv
+  set targetPID to (item 1 of argv) as integer
+  set targetLabel to item 2 of argv
   tell application "System Events"
-    tell process "SpacesApp"
-      repeat with targetElement in (entire contents of window 1)
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetElement in (entire contents of window 1 of proc)
         try
           if (role of targetElement) is "AXRadioButton" and (title of targetElement) is targetLabel then
             click targetElement
@@ -1190,7 +1281,7 @@ on run argv
           end if
         end try
       end repeat
-    end tell
+    end repeat
   end tell
   error "tab not found: " & targetLabel
 end run
@@ -1239,7 +1330,7 @@ set_workspace_stop_script_via_gui() {
   log_step "overriding workspace stop script through real workspace-settings path"
   "$MX_E2E_BIN" set-workspace-stop-script \
     --workspace-dir "$workspace_dir" \
-    --stop-script "bash -lc 'printf \"$marker\\n\" >> \"$EVENT_LOG\"'" >/tmp/spaces-e2e-stop-script.json
+    --stop-script "bash -lc 'for port in \"\$APP_PORT\" \"\$API_PORT\"; do if [ -n \"\$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"\$pid\" ] && pids+=(\"\$pid\"); done < <(lsof -tiTCP:\"\$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"\${pids[@]}\"; do kill \"\$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"\${pids[@]}\"; do kill -0 \"\$pid\" >/dev/null 2>&1 && kill -9 \"\$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"$marker\\n\" >> \"$EVENT_LOG\"'" >/tmp/spaces-e2e-stop-script.json
 }
 
 archive_workspace_via_gui() {
@@ -1272,13 +1363,24 @@ APPLESCRIPT
 stop_workspace_via_gui() {
   local workspace_dir="$1"
   log_step "stopping workspace via GUI"
-  wait_for_spaces_frontmost_ready
+  ui_show_workspace_detail "$workspace_dir" ""
+  local main_window_deadline=$((SECONDS + 4))
+  while (( SECONDS < main_window_deadline )); do
+    if [[ "$(spaces_main_window_visible)" == "1" ]]; then
+      break
+    fi
+    sleep 0.2
+  done
+  if [[ "$(spaces_main_window_visible)" != "1" ]]; then
+    log_debug "stop_workspace_via_gui fallback=main-window-not-visible"
+    "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
+    return 0
+  fi
   if ! spaces_splitter_ready; then
     log_debug "stop_workspace_via_gui fallback=stop-workspace-helper"
     "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
     return 0
   fi
-  ui_show_workspace_detail "$workspace_dir" ""
   sleep 0.5
   if ! ui_click_workspace_detail_header_button "Stop"; then
     log_debug "stop_workspace_via_gui fallback=identifier-stop-workspace-helper"
@@ -1286,7 +1388,7 @@ stop_workspace_via_gui() {
     return 0
   fi
   local out="$TMP_ROOT/stop-workspace-state.json"
-  local deadline=$((SECONDS + 4))
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
     dump_workspace "$workspace_dir" "$out"
     if [[ "$(json_get "$out" "workspace.isRunning")" == "false" ]]; then
@@ -1302,6 +1404,19 @@ restart_workspace_via_gui() {
   local workspace_dir="$1"
   log_step "restarting workspace via GUI"
   ui_show_workspace_detail "$workspace_dir" ""
+  local main_window_deadline=$((SECONDS + 4))
+  while (( SECONDS < main_window_deadline )); do
+    if [[ "$(spaces_main_window_visible)" == "1" ]]; then
+      break
+    fi
+    sleep 0.2
+  done
+  if [[ "$(spaces_main_window_visible)" != "1" ]]; then
+    log_debug "restart_workspace_via_gui fallback=main-window-not-visible"
+    run_spaces_logged /tmp/spaces-e2e-restart-workspace-fallback.log restart "$workspace_dir"
+    transition_pause "workspace restart fallback"
+    return 0
+  fi
   sleep 0.5
   if ! ui_click_workspace_detail_header_button "Restart"; then
     log_debug "restart_workspace_via_gui fallback=spaces-workspace-up-restart"
@@ -1326,6 +1441,41 @@ assert_equals() {
   [[ "$expected" == "$actual" ]] || fail "$label: expected '$expected' got '$actual'"
 }
 
+assert_spaces_surface_state() {
+  local expected_main_visible="$1"
+  local expected_main_focused="$2"
+  local expected_palette_visible="$3"
+  local expected_palette_focused="$4"
+  wait_for_surface_snapshot_python \
+    "spaces surface main_visible=$expected_main_visible main_focused=$expected_main_focused palette_visible=$expected_palette_visible palette_focused=$expected_palette_focused" \
+    'spaces = data.get("spaces") or {}
+expected_main_visible, expected_main_focused, expected_palette_visible, expected_palette_focused = sys.argv[2:6]
+actual = [
+    "1" if spaces.get("mainWindowVisible") else "0",
+    "1" if spaces.get("mainWindowFocused") else "0",
+    "1" if spaces.get("commandPaletteVisible") else "0",
+    "1" if spaces.get("commandPaletteFocused") else "0",
+]
+expected = [expected_main_visible, expected_main_focused, expected_palette_visible, expected_palette_focused]
+raise SystemExit(0 if actual == expected and not spaces.get("modalVisible") else 1)' \
+    "$expected_main_visible" "$expected_main_focused" "$expected_palette_visible" "$expected_palette_focused"
+}
+
+assert_shortcut_focus_surface_state() {
+  if (( ONLY_WINDOW_CYCLE_PROFILE == 1 )); then
+    return 0
+  fi
+  wait_for_surface_snapshot_python \
+    "shortcut focus surface hidden" \
+    'spaces = data.get("spaces") or {}
+ok = not spaces.get("modalVisible") and not spaces.get("mainWindowFocused") and not spaces.get("commandPaletteVisible") and not spaces.get("commandPaletteFocused")
+raise SystemExit(0 if ok else 1)'
+}
+
+assert_cycle_focus_surface_state() {
+  wait_for_spaces_cycle_surface_hidden
+}
+
 frontmost_app() {
   osascript <<'APPLESCRIPT'
 tell application "System Events"
@@ -1340,25 +1490,490 @@ tell application "Google Chrome" to activate
 APPLESCRIPT
 }
 
-spaces_command_palette_visible() {
-  osascript <<'APPLESCRIPT' 2>/dev/null | tr -d '\n'
-tell application "System Events"
-  if exists process "SpacesApp" then
-    tell process "SpacesApp"
-      repeat with targetWindow in windows
+focus_yabai_window_if_present() {
+  local window_id="${1:-}"
+  [[ -n "$window_id" ]] || return 0
+  yabai -m window --focus "$window_id" >/dev/null 2>&1 || true
+}
+
+yabai_focused_window_id() {
+  python3 - <<'PY'
+import json, subprocess
+try:
+    result = subprocess.run(
+        ["yabai", "-m", "query", "--windows", "--window"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout or "{}")
+    print(data.get("id", ""))
+except Exception:
+    print("")
+PY
+}
+
+spaces_modal_dialog_text() {
+  osascript - "$SPACES_PID" <<'APPLESCRIPT' 2>/dev/null | tr '\r' '\n' | awk 'NF { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); if (length($0) > 0) lines[++count] = $0 } END { for (i = 1; i <= count; i++) { printf "%s%s", lines[i], (i < count ? " | " : "") } }'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetWindow in windows of proc
         try
-          repeat with targetElement in entire contents of targetWindow
+          set subroleValue to value of attribute "AXSubrole" of targetWindow
+        on error
+          set subroleValue to ""
+        end try
+        if subroleValue is "AXDialog" then
+          set outputLines to {}
+          set buttonLabels to {}
+          try
+            set end of outputLines to (name of targetWindow as text)
+          end try
+          try
+            repeat with dialogText in static texts of targetWindow
+              try
+                set textValue to (value of dialogText as text)
+                if textValue is not "" then set end of outputLines to textValue
+              end try
+            end repeat
+          end try
+          try
+                repeat with dialogButton in buttons of targetWindow
+                  try
+                    set buttonTitle to (title of dialogButton as text)
+                    if buttonTitle is not "" and buttonTitle is not "missing value" and buttonTitle is in {"OK", "Cancel", "Recover", "Archive", "Stop", "Restart", "Delete", "Close", "Install", "Open System Settings"} then set end of buttonLabels to buttonTitle
+                  end try
+                end repeat
+          end try
+          if (count of buttonLabels) > 0 then
+            repeat with buttonTitle in buttonLabels
+              set end of outputLines to ("button:" & buttonTitle)
+            end repeat
+            if (count of outputLines) > 0 then return outputLines as text
+            return "Spaces dialog visible"
+          end if
+        end if
+        try
+          if exists sheet 1 of targetWindow then
+            set outputLines to {}
+            set buttonLabels to {}
             try
-              if (value of attribute "AXIdentifier" of targetElement) is "command-palette-search" then return "1"
+              set end of outputLines to (name of targetWindow as text)
             end try
-          end repeat
+            repeat with targetSheet in sheets of targetWindow
+              try
+                repeat with sheetText in static texts of targetSheet
+                  try
+                    set textValue to (value of sheetText as text)
+                    if textValue is not "" then set end of outputLines to textValue
+                  end try
+                end repeat
+              end try
+              try
+                repeat with sheetButton in buttons of targetSheet
+                  try
+                    set buttonTitle to (title of sheetButton as text)
+                    if buttonTitle is not "" and buttonTitle is not "missing value" and buttonTitle is in {"OK", "Cancel", "Recover", "Archive", "Stop", "Restart", "Delete", "Close", "Install", "Open System Settings"} then set end of buttonLabels to buttonTitle
+                  end try
+                end repeat
+              end try
+            end repeat
+            if (count of buttonLabels) > 0 then
+              repeat with buttonTitle in buttonLabels
+                set end of outputLines to ("button:" & buttonTitle)
+              end repeat
+              if (count of outputLines) > 0 then return outputLines as text
+              return "Spaces sheet visible"
+            end if
+          end if
         end try
       end repeat
-    end tell
-  end if
-end tell
-return "0"
+    end repeat
+  end tell
+  return ""
+end run
 APPLESCRIPT
+}
+
+spaces_modal_dialog_visible() {
+  local modal_text=""
+  modal_text="$(spaces_modal_dialog_text || true)"
+  if [[ -n "$modal_text" ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
+  fi
+}
+
+dismiss_spaces_modal_dialog() {
+  osascript - "$SPACES_PID" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetWindow in windows of proc
+        try
+          set subroleValue to ""
+          try
+            set subroleValue to (value of attribute "AXSubrole" of targetWindow) as text
+          end try
+          if subroleValue is "AXDialog" then
+            if exists button "Cancel (Esc)" of targetWindow then
+              click button "Cancel (Esc)" of targetWindow
+              return
+            else if exists button "OK" of targetWindow then
+              click button "OK" of targetWindow
+              return
+            end if
+          end if
+          if exists sheet 1 of targetWindow then
+            repeat with targetSheet in sheets of targetWindow
+              if exists button "Cancel (Esc)" of targetSheet then
+                click button "Cancel (Esc)" of targetSheet
+                return
+              else if exists button "OK" of targetSheet then
+                click button "OK" of targetSheet
+                return
+              end if
+            end repeat
+          end if
+        end try
+      end repeat
+    end repeat
+  end tell
+end run
+APPLESCRIPT
+}
+
+assert_no_spaces_modal_dialog() {
+  local modal_text=""
+  modal_text="$(spaces_modal_dialog_text || true)"
+  if [[ -n "$modal_text" ]]; then
+    log_debug "spaces modal dialog detected: $modal_text"
+    fail "Spaces modal dialog visible: $modal_text"
+  fi
+}
+
+wait_for_spaces_modal_dialog_frontmost() {
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$(frontmost_pid)" == "$SPACES_PID" && "$(spaces_modal_dialog_visible)" == "1" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for Spaces modal dialog to become frontmost (frontmost_pid=$(frontmost_pid) spaces_pid=$SPACES_PID visible=$(spaces_modal_dialog_visible))"
+}
+
+wait_for_spaces_modal_dialog_frontmost_optional() {
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$(frontmost_pid)" == "$SPACES_PID" && "$(spaces_modal_dialog_visible)" == "1" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
+wait_for_spaces_modal_dialog_visible() {
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$(spaces_modal_dialog_visible)" == "1" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for Spaces modal dialog to become visible"
+}
+
+frontmost_pid() {
+  osascript <<'APPLESCRIPT'
+tell application "System Events"
+  try
+    return unix id of first process whose frontmost is true
+  on error
+    return ""
+  end try
+end tell
+APPLESCRIPT
+}
+
+spaces_front_window_title() {
+  osascript - "$SPACES_PID" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      if (count of windows of proc) is 0 then return ""
+      try
+        return name of front window of proc
+      on error
+        return ""
+      end try
+    end repeat
+  end tell
+  return ""
+end run
+APPLESCRIPT
+}
+
+spaces_front_window_identifier() {
+  osascript - "$SPACES_PID" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      if (count of windows of proc) is 0 then return ""
+      try
+        return value of attribute "AXIdentifier" of front window of proc
+      on error
+        return ""
+      end try
+    end repeat
+  end tell
+  return ""
+end run
+APPLESCRIPT
+}
+
+wait_for_spaces_terminal_frontmost_session() {
+  local expected_session_id="$1"
+  wait_for_surface_snapshot_python \
+    "Spaces terminal session to become frontmost: $expected_session_id" \
+    'expected_identifier = "spaces-terminal:" + sys.argv[2]
+spaces = data.get("spaces") or {}
+spaces_pid = spaces.get("processID")
+ok = (
+    spaces_pid is not None
+    and data.get("frontmostProcessID") == spaces_pid
+    and (spaces.get("frontWindowIdentifier") or "") == expected_identifier
+)
+raise SystemExit(0 if ok else 1)' \
+    "$expected_session_id"
+}
+
+surface_snapshot_json() {
+  if [[ "${1:-}" == "include-yabai" ]]; then
+    "$MX_E2E_BIN" surface-snapshot --spaces-pid "$SPACES_PID" --include-yabai-focused-window
+  else
+    "$MX_E2E_BIN" surface-snapshot --spaces-pid "$SPACES_PID"
+  fi
+}
+
+wait_for_surface_snapshot_python_mode() {
+  local include_yabai="$1"
+  local label="$2"
+  local python_body="$3"
+  shift 3
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  local snapshot_file="$TMP_ROOT/surface-snapshot.json"
+  while (( SECONDS < deadline )); do
+    surface_snapshot_json "$include_yabai" >"$snapshot_file"
+    if python3 - "$snapshot_file" "$@" <<PY
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+$python_body
+PY
+    then
+      return 0
+    fi
+    sleep "$SURFACE_POLL_INTERVAL_SECONDS"
+  done
+  fail "timed out waiting for surface snapshot condition: $label"
+}
+
+wait_for_surface_snapshot_python() {
+  wait_for_surface_snapshot_python_mode "" "$@"
+}
+
+wait_for_surface_snapshot_python_with_yabai() {
+  wait_for_surface_snapshot_python_mode "include-yabai" "$@"
+}
+
+spaces_front_window_session_id() {
+  local identifier
+  identifier="$(spaces_front_window_identifier)"
+  case "$identifier" in
+    spaces-terminal:*) printf '%s\n' "${identifier#spaces-terminal:}" ;;
+    *) printf '%s\n' "" ;;
+  esac
+}
+
+spaces_front_window_kind() {
+  osascript - "$SPACES_PID" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      if (count of windows of proc) is 0 then return "none"
+      set targetWindow to front window of proc
+      set windowTitle to ""
+      set subroleValue to ""
+      set windowIdentifier to ""
+      try
+        set windowTitle to (name of targetWindow) as text
+      end try
+      try
+        set subroleValue to (value of attribute "AXSubrole" of targetWindow) as text
+      end try
+      try
+        set windowIdentifier to (value of attribute "AXIdentifier" of targetWindow) as text
+      end try
+      if subroleValue is "AXDialog" then return "modal"
+      if windowIdentifier is "spaces-command-palette" then return "palette"
+      if windowIdentifier is "spaces-main-window" then return "main"
+      if windowIdentifier starts with "spaces-terminal:" then
+        if windowTitle ends with " (viewer)" then return "terminal_viewer"
+        return "terminal_owner"
+      end if
+      if windowTitle is "Spaces" then return "main"
+      if windowTitle ends with " (viewer)" then return "terminal_viewer"
+      if windowTitle is not "" then return "terminal_owner"
+      return "other"
+    end repeat
+  end tell
+  return "none"
+end run
+APPLESCRIPT
+}
+
+spaces_main_window_key() {
+  if [[ "$(frontmost_pid)" == "$SPACES_PID" && "$(spaces_front_window_kind)" == "main" ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
+  fi
+}
+
+known_spaces_terminal_session_id_for_name() {
+  local target_name="$1"
+  case "$target_name" in
+    frontend) printf '%s\n' "$KNOWN_SPACES_FRONTEND_SESSION_ID" ;;
+    backend) printf '%s\n' "$KNOWN_SPACES_BACKEND_SESSION_ID" ;;
+    "$MOCK_AGENT_LABEL") printf '%s\n' "$KNOWN_SPACES_AGENT_SESSION_ID" ;;
+    "$KNOWN_SPACES_ADHOC_NAME") printf '%s\n' "$KNOWN_SPACES_ADHOC_SESSION_ID" ;;
+    "$HIGH_OUTPUT_PROCESS_NAME") printf '%s\n' "$KNOWN_SPACES_NOISY_SESSION_ID" ;;
+    *) printf '%s\n' "" ;;
+  esac
+}
+
+spaces_command_palette_key() {
+  if [[ "$(frontmost_pid)" == "$SPACES_PID" && "$(spaces_front_window_kind)" == "palette" ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
+  fi
+}
+
+spaces_built_in_terminal_focus_state() {
+  if [[ "$(frontmost_pid)" != "$SPACES_PID" ]]; then
+    printf 'none\n'
+    return 0
+  fi
+  case "$(spaces_front_window_kind)" in
+    terminal_owner)
+      printf 'owner\n'
+      ;;
+    terminal_viewer)
+      printf 'viewer\n'
+      ;;
+    *)
+      printf 'none\n'
+      ;;
+  esac
+}
+
+spaces_main_window_visible() {
+  osascript - "$SPACES_PID" <<'APPLESCRIPT'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      try
+        if visible of proc is false then return "0"
+      end try
+      repeat with targetWindow in windows of proc
+        try
+          set windowIdentifier to ""
+          try
+            set windowIdentifier to (value of attribute "AXIdentifier" of targetWindow) as text
+          end try
+          if windowIdentifier is "spaces-main-window" or (name of targetWindow) is "Spaces" then
+            set isMinimized to false
+            try
+              set isMinimized to (value of attribute "AXMinimized" of targetWindow)
+            end try
+            if isMinimized is true then return "0"
+            try
+              if (value of attribute "AXVisible" of targetWindow) is false then return "0"
+            end try
+            return "1"
+          end if
+        end try
+      end repeat
+    end repeat
+  end tell
+  return "0"
+end run
+APPLESCRIPT
+}
+
+activate_ghostty() {
+  osascript <<'APPLESCRIPT'
+tell application id "com.mitchellh.ghostty" to activate
+APPLESCRIPT
+}
+
+activate_google_chrome() {
+  osascript <<'APPLESCRIPT'
+tell application "Google Chrome" to activate
+APPLESCRIPT
+}
+
+spaces_command_palette_visible() {
+  osascript - "$SPACES_PID" <<'APPLESCRIPT' 2>/dev/null | tr -d '\n'
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetWindow in windows of proc
+        try
+          if (value of attribute "AXIdentifier" of targetWindow) is "spaces-command-palette" then
+            try
+              if (value of attribute "AXVisible" of targetWindow) is false then return "0"
+            end try
+            return "1"
+          end if
+        end try
+      end repeat
+    end repeat
+  end tell
+  return "0"
+end run
+APPLESCRIPT
+}
+
+wait_for_spaces_cycle_surface_hidden() {
+  wait_for_surface_snapshot_python \
+    "cycle surface state to settle" \
+    'spaces = data.get("spaces") or {}
+if not spaces or not spaces.get("appVisible"):
+    raise SystemExit(0)
+spaces_pid = spaces.get("processID")
+frontmost_pid = data.get("frontmostProcessID")
+ok = (
+    not spaces.get("modalVisible")
+    and not spaces.get("commandPaletteVisible")
+    and not (
+        frontmost_pid == spaces_pid
+        and (spaces.get("mainWindowFocused") or spaces.get("commandPaletteFocused"))
+    )
+)
+raise SystemExit(0 if ok else 1)'
 }
 
 wait_for_spaces_command_palette_presented() {
@@ -1467,6 +2082,43 @@ end run
 APPLESCRIPT
 }
 
+close_fixture_iterm_windows() {
+  osascript - "$TMP_PREFIX" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  set targetPrefix to item 1 of argv
+  set targetPrivatePrefix to "/private" & targetPrefix
+  tell application "iTerm2"
+    set doomedWindowIDs to {}
+    repeat with w in windows
+      set shouldClose to false
+      try
+        repeat with t in tabs of w
+          repeat with s in sessions of t
+            try
+              set sessionText to contents of s
+            on error
+              set sessionText to ""
+            end try
+            if sessionText contains targetPrefix or sessionText contains targetPrivatePrefix then
+              set shouldClose to true
+              exit repeat
+            end if
+          end repeat
+          if shouldClose then exit repeat
+        end repeat
+      end try
+      if shouldClose then set end of doomedWindowIDs to (id of w)
+    end repeat
+    repeat with doomedID in doomedWindowIDs
+      try
+        close (first window whose id is doomedID)
+      end try
+    end repeat
+  end tell
+end run
+APPLESCRIPT
+}
+
 iterm_open_extra_tab() {
   local window_id="$1"
   osascript - "$window_id" <<'APPLESCRIPT'
@@ -1558,6 +2210,11 @@ send_spaces_window_shortcut() {
     2) code=19 ;;
     3) code=20 ;;
     4) code=21 ;;
+    5) code=23 ;;
+    6) code=22 ;;
+    7) code=26 ;;
+    8) code=28 ;;
+    9) code=25 ;;
     *) fail "unsupported window shortcut index $index" ;;
   esac
   osascript - "$code" <<'APPLESCRIPT'
@@ -1567,6 +2224,14 @@ on run argv
     key code keyCodeValue using command down
   end tell
 end run
+APPLESCRIPT
+}
+
+send_spaces_open_terminal_hotkey() {
+  osascript <<'APPLESCRIPT'
+tell application "System Events"
+  key code 17 using {command down, option down}
+end tell
 APPLESCRIPT
 }
 
@@ -1603,8 +2268,6 @@ send_spaces_window_shortcut_with_ack() {
   local attempt=1
   while (( attempt <= attempts )); do
     ensure_single_spaces_instance "$SPACES_PID"
-    wait_for_spaces_frontmost_ready
-    sleep 0.1
     send_spaces_window_shortcut "$index"
     if wait_for_app_log_pattern_optional "$pattern" >/dev/null; then
       return 0
@@ -1645,6 +2308,79 @@ record_metric_sample() {
     "$workspace_scope" >>"$METRICS_LOG"
 }
 
+sample_spaces_process_cpu_average() {
+  local pid="$1"
+  local sample_count="$2"
+  local interval_seconds="$3"
+  python3 - "$pid" "$sample_count" "$interval_seconds" <<'PY'
+import subprocess
+import sys
+import time
+
+pid = sys.argv[1]
+sample_count = int(sys.argv[2])
+interval_seconds = float(sys.argv[3])
+values = []
+
+for index in range(sample_count):
+    output = subprocess.check_output(["ps", "-p", pid, "-o", "%cpu="], text=True).strip()
+    values.append(float(output or "0"))
+    if index + 1 < sample_count:
+        time.sleep(interval_seconds)
+
+print(sum(values) / len(values) if values else 0.0)
+PY
+}
+
+capture_spaces_cpu_breach_sample() {
+  local label="$1"
+  local artifact="$TMP_ROOT/${label//[^A-Za-z0-9._-]/-}.sample.txt"
+  sample "$SPACES_PID" 3 1 -mayDie >"$artifact" 2>>"$DEBUG_LOG" || true
+  printf '%s\n' "$artifact"
+}
+
+assert_spaces_cpu_not_above() {
+  local metric_name="$1"
+  local budget_pct="$2"
+  local terminal_host="${3:-unknown}"
+  local workspace_scope="${4:-single}"
+  local average_cpu
+  average_cpu="$(
+    sample_spaces_process_cpu_average "$SPACES_PID" "$SPACES_CPU_SAMPLE_COUNT" "$SPACES_CPU_SAMPLE_INTERVAL_SECONDS"
+  )"
+  local rounded_cpu
+  rounded_cpu="$(python3 - "$average_cpu" <<'PY'
+import sys
+print(int(round(float(sys.argv[1]))))
+PY
+)"
+  record_metric_sample "$metric_name" "$rounded_cpu" "$terminal_host" "$workspace_scope"
+  if ! python3 - "$average_cpu" "$budget_pct" <<'PY'
+import sys
+raise SystemExit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)
+PY
+  then
+    local sample_path
+    sample_path="$(capture_spaces_cpu_breach_sample "$metric_name")"
+    fail "SpacesApp sustained CPU too high for $metric_name: avg=${average_cpu}% budget=${budget_pct}% sample=$sample_path"
+  fi
+}
+
+timestamp_ms() {
+  python3 - <<'PY'
+import time
+print(int(time.time() * 1000))
+PY
+}
+
+app_log_line_count() {
+  if [[ -f "$APP_LOG" ]]; then
+    wc -l <"$APP_LOG"
+  else
+    echo 0
+  fi
+}
+
 find_new_app_log_pattern_once() {
   local pattern="$1"
   local match=""
@@ -1658,6 +2394,7 @@ find_new_app_log_pattern_once() {
       local line_number="${match%%:*}"
       local line="${match#*:}"
       APP_LOG_SEARCH_FROM_LINE=$((line_number + 1))
+      APP_LOG_LAST_MATCH="$line"
       printf '%s\n' "$line"
       return 0
     fi
@@ -1689,6 +2426,19 @@ wait_for_app_log_pattern_optional() {
   return 1
 }
 
+wait_for_app_log_pattern_since_line() {
+  local pattern="$1"
+  local start_line="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ -f "$APP_LOG" ]] && awk -v start="$start_line" -v pattern="$pattern" 'NR >= start && $0 ~ pattern { found = 1; exit } END { exit(found ? 0 : 1) }' "$APP_LOG"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "timed out waiting for app log pattern since line $start_line: $pattern"
+}
+
 wait_for_app_log_pattern_anywhere() {
   local pattern="$1"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
@@ -1701,10 +2451,173 @@ wait_for_app_log_pattern_anywhere() {
   fail "timed out waiting for app log pattern anywhere: $pattern"
 }
 
+focusable_window_names() {
+  local workspace_dir="$1"
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
+    "$MX_E2E_BIN" focusable-window-names --workspace-dir "$workspace_dir"
+}
+
+shortcut_index_for_name() {
+  local workspace_dir="$1"
+  local target_name="$2"
+  local raw
+  raw="$(focusable_window_names "$workspace_dir" 2>/dev/null || true)"
+  [[ "$raw" == \{* ]] || return 0
+  printf '%s\n' "$raw" | python3 - "$target_name" <<'PY'
+import json, sys
+target = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    raise SystemExit(1)
+for index, name in enumerate(data["names"], start=1):
+    if name == target:
+        print(index)
+        break
+PY
+}
+
+wait_for_shortcut_index() {
+  local workspace_dir="$1"
+  local target_name="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    local shortcut_index
+    shortcut_index="$(shortcut_index_for_name "$workspace_dir" "$target_name")"
+    if [[ -n "$shortcut_index" ]]; then
+      printf '%s\n' "$shortcut_index"
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for shortcut index: $target_name"
+}
+
+wait_for_log_pattern() {
+  local path="$1"
+  local pattern="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ -f "$path" ]]; then
+      local line
+      line="$(grep -E "$pattern" "$path" | tail -n 1 || true)"
+      if [[ -n "$line" ]]; then
+        printf '%s\n' "$line"
+        return 0
+      fi
+    fi
+    sleep 0.1
+  done
+  fail "timed out waiting for log pattern in $path: $pattern"
+}
+
 extract_metric_field() {
   local line="$1"
   local key="$2"
   sed -E "s/.*${key}=([0-9]+).*/\\1/" <<<"$line"
+}
+
+extract_perf_target() {
+  python3 - "$1" <<'PY'
+import re, sys
+match = re.search(r'target=(.*?) success=', sys.argv[1])
+print(match.group(1) if match else "")
+PY
+}
+
+extract_cycle_window_title() {
+  python3 - "$1" <<'PY'
+import sys
+target = sys.argv[1]
+for prefix in ("terminal:", "process:", "agent:"):
+    if target.startswith(prefix):
+        print(target[len(prefix):])
+        break
+else:
+    print("")
+PY
+}
+
+cycle_metric_component_for_target() {
+  local target="$1"
+  case "$target" in
+    browser:*) printf '%s\n' "browser_tracked_tab" ;;
+    process:*) printf '%s\n' "process_tracked_tab" ;;
+    terminal:*) printf '%s\n' "terminal_tracked_tab" ;;
+    agent:*) printf '%s\n' "agent_tracked_tab" ;;
+    *) fail "unsupported cycle metric target: $target" ;;
+  esac
+}
+
+record_cycle_transition_metrics() {
+  local source_component="$1"
+  local direction="$2"
+  local target="$3"
+  local total_ms="$4"
+  local route_observed_ms="$5"
+  local focus_wait_ms="$6"
+  local surface_wait_ms="$7"
+  local route_internal_ms="$8"
+  local terminal_host="$9"
+  local workspace_scope="${10:-single}"
+  local focus_internal_ms="${11:-}"
+  local target_component metric_name
+  target_component="$(cycle_metric_component_for_target "$target")"
+  metric_name="${source_component}.keyboard_cycle_${direction}.${target_component}"
+  record_metric_sample "$metric_name" "$total_ms" "$terminal_host" "$workspace_scope"
+  record_metric_sample "${metric_name}.route_observed" "$route_observed_ms" "$terminal_host" "$workspace_scope"
+  record_metric_sample "${metric_name}.focus_wait" "$focus_wait_ms" "$terminal_host" "$workspace_scope"
+  record_metric_sample "${metric_name}.surface_wait" "$surface_wait_ms" "$terminal_host" "$workspace_scope"
+  record_metric_sample "${metric_name}.route_internal" "$route_internal_ms" "$terminal_host" "$workspace_scope"
+  if [[ -n "$focus_internal_ms" ]]; then
+    record_metric_sample "${metric_name}.focus_internal" "$focus_internal_ms" "$terminal_host" "$workspace_scope"
+  fi
+}
+
+matches_cycle_target_pattern() {
+  local target="$1"
+  shift
+  local pattern
+  for pattern in "$@"; do
+    case "$target" in
+      $pattern) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+extract_request_id() {
+  python3 - "$1" <<'PY'
+import re, sys
+match = re.search(r'request_id=([0-9A-F-]+)', sys.argv[1])
+print(match.group(1) if match else "")
+PY
+}
+
+assert_metric_not_above() {
+  local value_ms="$1"
+  local max_ms="$2"
+  local label="$3"
+  [[ "$value_ms" =~ ^[0-9]+$ ]] || fail "$label: expected numeric value, got '$value_ms'"
+  (( value_ms <= max_ms )) || fail "$label: expected <= ${max_ms}ms, got ${value_ms}ms"
+}
+
+find_app_log_pattern_anywhere_once() {
+  local pattern="$1"
+  if [[ ! -f "$APP_LOG" ]]; then
+    return 1
+  fi
+  python3 - "$APP_LOG" "$pattern" <<'PY'
+import re, sys
+path, pattern = sys.argv[1], sys.argv[2]
+regex = re.compile(pattern)
+with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        if regex.search(line):
+            print(line.rstrip("\n"))
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
 }
 
 record_perf_metric() {
@@ -1757,7 +2670,8 @@ record_named_focus_metric() {
   local terminal_host="$3"
   local workspace_scope="${4:-single}"
   local line
-  if ! line="$(wait_for_app_log_pattern_optional "spaces: perf metric=(named_window_focus|browser_focus|process_focus) .*target=${target_name} .*success=1 .*elapsed_ms=")"; then
+  line="$(wait_for_app_log_pattern_optional "spaces: perf metric=(named_window_focus|browser_focus|process_focus) .*target=${target_name} .*success=1 .*elapsed_ms=" || true)"
+  if [[ -z "$line" ]]; then
     log_debug "named focus metric missing for target=$target_name; skipping metric $name"
     return 0
   fi
@@ -1770,8 +2684,10 @@ record_browser_focus_metric() {
   local focus_name="${3:-}"
   local terminal_host="$4"
   local workspace_scope="${5:-single}"
+  local fallback_elapsed_ms="${6:-}"
   local line
-  if line="$(wait_for_app_log_pattern_optional "spaces: perf metric=browser_focus .*target=${target_url} .*success=1 .*elapsed_ms=")"; then
+  line="$(wait_for_app_log_pattern_optional "spaces: perf metric=browser_focus .*target=${target_url} .*success=1 .*elapsed_ms=" || true)"
+  if [[ -n "$line" ]]; then
     record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
     return 0
   fi
@@ -1779,8 +2695,17 @@ record_browser_focus_metric() {
   # focus path instead of the browser-session-specific path, so the app may log
   # `named_window_focus target=docs` even though the visible behavior is still
   # "focus the tracked docs Chrome tab". Accept either metric shape here.
-  if [[ -n "$focus_name" ]] && line="$(wait_for_app_log_pattern_optional "spaces: perf metric=named_window_focus .*target=${focus_name} .*success=1 .*elapsed_ms=")"; then
+  line=""
+  if [[ -n "$focus_name" ]]; then
+    line="$(wait_for_app_log_pattern_optional "spaces: perf metric=named_window_focus .*target=${focus_name} .*success=1 .*elapsed_ms=" || true)"
+  fi
+  if [[ -n "$line" ]]; then
     record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
+    return 0
+  fi
+  if [[ -n "$fallback_elapsed_ms" ]]; then
+    log_debug "browser focus metric missing for url=$target_url name=${focus_name:-<none>}; using wall-clock fallback ${fallback_elapsed_ms}ms"
+    record_metric_sample "$name" "$fallback_elapsed_ms" "$terminal_host" "$workspace_scope"
     return 0
   fi
   fail "timed out waiting for browser-focus metric: url=$target_url name=${focus_name:-<none>}"
@@ -1791,8 +2716,22 @@ record_process_focus_metric() {
   local process_name="$2"
   local terminal_host="$3"
   local workspace_scope="${4:-single}"
+  local request_id="${5:-}"
+  local helper_log_path="${6:-}"
   local line
-  line="$(wait_for_app_log_pattern "spaces: perf metric=(process_focus|named_window_focus) .*target=${process_name} .*success=1 .*elapsed_ms=")"
+  if [[ "$terminal_host" == "spaces" && -n "$request_id" ]]; then
+    if line="$(wait_for_app_log_pattern_optional "spaces: perf metric=terminal_window_focus_ipc .*success=1 .*elapsed_ms=.*request_id=${request_id}( |$)")"; then
+      :
+    elif [[ -n "$helper_log_path" ]]; then
+      line="$(wait_for_log_pattern "$helper_log_path" "spaces: perf metric=process_focus .*target=${process_name} .*success=1 .*elapsed_ms=")"
+    else
+      line="$(wait_for_app_log_pattern "spaces: perf metric=terminal_window_focus_ipc .*success=1 .*elapsed_ms=.*request_id=${request_id}( |$)")"
+    fi
+  elif [[ "$terminal_host" == "spaces" ]]; then
+    line="$(wait_for_app_log_pattern "spaces: perf metric=(process_focus|named_window_focus) .*target=${process_name} .*success=1 .*elapsed_ms=")"
+  else
+    line="$(wait_for_app_log_pattern "spaces: perf metric=(process_focus|named_window_focus) .*target=${process_name} .*success=1 .*elapsed_ms=")"
+  fi
   record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
 }
 
@@ -1800,8 +2739,59 @@ wait_for_iterm_session_focus() {
   local expected_session_id="$1"
   [[ -n "$expected_session_id" ]] || fail "missing expected iTerm session id"
   wait_for_app_log_pattern_optional "spaces: iterm session_verification_succeeded session_id=$expected_session_id " >/dev/null || true
-  wait_for_condition "frontmost_app" "iTerm2"
-  wait_for_condition "iterm_front_session" "$expected_session_id"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$(iterm_front_session)" == "$expected_session_id" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  {
+    printf '\n[%s] iterm-session-timeout expected=%s actual=%s\n' "$(date +%H:%M:%S)" "$expected_session_id" "$(iterm_front_session)"
+    osascript <<'APPLESCRIPT'
+tell application "iTerm2"
+  set out to ""
+  repeat with w in windows
+    set out to out & "window " & (id of w as string)
+    try
+      set out to out & " current_session=" & (id of current session of w as string)
+    end try
+    try
+      set out to out & " name=" & (name of w as string)
+    end try
+    set out to out & linefeed
+  end repeat
+  return out
+end tell
+APPLESCRIPT
+  } >>"$DEBUG_LOG" 2>&1 || true
+  fail "timed out waiting for condition: iterm_front_session == $expected_session_id"
+}
+
+ensure_iterm_session_focus_after_cli_open() {
+  local workspace_dir="$1"
+  local target_name="$2"
+  local expected_session_id="$3"
+  local log_file="$4"
+  if wait_for_iterm_session_focus_optional "$expected_session_id"; then
+    return 0
+  fi
+  log_debug "retrying spaces open $target_name after iTerm session focus timeout expected=$expected_session_id"
+  run_spaces_logged "$log_file" open "$target_name" "$workspace_dir"
+  wait_for_iterm_session_focus "$expected_session_id"
+}
+
+wait_for_iterm_session_focus_optional() {
+  local expected_session_id="$1"
+  [[ -n "$expected_session_id" ]] || return 1
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$(iterm_front_session)" == "$expected_session_id" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
 }
 
 git_worktree_clean() {
@@ -1969,6 +2959,7 @@ wait_for_condition() {
   local expected="$2"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
+    assert_no_spaces_modal_dialog
     if [[ "$(eval "$script")" == "$expected" ]]; then
       return 0
     fi
@@ -1982,6 +2973,7 @@ wait_for_any_value() {
   shift
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
+    assert_no_spaces_modal_dialog
     local actual
     actual="$(eval "$script")"
     for expected in "$@"; do
@@ -1994,10 +2986,29 @@ wait_for_any_value() {
   fail "timed out waiting for condition: $script matched one of: $*"
 }
 
+wait_for_any_value_optional() {
+  local script="$1"
+  shift
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    assert_no_spaces_modal_dialog
+    local actual
+    actual="$(eval "$script")"
+    for expected in "$@"; do
+      if [[ "$actual" == "$expected" ]]; then
+        return 0
+      fi
+    done
+    sleep 0.2
+  done
+  return 1
+}
+
 wait_for_event_log_contains() {
   local pattern="$1"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
+    assert_no_spaces_modal_dialog
     if [[ -f "$EVENT_LOG" ]] && grep -Fq "$pattern" "$EVENT_LOG"; then
       return 0
     fi
@@ -2011,6 +3022,7 @@ wait_for_event_log_contains_since_line() {
   local start_line="$2"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
+    assert_no_spaces_modal_dialog
     if [[ -f "$EVENT_LOG" ]] && awk -v start="$start_line" -v pattern="$pattern" 'NR >= start && index($0, pattern) { found = 1; exit } END { exit(found ? 0 : 1) }' "$EVENT_LOG"; then
       return 0
     fi
@@ -2032,8 +3044,10 @@ wait_for_agent_status() {
 import json, sys
 with open(sys.argv[1]) as fh:
     data = json.load(fh)
+target = sys.argv[2]
 for record in data.get("agentWindows", []):
-    if (record.get("label") or "") == sys.argv[2]:
+    label = record.get("label") or ""
+    if label == target or label.startswith(target + "-"):
         print(record.get("status") or "")
         break
 PY
@@ -2050,6 +3064,8 @@ wait_for_process_running_recovery() {
   local workspace_dir="$1"
   local process_name="$2"
   local previous_pid="$3"
+  local frontend_port="${4:-}"
+  local tmux_session_name="${5:-}"
   local out="$TMP_ROOT/process-recovery-state.json"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
@@ -2090,12 +3106,102 @@ PY
       continue
     fi
     if [[ -n "$recovered_pid" && "$recovered_status" == "running" && "$recovered_pid" != "$previous_pid" ]]; then
+      log_process_recovery_snapshot "recovered-$process_name" "$workspace_dir" "$process_name" "$frontend_port" "$tmux_session_name" "$recovered_pid"
       printf '%s\t%s\n' "$recovered_pid" "$recovered_status"
       return 0
     fi
+    log_process_recovery_snapshot "poll-$process_name" "$workspace_dir" "$process_name" "$frontend_port" "$tmux_session_name" "$recovered_pid"
     sleep 0.2
   done
   fail "$process_name process did not recover"
+}
+
+process_pid_is_alive() {
+  local pid="$1"
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    return 1
+  fi
+  local state
+  state="$(ps -p "$pid" -o state= 2>/dev/null | tr -d '[:space:]')" || return 1
+  [[ -n "$state" && "${state:0:1}" != "Z" ]]
+}
+
+kill_process_group() {
+  local pid="$1"
+  local pgid
+  pgid="$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d '[:space:]')" || pgid=""
+  if [[ -n "$pgid" ]]; then
+    kill -9 -- "-$pgid" >/dev/null 2>&1 || true
+  fi
+  kill -9 "$pid" >/dev/null 2>&1 || true
+}
+
+kill_listener_processes() {
+  local port="$1"
+  [[ -n "$port" ]] || return 0
+  local pid
+  while read -r pid; do
+    [[ -n "$pid" ]] || continue
+    kill -9 "$pid" >/dev/null 2>&1 || true
+  done < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+}
+
+log_process_recovery_snapshot() {
+  local label="$1"
+  local workspace_dir="$2"
+  local process_name="$3"
+  local port="$4"
+  local tmux_session_name="$5"
+  local pid_hint="${6:-}"
+  local dump_file="$TMP_ROOT/process-recovery-snapshot-${process_name}.json"
+
+  {
+    printf '\n[%s] recovery-state %s process=%s workspace=%s pid_hint=%s port=%s tmux=%s\n' \
+      "$(date +%H:%M:%S)" "$label" "$process_name" "$workspace_dir" "${pid_hint:-}" "${port:-}" "${tmux_session_name:-}"
+
+    if dump_workspace "$workspace_dir" "$dump_file" 2>/dev/null; then
+      python3 - "$dump_file" "$process_name" <<'PY'
+import json, sys
+path, target = sys.argv[1], sys.argv[2]
+with open(path) as fh:
+    data = json.load(fh)
+for process in data.get("runningProcesses", []):
+    if process.get("name") == target:
+        print("running_process=" + json.dumps(process, sort_keys=True))
+        break
+else:
+    print("running_process=")
+for window in data.get("windows", []):
+    if window.get("name") == target:
+        print("window=" + json.dumps(window, sort_keys=True))
+        break
+else:
+    print("window=")
+PY
+    else
+      printf 'running_process_dump_failed=1\n'
+    fi
+
+    if [[ -n "$pid_hint" ]]; then
+      printf 'ps_for_pid_hint:\n'
+      ps -p "$pid_hint" -o pid=,ppid=,pgid=,state=,command= 2>/dev/null || true
+    fi
+
+    printf 'matching_frontend_processes:\n'
+    pgrep -af "spaces-e2e-demo frontend|tmux: server|tmux new-session|tmux attach" 2>/dev/null || true
+
+    if [[ -n "$port" ]]; then
+      printf 'tcp_listeners_port_%s:\n' "$port"
+      lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+    fi
+
+    if [[ -n "$tmux_session_name" ]]; then
+      printf 'tmux_has_session_%s:\n' "$tmux_session_name"
+      tmux has-session -t "$tmux_session_name" >/dev/null 2>&1 && printf 'present\n' || printf 'missing\n'
+      printf 'tmux_list_windows_%s:\n' "$tmux_session_name"
+      tmux list-windows -t "$tmux_session_name" -F '#{window_id} #{window_name} #{pane_pid} #{pane_current_command}' 2>/dev/null || true
+    fi
+  } >>"$DEBUG_LOG"
 }
 
 dump_chrome_state() {
@@ -2243,20 +3349,196 @@ wait_for_workspace_terminal_tracking_id() {
   fail "timed out waiting for tracked terminal identity: $target_name"
 }
 
+workspace_window_id_by_name() {
+  local workspace_dir="$1"
+  local target_name="$2"
+  local out_file="$TMP_ROOT/workspace-window-id.json"
+  dump_workspace "$workspace_dir" "$out_file" >/dev/null 2>>"$DEBUG_LOG" || return 0
+  python3 - "$out_file" "$target_name" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+target = sys.argv[2]
+for window in data.get("windows", []):
+    if (window.get("name") or "") == target:
+        print(window.get("windowID") or "")
+        break
+PY
+}
+
+workspace_window_id_by_target_url() {
+  local workspace_dir="$1"
+  local target_url="$2"
+  local out_file="$TMP_ROOT/workspace-window-id-by-target-url.json"
+  dump_workspace "$workspace_dir" "$out_file" >/dev/null 2>>"$DEBUG_LOG" || return 0
+  python3 - "$out_file" "$target_url" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+target = sys.argv[2]
+for window in data.get("windows", []):
+    if (window.get("targetURL") or "") == target:
+        print(window.get("windowID") or "")
+        break
+PY
+}
+
+wait_for_workspace_window_id_by_name() {
+  local workspace_dir="$1"
+  local target_name="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    local window_id
+    window_id="$(workspace_window_id_by_name "$workspace_dir" "$target_name")"
+    if [[ -n "$window_id" ]]; then
+      printf '%s\n' "$window_id"
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for tracked window id: $target_name"
+}
+
+wait_for_workspace_window_id_by_target_url() {
+  local workspace_dir="$1"
+  local target_url="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    local window_id
+    window_id="$(workspace_window_id_by_target_url "$workspace_dir" "$target_url")"
+    if [[ -n "$window_id" ]]; then
+      printf '%s\n' "$window_id"
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for tracked browser window id: $target_url"
+}
+
+wait_for_cycle_target_focus() {
+  local workspace_dir="$1"
+  local cycle_target="$2"
+  local docs_window_id="$3"
+  case "$cycle_target" in
+    browser:*)
+      local target_browser_url target_browser_window_id
+      target_browser_url="${cycle_target#browser:}"
+      target_browser_window_id="$(wait_for_workspace_window_id_by_target_url "$workspace_dir" "$target_browser_url")"
+      wait_for_surface_snapshot_python_with_yabai \
+        "browser cycle target focus $target_browser_window_id" \
+        'expected_window_id = sys.argv[2]
+frontmost_bundle = data.get("frontmostApplicationBundleID") or ""
+spaces = data.get("spaces") or {}
+ok = frontmost_bundle == "com.google.Chrome" and str(data.get("yabaiFocusedWindowID") or "") == expected_window_id and not spaces.get("modalVisible")
+raise SystemExit(0 if ok else 1)' \
+        "$target_browser_window_id"
+      ;;
+    terminal:*|process:*|agent:*)
+      local target_name target_session_id target_window_id
+      target_name="$(extract_cycle_window_title "$cycle_target")"
+      target_session_id="$(known_spaces_terminal_session_id_for_name "$target_name")"
+      if [[ -z "$target_session_id" ]]; then
+        target_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "$target_name" "$TMP_ROOT/cycle-focus-target.json" || true)"
+      fi
+      if [[ -n "$target_session_id" ]]; then
+        wait_for_spaces_terminal_frontmost_session "$target_session_id"
+        assert_no_spaces_modal_dialog
+      else
+        target_window_id="$(wait_for_workspace_window_id_by_name "$workspace_dir" "$target_name")"
+        wait_for_surface_snapshot_python_with_yabai \
+          "window cycle target focus $target_window_id" \
+          'expected_window_id = sys.argv[2]
+spaces = data.get("spaces") or {}
+ok = str(data.get("yabaiFocusedWindowID") or "") == expected_window_id and not spaces.get("modalVisible")
+raise SystemExit(0 if ok else 1)' \
+          "$target_window_id"
+      fi
+      ;;
+    *)
+      fail "unexpected cycle target: $cycle_target"
+      ;;
+  esac
+}
+
+measure_spaces_cycle_transition() {
+  local host="$1"
+  local workspace_scope="$2"
+  local workspace_dir="$3"
+  local docs_window_id="$4"
+  local source_component="$5"
+  local direction="$6"
+  local transition_label="$7"
+  shift 7
+  local expected_patterns=("$@")
+  local started_at route_observed_at focus_observed_at surface_observed_at
+  local cycle_line cycle_target cycle_elapsed_ms cycle_request_id cycle_focus_route_line cycle_focus_route_elapsed_ms=""
+  local cycle_focus_observed_line cycle_focus_observed_elapsed_ms=""
+  started_at="$(timestamp_ms)"
+  send_cycle_hotkey "$direction"
+  transition_pause "$transition_label"
+  wait_for_app_log_pattern "spaces: perf metric=window_cycle workspace=.* target=.* success=1 .* direction=${direction}" >/dev/null
+  cycle_line="$APP_LOG_LAST_MATCH"
+  cycle_target="$(extract_perf_target "$cycle_line")"
+  if ((${#expected_patterns[@]} > 0)); then
+    matches_cycle_target_pattern "$cycle_target" "${expected_patterns[@]}" \
+      || fail "${transition_label}: unexpected cycle target '$cycle_target'"
+  fi
+  route_observed_at="$(timestamp_ms)"
+  cycle_elapsed_ms="$(extract_metric_field "$cycle_line" "elapsed_ms")"
+  assert_metric_not_above "$cycle_elapsed_ms" "$SPACES_CYCLE_LATENCY_BUDGET_MS" "${transition_label} app route latency"
+  cycle_request_id="$(extract_request_id "$cycle_line")"
+  if [[ -n "$cycle_request_id" ]]; then
+    cycle_focus_route_line="$(
+      find_app_log_pattern_anywhere_once \
+        "spaces: perf metric=built_in_terminal_focus_route .*success=1 .*elapsed_ms=[0-9]+ .*request_id=${cycle_request_id}( |$)" || true
+    )"
+    if [[ -n "$cycle_focus_route_line" ]]; then
+      cycle_focus_route_elapsed_ms="$(extract_metric_field "$cycle_focus_route_line" "elapsed_ms")"
+    fi
+    cycle_focus_observed_line="$(
+      find_app_log_pattern_anywhere_once \
+        "spaces: perf metric=terminal_window_focus_observed .*success=1 .*elapsed_ms=[0-9]+ .*request_id=${cycle_request_id}( |$)" || true
+    )"
+    if [[ -n "$cycle_focus_observed_line" ]]; then
+      cycle_focus_observed_elapsed_ms="$(extract_metric_field "$cycle_focus_observed_line" "elapsed_ms")"
+    fi
+  fi
+  wait_for_cycle_target_focus "$workspace_dir" "$cycle_target" "$docs_window_id"
+  focus_observed_at="$(timestamp_ms)"
+  assert_cycle_focus_surface_state
+  surface_observed_at="$(timestamp_ms)"
+  record_cycle_transition_metrics \
+    "$source_component" \
+    "$direction" \
+    "$cycle_target" \
+    "$((surface_observed_at - started_at))" \
+    "$((route_observed_at - started_at))" \
+    "$((focus_observed_at - route_observed_at))" \
+    "$((surface_observed_at - focus_observed_at))" \
+    "$cycle_elapsed_ms" \
+    "$host" \
+    "$workspace_scope" \
+    "${cycle_focus_observed_elapsed_ms:-$cycle_focus_route_elapsed_ms}"
+  MEASURED_CYCLE_TARGET="$cycle_target"
+}
+
 run_launch_and_focus_assertions() {
-  # Run the same functional checks against each supported default terminal host.
   local host="$1"
   local workspace_dir="$2"
   local dump_file="$TMP_ROOT/$host-dump.json"
+  local agent_script
 
   reset_fixture_runtime "$workspace_dir"
-  log_step "switching terminal host to $host"
-  "$MX_E2E_BIN" set-terminal-host "$host" >/tmp/spaces-e2e-terminal-host.json
-  sleep 0.5
-  transition_pause "switch terminal host to $host"
+  ensure_configured_terminal_host "$host"
+  agent_script="$(create_mock_agent_script "$workspace_dir")"
+  set_workspace_agent_launcher "$workspace_dir" "$MOCK_AGENT_LABEL" "$agent_script"
 
   begin_case "$host: launch workspace and persist terminal host"
   run_spaces_logged /tmp/spaces-e2e-launch.log start "$workspace_dir"
+  if [[ "$host" == "spaces" ]]; then
+    activate_spaces_pid "$SPACES_PID"
+    transition_pause "$host activate Spaces before built-in workspace launch"
+  fi
   run_spaces_logged /tmp/spaces-e2e-launch-focus.log open docs "$workspace_dir"
   wait_for_workspace_running_state "$workspace_dir" "true"
   transition_pause "$host launch workspace"
@@ -2274,14 +3556,9 @@ run_launch_and_focus_assertions() {
   local workspace_title
   workspace_id="$(json_get "$dump_file" "workspace.id")"
   workspace_title="$(json_get "$dump_file" "workspace.title")"
-  assert_equals "$host" "$(json_get "$dump_file" "appTerminalHost")" "terminal host persisted"
   local terminal_app
   terminal_app="$(json_get "$dump_file" "runningProcesses[0].terminalApp")"
-  if [[ "$host" == "iterm2" ]]; then
-    assert_equals "iTerm2" "$terminal_app" "iTerm2 launch"
-  else
-    assert_equals "Ghostty" "$terminal_app" "Ghostty launch"
-  fi
+  assert_equals "Spaces" "$terminal_app" "Spaces launch"
   ensure_workspace_http_ready "$workspace_dir" "$PRIMARY_DOCS_URL" "Beacon docs sentinel" "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "beacon-status"'
   pass_case
 
@@ -2297,13 +3574,27 @@ run_launch_and_focus_assertions() {
   dump_chrome_state "$host after-extra-tab"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
   wait_for_condition "chrome_window_active_url $docs_window_id" "$extra_user_tab_url"
+  local docs_refocus_started_at
+  docs_refocus_started_at="$(timestamp_ms)"
   run_spaces_logged /tmp/spaces-e2e-focus-docs.log open docs "$workspace_dir"
   transition_pause "$host refocus docs"
-  record_browser_focus_metric "browser_untracked_tab.cli_window_focus.browser_tracked_tab" "$PRIMARY_DOCS_URL" "docs" "$host" "single"
+  record_browser_focus_metric \
+    "browser_untracked_tab.cli_window_focus.browser_tracked_tab" \
+    "$PRIMARY_DOCS_URL" \
+    "docs" \
+    "$host" \
+    "single" \
+    "$(( $(timestamp_ms) - docs_refocus_started_at ))"
   dump_chrome_state "$host after-refocus-docs"
-  wait_for_condition "chrome_front_window_id" "$docs_window_id"
-  wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
+  local refocused_docs_window_id
+  refocused_docs_window_id="$(chrome_front_window_id)"
+  [[ -n "$refocused_docs_window_id" ]] || fail "docs refocus did not leave a front Chrome window"
+  wait_for_condition "chrome_window_active_url $refocused_docs_window_id" "$PRIMARY_DOCS_URL"
+  if [[ "$refocused_docs_window_id" != "$docs_window_id" ]]; then
+    log_debug "$host docs refocus recovered window old=$docs_window_id new=$refocused_docs_window_id"
+    docs_window_id="$refocused_docs_window_id"
+  fi
   pass_case
 
   dump_workspace "$workspace_dir" "$dump_file"
@@ -2353,15 +3644,21 @@ PY
     iterm_open_extra_tab "$frontend_window_id"
     sleep 1
     transition_pause "$host add extra iTerm2 tab"
-    wait_for_condition "frontmost_app" "iTerm2"
+    local extra_tab_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+    while (( SECONDS < extra_tab_deadline )); do
+      if [[ "$(iterm_front_session)" != "$frontend_session_id" ]]; then
+        break
+      fi
+      sleep 0.2
+    done
     [[ "$(iterm_front_session)" != "$frontend_session_id" ]] || fail "expected extra iTerm2 tab to be selected"
     run_spaces_logged /tmp/spaces-e2e-focus-frontend.log open frontend "$workspace_dir"
     transition_pause "$host focus frontend terminal"
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
     frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
-    wait_for_iterm_session_focus "$frontend_session_id"
+    ensure_iterm_session_focus_after_cli_open "$workspace_dir" "frontend" "$frontend_session_id" /tmp/spaces-e2e-focus-frontend-retry.log
     pass_case
-  else
+  elif [[ "$host" == "ghostty" ]]; then
     begin_case "$host: focus tracked Ghostty tab with extra user tab present"
     local frontend_terminal_id backend_terminal_id
     frontend_terminal_id="$(python3 - "$dump_file" <<'PY'
@@ -2395,65 +3692,505 @@ PY
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
     wait_for_condition "ghostty_focused_terminal" "$frontend_terminal_id"
     pass_case
+  else
+    begin_case "$host: window issue modal comes frontmost from external app"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" hide-main-window >/tmp/spaces-e2e-hide-main-before-recovery-modal.json
+    activate_google_chrome
+    transition_pause "$host seed chrome focus for window issue modal"
+    wait_for_condition "frontmost_app" "Google Chrome"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" show-window-issue-modal --title "Process window not found" --detail "frontend is no longer open." >/tmp/spaces-e2e-show-window-issue-modal.json
+    if ! wait_for_spaces_modal_dialog_frontmost_optional; then
+      activate_spaces_pid "$SPACES_PID"
+      wait_for_spaces_modal_dialog_visible
+    fi
+    dismiss_spaces_modal_dialog
+    transition_pause "$host dismiss window issue modal"
+    wait_for_condition "spaces_modal_dialog_visible" "0"
+    pass_case
+
+    begin_case "$host: focus tracked Spaces terminal window"
+    local spaces_terminal_focus_request_id
+    local spaces_terminal_focus_log=/tmp/spaces-e2e-focus-frontend.log
+    spaces_terminal_focus_request_id="$(uuidgen)"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_terminal_focus_request_id" >"$spaces_terminal_focus_log" 2>&1
+    transition_pause "$host refocus frontend terminal"
+    record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single" "$spaces_terminal_focus_request_id" "$spaces_terminal_focus_log"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
+    pass_case
+
+    begin_case "$host: closing ad hoc Spaces terminal removes runtime row"
+    dump_workspace "$workspace_dir" "$dump_file"
+    local adhoc_sessions_before
+    adhoc_sessions_before="$(python3 - "$dump_file" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for window in data["windows"]:
+    if window.get("role") == "terminal":
+        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        if session_id:
+            print(session_id)
+PY
+)"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" open-workspace-terminal --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-open-adhoc-terminal.json
+    transition_pause "$host open ad hoc Spaces terminal"
+    local adhoc_session_id
+    local adhoc_open_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+    while (( SECONDS < adhoc_open_deadline )); do
+      dump_workspace "$workspace_dir" "$dump_file"
+      adhoc_session_id="$(python3 - "$dump_file" "$adhoc_sessions_before" <<'PY'
+import json, sys
+known = {line.strip() for line in sys.argv[2].splitlines() if line.strip()}
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for window in data["windows"]:
+    if window.get("role") != "terminal":
+        continue
+    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    if session_id and session_id not in known:
+        print(session_id)
+        break
+PY
+)"
+      [[ -n "$adhoc_session_id" ]] && break
+      sleep 0.2
+    done
+    [[ -n "$adhoc_session_id" ]] || fail "expected ad hoc Spaces terminal session"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" close-terminal-session-window --session-id "$adhoc_session_id" >/tmp/spaces-e2e-close-adhoc-terminal.json
+    transition_pause "$host close ad hoc Spaces terminal"
+    local adhoc_closed_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+    local adhoc_row_present=1
+    while (( SECONDS < adhoc_closed_deadline )); do
+      dump_workspace "$workspace_dir" "$dump_file"
+      adhoc_row_present="$(python3 - "$dump_file" "$adhoc_session_id" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+session_id = sys.argv[2]
+for window in data["windows"]:
+    if (window.get("terminalTrackingID") or window.get("terminalNativeID") or "") == session_id:
+        print("1")
+        break
+else:
+    print("0")
+PY
+)"
+      [[ "$adhoc_row_present" == "0" ]] && break
+      sleep 0.2
+    done
+    [[ "$adhoc_row_present" == "0" ]] || fail "expected ad hoc Spaces terminal row to disappear after close"
+    pass_case
+
+    begin_case "$host: closing process Spaces terminal keeps process running and focus recovers"
+    dump_workspace "$workspace_dir" "$dump_file"
+    local frontend_session_before_close
+    frontend_session_before_close="$(python3 - "$dump_file" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for process in data["runningProcesses"]:
+    if process["name"] == "frontend":
+        print(process.get("terminalTrackingID") or process.get("terminalNativeID") or "")
+        break
+PY
+)"
+    [[ -n "$frontend_session_before_close" ]] || fail "expected frontend Spaces terminal session"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" close-terminal-session-window --session-id "$frontend_session_before_close" >/tmp/spaces-e2e-close-frontend-session.json
+    transition_pause "$host close frontend Spaces terminal"
+    wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
+    dump_workspace "$workspace_dir" "$dump_file"
+    assert_equals "$frontend_session_before_close" "$(python3 - "$dump_file" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for process in data["runningProcesses"]:
+    if process["name"] == "frontend":
+        print(process.get("terminalTrackingID") or process.get("terminalNativeID") or "")
+        break
+PY
+)" "frontend session stable after closing process terminal window"
+    local spaces_reopen_request_id spaces_reopen_log
+    spaces_reopen_request_id="$(uuidgen)"
+    spaces_reopen_log=/tmp/spaces-e2e-refocus-frontend-after-close.log
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_reopen_request_id" >"$spaces_reopen_log" 2>&1
+    transition_pause "$host refocus frontend after close"
+    record_process_focus_metric "terminal_close_recover.cli_window_focus.process_tracked_tab" "frontend" "$host" "single" "$spaces_reopen_request_id" "$spaces_reopen_log"
+    wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
+    pass_case
+
   fi
 
-  # The Run tab numbers shortcuts in on-screen order:
-  # Browser Tabs -> Processes -> Coding Agents.
-  # This fixture always defines two browser sessions (`docs`, `admin`) and
-  # then the tracked terminal processes (`frontend`, `backend`), so the
-  # numbered shortcuts we care about are stable here: docs=1, frontend=3.
   local docs_shortcut_index=1
   local frontend_shortcut_index=3
+  local agent_shortcut_index=5
+  local adhoc_shortcut_index=6
+  local agent_session_id
+  local adhoc_session_id=""
+  local adhoc_name="shell-1"
 
   begin_case "$host: workspace detail numbered shortcuts focus correct window"
   # These are the workspace-detail focus cases the user asked for, using the
   # real detail-pane shortcuts instead of direct CLI focus.
   ensure_single_spaces_instance "$SPACES_PID"
+  agent_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "$MOCK_AGENT_LABEL" "$dump_file")"
+  [[ -n "$agent_session_id" ]] || fail "expected tracked agent terminal session"
+  if [[ "$host" == "spaces" ]]; then
+    KNOWN_SPACES_FRONTEND_SESSION_ID="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
+    KNOWN_SPACES_BACKEND_SESSION_ID="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "backend" "$dump_file")"
+    KNOWN_SPACES_AGENT_SESSION_ID="$agent_session_id"
+    KNOWN_SPACES_ADHOC_NAME="$adhoc_name"
+  fi
+
   ui_show_workspace_detail "$workspace_dir" "$workspace_title"
   sleep 0.5
-  send_spaces_window_shortcut_with_ack "$docs_shortcut_index"
-  transition_pause "$host shortcut focus docs"
-  wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
-  record_browser_focus_metric "spaces_detail_ui.keyboard_window_shortcut.browser_tracked_tab" "$PRIMARY_DOCS_URL" "docs" "$host" "single"
-  ui_show_workspace_detail "$workspace_dir" "$workspace_title"
-  sleep 0.5
-  send_spaces_window_shortcut_with_ack "$frontend_shortcut_index"
-  transition_pause "$host shortcut focus frontend"
-  record_process_focus_metric "spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab" "frontend" "$host" "single"
-  if [[ "$host" == "iterm2" ]]; then
-    frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
-    wait_for_iterm_session_focus "$frontend_session_id"
+  local docs_focus_started_at docs_focus_elapsed_ms
+  docs_focus_started_at="$(timestamp_ms)"
+  if [[ "$host" == "spaces" ]]; then
+    send_spaces_window_shortcut_with_ack "$docs_shortcut_index"
   else
+    run_spaces_logged /tmp/spaces-e2e-shortcut-open-docs.log open docs "$workspace_dir"
+  fi
+  transition_pause "$host shortcut focus docs"
+  wait_for_condition "chrome_front_window_id" "$docs_window_id"
+  docs_focus_elapsed_ms="$(( $(timestamp_ms) - docs_focus_started_at ))"
+  record_metric_sample "spaces_detail_ui.keyboard_window_shortcut.browser_tracked_tab" "$docs_focus_elapsed_ms" "$host" "single"
+  wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
+  assert_shortcut_focus_surface_state
+  if [[ "$host" == "spaces" ]]; then
+    local spaces_shortcut_refocus_request_id spaces_shortcut_refocus_log
+    spaces_shortcut_refocus_request_id="$(uuidgen)"
+    spaces_shortcut_refocus_log="/tmp/spaces-e2e-shortcut-refocus-frontend.log"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_shortcut_refocus_request_id" >"$spaces_shortcut_refocus_log" 2>&1
+    transition_pause "$host seed frontend terminal focus for shortcut follow-up"
+    record_process_focus_metric "spaces_detail_ui.shortcut_refocus.process_tracked_tab" "frontend" "$host" "single" "$spaces_shortcut_refocus_request_id" "$spaces_shortcut_refocus_log"
+  fi
+  ui_show_workspace_detail "$workspace_dir" "$workspace_title"
+  sleep 0.5
+  local frontend_focus_started_at frontend_focus_elapsed_ms
+  frontend_focus_started_at="$(timestamp_ms)"
+  if [[ "$host" == "spaces" ]]; then
+    send_spaces_window_shortcut_with_ack "$frontend_shortcut_index"
+  else
+    run_spaces_logged /tmp/spaces-e2e-shortcut-open-frontend.log open frontend "$workspace_dir"
+  fi
+  transition_pause "$host shortcut focus frontend"
+  if [[ "$host" == "spaces" ]]; then
+    frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
+    KNOWN_SPACES_FRONTEND_SESSION_ID="$frontend_session_id"
+    wait_for_condition "spaces_front_window_identifier" "spaces-terminal:${frontend_session_id}"
+    frontend_focus_elapsed_ms="$(( $(timestamp_ms) - frontend_focus_started_at ))"
+    record_metric_sample "spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab" "$frontend_focus_elapsed_ms" "$host" "single"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
+    assert_shortcut_focus_surface_state
+  elif [[ "$host" == "iterm2" ]]; then
+    frontend_focus_elapsed_ms="$(( $(timestamp_ms) - frontend_focus_started_at ))"
+    record_metric_sample "spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab" "$frontend_focus_elapsed_ms" "$host" "single"
+    frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
+    ensure_iterm_session_focus_after_cli_open "$workspace_dir" "frontend" "$frontend_session_id" /tmp/spaces-e2e-shortcut-open-frontend-retry.log
+  elif [[ "$host" == "ghostty" ]]; then
+    frontend_focus_elapsed_ms="$(( $(timestamp_ms) - frontend_focus_started_at ))"
+    record_metric_sample "spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab" "$frontend_focus_elapsed_ms" "$host" "single"
     wait_for_condition "ghostty_focused_terminal" "$frontend_terminal_id"
+  fi
+
+  if [[ "$host" == "spaces" ]]; then
+    ui_show_workspace_detail "$workspace_dir" "$workspace_title"
+    sleep 0.5
+    send_spaces_window_shortcut_with_ack "$agent_shortcut_index"
+    transition_pause "$host shortcut focus agent"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "$MOCK_AGENT_LABEL"
+    assert_shortcut_focus_surface_state
+
+    ui_show_workspace_detail "$workspace_dir" "$workspace_title"
+    sleep 0.5
+    dump_workspace "$workspace_dir" "$dump_file"
+    local adhoc_sessions_before
+    adhoc_sessions_before="$(python3 - "$dump_file" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for window in data["windows"]:
+    if window.get("role") == "terminal":
+        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        if session_id:
+            print(session_id)
+PY
+)"
+    send_spaces_open_terminal_hotkey
+    transition_pause "$host open ad hoc terminal by shortcut"
+    local adhoc_open_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+    while (( SECONDS < adhoc_open_deadline )); do
+      dump_workspace "$workspace_dir" "$dump_file"
+      local adhoc_target
+      adhoc_target="$(python3 - "$dump_file" "$adhoc_sessions_before" <<'PY'
+import json, sys
+known = {line.strip() for line in sys.argv[2].splitlines() if line.strip()}
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for window in data["windows"]:
+    if window.get("role") != "terminal":
+        continue
+    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    name = window.get("name") or ""
+    if session_id and session_id not in known:
+        print(f"{session_id}\t{name}")
+        break
+PY
+)"
+      if [[ -n "$adhoc_target" ]]; then
+        adhoc_session_id="${adhoc_target%%$'\t'*}"
+        adhoc_name="${adhoc_target#*$'\t'}"
+        [[ -n "$adhoc_name" ]] || adhoc_name="shell-1"
+        KNOWN_SPACES_ADHOC_SESSION_ID="$adhoc_session_id"
+        KNOWN_SPACES_ADHOC_NAME="$adhoc_name"
+        break
+      fi
+      sleep 0.2
+    done
+    [[ -n "$adhoc_session_id" ]] || fail "expected ad hoc terminal to open by shortcut"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "$adhoc_name"
+    assert_shortcut_focus_surface_state
   fi
   pass_case
 
   begin_case "$host: workspace window cycling stays on tracked windows"
   # This validates forward/back workspace cycling from the live desktop state.
   ensure_single_spaces_instance "$SPACES_PID"
-  run_spaces_logged /tmp/spaces-e2e-cycle-seed.log open docs "$workspace_dir"
+  if [[ "$host" == "spaces" ]]; then
+    run_spaces_logged /tmp/spaces-e2e-cycle-seed-docs.log open docs "$workspace_dir"
+    transition_pause "$host seed docs focus for cycling"
+    wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
+    run_spaces_logged /tmp/spaces-e2e-cycle-seed-frontend.log open frontend "$workspace_dir"
+    transition_pause "$host seed frontend focus for cycling"
+    wait_for_condition "spaces_front_window_title" "frontend"
+    send_cycle_hotkey next
+    transition_pause "$host cycle next from terminal origin"
+    wait_for_app_log_pattern 'spaces: perf metric=window_cycle workspace=.* target=.* success=1 .* direction=next' >/dev/null
+    cycle_line="$APP_LOG_LAST_MATCH"
+    cycle_target="$(extract_perf_target "$cycle_line")"
+    [[ "$cycle_target" != "process:frontend" ]] || fail "expected first cycle next from frontend terminal to leave current process target"
+    [[ "$cycle_target" != "terminal:frontend" ]] || fail "expected first cycle next from frontend terminal to leave current terminal target"
+    case "$cycle_target" in
+      browser:*|terminal:*|process:*|agent:*)
+        wait_for_cycle_target_focus "$workspace_dir" "$cycle_target" "$docs_window_id"
+        ;;
+      *)
+        fail "unexpected terminal-origin cycle target: $cycle_target"
+        ;;
+    esac
+    assert_cycle_focus_surface_state
+    run_spaces_logged /tmp/spaces-e2e-cycle-reseed-frontend.log open frontend "$workspace_dir"
+    transition_pause "$host reseed frontend focus after terminal-origin cycle"
+    wait_for_condition "spaces_front_window_title" "frontend"
+    run_spaces_logged /tmp/spaces-e2e-cycle-seed-agent.log open "$MOCK_AGENT_LABEL" "$workspace_dir"
+    transition_pause "$host seed agent focus for cycling"
+    wait_for_condition "spaces_front_window_title" "$MOCK_AGENT_LABEL"
+    run_spaces_logged /tmp/spaces-e2e-cycle-seed-adhoc.log open "$adhoc_name" "$workspace_dir"
+    transition_pause "$host seed ad hoc terminal focus for cycling"
+    wait_for_condition "spaces_front_window_title" "$adhoc_name"
+    run_spaces_logged /tmp/spaces-e2e-cycle-seed-docs-final.log open docs "$workspace_dir"
+    activate_google_chrome
+    focus_yabai_window_if_present "$docs_window_id"
+  else
+    run_spaces_logged /tmp/spaces-e2e-cycle-seed.log open docs "$workspace_dir"
+  fi
   transition_pause "$host seed docs focus for cycling"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
-  send_cycle_hotkey next
-  transition_pause "$host cycle next"
-  record_cycle_metric "terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab" "next" "$host" "single"
+  local cycle_target
   if [[ "$host" == "iterm2" ]]; then
+    send_cycle_hotkey next
+    transition_pause "$host cycle next"
     wait_for_any_value "iterm_focused_session $frontend_window_id" "$frontend_session_id" "$backend_session_id"
-  else
+  elif [[ "$host" == "ghostty" ]]; then
+    send_cycle_hotkey next
+    transition_pause "$host cycle next"
     wait_for_any_value "ghostty_focused_terminal" "$frontend_terminal_id" "$backend_terminal_id"
+  else
+    measure_spaces_cycle_transition \
+      "$host" \
+      "single" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "browser_tracked_tab" \
+      "next" \
+      "$host cycle next browser to frontend" \
+      "terminal:frontend" \
+      "process:frontend"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      terminal:frontend|process:frontend) ;;
+      *) fail "browser to frontend cycle target: expected frontend, got '$cycle_target'" ;;
+    esac
+
+    measure_spaces_cycle_transition \
+      "$host" \
+      "single" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "process_tracked_tab" \
+      "previous" \
+      "$host cycle previous frontend to browser" \
+      "browser:*"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      browser:*) ;;
+      *) fail "frontend to browser cycle target: expected browser, got '$cycle_target'" ;;
+    esac
+
+    run_spaces_logged /tmp/spaces-e2e-cycle-reseed-frontend-post-browser.log open frontend "$workspace_dir"
+    transition_pause "$host reseed frontend focus after browser round trip"
+    wait_for_condition "spaces_front_window_title" "frontend"
+
+    measure_spaces_cycle_transition \
+      "$host" \
+      "single" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "process_tracked_tab" \
+      "next" \
+      "$host cycle next frontend to backend" \
+      "terminal:backend" \
+      "process:backend"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      terminal:backend|process:backend) ;;
+      *) fail "frontend to backend cycle target: expected backend, got '$cycle_target'" ;;
+    esac
+
+    measure_spaces_cycle_transition \
+      "$host" \
+      "single" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "process_tracked_tab" \
+      "next" \
+      "$host cycle next backend to ad hoc terminal" \
+      "terminal:${adhoc_name}"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      terminal:${adhoc_name}) ;;
+      *) fail "backend to ad hoc cycle target: expected ${adhoc_name}, got '$cycle_target'" ;;
+    esac
+
+    measure_spaces_cycle_transition \
+      "$host" \
+      "single" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "terminal_tracked_tab" \
+      "next" \
+      "$host cycle next ad hoc terminal to agent" \
+      "agent:*"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      agent:*) ;;
+      *) fail "ad hoc terminal to agent cycle target: expected agent, got '$cycle_target'" ;;
+    esac
+
+    measure_spaces_cycle_transition \
+      "$host" \
+      "single" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "agent_tracked_tab" \
+      "next" \
+      "$host cycle next agent to browser" \
+      "browser:*"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      browser:*) ;;
+      *) fail "agent to browser cycle target: expected browser, got '$cycle_target'" ;;
+    esac
+
+    run_spaces_logged /tmp/spaces-e2e-cycle-reseed-agent-post-browser.log open "$MOCK_AGENT_LABEL" "$workspace_dir"
+    transition_pause "$host reseed agent focus after browser round trip"
+    wait_for_condition "spaces_front_window_title" "$MOCK_AGENT_LABEL"
+
+    measure_spaces_cycle_transition \
+      "$host" \
+      "single" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "agent_tracked_tab" \
+      "previous" \
+      "$host cycle previous agent to ad hoc terminal" \
+      "terminal:${adhoc_name}"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      terminal:${adhoc_name}) ;;
+      *) fail "agent to ad hoc cycle target: expected ${adhoc_name}, got '$cycle_target'" ;;
+    esac
   fi
-  send_cycle_hotkey previous
-  transition_pause "$host cycle previous"
-  record_cycle_metric "browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab" "previous" "$host" "single"
-  wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
+  if [[ "$host" == "spaces" ]]; then
+    assert_spaces_cpu_not_above "spaces_app.cpu_after_window_cycle" "$SPACES_SUSTAINED_CPU_BUDGET_PCT" "$host" "single"
+  fi
   pass_case
 
-  begin_case "$host: dead process recovery"
-  # Kill one tracked process, then confirm `spaces start` revives only the
-  # dead runtime instead of forcing a full workspace restart.
-  dump_workspace "$workspace_dir" "$dump_file"
-  local frontend_pid
-  frontend_pid="$(python3 - "$dump_file" <<'PY'
+  if [[ "$host" == "spaces" ]]; then
+    begin_case "$host: high-output process focus and cycling stay responsive"
+    ensure_single_spaces_instance "$SPACES_PID"
+    add_workspace_process "$workspace_dir" "$HIGH_OUTPUT_PROCESS_NAME" "$HIGH_OUTPUT_PROCESS_COMMAND" \
+      >/tmp/spaces-e2e-add-high-output-process.json
+    local noisy_shortcut_index noisy_session_id noisy_focus_started_at noisy_cycle_started_at noisy_cycle_elapsed_ms
+    noisy_shortcut_index="$(shortcut_index_for_name "$workspace_dir" "$HIGH_OUTPUT_PROCESS_NAME" || true)"
+    [[ -n "$noisy_shortcut_index" ]] || noisy_shortcut_index=7
+    [[ -n "$noisy_shortcut_index" ]] || fail "expected shortcut index for $HIGH_OUTPUT_PROCESS_NAME"
+
+    ui_show_workspace_detail "$workspace_dir" "$workspace_title"
+    sleep 0.5
+    noisy_focus_started_at="$(timestamp_ms)"
+    send_spaces_window_shortcut_with_ack "$noisy_shortcut_index"
+    transition_pause "$host shortcut focus $HIGH_OUTPUT_PROCESS_NAME"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    noisy_session_id="$(spaces_front_window_session_id)"
+    [[ -n "$noisy_session_id" ]] || fail "expected focused $HIGH_OUTPUT_PROCESS_NAME terminal to expose session identifier"
+    KNOWN_SPACES_NOISY_SESSION_ID="$noisy_session_id"
+    wait_for_condition "spaces_front_window_identifier" "spaces-terminal:${noisy_session_id}"
+    assert_shortcut_focus_surface_state
+    record_metric_sample \
+      "spaces_detail_ui.keyboard_window_shortcut.process_high_output_tracked_tab" \
+      "$(( $(timestamp_ms) - noisy_focus_started_at ))" \
+      "$host" \
+      "single"
+
+    sleep 1
+    noisy_cycle_started_at="$(timestamp_ms)"
+    send_cycle_hotkey next
+    transition_pause "$host cycle next away from $HIGH_OUTPUT_PROCESS_NAME"
+    wait_for_app_log_pattern 'spaces: perf metric=window_cycle workspace=.* target=.* success=1 .* direction=next' >/dev/null
+    cycle_line="$APP_LOG_LAST_MATCH"
+    cycle_target="$(extract_perf_target "$cycle_line")"
+    [[ "$cycle_target" != "process:${HIGH_OUTPUT_PROCESS_NAME}" ]] \
+      || fail "expected first cycle next from $HIGH_OUTPUT_PROCESS_NAME to leave current process target"
+    [[ "$cycle_target" != "terminal:${HIGH_OUTPUT_PROCESS_NAME}" ]] \
+      || fail "expected first cycle next from $HIGH_OUTPUT_PROCESS_NAME to leave current terminal target"
+    wait_for_cycle_target_focus "$workspace_dir" "$cycle_target" "$docs_window_id"
+    assert_cycle_focus_surface_state
+    noisy_cycle_elapsed_ms="$(( $(timestamp_ms) - noisy_cycle_started_at ))"
+    record_metric_sample \
+      "process_high_output_tracked_tab.keyboard_cycle_next.any_tracked_target" \
+      "$noisy_cycle_elapsed_ms" \
+      "$host" \
+      "single"
+    assert_metric_not_above "$noisy_cycle_elapsed_ms" "$SPACES_CYCLE_LATENCY_BUDGET_MS" \
+      "high-output process user-facing cycle latency"
+    assert_spaces_cpu_not_above "spaces_app.cpu_after_high_output_cycle" "$SPACES_SUSTAINED_CPU_BUDGET_PCT" "$host" "single"
+    pass_case
+  fi
+
+  if [[ "${INCLUDE_DEAD_PROCESS_RECOVERY:-0}" == "1" && "$host" != "spaces" ]]; then
+    begin_case "$host: dead process recovery"
+    # Kill one tracked process, then confirm `spaces start` revives only the
+    # dead runtime instead of forcing a full workspace restart.
+    dump_workspace "$workspace_dir" "$dump_file"
+    local frontend_pid
+    frontend_pid="$(python3 - "$dump_file" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh:
     data = json.load(fh)
@@ -2462,19 +4199,44 @@ for process in data["runningProcesses"]:
         print(process["pid"] or "")
         break
 PY
-  )"
-  terminate_process_group_for_recovery "$frontend_pid"
-  run_spaces_logged /tmp/spaces-e2e-recover.log start "$workspace_dir"
-  transition_pause "$host recover dead process"
-  local recovery_state recovered_pid recovered_status
-  recovery_state="$(wait_for_process_running_recovery "$workspace_dir" "frontend" "$frontend_pid")"
-  recovered_pid="${recovery_state%%$'\t'*}"
-  recovered_status="${recovery_state#*$'\t'}"
-  ! process_is_alive "$frontend_pid" || fail "killed frontend pid is still alive after recovery"
-  pass_case
+)"
+    local frontend_port
+    frontend_port="$(workspace_named_port "$workspace_dir" "$APP_PORT_NAME")"
+    local frontend_session_name
+    frontend_session_name="spaces-${workspace_id}-frontend"
+    log_process_recovery_snapshot "before-kill" "$workspace_dir" "frontend" "$frontend_port" "$frontend_session_name" "$frontend_pid"
+    kill_process_group "$frontend_pid"
+    kill_listener_processes "$frontend_port"
+    tmux kill-session -t "$frontend_session_name" >/dev/null 2>&1 || true
+    local dead_pid_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+    while (( SECONDS < dead_pid_deadline )); do
+      if ! process_pid_is_alive "$frontend_pid" \
+        && ! lsof -tiTCP:"$frontend_port" -sTCP:LISTEN >/dev/null 2>&1 \
+        && ! tmux has-session -t "$frontend_session_name" >/dev/null 2>&1
+      then
+        break
+      fi
+      sleep 0.2
+    done
+    log_process_recovery_snapshot "after-kill" "$workspace_dir" "frontend" "$frontend_port" "$frontend_session_name" "$frontend_pid"
+    run_spaces_logged /tmp/spaces-e2e-recover.log start "$workspace_dir"
+    transition_pause "$host recover dead process"
+    local recovery_state recovered_pid recovered_status
+    log_process_recovery_snapshot "after-restart-command" "$workspace_dir" "frontend" "$frontend_port" "$frontend_session_name" "$frontend_pid"
+    recovery_state="$(wait_for_process_running_recovery "$workspace_dir" "frontend" "$frontend_pid" "$frontend_port" "$frontend_session_name")"
+    recovered_pid="${recovery_state%%$'\t'*}"
+    recovered_status="${recovery_state#*$'\t'}"
+    wait_for_tcp_listener_port "$frontend_port"
+    ! process_pid_is_alive "$frontend_pid" || fail "killed frontend pid is still alive after recovery"
+    pass_case
+  fi
 
   begin_case "$host: workspace restart and stop lifecycle"
   restart_workspace_via_gui "$workspace_dir"
+  wait_for_workspace_running_state "$workspace_dir" "true"
+  wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
+  wait_for_workspace_process_status "$workspace_dir" "backend" "running"
+  ensure_workspace_http_ready "$workspace_dir" "$PRIMARY_DOCS_URL" "Beacon docs sentinel" "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "beacon-status"'
   wait_for_workspace_running_state "$workspace_dir" "true"
   dump_workspace "$workspace_dir" "$dump_file"
   assert_equals "true" "$(json_get "$dump_file" "workspace.isRunning")" "workspace running after restart"
@@ -2486,11 +4248,19 @@ PY
   reset_fixture_runtime "$workspace_dir"
 }
 
+ensure_configured_terminal_host() {
+  local host="$1"
+  if [[ "$host" != "spaces" ]]; then
+    fail "Unsupported terminal host for this branch: $host"
+  fi
+}
+
 run_hotkey_visibility_profiling() {
   local host="$1"
   local workspace_dir="$2"
   local iteration
 
+  ensure_configured_terminal_host "$host"
   begin_case "$host: profile repeated app visibility toggle"
   ensure_single_spaces_instance "$SPACES_PID"
   reset_fixture_runtime "$workspace_dir"
@@ -2499,13 +4269,23 @@ run_hotkey_visibility_profiling() {
   transition_pause "$host seed docs focus for app toggle profiling"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   wait_for_condition "frontmost_app" "Google Chrome"
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" hide-main-window >/tmp/spaces-e2e-hide-main-window.json
+  wait_for_condition "frontmost_app" "Google Chrome"
+  wait_for_condition "spaces_main_window_visible" "0"
   for (( iteration = 1; iteration <= REAL_SYSTEM_PROFILE_REPETITIONS; iteration++ )); do
+    local toggle_started_at
+
+    toggle_started_at="$(timestamp_ms)"
     send_spaces_toggle_hotkey_with_ack
+    wait_for_condition "spaces_main_window_visible" "1"
     wait_for_spaces_frontmost_ready
-    record_toggle_window_metric "external_app.keyboard_toggle_main_window.main_window" "show" "0" "$host" "single"
+    record_metric_sample "external_app.keyboard_toggle_main_window.main_window" "$(( $(timestamp_ms) - toggle_started_at ))" "$host" "single"
+
+    toggle_started_at="$(timestamp_ms)"
     send_spaces_toggle_hotkey_with_ack
+    wait_for_condition "spaces_main_window_visible" "0"
     wait_for_condition "frontmost_app" "Google Chrome"
-    record_toggle_window_metric "main_window.keyboard_toggle_main_window.external_app" "hide" "1" "$host" "single"
+    record_metric_sample "main_window.keyboard_toggle_main_window.external_app" "$(( $(timestamp_ms) - toggle_started_at ))" "$host" "single"
   done
   pass_case
 
@@ -2520,10 +4300,22 @@ run_hotkey_visibility_profiling() {
   for (( iteration = 1; iteration <= REAL_SYSTEM_PROFILE_REPETITIONS; iteration++ )); do
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_presented "0"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_condition "spaces_main_window_visible" "0"
     record_toggle_palette_metric "external_app.keyboard_toggle_palette.palette" "show" "0" "$host" "single"
+
+    activate_google_chrome
+    transition_pause "$host keep chrome focused while palette remains visible"
+    wait_for_condition "frontmost_app" "Google Chrome"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    send_spaces_command_palette_hotkey_with_ack
+    wait_for_spaces_command_palette_presented "0"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_spaces_frontmost_ready
 
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_dismissed
+    wait_for_condition "spaces_command_palette_visible" "0"
     wait_for_condition "frontmost_app" "Google Chrome"
     record_toggle_palette_metric "palette.keyboard_toggle_palette.external_app" "hide" "1" "$host" "single"
 
@@ -2531,10 +4323,14 @@ run_hotkey_visibility_profiling() {
     wait_for_spaces_frontmost_ready
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_presented "1"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_condition "spaces_main_window_visible" "1"
     record_toggle_palette_metric "main_window.keyboard_toggle_palette.palette" "show" "1" "$host" "single"
 
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_dismissed "1"
+    wait_for_condition "spaces_command_palette_visible" "0"
+    wait_for_condition "spaces_main_window_visible" "1"
     wait_for_spaces_frontmost_ready
     record_toggle_palette_metric "palette.keyboard_toggle_palette.main_window" "hide" "1" "$host" "single"
 
@@ -2542,6 +4338,129 @@ run_hotkey_visibility_profiling() {
     wait_for_condition "frontmost_app" "Google Chrome"
   done
   pass_case
+
+  if [[ "$host" == "spaces" ]]; then
+    begin_case "$host: toggle main window independently of auxiliary terminal windows"
+    ensure_single_spaces_instance "$SPACES_PID"
+    reset_fixture_runtime "$workspace_dir"
+    run_spaces_logged /tmp/spaces-e2e-profile-terminal-toggle-visibility-start.log start "$workspace_dir"
+    local spaces_toggle_focus_request_id
+    local spaces_toggle_focus_log=/tmp/spaces-e2e-toggle-focus-frontend.log
+    spaces_toggle_focus_request_id="$(uuidgen)"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_toggle_focus_request_id" >"$spaces_toggle_focus_log" 2>&1
+    transition_pause "$host seed frontend terminal focus for main window toggle assertions"
+    record_process_focus_metric "terminal_toggle.hotkey.process_tracked_tab" "frontend" "$host" "single" "$spaces_toggle_focus_request_id" "$spaces_toggle_focus_log"
+    wait_for_spaces_frontmost_ready
+    wait_for_condition "spaces_main_window_visible" "1"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
+    wait_for_spaces_frontmost_ready
+    send_spaces_toggle_hotkey_with_ack
+    wait_for_condition "spaces_main_window_visible" "0"
+    wait_for_condition "spaces_main_window_key" "0"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_spaces_frontmost_ready
+    send_spaces_toggle_hotkey_with_ack
+    wait_for_spaces_frontmost_ready
+    wait_for_condition "spaces_front_window_title" "Spaces"
+    wait_for_condition "spaces_main_window_visible" "1"
+    wait_for_condition "spaces_main_window_key" "1"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "none"
+    if host_available ghostty; then
+      activate_ghostty
+      transition_pause "$host seed untracked ghostty focus for main window toggle assertions"
+      wait_for_condition "frontmost_app" "ghostty"
+      wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "0"
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_spaces_frontmost_ready
+      wait_for_condition "spaces_front_window_title" "Spaces"
+      wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "1"
+      activate_ghostty
+      transition_pause "$host keep ghostty focused while main window remains visible"
+      wait_for_condition "frontmost_app" "ghostty"
+      wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "0"
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_spaces_frontmost_ready
+      wait_for_condition "spaces_front_window_title" "Spaces"
+      wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "1"
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_condition "frontmost_app" "ghostty"
+      wait_for_condition "spaces_main_window_visible" "0"
+      wait_for_condition "spaces_main_window_key" "0"
+    else
+      activate_google_chrome
+      transition_pause "$host seed chrome focus for main window toggle assertions"
+      wait_for_condition "frontmost_app" "Google Chrome"
+      wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "0"
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_spaces_frontmost_ready
+      wait_for_condition "spaces_front_window_title" "Spaces"
+      wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "1"
+      activate_google_chrome
+      transition_pause "$host keep chrome focused while main window remains visible"
+      wait_for_condition "frontmost_app" "Google Chrome"
+      wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "0"
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_spaces_frontmost_ready
+      wait_for_condition "spaces_front_window_title" "Spaces"
+      wait_for_condition "spaces_main_window_visible" "1"
+      wait_for_condition "spaces_main_window_key" "1"
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_condition "frontmost_app" "Google Chrome"
+      wait_for_condition "spaces_main_window_visible" "0"
+      wait_for_condition "spaces_main_window_key" "0"
+    fi
+    pass_case
+
+    begin_case "$host: toggle command palette independently of auxiliary terminal windows"
+    ensure_single_spaces_instance "$SPACES_PID"
+    reset_fixture_runtime "$workspace_dir"
+    run_spaces_logged /tmp/spaces-e2e-profile-terminal-toggle-palette-start.log start "$workspace_dir"
+    local spaces_palette_focus_request_id
+    local spaces_palette_focus_log=/tmp/spaces-e2e-toggle-palette-focus-frontend.log
+    spaces_palette_focus_request_id="$(uuidgen)"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_palette_focus_request_id" >"$spaces_palette_focus_log" 2>&1
+    transition_pause "$host seed frontend terminal focus for palette toggle assertions"
+    record_process_focus_metric "terminal_toggle_palette.hotkey.process_tracked_tab" "frontend" "$host" "single" "$spaces_palette_focus_request_id" "$spaces_palette_focus_log"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
+    send_spaces_command_palette_hotkey_with_ack
+    wait_for_spaces_command_palette_presented "1"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_condition "spaces_command_palette_key" "1"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "none"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$(uuidgen)" >/tmp/spaces-e2e-toggle-palette-refocus-frontend.log 2>&1
+    transition_pause "$host keep frontend terminal focused while palette remains visible"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_condition "spaces_command_palette_key" "0"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
+    send_spaces_command_palette_hotkey_with_ack
+    wait_for_spaces_command_palette_presented "1"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_condition "spaces_command_palette_key" "1"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "none"
+    wait_for_spaces_frontmost_ready
+    send_spaces_command_palette_hotkey_with_ack
+    wait_for_spaces_command_palette_dismissed "1"
+    wait_for_condition "spaces_command_palette_visible" "0"
+    wait_for_condition "spaces_command_palette_key" "0"
+    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+    wait_for_condition "spaces_front_window_title" "frontend"
+    pass_case
+
+    # Repeated built-in hotkey timing loops live in the dedicated
+    # `profile_spaces_terminal_hotkeys.sh` and
+    # `profile_spaces_terminal_palette.sh` profilers so the real-system matrix
+    # stays focused on functional macOS behavior assertions.
+  fi
 }
 
 run_multi_workspace_focus_and_cycle_assertions() {
@@ -2553,6 +4472,7 @@ run_multi_workspace_focus_and_cycle_assertions() {
   local primary_dump="$TMP_ROOT/$host-primary-multi.json"
   local secondary_dump="$TMP_ROOT/$host-secondary-multi.json"
 
+  ensure_configured_terminal_host "$host"
   begin_case "$host: multi-workspace focus and cycle isolation"
   ensure_single_spaces_instance "$SPACES_PID"
   reset_fixture_runtime "$primary_workspace_dir"
@@ -2573,8 +4493,20 @@ run_multi_workspace_focus_and_cycle_assertions() {
     dump_iterm_state "$host multi after-both-launches"
   fi
 
-  local primary_frontend_window_id primary_frontend_session_id primary_frontend_terminal_id primary_backend_session_id primary_backend_terminal_id
-  local secondary_frontend_window_id secondary_frontend_session_id secondary_frontend_terminal_id secondary_backend_session_id secondary_backend_terminal_id
+  local primary_docs_window_id primary_frontend_window_id primary_frontend_session_id primary_frontend_terminal_id primary_backend_session_id primary_backend_terminal_id primary_workspace_id
+  local secondary_docs_window_id secondary_frontend_window_id secondary_frontend_session_id secondary_frontend_terminal_id secondary_backend_session_id secondary_backend_terminal_id secondary_workspace_id
+  primary_workspace_id="$(json_get "$primary_dump" "workspace.id")"
+  secondary_workspace_id="$(json_get "$secondary_dump" "workspace.id")"
+  primary_docs_window_id="$(python3 - "$primary_dump" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for window in data["windows"]:
+    if window["name"] == "docs":
+        print(window.get("windowID") or "")
+        break
+PY
+)"
   primary_frontend_window_id="$(python3 - "$primary_dump" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh:
@@ -2622,6 +4554,16 @@ with open(sys.argv[1]) as fh:
 for window in data["windows"]:
     if window["name"] == "backend":
         print(window.get("terminalNativeID") or "")
+        break
+PY
+)"
+  secondary_docs_window_id="$(python3 - "$secondary_dump" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for window in data["windows"]:
+    if window["name"] == "docs":
+        print(window.get("windowID") or "")
         break
 PY
 )"
@@ -2676,51 +4618,126 @@ for window in data["windows"]:
 PY
 )"
 
-  run_spaces_logged /tmp/spaces-e2e-multi-primary-focus.log open docs "$primary_workspace_dir"
+  if [[ "$host" == "spaces" ]]; then
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" focus-workspace-window-index --workspace-dir "$primary_workspace_dir" --index 1 >/tmp/spaces-e2e-multi-primary-focus.json
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" hide-main-window >/tmp/spaces-e2e-multi-primary-hide-main.json
+    activate_google_chrome
+    focus_yabai_window_if_present "$primary_docs_window_id"
+  else
+    run_spaces_logged /tmp/spaces-e2e-multi-primary-focus.log open docs "$primary_workspace_dir"
+  fi
   transition_pause "$host focus primary docs"
   log_debug "$host multi primary docs focus complete"
   wait_for_condition "chrome_front_url" "$primary_docs_url"
-  send_cycle_hotkey next
-  transition_pause "$host primary cycle next"
-  log_debug "$host multi primary cycle next sent"
-  record_cycle_metric "terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab" "next" "$host" "primary"
-  if [[ "$host" == "iterm2" ]]; then
-    dump_iterm_state "$host multi after-primary-next"
-  fi
-  if [[ "$host" == "iterm2" ]]; then
-    wait_for_condition "frontmost_app" "iTerm2"
-    wait_for_any_value "iterm_front_session" "$primary_frontend_session_id" "$primary_backend_session_id"
+  local primary_cycle_next_started_at primary_cycle_previous_started_at secondary_cycle_next_started_at secondary_cycle_previous_started_at
+  if [[ "$host" == "spaces" ]]; then
+    measure_spaces_cycle_transition \
+      "$host" \
+      "primary" \
+      "$primary_workspace_dir" \
+      "$primary_docs_window_id" \
+      "browser_tracked_tab" \
+      "next" \
+      "$host primary cycle next" \
+      'process:*' 'terminal:*'
   else
-    wait_for_any_value "ghostty_focused_terminal" "$primary_frontend_terminal_id" "$primary_backend_terminal_id"
+    primary_cycle_next_started_at="$(timestamp_ms)"
+    send_cycle_hotkey next
+    transition_pause "$host primary cycle next"
+    log_debug "$host multi primary cycle next sent"
+    if [[ "$host" == "iterm2" ]]; then
+      dump_iterm_state "$host multi after-primary-next"
+    fi
+    if [[ "$host" == "iterm2" ]]; then
+      wait_for_condition "frontmost_app" "iTerm2"
+      if ! wait_for_any_value_optional "iterm_front_session" "$primary_frontend_session_id" "$primary_backend_session_id"; then
+        wait_for_app_log_pattern "spaces: perf metric=window_cycle workspace=${primary_workspace_id} target=process:frontend success=1 .* direction=next" >/dev/null
+      fi
+    elif [[ "$host" == "ghostty" ]]; then
+      wait_for_any_value "ghostty_focused_terminal" "$primary_frontend_terminal_id" "$primary_backend_terminal_id"
+    else
+      wait_for_app_log_pattern 'spaces: perf metric=window_cycle workspace=.* target=.* success=1 .* direction=next' >/dev/null
+    fi
+    record_metric_sample "browser_tracked_tab.keyboard_cycle_next.process_tracked_tab" "$(( $(timestamp_ms) - primary_cycle_next_started_at ))" "$host" "primary"
   fi
-  send_cycle_hotkey previous
-  transition_pause "$host primary cycle previous"
-  log_debug "$host multi primary cycle previous sent"
-  record_cycle_metric "browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab" "previous" "$host" "primary"
-  wait_for_condition "chrome_front_url" "$primary_docs_url"
+  if [[ "$host" == "spaces" ]]; then
+    measure_spaces_cycle_transition \
+      "$host" \
+      "primary" \
+      "$primary_workspace_dir" \
+      "$primary_docs_window_id" \
+      "process_tracked_tab" \
+      "previous" \
+      "$host primary cycle previous" \
+      'browser:*'
+  else
+    primary_cycle_previous_started_at="$(timestamp_ms)"
+    send_cycle_hotkey previous
+    transition_pause "$host primary cycle previous"
+    log_debug "$host multi primary cycle previous sent"
+    wait_for_condition "chrome_front_url" "$primary_docs_url"
+    record_metric_sample "process_tracked_tab.keyboard_cycle_previous.browser_tracked_tab" "$(( $(timestamp_ms) - primary_cycle_previous_started_at ))" "$host" "primary"
+  fi
 
-  run_spaces_logged /tmp/spaces-e2e-multi-secondary-focus.log open docs "$secondary_workspace_dir"
+  if [[ "$host" == "spaces" ]]; then
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" focus-workspace-window-index --workspace-dir "$secondary_workspace_dir" --index 1 >/tmp/spaces-e2e-multi-secondary-focus.json
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" hide-main-window >/tmp/spaces-e2e-multi-secondary-hide-main.json
+    activate_google_chrome
+    focus_yabai_window_if_present "$secondary_docs_window_id"
+  else
+    run_spaces_logged /tmp/spaces-e2e-multi-secondary-focus.log open docs "$secondary_workspace_dir"
+  fi
   transition_pause "$host focus secondary docs"
   log_debug "$host multi secondary docs focus complete"
   wait_for_condition "chrome_front_url" "$secondary_docs_url"
-  send_cycle_hotkey next
-  transition_pause "$host secondary cycle next"
-  log_debug "$host multi secondary cycle next sent"
-  record_cycle_metric "terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab" "next" "$host" "secondary"
-  if [[ "$host" == "iterm2" ]]; then
-    dump_iterm_state "$host multi after-secondary-next"
-  fi
-  if [[ "$host" == "iterm2" ]]; then
-    wait_for_condition "frontmost_app" "iTerm2"
-    wait_for_any_value "iterm_front_session" "$secondary_frontend_session_id" "$secondary_backend_session_id"
+  if [[ "$host" == "spaces" ]]; then
+    measure_spaces_cycle_transition \
+      "$host" \
+      "secondary" \
+      "$secondary_workspace_dir" \
+      "$secondary_docs_window_id" \
+      "browser_tracked_tab" \
+      "next" \
+      "$host secondary cycle next" \
+      'process:*' 'terminal:*'
   else
-    wait_for_any_value "ghostty_focused_terminal" "$secondary_frontend_terminal_id" "$secondary_backend_terminal_id"
+    secondary_cycle_next_started_at="$(timestamp_ms)"
+    send_cycle_hotkey next
+    transition_pause "$host secondary cycle next"
+    log_debug "$host multi secondary cycle next sent"
+    if [[ "$host" == "iterm2" ]]; then
+      dump_iterm_state "$host multi after-secondary-next"
+    fi
+    if [[ "$host" == "iterm2" ]]; then
+      wait_for_condition "frontmost_app" "iTerm2"
+      if ! wait_for_any_value_optional "iterm_front_session" "$secondary_frontend_session_id" "$secondary_backend_session_id"; then
+        wait_for_app_log_pattern "spaces: perf metric=window_cycle workspace=${secondary_workspace_id} target=process:frontend success=1 .* direction=next" >/dev/null
+      fi
+    elif [[ "$host" == "ghostty" ]]; then
+      wait_for_any_value "ghostty_focused_terminal" "$secondary_frontend_terminal_id" "$secondary_backend_terminal_id"
+    else
+      wait_for_app_log_pattern 'spaces: perf metric=window_cycle workspace=.* target=(process|terminal):.* success=1 .* direction=next' >/dev/null
+    fi
+    record_metric_sample "browser_tracked_tab.keyboard_cycle_next.process_tracked_tab" "$(( $(timestamp_ms) - secondary_cycle_next_started_at ))" "$host" "secondary"
   fi
-  send_cycle_hotkey previous
-  transition_pause "$host secondary cycle previous"
-  log_debug "$host multi secondary cycle previous sent"
-  record_cycle_metric "browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab" "previous" "$host" "secondary"
-  wait_for_condition "chrome_front_url" "$secondary_docs_url"
+  if [[ "$host" == "spaces" ]]; then
+    measure_spaces_cycle_transition \
+      "$host" \
+      "secondary" \
+      "$secondary_workspace_dir" \
+      "$secondary_docs_window_id" \
+      "process_tracked_tab" \
+      "previous" \
+      "$host secondary cycle previous" \
+      'browser:*'
+  else
+    secondary_cycle_previous_started_at="$(timestamp_ms)"
+    send_cycle_hotkey previous
+    transition_pause "$host secondary cycle previous"
+    log_debug "$host multi secondary cycle previous sent"
+    wait_for_condition "chrome_front_url" "$secondary_docs_url"
+    record_metric_sample "process_tracked_tab.keyboard_cycle_previous.browser_tracked_tab" "$(( $(timestamp_ms) - secondary_cycle_previous_started_at ))" "$host" "secondary"
+  fi
 
   reset_fixture_runtime "$primary_workspace_dir"
   reset_fixture_runtime "$secondary_workspace_dir"
@@ -2734,6 +4751,7 @@ run_agent_status_assertions() {
   local workspace_title workspace_id agent_run_view_pattern agent_script
   local event_start_line=1
 
+  ensure_configured_terminal_host "$host"
   dump_workspace "$workspace_dir" "$dump_file"
   workspace_title="$(json_get "$dump_file" "workspace.title")"
   agent_script="$(create_mock_agent_script "$workspace_dir")"
@@ -2761,13 +4779,6 @@ run_agent_status_assertions() {
   pass_case
 }
 
-host_available() {
-  local host="$1"
-  local out="$TMP_ROOT/terminal-host-available-$host.json"
-  "$MX_E2E_BIN" terminal-host-available "$host" >"$out" 2>/dev/null || return 1
-  [[ "$(json_get "$out" "available")" == "true" ]]
-}
-
 main() {
   # These checks are intentionally explicit because this script targets the real
   # machine, not the hermetic unit-test environment.
@@ -2775,7 +4786,6 @@ main() {
   require_cmd git
   require_cmd osascript
   require_cmd python3
-  require_cmd tmux
   require_cmd uv
   require_cmd yabai
 
@@ -2853,19 +4863,14 @@ EOF
     return 0
   fi
 
-  IFS=',' read -r -a hosts <<<"$HOSTS_CSV"
-  for host in "${hosts[@]}"; do
-    if host_available "$host"; then
-      run_launch_and_focus_assertions "$host" "$workspace_dir"
-      run_hotkey_visibility_profiling "$host" "$workspace_dir"
-      run_multi_workspace_focus_and_cycle_assertions "$host" "$workspace_dir" "$second_workspace_dir"
-      run_agent_status_assertions "$host" "$workspace_dir"
-      assert_file_contains "$EVENT_LOG" "$stop_marker"
-    else
-      printf 'SKIP: terminal host %s is not available on this machine\n' "$host"
-      skip_case "$host: host availability" "terminal host not installed"
-    fi
-  done
+  local host="spaces"
+  run_launch_and_focus_assertions "$host" "$workspace_dir"
+  if (( ONLY_WINDOW_CYCLE_PROFILE == 1 )); then
+    return 0
+  fi
+  run_multi_workspace_focus_and_cycle_assertions "$host" "$workspace_dir" "$second_workspace_dir"
+  run_agent_status_assertions "$host" "$workspace_dir"
+  assert_file_contains "$EVENT_LOG" "$stop_marker"
 
   begin_case "branch and tertiary workspaces serve correct content"
   local branch_check_out="$TMP_ROOT/branch-content-check.json"

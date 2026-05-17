@@ -37,11 +37,10 @@ public struct AgentWindowRecord: Codable, Sendable {
         status: AgentWindowStatus, createdAt: String, updatedAt: String
     ) {
         let resolvedWindowID = yabaiWindowID ?? windowID
+        let resolvedTrackingID = terminalTrackingID ?? terminalNativeID ?? tmuxWindowID
         let terminalTarget: TerminalTargetRecord? =
-            if terminalTrackingID != nil || terminalNativeID != nil || tmuxWindowID != nil || resolvedWindowID != nil {
-                TerminalTargetRecord(
-                    app: TerminalHost(rawValue: provider.rawValue)?.appName ?? TerminalHost.iterm2.appName, windowID: resolvedWindowID,
-                    provider: provider.rawValue, trackingID: terminalTrackingID, nativeID: terminalNativeID, tmuxWindowID: tmuxWindowID)
+            if resolvedWindowID != nil || resolvedTrackingID != nil {
+                TerminalTargetRecord(runtimeTargetID: runtimeTargetID, windowID: resolvedWindowID, trackingID: resolvedTrackingID)
             } else { nil }
         self.init(
             id: id, workspaceID: workspaceID, provider: provider, label: label, runtimeTargetID: runtimeTargetID, terminalTarget: terminalTarget,
@@ -60,8 +59,8 @@ public struct AgentWindowRecord: Codable, Sendable {
     }
 
     public var terminalTrackingID: String? { terminalTarget?.trackingID }
-    public var terminalNativeID: String? { terminalTarget?.nativeID }
-    public var tmuxWindowID: String? { terminalTarget?.tmuxWindowID }
+    public var terminalNativeID: String? { terminalTarget?.trackingID }
+    public var tmuxWindowID: String? { nil }
     public var codexThreadID: String? { sessionKey }
     public var windowID: Int? { terminalTarget?.windowID }
     /// Yabai window ID of the captured workspace window hosting this agent session.

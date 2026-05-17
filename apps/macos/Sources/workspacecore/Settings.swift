@@ -2,8 +2,6 @@ import Foundation
 
 public enum SettingsKey {
     public static let appEditor = "app_editor"
-    public static let appTerminalHost = "app_terminal_host"
-    public static let defaultAppTerminalHost = TerminalHost.iterm2.rawValue
     public static let appProcessShell = "app_process_shell"
     public static let defaultAppProcessShell = ProcessShell.zsh.rawValue
     public static let appPortRangeStart = "app_port_range_start"

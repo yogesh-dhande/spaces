@@ -2,6 +2,9 @@ import AppKit
 import Carbon
 import Foundation
 import Sparkle
+import spacesterminalcore
+import spacesterminalghostty
+import spacesterminalui
 import systembridge
 import workspacecore
 
@@ -47,6 +50,8 @@ private final class CommandPalettePanel: NSPanel {
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate,
     NSWindowDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSComboBoxDelegate, NSTableViewDelegate, NSTableViewDataSource
 {
+    private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
     private enum AlertsIconTint: Sendable {
         case browser
         case terminal
@@ -201,8 +206,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }()
     private var agentEventIPCObserver: NSObjectProtocol?
     private var selectWorkspaceDetailIPCObserver: NSObjectProtocol?
+    private var showMainWindowIPCObserver: NSObjectProtocol?
+    private var hideMainWindowIPCObserver: NSObjectProtocol?
+    private var showWindowIssueModalIPCObserver: NSObjectProtocol?
+    private var cycleWorkspaceWindowIPCObserver: NSObjectProtocol?
+    private var openWorkspaceTerminalIPCObserver: NSObjectProtocol?
+    private var openTerminalSessionWindowIPCObserver: NSObjectProtocol?
+    private var focusTerminalSessionWindowIPCObserver: NSObjectProtocol?
+    private var closeTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
+    private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
     private var setupManager: SetupManager?
     private var sidebarReloadTask: Task<Void, Never>?
@@ -242,6 +256,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var recentCommandPaletteFocusIdentities: [String] = []
+    private var terminalSessionWindowControllers: [String: [TerminalSessionWindowController]] = [:]
+    private var lastFocusedBuiltInTerminalSessionID: String?
+    private var appToggleReturnTerminalSessionID: String?
+    private var appToggleReturnApplicationProcessID: pid_t?
+    private var commandPaletteReturnTerminalSessionID: String?
+    private var commandPaletteReturnApplicationProcessID: pid_t?
 
     private struct WindowShortcutProfile {
         let index: Int
@@ -259,13 +279,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     enum ExternalWindowAction: Sendable {
-        case focus
-        case open
+        case focus(hidesApp: Bool)
+        case open(hidesApp: Bool)
     }
 
     private enum WindowShortcutExecutionOutcome: Sendable {
-        case focused(kind: String, recentFocusIdentity: String)
-        case opened(kind: String)
+        case focused(kind: String, recentFocusIdentity: String, hidesApp: Bool)
+        case opened(kind: String, hidesApp: Bool)
         case noWorkspace
         case noMatch
     }
@@ -300,15 +320,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             let db = try DatabaseLocator.defaultPath()
             let store = try SQLiteStore(path: db)
-            orchestrator = WorkspaceOrchestrator(store: store)
+            orchestrator = makeUIOrchestrator(store: store)
         } catch {
             showError(error)
             return
         }
         logStartupProfile("store_ready")
 
-        buildShellWindow()
-        logStartupProfile("shell_window_ready")
         NSApp.activate(ignoringOtherApps: true)
         logStartupProfile("app_activated")
         buildMainMenu()
@@ -321,13 +339,49 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupShortcutMonitor()
         logStartupProfile("shortcut_monitor_ready")
         setupAgentEventIPCObserver()
+        setupShowMainWindowIPCObserver()
+        setupHideMainWindowIPCObserver()
+        setupShowWindowIssueModalIPCObserver()
+        setupCycleWorkspaceWindowIPCObserver()
         setupSelectWorkspaceDetailIPCObserver()
+        setupOpenWorkspaceTerminalIPCObserver()
+        setupOpenTerminalSessionWindowIPCObserver()
+        setupFocusTerminalSessionWindowIPCObserver()
+        setupCloseTerminalSessionWindowIPCObserver()
         setupAppActivationObservers()
+        setupTerminalAttachmentStateObserver()
         logStartupProfile("ipc_observers_ready")
-        enterSetupFlow()
-        logStartupProfile("setup_started")
+        Self.scheduleAfterNextRunLoopTurn { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.buildShellWindow()
+                self.logStartupProfile("shell_window_ready")
+                self.enterSetupFlow()
+                self.logStartupProfile("setup_started")
+                self.ensureMainWindowVisibleOnLaunch()
+            }
+        }
         Task { @MainActor in WorkspaceOrchestrator.prepareUserNotificationAuthorization() }
     }
+
+    private func makeUIOrchestrator(store: SQLiteStore) -> WorkspaceOrchestrator {
+        WorkspaceOrchestrator(
+            store: store,
+            builtInTerminalWindowOpener: { [weak self] sessionID, mode in
+                Self.dispatchBuiltInTerminalWindowActionOnMainThread { self?.openTerminalSessionWindow(sessionID: sessionID, mode: mode) }
+            },
+            builtInTerminalWindowFocuser: { [weak self] sessionID, requestID in
+                Self.dispatchBuiltInTerminalWindowActionOnMainThread { self?.focusTerminalSessionWindow(sessionID: sessionID, requestID: requestID) }
+            },
+            builtInTerminalWindowCloser: { [weak self] sessionID in
+                Self.dispatchBuiltInTerminalWindowActionOnMainThread { self?.closeTerminalSessionWindows(sessionID: sessionID) }
+            })
+    }
+
+    nonisolated static func dispatchBuiltInTerminalWindowActionOnMainThread(
+        isMainThread: Bool = Thread.isMainThread,
+        scheduler: (@escaping @MainActor () -> Void) -> Void = { action in Task { @MainActor in action() } }, action: @escaping @MainActor () -> Void
+    ) { if isMainThread { MainActor.assumeIsolated { action() } } else { scheduler(action) } }
 
     public func applicationWillTerminate(_ notification: Notification) {
         periodicWorkspaceRefreshTask?.cancel()
@@ -347,6 +401,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             DistributedNotificationCenter.default().removeObserver(selectWorkspaceDetailIPCObserver)
             self.selectWorkspaceDetailIPCObserver = nil
         }
+        if let showMainWindowIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(showMainWindowIPCObserver)
+            self.showMainWindowIPCObserver = nil
+        }
+        if let hideMainWindowIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(hideMainWindowIPCObserver)
+            self.hideMainWindowIPCObserver = nil
+        }
+        if let showWindowIssueModalIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(showWindowIssueModalIPCObserver)
+            self.showWindowIssueModalIPCObserver = nil
+        }
+        if let cycleWorkspaceWindowIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(cycleWorkspaceWindowIPCObserver)
+            self.cycleWorkspaceWindowIPCObserver = nil
+        }
+        if let openWorkspaceTerminalIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(openWorkspaceTerminalIPCObserver)
+            self.openWorkspaceTerminalIPCObserver = nil
+        }
+        if let openTerminalSessionWindowIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(openTerminalSessionWindowIPCObserver)
+            self.openTerminalSessionWindowIPCObserver = nil
+        }
+        if let focusTerminalSessionWindowIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(focusTerminalSessionWindowIPCObserver)
+            self.focusTerminalSessionWindowIPCObserver = nil
+        }
+        if let closeTerminalSessionWindowIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(closeTerminalSessionWindowIPCObserver)
+            self.closeTerminalSessionWindowIPCObserver = nil
+        }
         if let appDidBecomeActiveObserver {
             NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
             self.appDidBecomeActiveObserver = nil
@@ -354,6 +440,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let appDidResignActiveObserver {
             NotificationCenter.default.removeObserver(appDidResignActiveObserver)
             self.appDidResignActiveObserver = nil
+        }
+        if let terminalAttachmentStateDidChangeObserver {
+            NotificationCenter.default.removeObserver(terminalAttachmentStateDidChangeObserver)
+            self.terminalAttachmentStateDidChangeObserver = nil
         }
         commandPaletteLoadTask?.cancel()
         commandPaletteLoadTask = nil
@@ -367,6 +457,84 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.reloadData()
+            }
+        }
+    }
+
+    private func setupShowMainWindowIPCObserver() {
+        showMainWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.showMainWindow, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let window = self.window else { return }
+                self.revealTargetedHotkeyWindow(window)
+            }
+        }
+    }
+
+    private func setupHideMainWindowIPCObserver() {
+        hideMainWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.hideMainWindow, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let window = self.window else { return }
+                // This IPC is only used by the real-system E2E harness. Hide the
+                // entire app process so the setup state is deterministic before
+                // profiling external-app -> main-window hotkey flows.
+                window.orderOut(nil)
+                NSApp.hide(nil)
+            }
+        }
+    }
+
+    private func setupShowWindowIssueModalIPCObserver() {
+        showWindowIssueModalIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.showWindowIssueModal, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let title = notification.userInfo?[IPCNotification.titleUserInfoKey] as? String else { return }
+            guard let detail = notification.userInfo?[IPCNotification.detailUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, title, detail] in
+                guard let self else { return }
+                self.showWindowIssueModal(title: title, detail: detail)
+            }
+        }
+    }
+
+    private func setupCycleWorkspaceWindowIPCObserver() {
+        cycleWorkspaceWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.cycleWorkspaceWindow, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+            guard let direction = notification.userInfo?[IPCNotification.cycleDirectionUserInfoKey] as? String else { return }
+            let requestID = (notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String)?.trimmingCharacters(
+                in: .whitespacesAndNewlines)
+            let preferredFocusedBuiltInTerminalSessionID = (notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            Task { @MainActor [weak self, workspaceID, direction, requestID, preferredFocusedBuiltInTerminalSessionID] in
+                guard let self else { return }
+                do {
+                    let effectiveRequestID = (requestID?.isEmpty == false) ? requestID : UUID().uuidString
+                    let effectivePreferredTerminalSessionID =
+                        (preferredFocusedBuiltInTerminalSessionID?.isEmpty == false)
+                        ? preferredFocusedBuiltInTerminalSessionID : self.activeBuiltInTerminalSessionID()
+                    let hidesApp: Bool
+                    switch direction {
+                    case "next":
+                        hidesApp = try self.orchestrator.focusNextWindowHidesApp(
+                            workspaceID: workspaceID, requestID: effectiveRequestID,
+                            preferredFocusedBuiltInTerminalSessionID: effectivePreferredTerminalSessionID)
+                    case "previous":
+                        hidesApp = try self.orchestrator.focusPreviousWindowHidesApp(
+                            workspaceID: workspaceID, requestID: effectiveRequestID,
+                            preferredFocusedBuiltInTerminalSessionID: effectivePreferredTerminalSessionID)
+                    default: return
+                    }
+                    if hidesApp {
+                        self.hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true))
+                    } else {
+                        self.dismissCommandPaletteForBuiltInWindowNavigation()
+                    }
+                } catch { self.showError(error) }
             }
         }
     }
@@ -387,17 +555,229 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 self.showingSettings = false
                 self.selectWorkspace(workspace)
                 self.refreshSelection()
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.unhide(nil)
-                if let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first {
-                    if window.isMiniaturized { window.deminiaturize(nil) }
-                    self.prepareWindowForActiveSpaceSummon(window)
-                    window.orderFrontRegardless()
-                    window.makeKey()
-                }
+                if let window = self.window { self.revealTargetedHotkeyWindow(window) }
                 self.logWorkspaceDetailIPC("selected id=\(workspaceID) title=\(workspace.title)")
             }
         }
+    }
+
+    private func setupOpenWorkspaceTerminalIPCObserver() {
+        openWorkspaceTerminalIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.openWorkspaceTerminal, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, workspaceID] in
+                guard let self else { return }
+                self.openWorkspaceTerminal(workspaceID: workspaceID, route: .ipc)
+            }
+        }
+    }
+
+    private func setupOpenTerminalSessionWindowIPCObserver() {
+        openTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.openTerminalSessionWindow, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+            let modeRawValue = notification.userInfo?[IPCNotification.terminalAttachmentModeUserInfoKey] as? String
+            let mode = modeRawValue.flatMap(TerminalAttachmentMode.init(rawValue:)) ?? .owner
+            let requestID = notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String
+            Task { @MainActor [weak self, sessionID, mode, requestID] in
+                guard let self else { return }
+                self.openTerminalSessionWindow(sessionID: sessionID, mode: mode, requestID: requestID)
+            }
+        }
+    }
+
+    private func setupCloseTerminalSessionWindowIPCObserver() {
+        closeTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.closeTerminalSessionWindow, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, sessionID] in
+                guard let self else { return }
+                self.closeTerminalSessionWindows(sessionID: sessionID)
+            }
+        }
+    }
+
+    private func setupFocusTerminalSessionWindowIPCObserver() {
+        focusTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.focusTerminalSessionWindow, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+            let requestID = notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String
+            Task { @MainActor [weak self, sessionID, requestID] in
+                guard let self else { return }
+                self.focusTerminalSessionWindow(sessionID: sessionID, requestID: requestID)
+            }
+        }
+    }
+
+    private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) {
+        let startedAt = Date()
+        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+        cancelDeferredExternalWindowHide()
+        do {
+            pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+            let existingControllers = terminalSessionWindowControllers[sessionID] ?? []
+            let controller: TerminalSessionWindowController
+            let reusedExistingWindow: Bool
+            if mode == .owner, let existing = Self.inMemoryOwnerTerminalSessionWindowController(existingControllers) {
+                controller = existing
+                reusedExistingWindow = true
+            } else {
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                if mode == .owner,
+                    let existing = Self.reusableTerminalSessionWindowController(
+                        existingControllers, mode: .owner, activeOwnerClientID: Self.activeOwnerClientID(paths: paths))
+                {
+                    controller = existing
+                    reusedExistingWindow = true
+                } else {
+                    let created = TerminalSessionWindowController(
+                        sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false,
+                        onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
+                        onWindowClose: { [weak self] sessionID, clientID in
+                            if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
+                            self?.removeTerminalSessionWindowController(sessionID: sessionID, clientID: clientID)
+                        })
+                    terminalSessionWindowControllers[sessionID, default: []].append(created)
+                    controller = created
+                    reusedExistingWindow = false
+                }
+            }
+            controller.show(requestID: requestID, route: reusedExistingWindow ? "reuse_existing_window" : "create_window")
+            logPerfMetric(
+                "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+                detail: "mode=\(mode.rawValue) reused=\(reusedExistingWindow ? 1 : 0)\(requestDetail)")
+            if let requestID, !requestID.isEmpty {
+                logPerfMetric(
+                    "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+                    detail: "route=summoned_owner request_id=\(requestID)")
+            }
+        } catch {
+            logPerfMetric(
+                "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
+                detail: "mode=\(mode.rawValue)\(requestDetail)")
+            showError(error)
+            return
+        }
+    }
+
+    private func pruneClosedTerminalSessionWindowControllers(sessionID: String) {
+        guard var controllers = terminalSessionWindowControllers[sessionID] else { return }
+        controllers.removeAll(where: \.didClose)
+        if controllers.isEmpty {
+            terminalSessionWindowControllers.removeValue(forKey: sessionID)
+        } else {
+            terminalSessionWindowControllers[sessionID] = controllers
+        }
+    }
+
+    private func closeTerminalSessionWindows(sessionID: String) {
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+        guard let controllers = terminalSessionWindowControllers[sessionID], !controllers.isEmpty else { return }
+        for controller in controllers where !controller.didClose { controller.window?.close() }
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+    }
+
+    private func focusTerminalSessionWindow(sessionID: String, requestID: String? = nil) {
+        let startedAt = Date()
+        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+        cancelDeferredExternalWindowHide()
+        logPerfMetric(
+            "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: 0, success: true, detail: "stage=start\(requestDetail)")
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+        let existingControllers = terminalSessionWindowControllers[sessionID] ?? []
+        let controllerAndRoute: (controller: TerminalSessionWindowController, route: String)?
+        if let resolved = Self.focusableTerminalSessionWindowController(existingControllers, sessionID: sessionID) {
+            controllerAndRoute = resolved
+        } else {
+            openTerminalSessionWindow(sessionID: sessionID, mode: .owner, requestID: requestID)
+            pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+            let refreshedControllers = terminalSessionWindowControllers[sessionID] ?? []
+            controllerAndRoute = Self.focusableTerminalSessionWindowController(refreshedControllers, sessionID: sessionID).map {
+                ($0.controller, "summoned_owner")
+            }
+        }
+        guard let (controller, route) = controllerAndRoute else {
+            logPerfMetric(
+                "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+                detail: "route=missing\(requestDetail)")
+            return
+        }
+        logPerfMetric(
+            "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+            detail: "stage=resolved_controller route=\(route)\(requestDetail)")
+        controller.focusWindow(requestID: requestID, route: route)
+        logPerfMetric(
+            "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+            detail: "route=\(route)\(requestDetail)")
+    }
+
+    static func inMemoryOwnerTerminalSessionWindowController(_ controllers: [TerminalSessionWindowController]) -> TerminalSessionWindowController? {
+        let liveOwnerControllers = controllers.filter { !$0.didClose && $0.attachmentMode == .owner }
+        guard liveOwnerControllers.count == 1 else { return nil }
+        return liveOwnerControllers[0]
+    }
+
+    static func reusableTerminalSessionWindowController(
+        _ controllers: [TerminalSessionWindowController], mode: TerminalAttachmentMode, activeOwnerClientID: String?
+    ) -> TerminalSessionWindowController? {
+        guard mode == .owner, let activeOwnerClientID else { return nil }
+        return controllers.first { !$0.didClose && $0.clientID == activeOwnerClientID }
+    }
+
+    static func focusableTerminalSessionWindowController(_ controllers: [TerminalSessionWindowController], sessionID: String) -> (
+        controller: TerminalSessionWindowController, route: String
+    )? {
+        if let controller = inMemoryOwnerTerminalSessionWindowController(controllers) { return (controller, "in_memory_owner") }
+        guard !controllers.isEmpty else { return nil }
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
+        guard
+            let controller = reusableTerminalSessionWindowController(
+                controllers, mode: .owner, activeOwnerClientID: activeOwnerClientID(paths: paths))
+        else { return nil }
+        return (controller, "persisted_owner")
+    }
+
+    static func activeOwnerClientID(paths: TerminalSessionPaths) -> String? {
+        guard let ownerAttachment = try? TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner }) else {
+            return nil
+        }
+        return ownerAttachment.clientID
+    }
+
+    static func shouldTerminateAdHocBuiltInTerminalSession(paths: TerminalSessionPaths?, isConfiguredProcessSession: Bool, now: Date = Date()) -> Bool
+    {
+        guard !isConfiguredProcessSession, let paths, let activeAttachments = try? TerminalSessionPersistence.liveAttachments(paths: paths, now: now)
+        else { return false }
+        return activeAttachments.isEmpty
+    }
+
+    private func removeTerminalSessionWindowController(sessionID: String, clientID: String) {
+        guard var controllers = terminalSessionWindowControllers[sessionID] else { return }
+        controllers.removeAll { $0.clientID == clientID }
+        if controllers.isEmpty {
+            terminalSessionWindowControllers.removeValue(forKey: sessionID)
+            terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
+        } else {
+            terminalSessionWindowControllers[sessionID] = controllers
+        }
+    }
+
+    private func terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: String, now: Date = Date()) {
+        let workspaceID = try? orchestrator.workspaceIDForTerminalSession(sessionID)
+        guard let workspaceID else { return }
+        let isConfiguredProcessSession = ((try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? []).contains {
+            ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
+        }
+        let paths = try? TerminalSessionPaths.forSession(id: sessionID)
+        guard Self.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: isConfiguredProcessSession, now: now) else {
+            return
+        }
+        GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
+        if (try? orchestrator.removeAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
     }
 
     private func logWorkspaceDetailIPC(_ message: String) {
@@ -419,6 +799,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     self.logWindowShortcutProfile(
                         "stage=app_became_active index=\(profile.index) elapsed_ms=\(self.windowShortcutElapsedMS(since: profile.startedAt)) route_gap_ms=\(routeElapsedMS)"
                     )
+                    self.activeWindowShortcutProfile = nil
                 }
                 self.requestVisibleWorkspaceDetailRefreshIfNeeded(reason: "app_became_active")
             }
@@ -435,8 +816,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 self.logWindowShortcutProfile(
                     "stage=app_resigned_active index=\(profile.index) elapsed_ms=\(self.windowShortcutElapsedMS(since: profile.startedAt)) route_gap_ms=\(routeElapsedMS)"
                 )
+                self.activeWindowShortcutProfile = nil
             }
         }
+    }
+
+    private func setupTerminalAttachmentStateObserver() {
+        terminalAttachmentStateDidChangeObserver = NotificationCenter.default.addObserver(
+            forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main
+        ) { [weak self] notification in
+            let changedSessionID = notification.userInfo?["sessionID"] as? String
+            MainActor.assumeIsolated {
+                guard let self, let changedSessionID else { return }
+                self.handleTerminalAttachmentStateDidChange(sessionID: changedSessionID)
+            }
+        }
+    }
+
+    private func handleTerminalAttachmentStateDidChange(sessionID: String) {
+        guard terminalSessionWindowControllers[sessionID] == nil else { return }
+        terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
     }
 
     private func startPeriodicWorkspaceWindowRefresh() {
@@ -637,11 +1036,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let mainKey = window?.isKeyWindow == true ? 1 : 0
         let paletteVisible = commandPalettePanel?.isVisible == true ? 1 : 0
         let paletteKey = commandPalettePanel?.isKeyWindow == true ? 1 : 0
+        let auxiliaryVisible = hasVisibleAuxiliaryWindowsForHotkeyState() ? 1 : 0
+        let terminalVisible = hasVisibleTerminalSessionWindowsForHotkeyState() ? 1 : 0
         return
-            "app_active=\(NSApp.isActive ? 1 : 0) app_hidden=\(NSApp.isHidden ? 1 : 0) main_visible=\(mainVisible) main_key=\(mainKey) main_mini=\(mainMini) palette_exists=\(commandPalettePanel == nil ? 0 : 1) palette_visible=\(paletteVisible) palette_key=\(paletteKey)"
+            "app_active=\(NSApp.isActive ? 1 : 0) app_hidden=\(NSApp.isHidden ? 1 : 0) main_visible=\(mainVisible) main_key=\(mainKey) main_mini=\(mainMini) palette_exists=\(commandPalettePanel == nil ? 0 : 1) palette_visible=\(paletteVisible) palette_key=\(paletteKey) auxiliary_visible=\(auxiliaryVisible) terminal_visible=\(terminalVisible)"
     }
 
     private func rawMainWindowVisibility() -> Bool { window?.isVisible == true && window?.isMiniaturized != true }
+
+    private func hasVisibleTerminalSessionWindowsForHotkeyState() -> Bool {
+        terminalSessionWindowControllers.values.joined().contains { controller in
+            controller.window?.isVisible == true && controller.window?.isMiniaturized != true
+        }
+    }
+
+    private func hasVisibleAuxiliaryWindowsForHotkeyState() -> Bool {
+        if commandPalettePanel?.isVisible == true { return true }
+        return hasVisibleTerminalSessionWindowsForHotkeyState()
+    }
+
+    private func focusedTerminalSessionIDForToggle() -> String? {
+        for (sessionID, controllers) in terminalSessionWindowControllers {
+            if controllers.contains(where: { !$0.didClose && ($0.window?.isKeyWindow == true || $0.window?.isMainWindow == true) }) {
+                return sessionID
+            }
+        }
+        return nil
+    }
+
+    private func activateReturnApplication(processIdentifier: pid_t) {
+        guard let application = NSRunningApplication(processIdentifier: processIdentifier) else { return }
+        application.activate(options: [])
+    }
+
+    private func activateCurrentApplicationForTargetedReveal() { NSApp.activate(ignoringOtherApps: true) }
 
     private func effectiveMainWindowVisibilityForHotkeyState() -> Bool {
         Self.effectiveMainWindowVisibilityForHotkeyState(
@@ -735,6 +1163,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
+    nonisolated private static func openWorkspaceTerminalSnapshot(workspaceID: String) async -> Result<ExternalWindowAction, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                try orchestrator.openWorkspaceTerminal(workspaceID: workspaceID)
+                return .success(.open(hidesApp: false))
+            } catch { return .failure(error) }
+        }.value
+    }
+
     nonisolated private static func createWorkspaceSnapshot(input: WorkspaceCreateInput) async -> Result<WorkspaceRecord, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
@@ -808,22 +1248,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 switch request {
                 case .workspaceBrowserSession(let workspaceID, let targetURL):
                     try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
-                    return .success(.focus)
+                    return .success(.focus(hidesApp: true))
                 case .workspaceWindow(let workspaceID, let index):
+                    let trackedWindows = try orchestrator.windows(workspaceID: workspaceID)
+                    let trackedWindow = index > 0 && index <= trackedWindows.count ? trackedWindows[index - 1] : nil
                     try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
-                    return .success(.focus)
+                    return .success(.focus(hidesApp: trackedWindow?.app != TerminalHost.spaces.appName))
                 case .workspaceProcess(let workspaceID, let processID):
+                    let process = try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID })
                     try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
-                    return .success(.focus)
+                    return .success(.focus(hidesApp: process?.terminalApp != TerminalHost.spaces.appName))
                 case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
                     try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-                    return .success(.open)
+                    return .success(.open(hidesApp: false))
                 case .workspaceAgentLauncher(let workspaceID, let name):
                     _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
-                    return .success(.open)
+                    return .success(.open(hidesApp: Self.shouldHideAfterConfiguredAgentLauncherOpen(terminalHost: .spaces)))
                 case .agentWindow(let record):
                     try orchestrator.focusAgentWindow(record)
-                    return .success(.focus)
+                    return .success(.focus(hidesApp: Self.shouldHideAfterAgentWindowFocus(provider: record.provider)))
                 }
             } catch { return .failure(error) }
         }.value
@@ -852,6 +1295,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return .success(())
             } catch { return .failure(error) }
         }.value
+    }
+
+    nonisolated private static func recoveredWorkspaceProcessSnapshot(workspaceID: String, processID: String) async -> Result<
+        RunningProcessRecord?, Error
+    > {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                return .success(try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }))
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated static func recoveredProcessWindowDetail(title: String, terminalApp: String?) -> String {
+        let destination = terminalApp == TerminalHost.spaces.appName ? "a new Spaces window" : "a new terminal window"
+        return "\(title) reopened in \(destination)."
     }
 
     nonisolated private static func recoverRunningWorkspaceProcessIfPossibleSnapshot(_ context: MissingTrackedWindowContext) async -> Result<
@@ -896,25 +1357,37 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     case .workspaceBrowserSession(let workspaceID, let targetURL):
                         try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
                         return .success(
-                            .focused(kind: "alerts_browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
+                            .focused(
+                                kind: "alerts_browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
+                                hidesApp: true))
                     case .workspaceWindow(let workspaceID, let index):
+                        let trackedWindows = try orchestrator.windows(workspaceID: workspaceID)
+                        let trackedWindow = index > 0 && index <= trackedWindows.count ? trackedWindows[index - 1] : nil
                         try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
                         return .success(
-                            .focused(kind: "alerts_window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
+                            .focused(
+                                kind: "alerts_window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
+                                hidesApp: trackedWindow?.app != TerminalHost.spaces.appName))
                     case .workspaceProcess(let workspaceID, let processID):
+                        let process = try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID })
                         try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
                         return .success(
-                            .focused(kind: "alerts_process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
+                            .focused(
+                                kind: "alerts_process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
+                                hidesApp: process?.terminalApp != TerminalHost.spaces.appName))
                     case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
                         try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-                        return .success(.opened(kind: "alerts_process"))
+                        return .success(.opened(kind: "alerts_process", hidesApp: false))
                     case .workspaceAgentLauncher(let workspaceID, let name):
                         _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
-                        return .success(.opened(kind: "alerts_agent_launcher"))
+                        return .success(
+                            .opened(kind: "alerts_agent_launcher", hidesApp: Self.shouldHideAfterConfiguredAgentLauncherOpen(terminalHost: .spaces)))
                     case .agentWindow(let record):
                         try orchestrator.focusAgentWindow(record)
                         return .success(
-                            .focused(kind: "alerts_agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
+                            .focused(
+                                kind: "alerts_agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
+                                hidesApp: Self.shouldHideAfterAgentWindowFocus(provider: record.provider)))
                     }
                 }
                 guard let selectedWorkspaceID else { return .success(.noWorkspace) }
@@ -941,30 +1414,42 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     guard let targetURL = target.targetURL else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.workspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
                     try orchestrator.focusWorkspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
-                    return .success(.focused(kind: "browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
+                    return .success(
+                        .focused(kind: "browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest), hidesApp: true))
                 case .process:
                     guard let processID = target.processID else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.workspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
+                    let process = processesByID[processID]
                     try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
-                    return .success(.focused(kind: "process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
+                    return .success(
+                        .focused(
+                            kind: "process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest),
+                            hidesApp: process?.terminalApp != TerminalHost.spaces.appName))
                 case .window:
                     guard let windowListIndex = target.windowListIndex else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.workspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
+                    let targetWindow = windowListIndex < windows.count ? windows[windowListIndex] : nil
                     try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
-                    return .success(.focused(kind: "window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
+                    return .success(
+                        .focused(
+                            kind: "window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest),
+                            hidesApp: targetWindow?.app != TerminalHost.spaces.appName))
                 case .missingConfiguredProcess:
                     guard let processKey = target.processKey else { return .success(.noMatch) }
                     try orchestrator.recoverMissingConfiguredProcess(workspaceID: selectedWorkspaceID, processKey: processKey)
-                    return .success(.opened(kind: "process"))
+                    return .success(.opened(kind: "process", hidesApp: false))
                 case .agentLauncher:
                     guard let launcherName = target.launcherName else { return .success(.noMatch) }
                     _ = try orchestrator.launchAgentLauncher(workspaceID: selectedWorkspaceID, name: launcherName)
-                    return .success(.opened(kind: "agent_launcher"))
+                    return .success(.opened(kind: "agent_launcher", hidesApp: Self.shouldHideAfterConfiguredAgentLauncherOpen(terminalHost: .spaces)))
                 case .agent:
                     guard let record = target.agentWindow else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.agentWindow(record)
                     try orchestrator.focusAgentWindow(record)
-                    return .success(.focused(kind: "agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
+                    return .success(
+                        .focused(
+                            kind: "agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest),
+                            hidesApp: Self.shouldHideAfterAgentWindowFocus(provider: record.provider)))
                 }
             } catch { return .failure(error) }
         }.value
@@ -1184,24 +1669,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     nonisolated static func shouldHideAfterSuccessfulExternalWindowAction(_ succeeded: Bool, action: ExternalWindowAction) -> Bool {
         guard succeeded else { return false }
         switch action {
-        case .focus, .open: return true
+        case .focus(let hidesApp), .open(let hidesApp): return hidesApp
         }
     }
+
+    nonisolated static func shouldHideAfterConfiguredAgentLauncherOpen(terminalHost: TerminalHost) -> Bool { terminalHost != .spaces }
+
+    nonisolated static func shouldHideAfterAgentWindowFocus(provider: AgentProvider) -> Bool { provider != .spaces }
 
     nonisolated static func hideDelayAfterSuccessfulExternalWindowAction(_ succeeded: Bool, action: ExternalWindowAction) -> Duration? {
         guard shouldHideAfterSuccessfulExternalWindowAction(succeeded, action: action) else { return nil }
         switch action {
-        case .focus: return .milliseconds(400)
-        case .open: return nil
+        case .focus(_): return .milliseconds(400)
+        case .open(_): return nil
         }
     }
 
     nonisolated static func shouldRefreshVisibleWorkspaceDetail(
-        selectedWorkspaceID: String?, showingAlerts: Bool, showingSettings: Bool, workspaceExists: Bool
+        selectedWorkspaceID: String?, showingAlerts: Bool, showingSettings: Bool, workspaceExists: Bool, mainWindowIsFocused: Bool,
+        commandPaletteIsVisible: Bool
     ) -> Bool {
         guard selectedWorkspaceID != nil else { return false }
         guard !showingAlerts, !showingSettings else { return false }
-        return workspaceExists
+        guard workspaceExists else { return false }
+        return mainWindowIsFocused || commandPaletteIsVisible
     }
 
     struct WorkspaceRunProcessEntry: Sendable {
@@ -1337,7 +1828,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     nonisolated static func agentTerminalTrackingKeys(for record: AgentWindowRecord) -> Set<String> {
         var keys = Set<String>()
         if let trackingKey = record.terminalTrackingKey, !trackingKey.isEmpty { keys.insert(trackingKey) }
-        if record.provider == .ghostty, let sessionID = record.terminalTrackingID, !sessionID.isEmpty {
+        if record.provider == .spaces, let sessionID = record.terminalTrackingID, !sessionID.isEmpty {
             keys.insert(TerminalTrackingIdentity.session(sessionID).trackingKey)
         }
         return keys
@@ -1361,6 +1852,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let existingOrder = result[targetID] ?? Int.max
             result[targetID] = min(existingOrder, window.orderIndex)
         }
+        let terminalOrderByWindowID: [Int: Int] = windows.reduce(into: [:]) { result, window in
+            guard window.role == "terminal", let windowID = window.windowID else { return }
+            let existingOrder = result[windowID] ?? Int.max
+            result[windowID] = min(existingOrder, window.orderIndex)
+        }
+        func processOrder(_ process: RunningProcessRecord) -> Int {
+            if let targetID = process.terminalTrackingKey, let order = terminalOrderByTargetID[targetID] { return order }
+            if let windowID = process.windowID, let order = terminalOrderByWindowID[windowID] { return order }
+            return Int.max
+        }
         let processesByTerminalID: [String: [RunningProcessRecord]] = {
             var map: [String: [RunningProcessRecord]] = [:]
             for process in processes {
@@ -1369,26 +1870,50 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             for (targetID, list) in map {
                 map[targetID] = list.sorted { lhs, rhs in
-                    let lhsOrder = lhs.terminalTrackingKey.flatMap { terminalOrderByTargetID[$0] } ?? Int.max
-                    let rhsOrder = rhs.terminalTrackingKey.flatMap { terminalOrderByTargetID[$0] } ?? Int.max
+                    let lhsOrder = processOrder(lhs)
+                    let rhsOrder = processOrder(rhs)
                     if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
                     return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
                 }
             }
             return map
         }()
+        let processesByWindowID: [Int: [RunningProcessRecord]] = {
+            var map: [Int: [RunningProcessRecord]] = [:]
+            for process in processes {
+                guard let windowID = process.windowID else { continue }
+                map[windowID, default: []].append(process)
+            }
+            for (windowID, list) in map {
+                map[windowID] = list.sorted { lhs, rhs in
+                    let lhsOrder = processOrder(lhs)
+                    let rhsOrder = processOrder(rhs)
+                    if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
+                    if lhs.templateName != rhs.templateName {
+                        return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
+                    }
+                    return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
+                }
+            }
+            return map
+        }()
         let agentTerminalIDs = Set(agentWindows.flatMap { agentTerminalTrackingKeys(for: $0) })
-        let eligibleProcesses = processes.filter { process in process.terminalTrackingKey.map { !agentTerminalIDs.contains($0) } != false }
+        let agentWindowIDs = Set(agentWindows.compactMap { $0.yabaiWindowID ?? $0.windowID })
+        let eligibleProcesses = processes.filter { process in
+            let claimedByTerminalID = process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
+            let claimedByWindowID = process.windowID.map(agentWindowIDs.contains) ?? false
+            return !claimedByTerminalID && !claimedByWindowID
+        }
         let agentClaimedProcessKeys = Set(
-            processes.filter { process in process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false }.map {
-                processRuntimeKey(name: $0.templateName)
-            })
+            processes.filter { process in
+                (process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false) || (process.windowID.map(agentWindowIDs.contains) ?? false)
+            }.map { processRuntimeKey(name: $0.templateName) })
         var processQueuesByKey: [String: [RunningProcessRecord]] = [:]
         for process in eligibleProcesses { processQueuesByKey[processRuntimeKey(name: process.templateName), default: []].append(process) }
         for (key, list) in processQueuesByKey {
             processQueuesByKey[key] = list.sorted { lhs, rhs in
-                let lhsOrder = lhs.terminalTrackingKey.flatMap { terminalOrderByTargetID[$0] } ?? Int.max
-                let rhsOrder = rhs.terminalTrackingKey.flatMap { terminalOrderByTargetID[$0] } ?? Int.max
+                let lhsOrder = processOrder(lhs)
+                let rhsOrder = processOrder(rhs)
                 if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
                 return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
             }
@@ -1417,11 +1942,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         for (windowIdx, window) in windows.enumerated() where window.role != "browser" {
-            let windowProcesses = (window.role == "terminal" ? (window.terminalTrackingKey.flatMap { processesByTerminalID[$0] }) : nil) ?? []
-            let isAgentClaimedWindow = window.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
+            let windowProcesses: [RunningProcessRecord]
+            if window.role == "terminal" {
+                let linkedByTrackingID = window.terminalTrackingKey.flatMap { processesByTerminalID[$0] } ?? []
+                let linkedByWindowID = window.windowID.flatMap { processesByWindowID[$0] } ?? []
+                var seen = Set<String>()
+                windowProcesses = (linkedByTrackingID + linkedByWindowID).filter { seen.insert($0.id).inserted }
+            } else {
+                windowProcesses = []
+            }
+            let isAgentClaimedWindow =
+                (window.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false) || (window.windowID.map(agentWindowIDs.contains) ?? false)
             let nonAgentWindowProcesses = windowProcesses.filter { process in
-                guard let terminalID = process.terminalTrackingKey else { return true }
-                return !agentTerminalIDs.contains(terminalID)
+                let claimedByTerminalID = process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
+                let claimedByWindowID = process.windowID.map(agentWindowIDs.contains) ?? false
+                return !claimedByTerminalID && !claimedByWindowID
             }
             if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
             if window.role == "terminal", !nonAgentWindowProcesses.isEmpty {
@@ -1593,10 +2128,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.title = "Spaces"
+        window.setAccessibilityIdentifier("spaces-main-window")
         window.backgroundColor = sidebarPanelBackgroundColor()
         window.titlebarAppearsTransparent = true
         window.center()
         window.delegate = self
+        presentWindowIfAllowed(window)
+    }
+
+    private func ensureMainWindowVisibleOnLaunch() {
+        guard let window else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        prepareWindowForActiveSpaceSummon(window)
+        presentWindowIfAllowed(window, forceOrderFront: true)
+    }
+
+    private func presentWindowIfAllowed(_ window: NSWindow, forceOrderFront: Bool = false) {
+        if Self.isRunningUnderXCTest { return }
+        NSApp.activate(ignoringOtherApps: true)
+        if forceOrderFront { window.orderFrontRegardless() }
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -2285,7 +2835,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             logStartupProfile("apply_snapshot_selection_ready")
         } else if Self.shouldRefreshVisibleWorkspaceDetail(
             selectedWorkspaceID: selectedWorkspaceID, showingAlerts: showingAlerts, showingSettings: showingSettings,
-            workspaceExists: selectedWorkspaceID.flatMap { findWorkspace(id: $0) } != nil)
+            workspaceExists: selectedWorkspaceID.flatMap { findWorkspace(id: $0) } != nil, mainWindowIsFocused: window?.isKeyWindow == true,
+            commandPaletteIsVisible: commandPalettePanel?.isVisible == true)
         {
             refreshSelection()
             logStartupProfile("apply_snapshot_selection_preserved_ready")
@@ -2333,7 +2884,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard
             Self.shouldRefreshVisibleWorkspaceDetail(
                 selectedWorkspaceID: selectedWorkspaceID, showingAlerts: showingAlerts, showingSettings: showingSettings,
-                workspaceExists: findWorkspace(id: workspaceID) != nil)
+                workspaceExists: findWorkspace(id: workspaceID) != nil, mainWindowIsFocused: window?.isKeyWindow == true,
+                commandPaletteIsVisible: commandPalettePanel?.isVisible == true)
         else { return }
         if visibleWorkspaceDetailRefreshWorkspaceID == workspaceID, let task = visibleWorkspaceDetailRefreshTask, !task.isCancelled { return }
 
@@ -2612,6 +3164,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showWindowIssueModal(title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
         hideWindowIssueToast()
+        if commandPalettePanel?.isVisible == true {
+            commandPaletteReturnTerminalSessionID = nil
+            commandPaletteReturnApplicationProcessID = nil
+            dismissCommandPalette()
+        }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = title
@@ -2630,13 +3187,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             okButton.keyEquivalentModifierMask = []
         }
 
-        guard let window else {
+        if let window {
+            prepareWindowForActiveSpaceSummon(window)
+            NSApp.unhide(nil)
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+        }
+        Task { @MainActor in
+            await Task.yield()
+            if let window {
+                prepareWindowForActiveSpaceSummon(window)
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeKeyAndOrderFront(nil)
+                window.orderFrontRegardless()
+            }
             let response = alert.runModal()
             if actionTitle != nil, response == .alertFirstButtonReturn { action?() }
-            return
         }
-
-        alert.beginSheetModal(for: window) { response in if actionTitle != nil, response == .alertFirstButtonReturn { action?() } }
     }
 
     private func showSettingsDetail() {
@@ -2702,22 +3269,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         editorPopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
         editorPopUp.setAccessibilityIdentifier("settings-editor")
 
-        let terminalPopUp = NSPopUpButton()
-        terminalPopUp.translatesAutoresizingMaskIntoConstraints = false
-        for host in TerminalHost.allCases {
-            terminalPopUp.addItem(withTitle: host.displayName)
-            terminalPopUp.itemArray.last?.representedObject = host
-        }
-        if let currentHost = configCache?.terminalHost,
-            let item = terminalPopUp.itemArray.first(where: { ($0.representedObject as? TerminalHost) == currentHost })
-        {
-            terminalPopUp.select(item)
-        }
-        terminalPopUp.setAccessibilityIdentifier("settings-terminal-host")
-        terminalPopUp.target = self
-        terminalPopUp.action = #selector(terminalHostChanged(_:))
-        terminalPopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
         let processShellPopUp = NSPopUpButton()
         processShellPopUp.translatesAutoresizingMaskIntoConstraints = false
         for shell in ProcessShell.allCases {
@@ -2737,7 +3288,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var editorContentViews: [NSView] = [
             settingsLabeledField(
                 name: "Preferred editor", hint: "Opened when you use the editor shortcut from inside a workspace", control: editorPopUp),
-            settingsLabeledField(name: "Terminal host", hint: "Used for process panes and coding agents", control: terminalPopUp),
             settingsLabeledField(
                 name: "Shell for shell-mode processes", hint: "Applies only when a process row uses Shell execution mode", control: processShellPopUp),
         ]
@@ -2745,7 +3295,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let note = helpTextLabel("Saved editor \"\(editorDisplayName(current))\" is not installed.")
             editorContentViews.append(note)
         }
-        let editorCard = formSectionCard(icon: "square.and.pencil", title: "Editor & terminal", contentViews: editorContentViews)
+        let editorCard = formSectionCard(icon: "square.and.pencil", title: "Editor & shell", contentViews: editorContentViews)
         stack.addArrangedSubview(editorCard)
         constrainFormFieldToFillWidth(editorCard, in: stack)
 
@@ -2996,7 +3546,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let browserSessionsSection = BrowserSessionsSection(
             sessions: fullProject?.browserSessions ?? [], subtitle: "Optional names with URL prefixes to open automatically.")
         let agentLaunchersSection = AgentLaunchersSection(
-            launchers: fullProject?.agentLaunchers ?? [], subtitle: "Named interactive coding agents that open outside tmux.")
+            launchers: fullProject?.agentLaunchers ?? [], subtitle: "Named interactive coding agents that open in the built-in Spaces terminal.")
 
         setupScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
         stopScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
@@ -3275,7 +3825,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let portsSection = PortsSection(subtitle: "Named ports allocated per workspace, available as env vars.")
         let processesSection = ProcessesSection(subtitle: "Commands that run inside each workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(subtitle: "Browser windows opened automatically on launch.")
-        let agentLaunchersSection = AgentLaunchersSection(subtitle: "Interactive coding agents that open outside tmux.")
+        let agentLaunchersSection = AgentLaunchersSection(subtitle: "Interactive coding agents that open in the built-in Spaces terminal.")
 
         // --- Source section: segmented control on top, input below ---
         let localSourceSection = NSStackView()
@@ -5316,7 +5866,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func openWorkspaceTerminal(_ sender: NSButton) {
         guard let workspaceID = sender.identifier?.rawValue else { return }
-        openWorkspaceTerminal(workspaceID: workspaceID)
+        sender.isEnabled = false
+        openWorkspaceTerminal(workspaceID: workspaceID, route: .button) { sender.isEnabled = true }
     }
 
     @objc private func openWorkspaceFinder(_ sender: NSButton) {
@@ -5328,12 +5879,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let preference = sender.selectedItem?.representedObject as? EditorPreference else { return }
         if configCache?.editor == preference { return }
         do { configCache = try orchestrator.updateEditorPreference(preference) } catch { showError(error) }
-    }
-
-    @objc private func terminalHostChanged(_ sender: NSPopUpButton) {
-        guard let terminalHost = sender.selectedItem?.representedObject as? TerminalHost else { return }
-        if configCache?.terminalHost == terminalHost { return }
-        do { configCache = try orchestrator.updateTerminalHost(terminalHost) } catch { showError(error) }
     }
 
     @objc private func processShellChanged(_ sender: NSPopUpButton) {
@@ -6013,22 +6558,43 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             try orchestrator.openWorkspaceEditor(workspaceID: workspaceID)
             reloadData()
-            hideAfterSuccessfulExternalWindowAction(.open)
+            hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true))
         } catch { showError(error) }
     }
 
-    private func openWorkspaceTerminal(workspaceID: String) {
-        do {
-            try orchestrator.openWorkspaceTerminal(workspaceID: workspaceID)
-            reloadData()
-            hideAfterSuccessfulExternalWindowAction(.open)
-        } catch { showError(error) }
+    private enum WorkspaceTerminalOpenRoute: String {
+        case button
+        case shortcut
+        case ipc
+    }
+
+    private func openWorkspaceTerminal(workspaceID: String, route: WorkspaceTerminalOpenRoute, completion: (() -> Void)? = nil) {
+        let startedAt = Date()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { completion?() }
+            let result = await Self.openWorkspaceTerminalSnapshot(workspaceID: workspaceID)
+            let elapsedMS = windowShortcutElapsedMS(since: startedAt)
+            switch result {
+            case .success(let action):
+                logPerfMetric(
+                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: true,
+                    detail: "route=\(route.rawValue)")
+                reloadData()
+                hideAfterSuccessfulExternalWindowAction(action)
+            case .failure(let error):
+                logPerfMetric(
+                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,
+                    detail: "route=\(route.rawValue)")
+                showError(error)
+            }
+        }
     }
 
     private func openWorkspaceFinder(workspaceID: String) {
         guard let (_, workspace) = findWorkspace(id: workspaceID) else { return }
         let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
-        if NSWorkspace.shared.open(url) { hideAfterSuccessfulExternalWindowAction(.open) }
+        if NSWorkspace.shared.open(url) { hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true)) }
     }
 
     private func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? {
@@ -6129,6 +6695,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
             if event.type == .flagsChanged { return self.handleLeaderShortcutCaptureFlagsChanged(event: event) ? nil : event }
+            if Self.shouldBypassLocalShortcutMonitor(for: NSApp.keyWindow) { return event }
             self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
@@ -6143,16 +6710,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
             if self.handleSidebarArrowNavigation(event: event) { return nil }
-            if let nextShortcutSpec, matches(event: event, spec: nextShortcutSpec) {
-                self.selectNextVisibleWorkspace()
-                return nil
-            }
-            if let previousShortcutSpec, matches(event: event, spec: previousShortcutSpec) {
-                self.selectPreviousVisibleWorkspace()
-                return nil
-            }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
-                if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceTerminal(workspaceID: workspaceID) }
+                if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceTerminal(workspaceID: workspaceID, route: .shortcut) }
                 return nil
             }
             if let openFinderShortcutSpec, matches(event: event, spec: openFinderShortcutSpec) {
@@ -6172,6 +6731,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             return event
         }
+    }
+
+    static func shouldBypassLocalShortcutMonitor(for keyWindow: NSWindow?) -> Bool {
+        (keyWindow?.windowController as? TerminalSessionWindowController) != nil
     }
 
     private func handleLeaderShortcutCaptureFlagsChanged(event: NSEvent) -> Bool {
@@ -6419,8 +6982,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch hotkey {
         case .toggle: toggleWindowFromHotkey()
         case .openCommandPalette: toggleCommandPaletteFromHotkey()
-        case .next: if NSApp.isActive { selectNextVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: 1) }
-        case .previous: if NSApp.isActive { selectPreviousVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: -1) }
+        case .next: focusGlobalWindowNavigation(direction: 1)
+        case .previous: focusGlobalWindowNavigation(direction: -1)
         case .openEditor: openGlobalEditorFromHotkey()
         }
     }
@@ -6543,7 +7106,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch result {
         case .success(let action):
             reloadData()
-            if case .open = action { hideAfterSuccessfulExternalWindowAction(action) }
+            hideAfterSuccessfulExternalWindowAction(action)
         case .failure(let error): await handleWindowFocusFailure(error)
         }
     }
@@ -6553,7 +7116,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch result {
         case .success:
             reloadData()
-            hideAfterSuccessfulExternalWindowAction(.open)
+            hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true))
         case .failure(let error): showError(error)
         }
     }
@@ -6566,29 +7129,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let result = await Self.focusWindowShortcutSnapshot(
             index: index, selectedWorkspaceID: selectedWorkspaceID, alertsFocusRequest: alertsFocusRequest)
         switch result {
-        case .success(.focused(let kind, let recentFocusIdentity)):
+        case .success(.focused(let kind, let recentFocusIdentity, let hidesApp)):
             logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
             activeWindowShortcutProfile?.routeCompletedAt = Date()
             rememberRecentCommandPaletteFocusIdentity(recentFocusIdentity)
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
-        case .success(.opened(let kind)):
+            if hidesApp { hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true)) } else { activeWindowShortcutProfile = nil }
+        case .success(.opened(let kind, let hidesApp)):
             logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
             activeWindowShortcutProfile?.routeCompletedAt = Date()
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
             reloadData()
-            hideAfterSuccessfulExternalWindowAction(.open)
+            if hidesApp { hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true)) } else { activeWindowShortcutProfile = nil }
         case .success(.noWorkspace):
             logWindowShortcutProfile("stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+            activeWindowShortcutProfile = nil
         case .success(.noMatch):
             logWindowShortcutProfile("stage=aborted index=\(index) reason=no_match elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+            activeWindowShortcutProfile = nil
         case .failure(let error):
             await handleWindowFocusFailure(error)
             logWindowShortcutProfile("stage=aborted index=\(index) reason=error elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+            activeWindowShortcutProfile = nil
         }
     }
 
@@ -6604,13 +7171,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             paletteWasVisible: commandPalettePanel?.isVisible == true)
     }
 
-    nonisolated static func shouldUnhideMainWindowForCommandPalettePresentation(mainWindowIsVisible: Bool) -> Bool { mainWindowIsVisible }
-
-    nonisolated static func shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: Bool) -> Bool { !mainWindowIsVisible }
-
     nonisolated static func commandPalettePresentationIsComplete(panelIsVisible: Bool, panelIsKey: Bool) -> Bool { panelIsVisible && panelIsKey }
 
-    nonisolated static func shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: Bool) -> Bool { !mainWindowIsVisible }
+    nonisolated static func shouldDismissCommandPaletteForToggle(panelIsVisible: Bool, panelIsFocused: Bool) -> Bool {
+        panelIsVisible && panelIsFocused
+    }
+
+    nonisolated static func shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
+        appIsActive: Bool, mainWindowIsFocused: Bool, commandPaletteIsFocused: Bool
+    ) -> Bool { appIsActive && !mainWindowIsFocused && !commandPaletteIsFocused }
+
+    nonisolated static func shouldHideMainWindowForToggle(appIsHidden: Bool, mainWindowIsFocused: Bool) -> Bool {
+        !appIsHidden && mainWindowIsFocused
+    }
+
+    nonisolated static func shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: String?, auxiliaryTerminalWindowsVisible: Bool) -> Bool {
+        auxiliaryTerminalWindowsVisible && returnTerminalSessionID != nil
+    }
 
     nonisolated static func effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: Bool, commandPaletteMainWindowVisibility: Bool?)
         -> Bool
@@ -6631,9 +7208,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let perfContext = pending.perfContext { logHotkeyPerfMetric("toggle_palette", action: "show", context: perfContext) }
     }
 
-    private func logPerfMetric(_ metric: String, target: String, elapsedMS: Int, success: Bool) {
-        guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
-        fputs("spaces: perf metric=\(metric) target=\(target) success=\(success ? 1 : 0) elapsed_ms=\(elapsedMS)\n", stderr)
+    private func logPerfMetric(_ metric: String, target: String, elapsedMS: Int, success: Bool, detail: String = "") {
+        TerminalPerformance.logMetric(metric, target: target, elapsedMS: elapsedMS, success: success, detail: detail)
     }
 
     private func windowShortcutElapsedMS(since start: Date) -> Int { max(Int(Date().timeIntervalSince(start) * 1000), 0) }
@@ -6695,22 +7271,48 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func focusGlobalWindowNavigation(direction: Int) {
-        guard !NSApp.isActive else { return }
         guard let workspaceID = globalWindowNavigationWorkspaceID() else { return }
+        let requestID = UUID().uuidString
+        let startedAt = Date()
         do {
+            let hidesApp: Bool
+            let preferredFocusedBuiltInTerminalSessionID = activeBuiltInTerminalSessionID()
             if direction > 0 {
-                try orchestrator.focusNextWindow(workspaceID: workspaceID)
+                hidesApp = try orchestrator.focusNextWindowHidesApp(
+                    workspaceID: workspaceID, requestID: requestID, preferredFocusedBuiltInTerminalSessionID: preferredFocusedBuiltInTerminalSessionID
+                )
             } else {
-                try orchestrator.focusPreviousWindow(workspaceID: workspaceID)
+                hidesApp = try orchestrator.focusPreviousWindowHidesApp(
+                    workspaceID: workspaceID, requestID: requestID, preferredFocusedBuiltInTerminalSessionID: preferredFocusedBuiltInTerminalSessionID
+                )
             }
-            hideAfterSuccessfulExternalWindowAction(.focus)
-        } catch { showError(error) }
+            logPerfMetric(
+                "global_window_navigation", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+                detail: "direction=\(direction > 0 ? "next" : "previous") hides_app=\(hidesApp ? 1 : 0) request_id=\(requestID)")
+            if hidesApp { hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true)) } else { dismissCommandPaletteForBuiltInWindowNavigation() }
+        } catch {
+            logPerfMetric(
+                "global_window_navigation", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
+                detail: "direction=\(direction > 0 ? "next" : "previous") request_id=\(requestID)")
+            showError(error)
+        }
+    }
+
+    private func dismissCommandPaletteForBuiltInWindowNavigation() {
+        if let panel = commandPalettePanel, panel.isVisible {
+            panel.makeFirstResponder(nil)
+            panel.orderOut(nil)
+            commandPaletteContextWorkspaceID = nil
+            commandPaletteMainWindowVisibility = nil
+            commandPaletteReturnTerminalSessionID = nil
+            commandPaletteReturnApplicationProcessID = nil
+        }
     }
 
     private func hideAfterSuccessfulExternalWindowAction(_ action: ExternalWindowAction) {
         let hideDelay = Self.hideDelayAfterSuccessfulExternalWindowAction(true, action: action)
         guard hideDelay != nil || Self.shouldHideAfterSuccessfulExternalWindowAction(true, action: action) else { return }
-        deferredExternalWindowHideTask?.cancel()
+        cancelDeferredExternalWindowHide()
         if let hideDelay {
             deferredExternalWindowHideTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: hideDelay)
@@ -6721,6 +7323,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return
         }
         NSApp.hide(nil)
+    }
+
+    private func cancelDeferredExternalWindowHide() {
+        deferredExternalWindowHideTask?.cancel()
+        deferredExternalWindowHideTask = nil
     }
 
     private func handleWindowFocusFailure(_ error: Error) async {
@@ -6781,7 +7388,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             switch context.kind {
             case .browserSession:
                 showWindowIssueToast(title: "Browser session recovered", detail: "\(context.title) reopened in a new Chrome window.")
-            case .process: showWindowIssueToast(title: "Process recovered", detail: "\(context.title) reopened in a new iTerm2 window.")
+            case .process:
+                let recoveredProcess: RunningProcessRecord?
+                if let processID = context.processID {
+                    recoveredProcess = try? await Self.recoveredWorkspaceProcessSnapshot(workspaceID: context.workspaceID, processID: processID).get()
+                } else {
+                    recoveredProcess = nil
+                }
+                showWindowIssueToast(
+                    title: "Process recovered",
+                    detail: Self.recoveredProcessWindowDetail(title: context.title, terminalApp: recoveredProcess?.terminalApp))
             case .codingAgent, .window: break
             }
         case .failure(let error): showError(error)
@@ -6789,20 +7405,83 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func globalWindowNavigationWorkspaceID() -> String? {
+        if let terminalSessionID = activeBuiltInTerminalSessionID(),
+            let workspaceID = try? orchestrator.workspaceIDForTerminalSession(terminalSessionID)
+        {
+            return workspaceID
+        }
         if let workspaceID = try? orchestrator.workspaceIDForFocusedWindow() { return workspaceID }
         if let workspaceID = try? orchestrator.activeWorkspaceID() { return workspaceID }
         return nil
     }
 
-    nonisolated static func commandPaletteContextWorkspaceID(selectedWorkspaceID: String?, focusedWorkspaceID: () throws -> String?) rethrows
-        -> String?
-    {
-        if let selectedWorkspaceID { return selectedWorkspaceID }
-        return try focusedWorkspaceID()
+    private func activeBuiltInTerminalSessionID() -> String? {
+        for window in [NSApp.keyWindow, NSApp.mainWindow].compactMap({ $0 }) {
+            if let sessionID = (window.windowController as? TerminalSessionWindowController)?.terminalSessionID { return sessionID }
+        }
+        guard
+            Self.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
+                appIsActive: NSApp.isActive, mainWindowIsFocused: window?.isKeyWindow == true,
+                commandPaletteIsFocused: commandPalettePanel?.isKeyWindow == true)
+        else { return nil }
+        if let sessionID = lastFocusedBuiltInTerminalSessionID { return sessionID }
+        return nil
     }
 
+    nonisolated static func preferredWorkspaceIDForAppToggle(focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?) -> String?
+    { focusedTerminalSessionWorkspaceID ?? focusedWindowWorkspaceID }
+
+    nonisolated static func shouldRestoreReturnApplicationAfterMainHide(
+        returnTerminalSessionID: String?, returnApplicationProcessID: pid_t?, auxiliaryTerminalWindowsVisible: Bool
+    ) -> Bool { return returnTerminalSessionID == nil && returnApplicationProcessID != nil && !auxiliaryTerminalWindowsVisible }
+
+    nonisolated static func shouldHideAppAfterMainHide(
+        returnTerminalSessionID: String?, returnApplicationProcessID: pid_t?, auxiliaryTerminalWindowsVisible: Bool
+    ) -> Bool { return returnTerminalSessionID == nil && !auxiliaryTerminalWindowsVisible }
+
+    nonisolated static func shouldMiniaturizeMainWindowAfterHide(returnTerminalSessionID: String?) -> Bool { return returnTerminalSessionID == nil }
+
+    nonisolated static func returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: pid_t?, currentProcessID: pid_t) -> pid_t? {
+        guard let frontmostApplicationProcessID, frontmostApplicationProcessID != currentProcessID else { return nil }
+        return frontmostApplicationProcessID
+    }
+
+    nonisolated static func preferredWorkspaceIDForCommandPalette(
+        selectedWorkspaceID: String?, focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?
+    ) -> String? { selectedWorkspaceID ?? focusedTerminalSessionWorkspaceID ?? focusedWindowWorkspaceID }
+
+    nonisolated static func shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: String?) -> Bool { returnTerminalSessionID != nil }
+
+    nonisolated static func shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: String?, returnApplicationProcessID: pid_t?)
+        -> Bool
+    { return returnTerminalSessionID == nil && returnApplicationProcessID != nil }
+
     private func commandPaletteDefaultWorkspaceID() -> String? {
-        try? Self.commandPaletteContextWorkspaceID(selectedWorkspaceID: selectedWorkspaceID) { try orchestrator.workspaceIDForFocusedWindow() }
+        let focusedTerminalWorkspaceID: String?
+        if let terminalSessionID = focusedTerminalSessionIDForToggle() {
+            let lookupStartedAt = Date()
+            focusedTerminalWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(terminalSessionID)
+            logPerfMetric(
+                "toggle_palette_terminal_workspace_lookup", target: "session=\(terminalSessionID)",
+                elapsedMS: windowShortcutElapsedMS(since: lookupStartedAt), success: focusedTerminalWorkspaceID != nil)
+        } else {
+            focusedTerminalWorkspaceID = nil
+        }
+
+        let focusedWindowWorkspaceID: String?
+        if selectedWorkspaceID == nil, focusedTerminalWorkspaceID == nil {
+            let lookupStartedAt = Date()
+            focusedWindowWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
+            logPerfMetric(
+                "toggle_palette_focused_window_workspace_lookup", target: "frontmost_window",
+                elapsedMS: windowShortcutElapsedMS(since: lookupStartedAt), success: focusedWindowWorkspaceID != nil)
+        } else {
+            focusedWindowWorkspaceID = nil
+        }
+
+        return Self.preferredWorkspaceIDForCommandPalette(
+            selectedWorkspaceID: selectedWorkspaceID, focusedTerminalSessionWorkspaceID: focusedTerminalWorkspaceID,
+            focusedWindowWorkspaceID: focusedWindowWorkspaceID)
     }
 
     private func handleCommandPaletteShortcut(event: NSEvent) -> Bool {
@@ -6861,25 +7540,111 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func toggleWindowFromHotkey() {
         guard let window else { return }
+        let toggleStartedAt = Date()
         let perfContext = captureHotkeyPerfContext()
         logHotkeyDebug("toggle_window begin \(hotkeyWindowStateSummary())")
-        if commandPalettePanel?.isVisible == true { dismissCommandPalette() }
-        if NSApp.isActive, !NSApp.isHidden, window.isVisible, !window.isMiniaturized {
-            logHotkeyDebug("toggle_window hide_main")
-            NSApp.hide(nil)
+        if Self.shouldHideMainWindowForToggle(appIsHidden: NSApp.isHidden, mainWindowIsFocused: window.isKeyWindow) {
+            logHotkeyDebug("toggle_window hide_main_only")
+            let returnTerminalSessionID = appToggleReturnTerminalSessionID
+            let returnApplicationProcessID = appToggleReturnApplicationProcessID
+            let shouldRestoreTerminalFocus = Self.shouldRestoreTerminalFocusAfterMainHide(
+                returnTerminalSessionID: returnTerminalSessionID, auxiliaryTerminalWindowsVisible: hasVisibleTerminalSessionWindowsForHotkeyState())
+            let shouldRestoreReturnApplication = Self.shouldRestoreReturnApplicationAfterMainHide(
+                returnTerminalSessionID: returnTerminalSessionID, returnApplicationProcessID: returnApplicationProcessID,
+                auxiliaryTerminalWindowsVisible: hasVisibleTerminalSessionWindowsForHotkeyState())
+            let shouldHideApp = Self.shouldHideAppAfterMainHide(
+                returnTerminalSessionID: returnTerminalSessionID, returnApplicationProcessID: returnApplicationProcessID,
+                auxiliaryTerminalWindowsVisible: hasVisibleTerminalSessionWindowsForHotkeyState())
+            if shouldHideApp {
+                window.orderOut(nil)
+                NSApp.hide(nil)
+            } else if Self.shouldMiniaturizeMainWindowAfterHide(returnTerminalSessionID: returnTerminalSessionID) {
+                window.miniaturize(nil)
+            } else {
+                window.orderOut(nil)
+            }
+            if shouldRestoreTerminalFocus, let returnTerminalSessionID {
+                let restoreStartedAt = Date()
+                focusTerminalSessionWindow(sessionID: returnTerminalSessionID)
+                logPerfMetric(
+                    "toggle_window_return_terminal_focus", target: "session=\(returnTerminalSessionID)",
+                    elapsedMS: windowShortcutElapsedMS(since: restoreStartedAt), success: true)
+            } else if shouldRestoreReturnApplication, let returnApplicationProcessID {
+                let restoreStartedAt = Date()
+                activateReturnApplication(processIdentifier: returnApplicationProcessID)
+                logPerfMetric(
+                    "toggle_window_return_application_focus", target: "pid=\(returnApplicationProcessID)",
+                    elapsedMS: windowShortcutElapsedMS(since: restoreStartedAt), success: true)
+            }
+            appToggleReturnTerminalSessionID = nil
+            appToggleReturnApplicationProcessID = nil
             logHotkeyPerfMetric("toggle_window", action: "hide", context: perfContext)
             return
         }
-        let focusedWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.unhide(nil)
-        if window.isMiniaturized { window.deminiaturize(nil) }
-        prepareWindowForActiveSpaceSummon(window)
-        window.orderFrontRegardless()
-        window.makeKey()
+        let returnApplicationProcessID = Self.returnApplicationProcessIDForAppToggle(
+            frontmostApplicationProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            currentProcessID: ProcessInfo.processInfo.processIdentifier)
+        let focusedTerminalSessionID = focusedTerminalSessionIDForToggle()
+        let focusedTerminalWorkspaceID: String?
+        let selectionRefreshSource: String
+        if let terminalSessionID = focusedTerminalSessionID {
+            let lookupStartedAt = Date()
+            focusedTerminalWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(terminalSessionID)
+            logPerfMetric(
+                "toggle_window_terminal_workspace_lookup", target: "session=\(terminalSessionID)",
+                elapsedMS: windowShortcutElapsedMS(since: lookupStartedAt), success: focusedTerminalWorkspaceID != nil)
+            selectionRefreshSource = "terminal_session"
+        } else {
+            focusedTerminalWorkspaceID = nil
+            selectionRefreshSource = "focused_window"
+        }
+        let focusedWindowWorkspaceID: String?
+        if focusedTerminalWorkspaceID == nil {
+            let focusedWindowLookupStartedAt = Date()
+            focusedWindowWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
+            logPerfMetric(
+                "toggle_window_focused_window_workspace_lookup", target: "frontmost_window",
+                elapsedMS: windowShortcutElapsedMS(since: focusedWindowLookupStartedAt), success: focusedWindowWorkspaceID != nil)
+        } else {
+            focusedWindowWorkspaceID = nil
+        }
+        let focusedWorkspaceID = Self.preferredWorkspaceIDForAppToggle(
+            focusedTerminalSessionWorkspaceID: focusedTerminalWorkspaceID, focusedWindowWorkspaceID: focusedWindowWorkspaceID)
+        let revealStartedAt = Date()
+        revealTargetedHotkeyWindow(window)
+        logPerfMetric(
+            "toggle_window_reveal_target", target: "main", elapsedMS: windowShortcutElapsedMS(since: revealStartedAt), success: true,
+            detail: "app_active=\(NSApp.isActive ? 1 : 0)")
         logHotkeyDebug("toggle_window show_main focused_workspace=\(focusedWorkspaceID ?? "nil") \(hotkeyWindowStateSummary())")
+        logPerfMetric("toggle_window_flow", target: "main", elapsedMS: windowShortcutElapsedMS(since: toggleStartedAt), success: true)
         logHotkeyPerfMetric("toggle_window", action: "show", context: perfContext)
-        scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: focusedWorkspaceID ?? nil)
+        appToggleReturnTerminalSessionID = focusedTerminalSessionID
+        appToggleReturnApplicationProcessID = focusedTerminalSessionID == nil ? returnApplicationProcessID : nil
+        scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: focusedWorkspaceID ?? nil, source: selectionRefreshSource)
+    }
+
+    private func revealTargetedHotkeyWindow(_ window: NSWindow) {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        if Self.shouldFocusVisibleTargetedHotkeyWindow(
+            appIsActive: NSApp.isActive, windowIsVisible: window.isVisible, windowIsMiniaturized: window.isMiniaturized)
+        {
+            window.orderFront(nil)
+            window.makeKey()
+            return
+        }
+        if Self.shouldUseDirectTargetedHotkeyReveal(appIsActive: NSApp.isActive) {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        if Self.shouldActivateAppForTargetedHotkeyReveal(appIsActive: NSApp.isActive) { activateCurrentApplicationForTargetedReveal() }
+        prepareWindowForActiveSpaceSummon(window)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        Task { @MainActor [weak window] in
+            await Task.yield()
+            guard let window, window.isVisible, !window.isMiniaturized else { return }
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 
     private func prepareWindowForActiveSpaceSummon(_ window: NSWindow) {
@@ -6905,14 +7670,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return updated
     }
 
+    nonisolated static func shouldUseDirectTargetedHotkeyReveal(appIsActive: Bool) -> Bool { appIsActive }
+
+    nonisolated static func shouldActivateAppForTargetedHotkeyReveal(appIsActive: Bool) -> Bool { !appIsActive }
+
+    nonisolated static func shouldFocusVisibleTargetedHotkeyWindow(appIsActive: Bool, windowIsVisible: Bool, windowIsMiniaturized: Bool) -> Bool {
+        appIsActive && windowIsVisible && !windowIsMiniaturized
+    }
+
     nonisolated static func shouldActivateAppForCommandPalettePresentation(appIsActive: Bool) -> Bool { !appIsActive }
 
-    private func scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: String?) {
+    private func scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: String?, source: String) {
         deferredHotkeySelectionRefreshTask?.cancel()
         deferredHotkeySelectionRefreshTask = Task { @MainActor [weak self] in
             await Task.yield()
             guard let self, !Task.isCancelled else { return }
+            let refreshStartedAt = Date()
             self.refreshWorkspaceSelectionForActivation(focusedWorkspaceID: focusedWorkspaceID)
+            self.logPerfMetric(
+                "toggle_window_selection_refresh", target: "workspace=\(focusedWorkspaceID ?? "alerts")",
+                elapsedMS: self.windowShortcutElapsedMS(since: refreshStartedAt), success: true, detail: "source=\(source)")
         }
     }
 
@@ -8275,9 +9052,20 @@ extension AppKitController {
             toggleWindowFromHotkey()
             return
         }
-        if commandPalettePanel?.isVisible == true {
+        if let panel = commandPalettePanel,
+            Self.shouldDismissCommandPaletteForToggle(panelIsVisible: panel.isVisible, panelIsFocused: panel.isKeyWindow)
+        {
             logHotkeyDebug("toggle_palette dismiss_visible_panel")
             dismissCommandPalette(perfContext: perfContext)
+            return
+        }
+        if let panel = commandPalettePanel, panel.isVisible {
+            logHotkeyDebug("toggle_palette refocus_visible_panel")
+            revealTargetedHotkeyWindow(panel)
+            if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
+            pendingCommandPalettePresentation = PendingCommandPalettePresentation(
+                perfContext: perfContext, mainWindowWasVisible: rawMainWindowVisibility())
+            completePendingCommandPalettePresentationIfNeeded()
             return
         }
         presentCommandPalette(perfContext: perfContext)
@@ -8287,20 +9075,28 @@ extension AppKitController {
         let panel = ensureCommandPalettePanel()
         let mainWindowWasVisible = rawMainWindowVisibility()
         logHotkeyDebug("present_palette begin \(hotkeyWindowStateSummary())")
+        let focusedTerminalSessionID = focusedTerminalSessionIDForToggle()
+        let returnApplicationProcessID = Self.returnApplicationProcessIDForAppToggle(
+            frontmostApplicationProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            currentProcessID: ProcessInfo.processInfo.processIdentifier)
+        commandPaletteReturnTerminalSessionID = focusedTerminalSessionID
+        commandPaletteReturnApplicationProcessID = focusedTerminalSessionID == nil ? returnApplicationProcessID : nil
+        let contextLookupStartedAt = Date()
         commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
-        if Self.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: mainWindowWasVisible) { window?.orderOut(nil) }
-        if Self.shouldActivateAppForCommandPalettePresentation(appIsActive: NSApp.isActive) {
-            NSApp.activate(ignoringOtherApps: true)
-            if Self.shouldUnhideMainWindowForCommandPalettePresentation(mainWindowIsVisible: mainWindowWasVisible) { NSApp.unhide(nil) }
-        }
-        prepareWindowForActiveSpaceSummon(panel)
+        logPerfMetric(
+            "toggle_palette_context_workspace", target: "workspace=\(commandPaletteContextWorkspaceID ?? "nil")",
+            elapsedMS: windowShortcutElapsedMS(since: contextLookupStartedAt), success: true)
         panel.center()
-        panel.orderFrontRegardless()
-        panel.makeKey()
+        let revealStartedAt = Date()
+        revealTargetedHotkeyWindow(panel)
+        logPerfMetric("toggle_palette_reveal_target", target: "palette", elapsedMS: windowShortcutElapsedMS(since: revealStartedAt), success: true)
         commandPaletteSearchField?.stringValue = ""
         commandPaletteSelectedIndex = 0
         if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
+        let filterStartedAt = Date()
         applyCommandPaletteFilter()
+        logPerfMetric(
+            "toggle_palette_apply_filter", target: "query=<empty>", elapsedMS: windowShortcutElapsedMS(since: filterStartedAt), success: true)
         if commandPaletteItems.isEmpty {
             reloadCommandPaletteItems()
         } else if commandPaletteNeedsReload, commandPaletteLoadTask == nil {
@@ -8318,15 +9114,27 @@ extension AppKitController {
         guard let panel = commandPalettePanel else { return }
         guard !isDismissingCommandPalette else { return }
         isDismissingCommandPalette = true
-        let mainWindowIsVisible = effectiveMainWindowVisibilityForHotkeyState()
         logHotkeyDebug("dismiss_palette begin visible=\(panel.isVisible ? 1 : 0) key=\(panel.isKeyWindow ? 1 : 0) \(hotkeyWindowStateSummary())")
         panel.makeFirstResponder(nil)
         panel.orderOut(nil)
         commandPaletteContextWorkspaceID = nil
-        if Self.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: mainWindowIsVisible) { NSApp.hide(nil) }
+        if Self.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: commandPaletteReturnTerminalSessionID),
+            let returnTerminalSessionID = commandPaletteReturnTerminalSessionID
+        {
+            focusTerminalSessionWindow(sessionID: returnTerminalSessionID)
+        } else if Self.shouldRestoreReturnApplicationAfterPaletteHide(
+            returnTerminalSessionID: commandPaletteReturnTerminalSessionID, returnApplicationProcessID: commandPaletteReturnApplicationProcessID),
+            let returnApplicationProcessID = commandPaletteReturnApplicationProcessID
+        {
+            activateReturnApplication(processIdentifier: returnApplicationProcessID)
+        } else if rawMainWindowVisibility(), let window {
+            revealTargetedHotkeyWindow(window)
+        }
         isDismissingCommandPalette = false
         logHotkeyDebug("dismiss_palette end \(hotkeyWindowStateSummary())")
         commandPaletteMainWindowVisibility = nil
+        commandPaletteReturnTerminalSessionID = nil
+        commandPaletteReturnApplicationProcessID = nil
         if let perfContext { logHotkeyPerfMetric("toggle_palette", action: "hide", context: perfContext) }
     }
 
@@ -8347,6 +9155,7 @@ extension AppKitController {
         panel.backgroundColor = .clear
         panel.isReleasedWhenClosed = false
         panel.delegate = self
+        panel.setAccessibilityIdentifier("spaces-command-palette")
 
         if let closeButton = panel.standardWindowButton(.closeButton) { closeButton.isHidden = true }
         if let miniButton = panel.standardWindowButton(.miniaturizeButton) { miniButton.isHidden = true }
@@ -8646,10 +9455,10 @@ extension AppKitController {
             let result = await Self.performWindowFocusSnapshot(item.focusRequest)
             switch result {
             case .success(let action):
-                if case .focus = action { self.rememberRecentCommandPaletteFocusIdentity(item.recentFocusIdentity) }
+                if case .focus(_) = action { self.rememberRecentCommandPaletteFocusIdentity(item.recentFocusIdentity) }
                 dismissCommandPalette()
                 reloadData()
-                if case .open = action { hideAfterSuccessfulExternalWindowAction(action) }
+                hideAfterSuccessfulExternalWindowAction(action)
             case .failure(let error): await handleWindowFocusFailure(error)
             }
         }

@@ -83,10 +83,11 @@ Spaces focuses those windows; it does not decide their geometry.
 
 ## Onboarding
 - On launch, the main window should immediately show a neutral loading state while Spaces checks prerequisites and loads workspace data, so startup never presents a blank window.
-- On launch, Spaces blocks only on the cheap prerequisite checks: a supported terminal host installed (`iTerm2` or `Ghostty`), tmux installed, and yabai installed.
+- On launch, Spaces blocks only on the cheap prerequisite checks needed for its default runtime path: yabai installed.
 - Startup prerequisite checks may enrich command lookup from the user's login-shell PATH, but that lookup must stay bounded and fall back automatically to the inherited PATH plus standard package-manager locations so shell startup files cannot stall app launch indefinitely.
 - When command lookup is enriched from the login-shell PATH, the app's inherited `PATH` remains authoritative. Login-shell entries should only fill gaps that are missing from the launch environment, and built-in package-manager fallbacks should remain last.
-- During first-run setup, either `iTerm2` or `Ghostty` satisfies the terminal prerequisite. If both are installed, Spaces should default the terminal host preference to `Ghostty`. If neither is installed, setup should direct the user to install `Ghostty` via Homebrew or the Ghostty website.
+- During first-run setup, Spaces should treat its built-in terminal as the only supported terminal path and should not require any external terminal app.
+- Workspace processes should launch, stop, recover, and reopen without requiring tmux to be installed.
 - The slower yabai readiness step, including service-running and Accessibility validation, should be deferred until the setup flow is actually shown or another yabai-backed action needs it.
 - If a deferred yabai readiness check fails during startup, Spaces should switch into the setup flow at the yabai step instead of surfacing a raw shell error dialog.
 - If a blocking launch prerequisite fails, the main window shows a guided setup flow starting at the first failing step.
@@ -110,7 +111,25 @@ Spaces focuses those windows; it does not decide their geometry.
 
 ### Creation
 - Users can create, update, focus, stop, restart, and archive workspaces from the GUI.
-- The CLI should stay minimal and support `import`, `update`, `start`, `restart`, `open`, and `signal`.
+- The CLI should stay minimal and support `import`, `update`, `start`, `restart`, `open`, `signal`, and low-level `terminal` session commands for Spaces-owned PTY sessions, including listing available sessions by session ID, runtime state, and working directory and printing a clear empty-state message when none are available, sending text, sending named keys, opening native Spaces-owned session windows as an owner or viewer, transferring input ownership between attached clients, and exposing a local TCP proxy for mobile or remote control over the same session boundary.
+- Built-in terminal sessions should open in a native Spaces window backed by libghostty while preserving the same per-session `send`, `key`, and `tail` control behavior through the CLI.
+- `ghostty-embedded` terminal sessions should remain Mac-owned: mobile or remote clients may view, tail, send, and take over through the shared session control boundary, but the live libghostty surface stays attached to the running Spaces app on macOS.
+- Built-in process windows should keep a compact metadata header instead of expanding to fit full exported environment wrappers.
+- Built-in owner windows should stay on the libghostty render path. Passive viewer windows should wait for a read-only snapshot of the shared libghostty surface while the session is live, then switch to persisted final output once the session exits; the owner path should not switch renderers behind the user's back.
+- `ghostty-embedded` owner windows should follow live terminal metadata where possible, including title and working directory updates emitted by the session backend instead of staying frozen at launch-time values.
+- `ghostty-embedded` owner windows should accept direct keyboard input in the terminal surface itself rather than relying on a separate send-input form.
+- `ghostty-embedded` owner windows should prioritize the terminal surface over diagnostic chrome. Backend or attachment details may remain visible in viewer or fallback states, but the active owner window should keep the live terminal as the primary experience.
+- `ghostty-embedded` owner windows should use the native window titlebar for the live session title and collapse redundant in-window session identifiers or renderer diagnostics when the owner surface is active.
+- `ghostty-embedded` owner windows should show prompt and shell output on first open, including workspace-process sessions, without requiring the user to close and reopen the window to reveal already-buffered terminal content.
+- `Spaces`-hosted terminal windows opened or focused from the app stay visible with the Spaces app instead of following the external-app hide behavior used for browsers, Finder, or editors.
+- Ad hoc built-in terminal windows opened from Spaces, including the `New terminal` shortcut path, should remain listed in the workspace detail view even before their native yabai window ID has been backfilled.
+- Opening a built-in `Spaces` terminal from the app should not block the sidebar window while the session backend becomes ready; session bootstrap latency may still exist, but the workspace UI should stay interactive during that wait.
+- When the active `ghostty-embedded` owner window has no warning or non-running state to show, its inline header band should collapse so the terminal surface fills the content area instead of leaving a dead strip of chrome above the terminal.
+- When Spaces focuses an already-open built-in process window from the normal workspace flow, the owner terminal surface should be ready for immediate typing without requiring an extra click inside the window.
+- A terminal session may have one active owner client and one or more passive viewer clients attached at the same time.
+- Ad hoc built-in terminal sessions should stay alive while any local client or recently active remote/mobile client remains attached and should clean up once the final live attachment detaches or expires.
+- Only the active owner client may send input or control PTY size.
+- Viewer windows should remain readable, be able to take over ownership without restarting the underlying shell session, and keep passive chrome minimal: the native titlebar may identify the session, but the in-window experience should prioritize the terminal content plus a clear takeover action.
 - For git projects, new workspaces are branch-oriented and should support an existing-branch picker, a new-branch entry path, target branch, directory name, title, and notes inputs.
 - Git workspace creation must require an explicit branch choice. `Create branch` must reject any branch name that already exists, while `Use existing` is the only path allowed to attach or revive a workspace on an existing branch.
 - Workspace titles are display labels and may repeat within a project. Git branch identity, rather than title text, determines whether a workspace is revived or conflicts with an existing archived record.
@@ -148,7 +167,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - `restart` forces a full restart
 - `update` should own post-creation workspace metadata edits such as title and notes.
 - Launch should wait for setup to finish and should surface setup failures clearly.
-- If a configured process exits during startup, launch should surface the recent process output itself and should not open a dedicated tmux attach window that only reports a secondary attach failure.
+- If a configured process exits during startup, launch should surface the recent process output itself and should not open a secondary recovery window that only reports a follow-on attach failure.
 - Named ports must be available to setup scripts, stop scripts, and process commands.
 - Adding a named port from the workspace detail view should reserve its port number immediately instead of waiting for the next workspace launch.
 - Named port assignments belong to the workspace until that workspace is archived. Stopping a workspace must not give its assigned port numbers back to other workspaces.
@@ -164,16 +183,14 @@ Spaces focuses those windows; it does not decide their geometry.
 - Browser focus should match the intended browser session by URL, not by window title.
 - When focusing an already-open browser session, Spaces should activate Chrome and select the first tab in that tracked window.
 - Terminal focus should land on the intended dedicated process or agent session.
-- Focusing a tracked terminal window should flash a short semitransparent overlay on top of the target window in both iTerm2 and Ghostty.
-- When iTerm2 session targeting needs extra verification, Spaces should still pulse as soon as the tracked terminal window is focused instead of waiting on the slower session-verification path.
+- Focusing a tracked external window should flash a short semitransparent overlay on top of the target window.
 - The focus-pulse overlay color should be configured from the GUI settings panel.
-- Users should be able to choose the default terminal host globally, and both the GUI and CLI should respect that selection.
 - After the GUI focuses or opens an external window, Spaces should hide itself immediately so the target app stays unobstructed.
 - When a workspace detail view becomes visible, Spaces should refresh workspace windows and process state asynchronously so stale rows reconcile shortly after the page appears.
 - If tracked windows become stale during next/previous window cycling, Spaces should skip them and continue to the next live target.
 - Spaces should not poll in the background to verify whether a tracked browser-session window still exists; it should validate that on demand when the user focuses that browser session.
 - If direct window focus from the app targets a stale browser session, Spaces should reopen that session in a new Chrome window and update tracking without showing an error modal first.
-- If direct window focus from the app targets a stale process window, Spaces should first try to recover silently by opening a new dedicated window in the selected terminal host and reattaching to the existing tmux session when the process is still running. If the process is no longer running, Spaces should show a modal warning with `Recover (Cmd+R)` and `Cancel (Esc)`, and the explicit recovery action should restart it inside tmux.
+- If direct window focus from the app targets a stale process window, Spaces should first try to recover silently by reopening the built-in session when the process is still running. If the process is no longer running, Spaces should show a modal warning with `Recover (Cmd+R)` and `Cancel (Esc)`, and the explicit recovery action should restart it inside the built-in terminal.
   - coding-agent windows only show the error state and do not offer recovery
 - Spaces should still reconcile stale tracked windows in the background instead of forcing the user to repair state manually.
 - Degraded runtime health should appear as a warning on top of the current `Running` or `Stopped` lifecycle state, not as a separate replacement state label.
@@ -192,21 +209,30 @@ Spaces focuses those windows; it does not decide their geometry.
 - Project and workspace detail screens should prefer flat section layouts with spacing and dividers over nested bordered cards.
 - Global shortcuts should bring Spaces forward and support fast workspace switching.
 - The global app-toggle shortcut should hide Spaces when it is already frontmost and visible, and show it otherwise.
-- The app should expose a separate global command-palette shortcut that opens a lightweight palette without changing the visibility of the main window.
+- The app should expose a separate global command-palette shortcut that opens a lightweight palette without unhiding or fronting built-in terminal windows.
 - The command palette should default to `Cmd+Opt+-`.
-- Summoning Spaces from the global app-toggle shortcut should raise the main window above other apps and onto the active space.
+- Summoning Spaces from the global app-toggle shortcut should raise only the main window above other apps and onto the active space.
+- The global app-toggle shortcut should depend only on whether the main Spaces window is visible. Built-in terminal windows and the command palette must not change whether `Cmd+Opt+=` shows or hides the main window.
+- The command-palette shortcut should depend only on whether the command palette is visible. The main window and built-in terminal windows must not change whether `Cmd+Opt+-` shows or hides the command palette.
 - When Spaces is summoned, it should select the workspace for the window that was focused immediately before activation when that window belongs to a tracked workspace; otherwise it should show Alerts.
 - The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, Alerts, editor, terminal, and Finder.
+- Up/down arrow navigation inside the main window sidebar should remain a separate concern from global next/previous window cycling.
 - The command palette should draw from every navigable workspace target that can appear in workspace detail rows: browser sessions, processes, ad-hoc windows, configured coding-agent launchers, and live coding-agent terminals.
 - When the command palette opens with an empty query, it should show Alerts attention items first and then the most recently focused targets across workspaces, capped to the first nine visible rows. If there is no recent focus history, it should fall back to the existing workspace-target order.
 - Command-palette rows should show the same status language used by workspace detail rows, including process state and coding-agent state.
 - Once the user types a query, command-palette search should fuzzy-match across all workspaces using workspace title, target name, and secondary detail text, including compact cross-field queries such as `fu` matching `Frontend` plus `URL`.
 - The first command-palette result should stay selected by default, arrow keys should move the selection, and `Enter` should execute the same target-level focus/open action used by the numbered window shortcuts.
 - Leader-based previous/next window cycling should follow the most recently focused targets within the workspace rather than the static workspace definition order. Each repeated cycle sequence should traverse a frozen ordering snapshot so `previous` and `next` walk the full target set instead of bouncing between the last two windows.
+- Leader-based next/previous window cycling should always mean window cycling, even when the main Spaces window is focused.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
 - Numbered window focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
 - Window focus actions and numbered shortcuts should follow one target-level rule: make that target available now.
 - Focusing a target from the app UI or command palette should keep Spaces visible instead of hiding the app after the target receives focus.
+- The global `Toggle app` shortcut controls only the main Spaces window, not the built-in terminal windows or the command palette. If a built-in terminal or the command palette is focused, toggling the app should bring the main Spaces window forward instead of fronting all Spaces-owned windows.
+- The global command-palette shortcut controls only the command-palette panel. Showing the palette should not hide the main window, and hiding the palette should return focus to whichever window was active before the palette was shown.
+- Returning to the main Spaces window from a focused built-in terminal should show the workspace detail view that owns that terminal, matching the behavior of externally hosted terminal windows.
+- If the main Spaces window was summoned from a focused built-in terminal, toggling the app again should hide only the main window and restore focus to that same built-in terminal.
+- If the main Spaces window was summoned from an untracked external app such as Chrome, toggling the app again should hide only the main window and return focus to that external app instead of leaving Spaces frontmost.
 - A live target should receive focus. A configured target that is not live should be opened directly instead of requiring a full workspace launch or restart.
 - Opening a configured browser session, process, or coding agent from a stopped workspace should move that workspace out of the stopped state immediately.
 - Partial runtime is a first-class workspace state: some configured targets may be live and focusable while others remain directly openable.
@@ -218,6 +244,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - CLI focus should use unique names across focusable browser sessions, processes, and coding-agent terminals, and `spaces open <name>` should require one of those names explicitly.
 - Configured workspace processes and browser sessions must always have explicit names; Spaces should reject unnamed entries instead of falling back to commands or URLs as identities.
 - Focus target discovery may remain GUI-centric; the CLI does not need a separate read-only discovery command.
+- `spaces terminal tail` should reconstruct the visible terminal screen from persisted session output using the session's last known terminal size, so wrapped lines and full-screen terminal redraws stay aligned with the live session after resizes.
 - Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
 - Shortcut handling must not break normal text-edit shortcuts while an input is focused.
 - Recovery affordances should reserve `Cmd+R`; app-data reload should default to leader+`R` so it stays distinct from recovery modals.
@@ -228,7 +255,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Coding agents can explicitly report lifecycle events through `spaces signal`.
 - Agent status events are not implied by `import`, `start`, or `restart`, but workspace launch should open any configured coding-agent rows so they appear alongside runtime-managed agents under one `Coding Agents` section.
 - `spaces signal` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
-- Agent events that cannot be reliably attributed to a terminal must be dropped, not guessed onto the frontmost window. Events from unsupported hosts should also be dropped, and coding agents run from tmux are explicitly unsupported and should return a clear error.
+- Agent events that cannot be reliably attributed to a terminal must be dropped, not guessed onto the frontmost window.
 - `init` should identify the originating terminal and either attach to an already tracked terminal row or create a new tracked terminal row for that coding agent.
 - Coding-agent rows should render after browser and process rows so non-agent shortcut ordering stays stable when agents appear or disappear.
 - Configured and ad-hoc coding agents should share the same `Coding Agents` section rather than rendering as separate launcher and runtime sections.

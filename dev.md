@@ -12,13 +12,13 @@ Build, test, and release workflows for the Spaces monorepo. For product overview
 - [`AGENTS.md`](AGENTS.md): how coding agents should write, verify, and document changes
 - [`apps/macos/spec.md`](apps/macos/spec.md): expected product behavior and UX
 - [`apps/macos/docs/architecture.md`](apps/macos/docs/architecture.md): module boundaries, data model, and implementation rationale
+- [`apps/macos/docs/terminal.md`](apps/macos/docs/terminal.md): built-in terminal and libghostty integration notes, constraints, and verification guidance
 - [`design.md`](design.md): visual system and interaction patterns
 - [`apps/web/app/docs`](apps/web/app/docs): user-facing product and CLI documentation
 
 ## Requirements
 - macOS 14+
-- `yabai`, `tmux`
-- iTerm2 or Ghostty
+- `yabai`
 - Google Chrome
 - Accessibility permission (handled via the in-app setup flow on first launch)
 
@@ -27,14 +27,20 @@ Build, test, and release workflows for the Spaces monorepo. For product overview
 Run from the repository root:
 
 ```bash
+scripts/format.sh
 scripts/swiftpm.sh build
 scripts/swiftpm.sh test --parallel
-scripts/format-staged-swift.sh
 scripts/lint.sh
 scripts/coverage.sh
+scripts/verify.sh
 ```
 
-`scripts/lint.sh` auto-formats `apps/macos/Sources` and `apps/macos/Tests` with `swift format` before running lint so formatter-driven warnings do not drown out real issues.
+`scripts/format.sh` performs an explicit tree-wide `swift format` pass across `apps/macos/Sources` and `apps/macos/Tests`.
+`scripts/format-staged-swift.sh` formats staged macOS Swift source and test files in place and re-stages them.
+`scripts/lint.sh` runs `scripts/format-staged-swift.sh` and then `SwiftLint` when `swiftlint` is available.
+`scripts/coverage.sh` runs SwiftPM tests in parallel by default and caps auto-detected workers at `8` unless you override it with `SPACES_TEST_WORKERS` or change the cap with `SPACES_TEST_MAX_AUTO_WORKERS`.
+`scripts/verify.sh` is the canonical sequential local verification path: staged formatting and lint, build, then coverage.
+`scripts/swiftpm.sh` also uses a fail-fast lock around SwiftPM itself so overlapping build, test, or coverage commands stop immediately with a clear message instead of silently contending on the shared `.build` directory.
 
 Useful local entry points:
 
@@ -48,6 +54,179 @@ apps/macos/.build/debug/spaces restart
 ```
 
 Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. The script sets `SPACES_DB_PATH` to `~/.spaces-dev/spaces.db` by default. Override it with `SPACES_DEV_DB_PATH=/custom/path/spaces.db` when you want a different isolated dev database.
+
+For branch-local manual testing against a clean database and terminal-runtime root, override `SPACES_DB_PATH` before launching either binary:
+
+```bash
+export SPACES_DB_PATH="$TMPDIR/spaces-branch/spaces.db"
+mkdir -p "$(dirname "$SPACES_DB_PATH")"
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal list
+```
+
+For branch-local libghostty artifact setup, run:
+
+```bash
+apps/macos/scripts/setup_ghosttykit.sh
+```
+
+That installs `GhosttyKit.xcframework` and the Ghostty resource bundle under `apps/macos/.local/ghosttykit/`, which the current branch-local resolver will discover automatically.
+The default fork build comes from `apps/macos/ghosttykit-release-tag.txt`, and the setup script also accepts an explicit release tag argument plus `SPACES_GHOSTTYKIT_RELEASE_TAG` and `SPACES_GHOSTTYKIT_REPO` overrides when you need a different build or fork locally.
+The setup flow finishes by running `apps/macos/scripts/verify_ghosttykit.sh`, which checks that the downloaded artifact still declares and exports `ghostty_surface_set_data_callback(...)` and `ghostty_surface_send_input_raw(...)`.
+The GitHub Actions PR and release workflows run this setup before SwiftPM resolves the macOS package so clean runners have the pinned branch-local `GhosttyKit` artifact in place.
+
+If `SPACES_PROJECT_DIR` points at another checkout that already has `apps/macos/.local/ghosttykit/`, the setup script copies those local artifacts first and only falls back to GitHub release download when needed.
+The repo also runs [`.github/workflows/sync-ghosttykit-release.yml`](.github/workflows/sync-ghosttykit-release.yml) daily to bump that pinned tag to the latest published build from the Spaces-owned fork via pull request. The fork itself should run its own daily upstream-sync and rebuild automation; this repo only consumes the published release tag.
+
+To verify the embedded Ghostty backend on an isolated database root:
+
+```bash
+export SPACES_DB_PATH="$TMPDIR/spaces-ghostty/spaces.db"
+apps/macos/scripts/setup_ghosttykit.sh
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal command --backend ghostty-embedded --command cat --title verify-ghostty
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal list
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal send <session-id> "hello from ghostty" --newline
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal tail <session-id> --lines 5
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal proxy <session-id> --host 127.0.0.1 --port 0 --auth-token local-test-token
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal show <session-id> --viewer
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal takeover <session-id> <viewer-client-id>
+```
+
+For owner or viewer verification, keep exactly one `SpacesApp` process running for the chosen `SPACES_DB_PATH`. The current `ghostty-embedded` slice supports one live libghostty owner window plus one or more passive viewer windows that wait for live libghostty viewport readback while the session is active, then show persisted final output after exit, and can take over ownership without restarting the session.
+
+For the headless mobile-shaped control proof of concept against the Ghostty-owner path:
+
+```bash
+python3 apps/macos/Tests/poc_mobile_terminal_client.py --start-app
+```
+
+That flow launches an isolated `SpacesApp`, starts one `ghostty-embedded` session, exposes it through `spaces terminal proxy`, attaches an iPhone-shaped viewer, verifies viewer input rejection before takeover, closes the real macOS owner window, promotes the mobile client, sends text plus `Enter`, reopens the native owner window for the same session, and finally transfers ownership back to that reopened macOS owner.
+
+For the maintained E2E wrapper around that same flow:
+
+```bash
+apps/macos/Tests/e2e_terminal_mobile_client.sh
+```
+
+Use the shell wrapper when you want one command that exercises the full attach, takeover, owner-close, owner-reopen, send, and key path without remembering the Python invocation.
+
+`spaces terminal proxy` is the current low-level seam for that proof of concept. Treat it as a temporary integration primitive for remote-shaped clients rather than the long-term external API surface.
+
+For direct CLI verification of Spaces terminal commands:
+
+```bash
+apps/macos/Tests/e2e_terminal_cli_commands.sh
+```
+
+That script exercises `spaces terminal command`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Spaces terminal session.
+
+The Spaces terminal `tail` path also depends on a local `libghostty-vt` build. Set that up before building or profiling terminal changes:
+
+```bash
+apps/macos/scripts/setup_ghosttyvt.sh
+```
+
+That script pins a local `ghostty` checkout to `apps/macos/ghosttyvt-revision.txt`, installs Zig `0.15.2` under `apps/macos/.local/ghosttyvt/toolchain/`, and builds `libghostty-vt` under `apps/macos/.local/ghosttyvt/src/zig-out/`.
+The GitHub Actions PR and release workflows run this setup before the macOS build and coverage pass so clean runners have the matching `libghostty-vt` headers and dylib available.
+
+The terminal E2E, profiling, and soak scripts that launch `SpacesApp` acquire a shared harness lock before they run `setup_ghosttykit`, kill existing app instances, or launch a new app instance. Running them at the same time should serialize rather than tearing each other down mid-run.
+
+For repeatable profiling of the built-in terminal owner and viewer flows:
+
+```bash
+ITERATIONS=3 apps/macos/Tests/profile_built_in_terminal.sh
+```
+
+The profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, exercises owner attach, viewer attach, send, `tail`, and takeover, then summarizes the built-in terminal perf metrics captured from the app log.
+It also writes `summary.txt` and `metrics.json` under its temp work root so baseline metric snapshots can be compared across terminal-window parity changes.
+
+For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
+
+```bash
+apps/macos/Tests/profile_built_in_terminal_stress.sh
+```
+
+That profiler runs three isolated scenarios against the embedded Ghostty backend:
+- `lines`: high-volume append-only output
+- `repaint`: full-screen ANSI clears and redraws
+- `mixed`: status repaints plus ordered line emission
+
+Each scenario verifies ordered `SEQ` markers in `output.log`, records repeated `spaces terminal tail` wall times, and summarizes terminal metrics such as:
+- `terminal_output_write`
+- `terminal_surface_refresh`
+- `terminal_tail_read`
+
+The stress summary prints per-scenario `tail_min`, `tail_median`, `tail_avg`, `tail_p95`, and `tail_max` values so one slow sample does not hide the typical case.
+It also records CLI-side tail metrics for each scenario:
+- `terminal_tail_read`
+- `terminal_tail_command`
+
+Those CLI metrics make it easier to distinguish the internal tail implementation cost from the full `spaces terminal tail` wall time.
+
+For longer-running stability sampling of the same built-in terminal path:
+
+```bash
+DURATION_SECONDS=300 apps/macos/Tests/soak_built_in_terminal.sh
+```
+
+That soak harness runs a repaint-heavy mixed workload for the configured duration, samples `SpacesApp` RSS, CPU, output growth, and `terminal tail` latency at a fixed interval, then verifies that the emitted sequence numbers and final frame count stayed complete.
+
+For repeatable profiling of the app-triggered built-in workspace-terminal open path:
+
+```bash
+ITERATIONS=3 apps/macos/Tests/profile_workspace_terminal_open.sh
+```
+
+That profiler seeds an isolated fixture workspace, triggers the app-side workspace-terminal open route through the manual E2E IPC helper, and summarizes:
+- `workspace_terminal_open_wall`
+- `workspace_terminal_open_ui`
+- `terminal_session_wait_ready`
+- `terminal_window_summon`
+
+For repeatable profiling of the built-in `Spaces terminal -> main window -> tracked process terminal` hotkey loop:
+
+```bash
+ITERATIONS=3 apps/macos/Tests/profile_spaces_terminal_hotkeys.sh
+```
+
+That profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, focuses a tracked built-in process terminal, repeatedly toggles back to the main window with `Cmd+Opt+=`, then refocuses the tracked terminal through the normal workspace-process path while summarizing:
+- `terminal_to_main_toggle_wall`
+- `main_to_terminal_toggle_wall`
+- `toggle_window_show`
+- `toggle_window_hide`
+- `toggle_window_return_terminal_focus`
+- `toggle_window_reveal_target`
+- `toggle_window_terminal_workspace_lookup`
+- `toggle_window_selection_refresh`
+
+For repeatable profiling of the built-in `Spaces terminal -> command palette -> tracked process terminal` hotkey loop:
+
+```bash
+ITERATIONS=3 apps/macos/Tests/profile_spaces_terminal_palette.sh
+```
+
+That profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, focuses a tracked built-in process terminal, repeatedly opens the command palette with `Cmd+Opt+-`, then dismisses it and refocuses the tracked terminal through the normal workspace-process path while summarizing:
+- `terminal_to_palette_toggle_wall`
+- `toggle_palette`
+- `toggle_palette_terminal_workspace_lookup`
+- `toggle_palette_context_workspace`
+- `toggle_palette_reveal_target`
+- `toggle_palette_apply_filter`
+
+For workspace-process profiling, use:
+
+```bash
+apps/macos/Tests/profile_workspace_process_terminal.sh
+```
+
+That profiler waits for the built-in session summon metric instead of sleeping a fixed second after refocus, so the reported close or reopen timings track the actual app-side window path more closely.
 
 ## Pre-commit Hook
 
@@ -71,9 +250,8 @@ Expected output:
 .githooks
 ```
 
-The pre-commit hook does three things:
-- formats staged macOS Swift source and test files with `swift format`
-- runs `scripts/lint.sh`, which also auto-formats the full macOS Swift source and test tree before linting
+The pre-commit hook does two things:
+- runs `scripts/lint.sh`, which formats staged macOS Swift source and test files and then runs any additional lint checks
 - runs `scripts/coverage.sh`
 
 Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](.github/workflows/pr-checks.yml), which runs the same Swift lint/build/coverage flow plus the static website build.
@@ -102,13 +280,13 @@ To prepare the same fixture projects, localhost browser-session servers, and wor
 apps/macos/Tests/e2e_real_system.sh --setup-fixtures-only
 ```
 
-This suite is manual by design. It drives the real app, `spaces`, `yabai`, Chrome, and the configured terminal host in an interactive macOS session instead of XCTest.
+This suite is manual by design. It drives the real app, `spaces`, `yabai`, Chrome, and the built-in Spaces terminal in an interactive macOS session instead of XCTest.
 
 Primary coverage:
 - adding and archiving a workspace
 - overriding workspace settings after creation
 - launch, stop, restart, and dead-process recovery
-- iTerm2 and Ghostty default terminal coverage
+- built-in Spaces terminal coverage
 - extra user-added Chrome and terminal tabs
 - workspace-detail numbered focus shortcuts
 - forward/back workspace window cycling
@@ -119,14 +297,15 @@ The suite emits performance metrics in milliseconds for the main window-focus an
 Repeated real-system profiling also covers:
 - main window visibility toggles from inactive and active app states
 - command palette toggles from inactive and active app states
+- built-in `Spaces terminal -> main window -> tracked process terminal` focus loops
+- built-in `Spaces terminal -> command palette -> tracked process terminal` focus loops
 
-When the suite finishes with recorded metrics, it appends aggregated metric history to `apps/macos/.artifacts/real-system-profiles/metrics-history.csv` and regenerates `apps/macos/.artifacts/real-system-profiles/report.html` with `best`, `previous`, and `latest` comparisons for each tracked metric. Metric names use `start.action.end`, such as `browser_untracked_tab.cli_window_focus.browser_tracked_tab`, and the start and end tokens refer to concrete visible surfaces rather than app-level state. Scenario context like terminal host and workspace scope is stored alongside each row. Dirty worktrees are recorded alongside clean runs by pairing the base `HEAD` commit with a worktree fingerprint, so the report can distinguish two different uncommitted snapshots on the same branch.
+When the suite finishes with recorded metrics, it appends aggregated metric history to `apps/macos/.artifacts/real-system-profiles/metrics-history.csv` and regenerates `apps/macos/.artifacts/real-system-profiles/report.html` with `best`, `previous`, and `latest` comparisons for each tracked metric. Metric names use `start.action.end`, such as `browser_untracked_tab.cli_window_focus.browser_tracked_tab`, and the start and end tokens refer to concrete visible surfaces rather than app-level state. Scenario context like workspace scope is stored alongside each row. Dirty worktrees are recorded alongside clean runs by pairing the base `HEAD` commit with a worktree fingerprint, so the report can distinguish two different uncommitted snapshots on the same branch.
 
 The manual suite depends on a small set of debug-log lines from the app and CLI helpers. Treat these as test contracts when changing debug logging:
 - `spaces: perf metric=...`
 - `spaces: workspace_detail_ipc selecting ...` / `selected ...`
 - `spaces: workspace_run_view workspace=... selected=... agents=... coding_entries=...`
-- `spaces: iterm session_verification_succeeded ...` is used as an optional extra confirmation path for iTerm2 focus checks
 
 ## Website
 

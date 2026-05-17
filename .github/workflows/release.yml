@@ -43,6 +43,13 @@ jobs:
           xcrun swift --version
           swift --version
 
+      - name: Setup terminal build dependencies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apps/macos/scripts/setup_ghosttykit.sh
+          apps/macos/scripts/setup_ghosttyvt.sh
+
       - name: Resolve SwiftPM dependencies
         run: scripts/swiftpm.sh package resolve
 

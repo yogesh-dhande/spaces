@@ -23,10 +23,10 @@ import workspacecore
 
         section.runtimeAgentWindows = [
             AgentWindowRecord(
-                id: "matched", workspaceID: "workspace", provider: .iterm2, label: "Claude", terminalTrackingID: "session-claude", codexThreadID: nil,
+                id: "matched", workspaceID: "workspace", provider: .spaces, label: "Claude", terminalTrackingID: "session-claude", codexThreadID: nil,
                 windowID: 201, yabaiWindowID: 201, status: .idle, createdAt: "now", updatedAt: "now"),
             AgentWindowRecord(
-                id: "adhoc", workspaceID: "workspace", provider: .ghostty, label: "reviewer", terminalTrackingID: "session-reviewer",
+                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer",
                 codexThreadID: nil, windowID: 202, yabaiWindowID: 202, status: .spinning, createdAt: "now", updatedAt: "now"),
         ]
 
@@ -40,7 +40,7 @@ import workspacecore
         let section = AgentLaunchersSection()
         section.runtimeAgentWindows = [
             AgentWindowRecord(
-                id: "adhoc", workspaceID: "workspace", provider: .iterm2, label: "reviewer", terminalTrackingID: "session-reviewer",
+                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer",
                 codexThreadID: nil, windowID: 202, yabaiWindowID: 202, status: .waiting, createdAt: "now", updatedAt: "now")
         ]
         section.runtimeWindowTitleByAgentWindowID = ["adhoc": "review notes"]
@@ -55,7 +55,7 @@ import workspacecore
         let section = AgentLaunchersSection()
         section.runtimeAgentWindows = [
             AgentWindowRecord(
-                id: "adhoc", workspaceID: "workspace", provider: .ghostty, label: nil, terminalTrackingID: "ghostty-hook-1",
+                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: nil, terminalTrackingID: "ghostty-hook-1",
                 terminalNativeID: "ghostty-terminal-1", codexThreadID: nil, windowID: 202, yabaiWindowID: 202, status: .waiting, createdAt: "now",
                 updatedAt: "now")
         ]

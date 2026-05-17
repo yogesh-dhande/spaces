@@ -35,6 +35,14 @@ spaces restart             # full stop + launch
 spaces open <name>         # focus a tracked window by name
 spaces signal <event>      # coding-agent lifecycle: init|start|waiting|done|exit
 spaces update --notes "…"  # edit workspace metadata
+spaces terminal command --command "cat"   # start a Spaces terminal session
+spaces terminal list                      # inspect live session IDs and working directories
+spaces terminal send <session> "hello"    # write input to a session
+spaces terminal key <session> ctrl+c      # send a named key or control chord
+spaces terminal tail <session> --lines 20 # read recent output
+spaces terminal show <session>            # open the owner window for a session
+spaces terminal show <session> --viewer   # open a passive viewer window
+spaces terminal takeover <session> <id>   # hand input ownership to another client
 ```
 
 Coding agents emit `spaces signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).
@@ -57,15 +65,13 @@ Coding agents emit `spaces signal` events from their terminals so the GUI knows 
 ## How it works
 
 - [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
-- Process terminals run under [tmux](https://github.com/tmux/tmux) so closing a terminal window does not kill the process; Spaces reattaches on demand when you need to look at the process output.
-- Supported terminal hosts: [iTerm2](https://iterm2.com) and [Ghostty](https://ghostty.org).
+- Built-in process and ad hoc terminals run inside the Spaces app through the built-in Spaces terminal runtime, so session lifetime, takeover, and `spaces terminal` controls share one session boundary.
 - Browser sessions automate Google Chrome so you can quickly switch to view output without typing the URL or clicking through tabs.
 
 ## Requirements
 
 - macOS 14+
-- [`yabai`](https://github.com/koekeishiya/yabai), [`tmux`](https://github.com/tmux/tmux)
-- [iTerm2](https://iterm2.com) or [Ghostty](https://ghostty.org)
+- [`yabai`](https://github.com/koekeishiya/yabai)
 - Google Chrome (for browser-session focus)
 - Accessibility permission, granted via the in-app setup flow on first launch
 

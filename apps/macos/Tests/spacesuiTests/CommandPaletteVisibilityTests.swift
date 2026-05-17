@@ -16,24 +16,23 @@ import workspacecore
     }
 
     @Test func paletteContextPrefersPreviouslySelectedWorkspace() {
-        let workspaceID = AppKitController.commandPaletteContextWorkspaceID(
-            selectedWorkspaceID: "workspace-selected", focusedWorkspaceID: { "workspace-focused" })
+        let workspaceID = AppKitController.preferredWorkspaceIDForCommandPalette(
+            selectedWorkspaceID: "workspace-selected", focusedTerminalSessionWorkspaceID: "workspace-terminal",
+            focusedWindowWorkspaceID: "workspace-focused")
 
         #expect(workspaceID == "workspace-selected")
     }
 
-    @Test func paletteContextSkipsFocusedWorkspaceLookupWhenSelectionExists() throws {
-        enum SentinelError: Error { case shouldNotBeCalled }
+    @Test func paletteContextPrefersFocusedTerminalWorkspaceBeforeFocusedWindowWorkspace() {
+        let workspaceID = AppKitController.preferredWorkspaceIDForCommandPalette(
+            selectedWorkspaceID: nil, focusedTerminalSessionWorkspaceID: "workspace-terminal", focusedWindowWorkspaceID: "workspace-focused")
 
-        let workspaceID = try AppKitController.commandPaletteContextWorkspaceID(selectedWorkspaceID: "workspace-selected") {
-            throw SentinelError.shouldNotBeCalled
-        }
-
-        #expect(workspaceID == "workspace-selected")
+        #expect(workspaceID == "workspace-terminal")
     }
 
     @Test func paletteContextFallsBackToFocusedTrackedWorkspace() {
-        let workspaceID = AppKitController.commandPaletteContextWorkspaceID(selectedWorkspaceID: nil, focusedWorkspaceID: { "workspace-focused" })
+        let workspaceID = AppKitController.preferredWorkspaceIDForCommandPalette(
+            selectedWorkspaceID: nil, focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: "workspace-focused")
 
         #expect(workspaceID == "workspace-focused")
     }
@@ -81,7 +80,7 @@ import workspacecore
             id: "alerts::attention", source: .alertsAttention, workspaceID: "workspace-a", kind: .agent, label: "Claude", detail: nil,
             focusRequest: .agentWindow(
                 .init(
-                    id: "agent-1", workspaceID: "workspace-a", provider: .ghostty, label: "Claude", terminalTrackingID: nil, codexThreadID: nil,
+                    id: "agent-1", workspaceID: "workspace-a", provider: .spaces, label: "Claude", terminalTrackingID: nil, codexThreadID: nil,
                     windowID: nil, yabaiWindowID: nil, status: .waiting, createdAt: "2026-04-30T00:00:00Z", updatedAt: "2026-04-30T00:00:00Z")),
             alertsAttentionID: "attention-2", workspaceTitle: "Workspace A", status: .agent(.waiting))
         let workspaceItem = makeItem(

@@ -173,21 +173,11 @@ enum DatabaseSchema {
               detail TEXT,
               app TEXT NOT NULL,
               window_id INTEGER,
+              tracking_id TEXT,
               order_index INTEGER NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS terminal_targets (
-              runtime_target_id TEXT PRIMARY KEY,
-              provider TEXT NOT NULL,
-              tracking_id TEXT,
-              native_id TEXT,
-              container_id TEXT,
-              iterm_tab_index INTEGER,
-              tmux_window_id TEXT,
-              FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS browser_targets (

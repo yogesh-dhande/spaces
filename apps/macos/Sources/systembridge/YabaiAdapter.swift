@@ -23,10 +23,23 @@ public final class YabaiAdapter {
     }
 
     public func focusedWindow() throws -> YabaiWindow? {
+        let startedAt = Date()
         do {
+            let jsonStartedAt = Date()
             let json = try Shell.runAndCapture(command(["-m", "query", "--windows", "--window"]))
-            return try decodeObject(json)
-        } catch { return nil }
+            let decodeStartedAt = Date()
+            let window: YabaiWindow = try decodeObject(json)
+            logFocusedWindowDebug(
+                stage: "success", elapsedMS: elapsedMS(since: startedAt),
+                detail:
+                    "shell_ms=\(elapsedMS(since: jsonStartedAt)) decode_ms=\(elapsedMS(since: decodeStartedAt)) window_id=\(window.id) app=\(sanitizeDebugValue(window.app))"
+            )
+            return window
+        } catch {
+            logFocusedWindowDebug(
+                stage: "failure", elapsedMS: elapsedMS(since: startedAt), detail: "error=\(sanitizeDebugValue(error.localizedDescription))")
+            return nil
+        }
     }
 
     public func window(id: Int) throws -> YabaiWindow? {
@@ -37,7 +50,17 @@ public final class YabaiAdapter {
     }
 
     @discardableResult public func focusWindow(id: Int) throws -> Bool {
-        do { return try Shell.run(command(["-m", "window", "--focus", String(id)])) == 0 } catch { return false }
+        let startedAt = Date()
+        do {
+            let succeeded = try Shell.run(command(["-m", "window", "--focus", String(id)])) == 0
+            logFocusWindowDebug(stage: "success", elapsedMS: elapsedMS(since: startedAt), detail: "window_id=\(id) success=\(succeeded ? 1 : 0)")
+            return succeeded
+        } catch {
+            logFocusWindowDebug(
+                stage: "failure", elapsedMS: elapsedMS(since: startedAt),
+                detail: "window_id=\(id) error=\(sanitizeDebugValue(error.localizedDescription))")
+            return false
+        }
     }
 
     public func closeWindow(id: Int) throws { _ = try Shell.run(command(["-m", "window", "--close", String(id)])) }
@@ -57,5 +80,21 @@ public final class YabaiAdapter {
             throw NSError(domain: "spaces.yabai", code: 127, userInfo: [NSLocalizedDescriptionKey: "yabai executable not found"])
         }
         return [executablePath] + arguments
+    }
+
+    private func logFocusedWindowDebug(stage: String, elapsedMS: Int, detail: String) {
+        guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
+        fputs("spaces: yabai_focused_window stage=\(stage) elapsed_ms=\(elapsedMS) \(detail)\n", stderr)
+    }
+
+    private func logFocusWindowDebug(stage: String, elapsedMS: Int, detail: String) {
+        guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
+        fputs("spaces: yabai_focus_window stage=\(stage) elapsed_ms=\(elapsedMS) \(detail)\n", stderr)
+    }
+
+    private func elapsedMS(since start: Date) -> Int { max(Int(Date().timeIntervalSince(start) * 1000), 0) }
+
+    private func sanitizeDebugValue(_ value: String) -> String {
+        value.replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\r", with: "\\r")
     }
 }

@@ -17,8 +17,7 @@ export default function GettingStartedDocsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Requirements</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• macOS 14 or later.</li>
-          <li>• yabai and tmux installed.</li>
-          <li>• Ghostty or iTerm2 installed for workspace processes.</li>
+          <li>• yabai installed.</li>
           <li>• Google Chrome installed for browser sessions.</li>
           <li>• Accessibility permission granted when Spaces&apos;s setup flow asks.</li>
         </ul>
@@ -53,11 +52,11 @@ export default function GettingStartedDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Launch and Validate</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Launching a workspace starts its processes in your terminal and opens its browser sessions in Chrome. Confirm it worked:
+          Launching a workspace starts its processes in Spaces&apos;s built-in terminal windows and opens its browser sessions in Chrome. Confirm it worked:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• The workspace shows as running in the sidebar.</li>
-          <li>• Processes start with tmux sessions and terminal windows are opened for each process.</li>
+          <li>• Processes start in dedicated Spaces terminal windows.</li>
           <li>• Configured URLs open in Chrome.</li>
         </ul>
       </article>

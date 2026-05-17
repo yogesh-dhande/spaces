@@ -36,7 +36,7 @@ export default function CliReferencePage() {
   return (
     <DocsShell
       title="CLI Reference"
-      description="The spaces CLI is intentionally minimal. It exists for `import`, `update`, `start`, `restart`, `open`, and explicit coding-agent lifecycle events through `signal`."
+      description="The spaces CLI is intentionally minimal. It exists for `import`, `update`, `start`, `restart`, `open`, explicit coding-agent lifecycle events through `signal`, and low-level built-in terminal session control."
       pagePath="/docs/cli"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
@@ -151,7 +151,7 @@ spaces signal exit`}</CodeBlock>
           <Flag name="[path]" description="Workspace directory to associate with the event. Defaults to the current working directory." />
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Spaces infers the terminal host automatically. If the current terminal host is not iTerm2 or Ghostty, Spaces drops the event instead of recording it.
+          Spaces records agent lifecycle events only from Spaces-managed terminal sessions. If the current shell is not running inside a tracked Spaces terminal session, Spaces drops the event instead of recording it.
         </p>
       </article>
 

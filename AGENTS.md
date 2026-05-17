@@ -25,6 +25,9 @@
 ## Verification Rules
 - Always run lint and build before finalizing macOS app changes.
 - Run `scripts/coverage.sh` after changes unless the change is limited to `apps/web` or docs/comments.
+- Prefer `scripts/verify.sh` for the normal macOS verification pass so lint, build, and coverage run sequentially.
+- Treat `scripts/lint.sh` as read-only verification. Use `scripts/format.sh` for explicit tree-wide formatting, and rely on `.githooks/pre-commit` to format staged Swift files before commit.
+- `scripts/swiftpm.sh` is guarded by a fail-fast lock. Do not start overlapping build, test, or coverage runs; rerun after the active workflow finishes.
 - Whenever `scripts/coverage.sh` is run, report the overall coverage percentage.
 - Whenever `scripts/coverage.sh` is run, also report module-level coverage percentages for major modules such as systembridge, workspacecore, spacescli, etc.
 - Consider adding or expanding tests before finalizing code changes.

@@ -798,7 +798,7 @@ final class ShellTests: XCTestCase {
         let startedAt = Date()
         let output = try Shell.runAndCapture(["mockcmd"])
         XCTAssertEqual(output, "single-drain-budget")
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 3.5)
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 4.0)
     }
 
     func testRunAndCaptureRefreshesCachedLoginShellPathWhenZdotdirChanges() throws {

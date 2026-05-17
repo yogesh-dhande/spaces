@@ -36,6 +36,13 @@ jobs:
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
 
+      - name: Setup terminal build dependencies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apps/macos/scripts/setup_ghosttykit.sh
+          apps/macos/scripts/setup_ghosttyvt.sh
+
       - name: Install website dependencies
         working-directory: apps/web
         run: npm ci

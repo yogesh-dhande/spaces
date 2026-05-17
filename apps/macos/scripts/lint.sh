@@ -1,23 +1,15 @@
 #!/bin/sh
 set -eu
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
-swift_paths="$root/Sources $root/Tests"
+app_root="$(cd "$(dirname "$0")/.." && pwd)"
+repo_root="$(cd "$app_root/../.." && pwd)"
 
-if swift format --help >/dev/null 2>&1; then
-  echo "Running swift format autoformat..."
-  swift format format --in-place --parallel --recursive $swift_paths
-
-  echo "Running swift format lint..."
-  swift format lint --parallel --recursive $swift_paths
-  exit 0
-fi
+echo "Formatting staged Swift files..."
+"$repo_root/scripts/format-staged-swift.sh"
 
 if command -v swiftlint >/dev/null 2>&1; then
   echo "Running SwiftLint..."
-  swiftlint --strict --quiet "$root"
-  exit 0
+  exec swiftlint --strict --quiet "$app_root"
 fi
 
-echo "No Swift linter found. Install swift-format (preferred) or SwiftLint." >&2
-exit 1
+echo "No additional Swift linter configured."

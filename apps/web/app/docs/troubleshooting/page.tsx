@@ -16,7 +16,7 @@ export default function TroubleshootingDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Quick Triage</h2>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>1. Check that yabai, tmux, Ghostty or iTerm2, and Chrome are installed.</li>
+          <li>1. Check that yabai and Chrome are installed.</li>
           <li>2. Check that Spaces and yabai have Accessibility permission in System Settings.</li>
           <li>3. Confirm the workspace isn&apos;t archived.</li>
           <li>4. If launch complains about existing runtime, run <code>spaces restart</code>.</li>

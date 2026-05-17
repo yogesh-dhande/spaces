@@ -35,7 +35,7 @@ export default function WorkspaceLifecycleDocsPage() {
           Launching a stopped workspace:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Starts each configured process with tmux and attaches to it in its own terminal window (Ghostty or iTerm2, per your setting).</li>
+          <li>• Starts each configured process in its own Spaces terminal window backed by the built-in Spaces terminal runtime.</li>
           <li>• Leaves browser sessions unopened until you explicitly focus them.</li>
           <li>• Remembers those windows so you can jump back to any of them by keyboard shortcuts.</li>
         </ul>

@@ -63,7 +63,7 @@ export default function CodingAgentsDocsPage() {
           <li>• <strong>exit</strong> &mdash; agent ended; row returns to idle, or is removed if the terminal is gone.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Events from unsupported terminal hosts are dropped. Agents run inside tmux are not supported — use a direct terminal (iTerm2 or Ghostty).
+          Events are accepted only from Spaces-managed terminal sessions. Start agents in a workspace terminal opened by Spaces so the session can be tracked and focused reliably.
         </p>
       </article>
 
@@ -97,7 +97,7 @@ export default function CodingAgentsDocsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Configured vs. Ad-hoc</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>Configured launchers</strong> live on the project and open automatically when the workspace launches. Their name is reserved — relaunching reuses the same row rather than creating a duplicate.</li>
-          <li>• <strong>Ad-hoc agents</strong> are any supported terminal (iTerm2 or Ghostty) in which you run an agent yourself. Spaces creates a row the first time the agent reports an event. If an ad-hoc agent reports the same name as a configured launcher, Spaces auto-renames it with a numeric suffix.</li>
+          <li>• <strong>Ad-hoc agents</strong> are any Spaces-managed terminal session in which you run an agent yourself. Spaces creates a row the first time the agent reports an event. If an ad-hoc agent reports the same name as a configured launcher, Spaces auto-renames it with a numeric suffix.</li>
         </ul>
       </article>
 

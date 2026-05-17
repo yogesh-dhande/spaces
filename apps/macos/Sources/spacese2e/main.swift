@@ -1,5 +1,8 @@
+import AppKit
+import ApplicationServices
 import ArgumentParser
 import Foundation
+import spacesterminalcore
 import systembridge
 import workspacecore
 
@@ -10,10 +13,47 @@ struct MXE2ECommand: ParsableCommand {
         commandName: "spacese2e", abstract: "Manual real-system test helpers for Spaces.",
         subcommands: [
             SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
-            SelectWorkspaceDetailCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
+            ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, SelectWorkspaceDetailCommand.self,
+            OpenWorkspaceTerminalCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
             StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
-            SetWorkspaceStopScriptCommand.self, SetTerminalHostCommand.self, TerminalHostAvailableCommand.self, RecordScreenCommand.self,
+            SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self,
+            CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
+            CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, RecordScreenCommand.self,
         ])
+}
+
+private struct ShowMainWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "show-main-window")
+
+    func run() throws {
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.showMainWindow, object: nil, userInfo: nil, options: [.deliverImmediately])
+        try emitJSON(["success": true])
+    }
+}
+
+private struct HideMainWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "hide-main-window")
+
+    func run() throws {
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.hideMainWindow, object: nil, userInfo: nil, options: [.deliverImmediately])
+        try emitJSON(["success": true])
+    }
+}
+
+private struct ShowWindowIssueModalCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "show-window-issue-modal")
+
+    @Option(name: .long) var title: String
+    @Option(name: .long) var detail: String
+
+    func run() throws {
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.showWindowIssueModal, object: nil,
+            userInfo: [IPCNotification.titleUserInfoKey: title, IPCNotification.detailUserInfoKey: detail], options: [.deliverImmediately])
+        try emitJSON(["success": true])
+    }
 }
 
 private struct SelectWorkspaceDetailCommand: ParsableCommand {
@@ -32,6 +72,31 @@ private struct SelectWorkspaceDetailCommand: ParsableCommand {
         }
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.selectWorkspaceDetail, object: nil, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id],
+            options: [.deliverImmediately])
+        try emitJSON(
+            WorkspaceSummaryPayload(
+                id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+                notes: workspace.notes))
+    }
+}
+
+private struct OpenWorkspaceTerminalCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "open-workspace-terminal")
+
+    @Option(name: .long) var workspaceDir: String
+
+    /// Tells the running Spaces app to open one built-in terminal for a
+    /// workspace through the same UI-side path used by the app itself, so the
+    /// manual harness can profile launch responsiveness without scripting
+    /// shortcuts or sidebar clicks.
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.openWorkspaceTerminal, object: nil, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id],
             options: [.deliverImmediately])
         try emitJSON(
             WorkspaceSummaryPayload(
@@ -127,16 +192,23 @@ private struct SeedFixtureCommand: ParsableCommand {
     func run() throws {
         let orchestrator = try makeOrchestrator()
         let normalizedProjectDir = normalizePath(projectDir)
+        try materializeDemoFixtureIfNeeded(projectDir: normalizedProjectDir, variant: "beacon")
         let project = try orchestrator.project(dir: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
-        let uvExecutable = try resolveExecutablePath(named: "uv")
-        let frontendCommand =
-            "\(uvExecutable) run --project .spaces-e2e-demo spaces-e2e-demo frontend --port $APP_PORT --site-dir .spaces-e2e-demo/site --backend-url http://127.0.0.1:$API_PORT"
-        let backendCommand = "\(uvExecutable) run --project .spaces-e2e-demo spaces-e2e-demo backend --port $API_PORT --data-dir .spaces-e2e-demo/api"
+        let pythonExecutable = try resolveExecutablePath(named: "python3")
+        let frontendCommand = fixtureServiceCommand(
+            pythonExecutable: pythonExecutable,
+            arguments: [
+                "-m", "spaces_e2e_demo", "frontend", "--port", "$APP_PORT", "--site-dir", ".spaces-e2e-demo/site", "--backend-url",
+                "http://127.0.0.1:$API_PORT",
+            ])
+        let backendCommand = fixtureServiceCommand(
+            pythonExecutable: pythonExecutable,
+            arguments: ["-m", "spaces_e2e_demo", "backend", "--port", "$API_PORT", "--data-dir", ".spaces-e2e-demo/api"])
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.ports = [.init(name: "APP_PORT"), .init(name: "API_PORT")]
             config.stopScript =
-                #"bash -lc 'printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
+                #"bash -lc 'for port in "$APP_PORT" "$API_PORT"; do if [ -n "$port" ]; then pids=(); while IFS= read -r pid; do [ -n "$pid" ] && pids+=("$pid"); done < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true); for pid in "${pids[@]}"; do kill "$pid" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in "${pids[@]}"; do kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true; done; fi; done; printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
             config.processes = [
                 .init(name: "frontend", command: frontendCommand, executionMode: .shell),
                 .init(name: "backend", command: backendCommand, executionMode: .shell),
@@ -182,6 +254,73 @@ private struct SeedFixtureCommand: ParsableCommand {
         let path = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard process.terminationStatus == 0, let path, !path.isEmpty else { throw ValidationError("Required executable not found in PATH: \(name)") }
         return path
+    }
+
+    private func shellQuoted(_ raw: String) -> String { "'\(raw.replacingOccurrences(of: "'", with: "'\\''"))'" }
+
+    private func shellToken(_ raw: String) -> String { raw.contains("$") ? raw : shellQuoted(raw) }
+
+    private func fixtureServiceCommand(pythonExecutable: String, arguments: [String]) -> String {
+        let joinedArguments = ([shellQuoted(pythonExecutable)] + arguments.map(shellToken)).joined(separator: " ")
+        return "export PYTHONPATH=.spaces-e2e-demo/src; exec \(joinedArguments)"
+    }
+
+    private func materializeDemoFixtureIfNeeded(projectDir: String, variant: String) throws {
+        let fileManager = FileManager.default
+        let projectURL = URL(fileURLWithPath: projectDir, isDirectory: true)
+        let demoRoot = projectURL.appendingPathComponent(".spaces-e2e-demo", isDirectory: true)
+        let pyprojectURL = demoRoot.appendingPathComponent("pyproject.toml")
+        let mainURL = demoRoot.appendingPathComponent("src/spaces_e2e_demo/__main__.py")
+        let siteURL = demoRoot.appendingPathComponent("site", isDirectory: true)
+        let apiURL = demoRoot.appendingPathComponent("api", isDirectory: true)
+        if fileManager.fileExists(atPath: pyprojectURL.path), fileManager.fileExists(atPath: mainURL.path),
+            fileManager.fileExists(atPath: siteURL.path), fileManager.fileExists(atPath: apiURL.path)
+        {
+            return
+        }
+
+        let fixtureRoot = try resolveDemoFixtureRoot()
+        let templateRoot = fixtureRoot.appendingPathComponent("templates/\(variant)", isDirectory: true)
+        let pyprojectSource = fixtureRoot.appendingPathComponent("pyproject.toml")
+        let lockSource = fixtureRoot.appendingPathComponent("uv.lock")
+        let srcSource = fixtureRoot.appendingPathComponent("src", isDirectory: true)
+        let siteSource = templateRoot.appendingPathComponent("site", isDirectory: true)
+        let apiSource = templateRoot.appendingPathComponent("api", isDirectory: true)
+
+        guard fileManager.fileExists(atPath: pyprojectSource.path), fileManager.fileExists(atPath: srcSource.path),
+            fileManager.fileExists(atPath: siteSource.path), fileManager.fileExists(atPath: apiSource.path)
+        else { throw ValidationError("Demo fixture source is incomplete: \(fixtureRoot.path)") }
+
+        if fileManager.fileExists(atPath: demoRoot.path) { try fileManager.removeItem(at: demoRoot) }
+        try fileManager.createDirectory(at: demoRoot, withIntermediateDirectories: true)
+        try fileManager.copyItem(at: pyprojectSource, to: pyprojectURL)
+        if fileManager.fileExists(atPath: lockSource.path) {
+            try fileManager.copyItem(at: lockSource, to: demoRoot.appendingPathComponent("uv.lock"))
+        }
+        try fileManager.copyItem(at: srcSource, to: demoRoot.appendingPathComponent("src", isDirectory: true))
+        try fileManager.copyItem(at: siteSource, to: siteURL)
+        try fileManager.copyItem(at: apiSource, to: apiURL)
+    }
+
+    private func resolveDemoFixtureRoot() throws -> URL {
+        let fileManager = FileManager.default
+        var candidates: [String] = []
+        candidates.append(normalizePath("apps/macos/Tests/fixtures/e2e_demo"))
+        if let spacesProjectDir = ProcessInfo.processInfo.environment["SPACES_PROJECT_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !spacesProjectDir.isEmpty
+        {
+            candidates.append(
+                URL(fileURLWithPath: spacesProjectDir, isDirectory: true).appendingPathComponent(
+                    "apps/macos/Tests/fixtures/e2e_demo", isDirectory: true
+                ).path)
+        }
+
+        for candidate in candidates {
+            let candidateURL = URL(fileURLWithPath: candidate, isDirectory: true)
+            if fileManager.fileExists(atPath: candidateURL.appendingPathComponent("pyproject.toml").path) { return candidateURL }
+        }
+
+        throw ValidationError("Unable to locate apps/macos/Tests/fixtures/e2e_demo. Set SPACES_PROJECT_DIR to an original checkout if needed.")
     }
 }
 
@@ -251,9 +390,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
         guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
             throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
         }
-        let appConfig = try orchestrator.appConfig()
         let payload = WorkspaceDumpPayload(
-            appTerminalHost: appConfig.terminalHost.rawValue,
             workspace: .init(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
                 notes: workspace.notes),
@@ -265,8 +402,9 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             },
             runningProcesses: try orchestrator.runningProcesses(workspaceID: workspace.id).map {
                 RunningProcessPayload(
-                    id: $0.id, name: $0.templateName, pid: $0.pid, status: $0.status.rawValue, terminalApp: $0.terminalApp,
-                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID, tmuxWindowID: $0.tmuxWindowID)
+                    id: $0.id, name: $0.templateName, pid: try resolvedPID(for: $0), status: $0.status.rawValue, terminalApp: $0.terminalApp,
+                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID, tmuxWindowID: $0.tmuxWindowID,
+                    windowID: $0.windowID)
             },
             windows: try orchestrator.windows(workspaceID: workspace.id).map {
                 WindowPayload(
@@ -279,6 +417,155 @@ private struct DumpWorkspaceCommand: ParsableCommand {
                     terminalNativeID: $0.terminalNativeID, windowID: $0.windowID, yabaiWindowID: $0.yabaiWindowID)
             })
         try emitJSON(payload)
+    }
+
+    private func resolvedPID(for process: RunningProcessRecord) throws -> Int? {
+        if let pid = process.pid { return pid }
+        guard process.terminalApp == TerminalHost.spaces.appName else { return nil }
+        guard let sessionID = process.terminalTrackingID ?? process.terminalNativeID, !sessionID.isEmpty else { return nil }
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        return try TerminalSessionPersistence.readRuntimeState(paths: paths).childPID.map(Int.init)
+    }
+}
+
+private struct FocusWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "focus-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var processName: String
+    @Option(name: .long) var requestID: String?
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        guard let process = try orchestrator.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == processName }) else {
+            throw ValidationError("Running process not found: \(processName)")
+        }
+        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id, requestID: requestID)
+        try emitJSON(["workspaceID": workspace.id, "processID": process.id, "processName": process.templateName, "requestID": requestID ?? ""])
+    }
+}
+
+private struct FocusWorkspaceWindowIndexCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "focus-workspace-window-index")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var index: Int
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: index)
+        try emitJSON(["workspaceID": workspace.id, "index": String(index)])
+    }
+}
+
+private struct CycleWorkspaceWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "cycle-workspace-window")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var direction: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        switch direction {
+        case "next", "previous":
+            let requestID = UUID().uuidString
+            DistributedNotificationCenter.default().postNotificationName(
+                IPCNotification.cycleWorkspaceWindow, object: nil,
+                userInfo: [
+                    IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.cycleDirectionUserInfoKey: direction,
+                    IPCNotification.focusRequestIDUserInfoKey: requestID,
+                ], options: [.deliverImmediately])
+        default: throw ValidationError("Unsupported direction: \(direction)")
+        }
+        try emitJSON(["workspaceID": workspace.id, "direction": direction])
+    }
+}
+
+private struct RecoverWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "recover-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var processName: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: processName)
+        try emitJSON(["workspaceID": workspace.id, "processName": processName])
+    }
+}
+
+private struct CloseWorkspaceProcessWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "close-workspace-process-window")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var processName: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        guard let process = try orchestrator.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == processName }) else {
+            throw ValidationError("Running process not found: \(processName)")
+        }
+        guard let sessionID = process.terminalNativeID ?? process.terminalTrackingID, !sessionID.isEmpty else {
+            throw ValidationError("Running process has no built-in terminal session: \(processName)")
+        }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.closeTerminalSessionWindow, object: nil, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID],
+            options: [.deliverImmediately])
+        try emitJSON(["workspaceID": workspace.id, "processName": processName, "sessionID": sessionID])
+    }
+}
+
+private struct CloseTerminalSessionWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "close-terminal-session-window")
+
+    @Option(name: .long) var sessionID: String
+
+    func run() throws {
+        let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session id.") }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.closeTerminalSessionWindow, object: nil, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID],
+            options: [.deliverImmediately])
+        try emitJSON(["sessionID": trimmedSessionID])
+    }
+}
+
+private struct SurfaceSnapshotCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "surface-snapshot")
+
+    @Option(name: .long) var spacesPID: Int32?
+    @Flag(name: .long) var includeYabaiFocusedWindow = false
+
+    func run() throws {
+        let frontmostApplication = NSWorkspace.shared.frontmostApplication
+        let frontmostPID = frontmostApplication.map { Int($0.processIdentifier) }
+        let focusedWindowID = includeYabaiFocusedWindow ? (try? YabaiAdapter().focusedWindow()?.id) : nil
+        let spacesSurface = spacesPID.map { snapshotSpacesSurface(pid: $0, frontmostPID: frontmostPID) }
+        try emitJSON(
+            SurfaceSnapshotPayload(
+                frontmostProcessID: frontmostPID, frontmostApplicationName: frontmostApplication?.localizedName,
+                frontmostApplicationBundleID: frontmostApplication?.bundleIdentifier, yabaiFocusedWindowID: focusedWindowID ?? nil,
+                spaces: spacesSurface))
     }
 }
 
@@ -426,32 +713,39 @@ private struct SetWorkspaceBrowserSessionURLsCommand: ParsableCommand {
     }
 }
 
-private struct SetTerminalHostCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "set-terminal-host")
+private struct AddWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "add-workspace-process")
 
-    @Argument var host: String
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var name: String
+    @Option(name: .long) var command: String
 
-    /// Updates the persisted default terminal host without routing through the
-    /// user-facing CLI, keeping this helper focused on manual test setup.
+    /// Appends one process template through the production workspace-settings
+    /// path so the real-system harness can introduce additional runtime load
+    /// without scripting the nested settings UI.
     func run() throws {
         let orchestrator = try makeOrchestrator()
-        guard let terminalHost = TerminalHost(rawValue: host.lowercased()) else { throw ValidationError("Unsupported terminal host: \(host)") }
-        let config = try orchestrator.updateTerminalHost(terminalHost)
-        try emitJSON(["terminalHost": config.terminalHost.rawValue])
-    }
-}
-
-private struct TerminalHostAvailableCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "terminal-host-available")
-
-    @Argument var host: String
-
-    /// Reports whether one concrete terminal host is available using the same
-    /// adapter-level availability checks the app relies on for setup/runtime.
-    func run() throws {
-        guard let terminalHost = TerminalHost(rawValue: host.lowercased()) else { throw ValidationError("Unsupported terminal host: \(host)") }
-        let available = SetupChecker().isTerminalHostAvailable(named: terminalHost.rawValue)
-        try emitJSON(TerminalHostAvailabilityPayload(host: terminalHost.rawValue, available: available))
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw ValidationError("Missing process name.") }
+        guard !trimmedCommand.isEmpty else { throw ValidationError("Missing process command.") }
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes.removeAll { ($0.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == trimmedName }
+            settings.processes.append(ProcessTemplate(name: trimmedName, command: trimmedCommand, executionMode: .shell))
+        }
+        guard let updated = try orchestrator.workspaceSettings(workspaceID: workspace.id) else {
+            throw ValidationError("Workspace settings missing at: \(normalizedWorkspaceDir)")
+        }
+        try emitJSON(
+            WorkspaceSettingsPayload(
+                stopScript: updated.stopScript, ports: updated.ports.map(\.name),
+                processes: updated.processes.map { .init(name: $0.name, command: $0.command) },
+                browserSessions: updated.browserSessions.map { .init(name: $0.name, url: $0.url) },
+                agentLaunchers: updated.agentLaunchers.map { .init(name: $0.name, command: $0.command) }))
     }
 }
 
@@ -460,13 +754,7 @@ private struct SeedFixturePayload: Codable {
     let defaultWorkspace: WorkspaceSummaryPayload?
 }
 
-private struct TerminalHostAvailabilityPayload: Codable {
-    let host: String
-    let available: Bool
-}
-
 private struct WorkspaceDumpPayload: Codable {
-    let appTerminalHost: String
     let workspace: WorkspaceSummaryPayload
     let settings: WorkspaceSettingsPayload?
     let runningProcesses: [RunningProcessPayload]
@@ -510,6 +798,7 @@ private struct RunningProcessPayload: Codable {
     let terminalTrackingID: String?
     let terminalNativeID: String?
     let tmuxWindowID: String?
+    let windowID: Int?
 }
 
 private struct WindowPayload: Codable {
@@ -533,6 +822,27 @@ private struct AgentWindowPayload: Codable {
     let terminalNativeID: String?
     let windowID: Int?
     let yabaiWindowID: Int?
+}
+
+private struct SurfaceSnapshotPayload: Codable {
+    let frontmostProcessID: Int?
+    let frontmostApplicationName: String?
+    let frontmostApplicationBundleID: String?
+    let yabaiFocusedWindowID: Int?
+    let spaces: SpacesSurfacePayload?
+}
+
+private struct SpacesSurfacePayload: Codable {
+    let processID: Int
+    let appVisible: Bool
+    let frontWindowIdentifier: String?
+    let frontWindowTitle: String?
+    let frontWindowKind: String
+    let mainWindowVisible: Bool
+    let mainWindowFocused: Bool
+    let commandPaletteVisible: Bool
+    let commandPaletteFocused: Bool
+    let modalVisible: Bool
 }
 
 /// Looks up one workspace by project directory and title, matching the GUI's
@@ -563,5 +873,84 @@ private func makeOrchestrator() throws -> WorkspaceOrchestrator { try WorkspaceO
 /// Normalizes filesystem paths before lookups so shell callers can pass either
 /// relative or absolute values safely.
 private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
+
+private func snapshotSpacesSurface(pid: Int32, frontmostPID: Int?) -> SpacesSurfacePayload {
+    let appElement = AXUIElementCreateApplication(pid)
+    let windows = axElementArrayAttribute(appElement, attribute: kAXWindowsAttribute)
+    let focusedWindow =
+        axElementAttribute(appElement, attribute: kAXFocusedWindowAttribute) ?? axElementAttribute(appElement, attribute: kAXMainWindowAttribute)
+    let appVisible = !(NSRunningApplication(processIdentifier: pid)?.isHidden ?? true)
+
+    let frontWindowIdentifier = focusedWindow.flatMap { axStringAttribute($0, attribute: kAXIdentifierAttribute as String) }
+    let frontWindowTitle = focusedWindow.flatMap { axStringAttribute($0, attribute: kAXTitleAttribute as String) }
+    let frontWindowKind = classifySpacesWindow(focusedWindow)
+
+    let mainWindow = windows.first { window in
+        let identifier = axStringAttribute(window, attribute: kAXIdentifierAttribute as String)
+        let title = axStringAttribute(window, attribute: kAXTitleAttribute as String)
+        return identifier == "spaces-main-window" || title == "Spaces"
+    }
+    let paletteWindow = windows.first { window in axStringAttribute(window, attribute: kAXIdentifierAttribute as String) == "spaces-command-palette" }
+
+    let mainWindowVisible = appVisible && mainWindow.map(isVisibleWindow) == true
+    let commandPaletteVisible = appVisible && paletteWindow.map(isVisibleWindow) == true
+    let mainWindowFocused = frontmostPID == Int(pid) && frontWindowKind == "main"
+    let commandPaletteFocused = frontmostPID == Int(pid) && frontWindowKind == "palette"
+    let modalVisible =
+        appVisible
+        && windows.contains { window in
+            guard isVisibleWindow(window) else { return false }
+            if axStringAttribute(window, attribute: kAXSubroleAttribute as String) == kAXDialogSubrole as String { return true }
+            return !axElementArrayAttribute(window, attribute: "AXSheets").isEmpty
+        }
+
+    return SpacesSurfacePayload(
+        processID: Int(pid), appVisible: appVisible, frontWindowIdentifier: frontWindowIdentifier, frontWindowTitle: frontWindowTitle,
+        frontWindowKind: frontWindowKind, mainWindowVisible: mainWindowVisible, mainWindowFocused: mainWindowFocused,
+        commandPaletteVisible: commandPaletteVisible, commandPaletteFocused: commandPaletteFocused, modalVisible: modalVisible)
+}
+
+private func classifySpacesWindow(_ window: AXUIElement?) -> String {
+    guard let window else { return "none" }
+    let identifier = axStringAttribute(window, attribute: kAXIdentifierAttribute as String) ?? ""
+    let title = axStringAttribute(window, attribute: kAXTitleAttribute as String) ?? ""
+    let subrole = axStringAttribute(window, attribute: kAXSubroleAttribute as String) ?? ""
+
+    if subrole == kAXDialogSubrole as String { return "modal" }
+    if identifier == "spaces-command-palette" { return "palette" }
+    if identifier == "spaces-main-window" { return "main" }
+    if identifier.hasPrefix("spaces-terminal:") { return title.hasSuffix(" (viewer)") ? "terminal_viewer" : "terminal_owner" }
+    if title == "Spaces" { return "main" }
+    if title.hasSuffix(" (viewer)") { return "terminal_viewer" }
+    if !title.isEmpty { return "terminal_owner" }
+    return "other"
+}
+
+private func isVisibleWindow(_ window: AXUIElement) -> Bool {
+    if axBoolAttribute(window, attribute: kAXMinimizedAttribute) == true { return false }
+    if axBoolAttribute(window, attribute: "AXVisible") == false { return false }
+    return true
+}
+
+private func axAttributeValue(_ element: AXUIElement, attribute: String) -> CFTypeRef? {
+    var value: CFTypeRef?
+    let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+    guard result == .success else { return nil }
+    return value
+}
+
+private func axElementAttribute(_ element: AXUIElement, attribute: String) -> AXUIElement? {
+    axAttributeValue(element, attribute: attribute) as! AXUIElement?
+}
+
+private func axElementArrayAttribute(_ element: AXUIElement, attribute: String) -> [AXUIElement] {
+    (axAttributeValue(element, attribute: attribute) as? [AXUIElement]) ?? []
+}
+
+private func axStringAttribute(_ element: AXUIElement, attribute: String) -> String? { axAttributeValue(element, attribute: attribute) as? String }
+
+private func axBoolAttribute(_ element: AXUIElement, attribute: String) -> Bool? {
+    (axAttributeValue(element, attribute: attribute) as? NSNumber)?.boolValue
+}
 
 MXE2ECommand.main()

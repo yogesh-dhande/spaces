@@ -80,7 +80,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Use the minimal spaces CLI for import, update, start, restart, open, and explicit coding-agent signals.",
+      "Use the spaces CLI for workspace actions plus built-in terminal session commands such as command, list with attached-client state, send, key, tail, owner or viewer windows, and ownership takeover.",
   },
 ];
 
