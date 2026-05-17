@@ -14,6 +14,25 @@ REQUIRED_EXPORTS=(
     "ghostty_surface_send_input_raw"
 )
 
+file_contains_fixed() {
+    local needle="$1"
+    local path="$2"
+    if command -v rg >/dev/null 2>&1; then
+        rg -Fq "$needle" "$path"
+        return
+    fi
+    grep -Fq "$needle" "$path"
+}
+
+stream_matches_regex() {
+    local pattern="$1"
+    if command -v rg >/dev/null 2>&1; then
+        rg -q "$pattern"
+        return
+    fi
+    grep -Eq "$pattern"
+}
+
 if [[ ! -d "$XCFRAMEWORK_ROOT" ]]; then
     echo "GhosttyKit.xcframework not found: $XCFRAMEWORK_ROOT" >&2
     exit 1
@@ -34,12 +53,12 @@ else
 fi
 
 for export_name in "${REQUIRED_EXPORTS[@]}"; do
-    if ! rg -q "\\b${export_name}\\b" "$HEADER_PATH"; then
+    if ! file_contains_fixed "$export_name" "$HEADER_PATH"; then
         echo "Missing GhosttyKit declaration for ${export_name} in $HEADER_PATH" >&2
         exit 1
     fi
 
-    if ! nm -gU "$LIBRARY_PATH" | rg -q "_${export_name}$"; then
+    if ! nm -gU "$LIBRARY_PATH" | stream_matches_regex "_${export_name}$"; then
         echo "Missing GhosttyKit export for ${export_name} in $LIBRARY_PATH" >&2
         exit 1
     fi
