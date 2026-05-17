@@ -2297,16 +2297,26 @@ public final class WorkspaceOrchestrator {
             var browserFocusPath = "yabai"
             let focusedWindow: Bool
             if sourceBuiltInTerminalSessionID != nil, let requestID, let targetURL = window.targetURL, chrome.isAvailable() {
-                let chromeFocusStartedAt = currentDate()
-                let focusedByURL = (try? chrome.focusFirstMatchingTab(urlPrefix: targetURL)) ?? false
+                let chromeFocusByWindowStartedAt = currentDate()
+                let focusedByWindow = (try? chrome.focusTab(windowID: windowID, tabIndex: 1)) ?? false
                 logBrowserFocus(
-                    "workspace=\(workspaceID) path=chrome_url_from_built_in target=\(targetURL) success=\(focusedByURL ? "1" : "0") elapsed_ms=\(elapsedMS(since: chromeFocusStartedAt)) request_id=\(requestID)"
+                    "workspace=\(workspaceID) path=chrome_window_tab_1_from_built_in window=\(windowID) success=\(focusedByWindow ? "1" : "0") elapsed_ms=\(elapsedMS(since: chromeFocusByWindowStartedAt)) request_id=\(requestID)"
                 )
-                if focusedByURL {
+                if focusedByWindow {
                     focusedWindow = true
-                    browserFocusPath = "chrome_url_from_built_in"
+                    browserFocusPath = "chrome_window_tab_1_from_built_in"
                 } else {
-                    focusedWindow = (try? yabai.focusWindow(id: windowID)) ?? false
+                    let chromeFocusByURLStartedAt = currentDate()
+                    let focusedByURL = (try? chrome.focusFirstMatchingTab(urlPrefix: targetURL)) ?? false
+                    logBrowserFocus(
+                        "workspace=\(workspaceID) path=chrome_url_from_built_in target=\(targetURL) success=\(focusedByURL ? "1" : "0") elapsed_ms=\(elapsedMS(since: chromeFocusByURLStartedAt)) request_id=\(requestID)"
+                    )
+                    if focusedByURL {
+                        focusedWindow = true
+                        browserFocusPath = "chrome_url_from_built_in"
+                    } else {
+                        focusedWindow = (try? yabai.focusWindow(id: windowID)) ?? false
+                    }
                 }
             } else {
                 focusedWindow = (try? yabai.focusWindow(id: windowID)) ?? false

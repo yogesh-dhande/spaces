@@ -554,11 +554,12 @@ private struct SurfaceSnapshotCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "surface-snapshot")
 
     @Option(name: .long) var spacesPID: Int32?
+    @Flag(name: .long) var includeYabaiFocusedWindow = false
 
     func run() throws {
         let frontmostApplication = NSWorkspace.shared.frontmostApplication
         let frontmostPID = frontmostApplication.map { Int($0.processIdentifier) }
-        let focusedWindowID = try? YabaiAdapter().focusedWindow()?.id
+        let focusedWindowID = includeYabaiFocusedWindow ? (try? YabaiAdapter().focusedWindow()?.id) : nil
         let spacesSurface = spacesPID.map { snapshotSpacesSurface(pid: $0, frontmostPID: frontmostPID) }
         try emitJSON(
             SurfaceSnapshotPayload(
@@ -895,10 +896,13 @@ private func snapshotSpacesSurface(pid: Int32, frontmostPID: Int?) -> SpacesSurf
     let commandPaletteVisible = appVisible && paletteWindow.map(isVisibleWindow) == true
     let mainWindowFocused = frontmostPID == Int(pid) && frontWindowKind == "main"
     let commandPaletteFocused = frontmostPID == Int(pid) && frontWindowKind == "palette"
-    let modalVisible = windows.contains { window in
-        if axStringAttribute(window, attribute: kAXSubroleAttribute as String) == kAXDialogSubrole as String { return true }
-        return !axElementArrayAttribute(window, attribute: "AXSheets").isEmpty
-    }
+    let modalVisible =
+        appVisible
+        && windows.contains { window in
+            guard isVisibleWindow(window) else { return false }
+            if axStringAttribute(window, attribute: kAXSubroleAttribute as String) == kAXDialogSubrole as String { return true }
+            return !axElementArrayAttribute(window, attribute: "AXSheets").isEmpty
+        }
 
     return SpacesSurfacePayload(
         processID: Int(pid), appVisible: appVisible, frontWindowIdentifier: frontWindowIdentifier, frontWindowTitle: frontWindowTitle,

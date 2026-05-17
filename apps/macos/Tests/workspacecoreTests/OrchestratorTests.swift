@@ -1931,10 +1931,11 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedWindows, ["202"])
     }
 
-    func testFocusNextWindowHidesAppUsesChromeURLFocusFromBuiltInTerminal() throws {
+    func testFocusNextWindowHidesAppUsesChromeWindowTabFocusFromBuiltInTerminal() throws {
         let store = try makeTemporaryStore()
         let root = try makeTempDirectory()
         let chromeFocusLog = root.appendingPathComponent("browser-cycle-url-focus.log")
+        let chromeTabIndexLog = root.appendingPathComponent("browser-cycle-tab-index.log")
         let yabaiFocusLog = root.appendingPathComponent("browser-cycle-url-yabai.log")
         let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1962,15 +1963,21 @@ final class OrchestratorTests: XCTestCase {
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeFocusLog.path) {
-                try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
-                    let hidesApp = try orchestrator.focusNextWindowHidesApp(
-                        workspaceID: workspace.id, requestID: "cycle-request-browser-focus",
-                        preferredFocusedBuiltInTerminalSessionID: "spaces-session-browser-cycle")
-                    XCTAssertTrue(hidesApp)
+                try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: "202\t1\tDocs\thttp://localhost:3001/docs/\n") {
+                    try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: chromeTabIndexLog.path) {
+                        try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
+                            let hidesApp = try orchestrator.focusNextWindowHidesApp(
+                                workspaceID: workspace.id, requestID: "cycle-request-browser-focus",
+                                preferredFocusedBuiltInTerminalSessionID: "spaces-session-browser-cycle")
+                            XCTAssertTrue(hidesApp)
+                        }
+                    }
                 }
             }
         }
 
+        let focusedTabs = try String(contentsOf: chromeTabIndexLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedTabs, ["202\t1"])
         let focusedURLs = try String(contentsOf: chromeFocusLog).split(separator: "\n").map(String.init)
         XCTAssertEqual(focusedURLs, ["http://localhost:3001/docs/"])
         XCTAssertFalse(FileManager.default.fileExists(atPath: yabaiFocusLog.path))

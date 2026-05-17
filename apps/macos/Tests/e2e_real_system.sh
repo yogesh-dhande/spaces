@@ -1473,11 +1473,7 @@ raise SystemExit(0 if ok else 1)'
 }
 
 assert_cycle_focus_surface_state() {
-  wait_for_surface_snapshot_python \
-    "cycle focus surface hidden" \
-    'spaces = data.get("spaces") or {}
-ok = not spaces.get("modalVisible") and not spaces.get("mainWindowFocused") and not spaces.get("commandPaletteVisible") and not spaces.get("commandPaletteFocused")
-raise SystemExit(0 if ok else 1)'
+  wait_for_spaces_cycle_surface_hidden
 }
 
 frontmost_app() {
@@ -1743,18 +1739,39 @@ end run
 APPLESCRIPT
 }
 
-surface_snapshot_json() {
-  "$MX_E2E_BIN" surface-snapshot --spaces-pid "$SPACES_PID"
+wait_for_spaces_terminal_frontmost_session() {
+  local expected_session_id="$1"
+  wait_for_surface_snapshot_python \
+    "Spaces terminal session to become frontmost: $expected_session_id" \
+    'expected_identifier = "spaces-terminal:" + sys.argv[2]
+spaces = data.get("spaces") or {}
+spaces_pid = spaces.get("processID")
+ok = (
+    spaces_pid is not None
+    and data.get("frontmostProcessID") == spaces_pid
+    and (spaces.get("frontWindowIdentifier") or "") == expected_identifier
+)
+raise SystemExit(0 if ok else 1)' \
+    "$expected_session_id"
 }
 
-wait_for_surface_snapshot_python() {
-  local label="$1"
-  local python_body="$2"
-  shift 2
+surface_snapshot_json() {
+  if [[ "${1:-}" == "include-yabai" ]]; then
+    "$MX_E2E_BIN" surface-snapshot --spaces-pid "$SPACES_PID" --include-yabai-focused-window
+  else
+    "$MX_E2E_BIN" surface-snapshot --spaces-pid "$SPACES_PID"
+  fi
+}
+
+wait_for_surface_snapshot_python_mode() {
+  local include_yabai="$1"
+  local label="$2"
+  local python_body="$3"
+  shift 3
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   local snapshot_file="$TMP_ROOT/surface-snapshot.json"
   while (( SECONDS < deadline )); do
-    surface_snapshot_json >"$snapshot_file"
+    surface_snapshot_json "$include_yabai" >"$snapshot_file"
     if python3 - "$snapshot_file" "$@" <<PY
 import json, sys
 with open(sys.argv[1]) as fh:
@@ -1767,6 +1784,14 @@ PY
     sleep "$SURFACE_POLL_INTERVAL_SECONDS"
   done
   fail "timed out waiting for surface snapshot condition: $label"
+}
+
+wait_for_surface_snapshot_python() {
+  wait_for_surface_snapshot_python_mode "" "$@"
+}
+
+wait_for_surface_snapshot_python_with_yabai() {
+  wait_for_surface_snapshot_python_mode "include-yabai" "$@"
 }
 
 spaces_front_window_session_id() {
@@ -1930,6 +1955,25 @@ on run argv
   return "0"
 end run
 APPLESCRIPT
+}
+
+wait_for_spaces_cycle_surface_hidden() {
+  wait_for_surface_snapshot_python \
+    "cycle surface state to settle" \
+    'spaces = data.get("spaces") or {}
+if not spaces or not spaces.get("appVisible"):
+    raise SystemExit(0)
+spaces_pid = spaces.get("processID")
+frontmost_pid = data.get("frontmostProcessID")
+ok = (
+    not spaces.get("modalVisible")
+    and not spaces.get("commandPaletteVisible")
+    and not (
+        frontmost_pid == spaces_pid
+        and (spaces.get("mainWindowFocused") or spaces.get("commandPaletteFocused"))
+    )
+)
+raise SystemExit(0 if ok else 1)'
 }
 
 wait_for_spaces_command_palette_presented() {
@@ -3322,6 +3366,23 @@ for window in data.get("windows", []):
 PY
 }
 
+workspace_window_id_by_target_url() {
+  local workspace_dir="$1"
+  local target_url="$2"
+  local out_file="$TMP_ROOT/workspace-window-id-by-target-url.json"
+  dump_workspace "$workspace_dir" "$out_file" >/dev/null 2>>"$DEBUG_LOG" || return 0
+  python3 - "$out_file" "$target_url" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+target = sys.argv[2]
+for window in data.get("windows", []):
+    if (window.get("targetURL") or "") == target:
+        print(window.get("windowID") or "")
+        break
+PY
+}
+
 wait_for_workspace_window_id_by_name() {
   local workspace_dir="$1"
   local target_name="$2"
@@ -3338,25 +3399,39 @@ wait_for_workspace_window_id_by_name() {
   fail "timed out waiting for tracked window id: $target_name"
 }
 
+wait_for_workspace_window_id_by_target_url() {
+  local workspace_dir="$1"
+  local target_url="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    local window_id
+    window_id="$(workspace_window_id_by_target_url "$workspace_dir" "$target_url")"
+    if [[ -n "$window_id" ]]; then
+      printf '%s\n' "$window_id"
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for tracked browser window id: $target_url"
+}
+
 wait_for_cycle_target_focus() {
   local workspace_dir="$1"
   local cycle_target="$2"
   local docs_window_id="$3"
   case "$cycle_target" in
     browser:*)
-      wait_for_surface_snapshot_python \
-        "browser cycle target focus $docs_window_id" \
+      local target_browser_url target_browser_window_id
+      target_browser_url="${cycle_target#browser:}"
+      target_browser_window_id="$(wait_for_workspace_window_id_by_target_url "$workspace_dir" "$target_browser_url")"
+      wait_for_surface_snapshot_python_with_yabai \
+        "browser cycle target focus $target_browser_window_id" \
         'expected_window_id = sys.argv[2]
 frontmost_bundle = data.get("frontmostApplicationBundleID") or ""
 spaces = data.get("spaces") or {}
-if frontmost_bundle != "com.google.Chrome" or spaces.get("modalVisible"):
-    raise SystemExit(1)
-import subprocess
-script = """tell application \"Google Chrome\"\n  try\n    return id of front window\n  on error\n    return \"\"\n  end try\nend tell"""
-result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=False)
-ok = result.stdout.strip() == expected_window_id
+ok = frontmost_bundle == "com.google.Chrome" and str(data.get("yabaiFocusedWindowID") or "") == expected_window_id and not spaces.get("modalVisible")
 raise SystemExit(0 if ok else 1)' \
-        "$docs_window_id"
+        "$target_browser_window_id"
       ;;
     terminal:*|process:*|agent:*)
       local target_name target_session_id target_window_id
@@ -3366,17 +3441,11 @@ raise SystemExit(0 if ok else 1)' \
         target_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "$target_name" "$TMP_ROOT/cycle-focus-target.json" || true)"
       fi
       if [[ -n "$target_session_id" ]]; then
-        wait_for_surface_snapshot_python \
-          "terminal cycle target focus $target_session_id" \
-          'expected_identifier = "spaces-terminal:" + sys.argv[2]
-spaces = data.get("spaces") or {}
-frontmost_pid = str(data.get("frontmostProcessID") or "")
-ok = frontmost_pid == str(spaces.get("processID") or "") and spaces.get("frontWindowIdentifier") == expected_identifier and not spaces.get("modalVisible")
-raise SystemExit(0 if ok else 1)' \
-          "$target_session_id"
+        wait_for_spaces_terminal_frontmost_session "$target_session_id"
+        assert_no_spaces_modal_dialog
       else
         target_window_id="$(wait_for_workspace_window_id_by_name "$workspace_dir" "$target_name")"
-        wait_for_surface_snapshot_python \
+        wait_for_surface_snapshot_python_with_yabai \
           "window cycle target focus $target_window_id" \
           'expected_window_id = sys.argv[2]
 spaces = data.get("spaces") or {}
