@@ -1931,7 +1931,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedWindows, ["202"])
     }
 
-    func testFocusNextWindowHidesAppUsesChromeWindowTabFocusFromBuiltInTerminal() throws {
+    func testFocusNextWindowHidesAppUsesScannedChromeWindowTabFocusFromBuiltInTerminal() throws {
         let store = try makeTemporaryStore()
         let root = try makeTempDirectory()
         let chromeFocusLog = root.appendingPathComponent("browser-cycle-url-focus.log")
@@ -1948,7 +1948,7 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "window-browser", workspaceID: workspace.id, app: "Google Chrome", title: "Docs", targetURL: "http://localhost:3001/docs/",
-                windowID: 202, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+                windowID: 302, role: "browser", orderIndex: 1, lastSeenAt: "now"))
         let process = RunningProcessRecord(
             id: "process-spaces-browser-cycle", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
             terminalApp: TerminalHost.spaces.appName, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle",
@@ -1980,6 +1980,59 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedTabs, ["202\t1"])
         let focusedURLs = try String(contentsOf: chromeFocusLog).split(separator: "\n").map(String.init)
         XCTAssertEqual(focusedURLs, ["http://localhost:3001/docs/"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: yabaiFocusLog.path))
+    }
+
+    func testFocusNextWindowHidesAppNormalizesBrowserTargetURLFromBuiltInTerminal() throws {
+        let store = try makeTemporaryStore()
+        let root = try makeTempDirectory()
+        let chromeFocusLog = root.appendingPathComponent("browser-cycle-google-focus.log")
+        let chromeTabIndexLog = root.appendingPathComponent("browser-cycle-google-tab-index.log")
+        let yabaiFocusLog = root.appendingPathComponent("browser-cycle-google-yabai.log")
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Google", url: "https://google.com")])
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-browser-google", workspaceID: workspace.id, app: "Google Chrome", title: "Google", targetURL: "https://google.com",
+                windowID: 42176, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+        let process = RunningProcessRecord(
+            id: "process-spaces-browser-cycle-google", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
+            terminalApp: TerminalHost.spaces.appName, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle-google",
+            terminalNativeID: "spaces-session-browser-cycle-google", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-terminal-google", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend",
+                detail: "npm run frontend", targetURL: nil, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle-google",
+                terminalNativeID: "spaces-session-browser-cycle-google", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil,
+                role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeFocusLog.path) {
+                try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: "1039450131\t1\tGoogle\thttps://www.google.com/\n") {
+                    try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: chromeTabIndexLog.path) {
+                        try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
+                            let hidesApp = try orchestrator.focusNextWindowHidesApp(
+                                workspaceID: workspace.id, requestID: "cycle-request-browser-focus-google",
+                                preferredFocusedBuiltInTerminalSessionID: "spaces-session-browser-cycle-google")
+                            XCTAssertTrue(hidesApp)
+                        }
+                    }
+                }
+            }
+        }
+
+        let focusedTabs = try String(contentsOf: chromeTabIndexLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedTabs, ["1039450131\t1"])
+        let focusedURLs = try String(contentsOf: chromeFocusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedURLs, ["https://www.google.com/"])
         XCTAssertFalse(FileManager.default.fileExists(atPath: yabaiFocusLog.path))
     }
 

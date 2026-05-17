@@ -67,6 +67,12 @@ public final class WorkspaceOrchestrator {
         let browserPrefixes: [String]
     }
 
+    private struct ScannedBrowserFocusTarget {
+        let windowID: Int
+        let tabIndex: Int
+        let matchedURL: String
+    }
+
     private struct BrowserWindowScanCacheEntry {
         let browserPrefixes: [String]
         let refreshedAt: Date
@@ -2162,7 +2168,13 @@ public final class WorkspaceOrchestrator {
     private func browserFocusName(workspaceID: String, targetURL: String?) throws -> String? {
         guard let targetURL = sanitizedFocusName(targetURL) else { return nil }
         let sessions = try resolvedBrowserSessionsForFocusNames(workspaceID: workspaceID)
-        if let match = sessions.filter({ targetURL.hasPrefix($0.targetURL) }).max(by: { $0.targetURL.count < $1.targetURL.count }) {
+        if let match = sessions.compactMap({ session -> (name: String, targetURL: String, score: Int)? in
+            guard let score = browserURLMatchScore(targetURL, targetURL: session.targetURL) else { return nil }
+            return (session.name, session.targetURL, score)
+        }).max(by: { lhs, rhs in
+            if lhs.score == rhs.score { return lhs.targetURL.count < rhs.targetURL.count }
+            return lhs.score < rhs.score
+        }) {
             return match.name
         }
         return targetURL
@@ -2298,13 +2310,13 @@ public final class WorkspaceOrchestrator {
             let focusedWindow: Bool
             if sourceBuiltInTerminalSessionID != nil, let requestID, let targetURL = window.targetURL, chrome.isAvailable() {
                 let chromeFocusByWindowStartedAt = currentDate()
-                let focusedByWindow = (try? chrome.focusTab(windowID: windowID, tabIndex: 1)) ?? false
+                let focusedByWindow = (try? focusScannedBrowserTab(workspaceID: workspaceID, targetURL: targetURL)) ?? false
                 logBrowserFocus(
-                    "workspace=\(workspaceID) path=chrome_window_tab_1_from_built_in window=\(windowID) success=\(focusedByWindow ? "1" : "0") elapsed_ms=\(elapsedMS(since: chromeFocusByWindowStartedAt)) request_id=\(requestID)"
+                    "workspace=\(workspaceID) path=chrome_scanned_tab_from_built_in window=\(windowID) success=\(focusedByWindow ? "1" : "0") elapsed_ms=\(elapsedMS(since: chromeFocusByWindowStartedAt)) request_id=\(requestID)"
                 )
                 if focusedByWindow {
                     focusedWindow = true
-                    browserFocusPath = "chrome_window_tab_1_from_built_in"
+                    browserFocusPath = "chrome_scanned_tab_from_built_in"
                 } else {
                     let chromeFocusByURLStartedAt = currentDate()
                     let focusedByURL = (try? chrome.focusFirstMatchingTab(urlPrefix: targetURL)) ?? false
@@ -3403,8 +3415,14 @@ public final class WorkspaceOrchestrator {
         guard !resolvedSessions.isEmpty else { return .notMapped }
 
         let matchSessionStartedAt = currentDate()
-        guard let matchedSession = resolvedSessions.filter({ targetURL.hasPrefix($0.prefix) }).max(by: { $0.prefix.count < $1.prefix.count }),
-            let extractedWindow = sessions[matchedSession.index].extractedWindow, extractedWindow.isValid
+        guard
+            let matchedSession = resolvedSessions.compactMap({ resolved -> (session: ResolvedBrowserSession, score: Int)? in
+                guard let score = browserURLMatchScore(targetURL, targetURL: resolved.prefix) else { return nil }
+                return (resolved, score)
+            }).max(by: { lhs, rhs in
+                if lhs.score == rhs.score { return lhs.session.prefix.count < rhs.session.prefix.count }
+                return lhs.score < rhs.score
+            })?.session, let extractedWindow = sessions[matchedSession.index].extractedWindow, extractedWindow.isValid
         else { return .notMapped }
         logBrowserFocus(
             "workspace=\(workspaceID) path=extracted_substep step=match_session elapsed_ms=\(elapsedMS(since: matchSessionStartedAt)) window_id=\(extractedWindow.windowID)"
@@ -3481,21 +3499,20 @@ public final class WorkspaceOrchestrator {
         browserScanCacheLock.unlock()
     }
 
-    private func focusScannedBrowserTab(workspaceID: String, windowID: Int, targetURL: String) throws -> Bool {
+    private func focusScannedBrowserTab(workspaceID: String, targetURL: String) throws -> Bool {
         let focusStartedAt = currentDate()
-        var refreshed = false
-        var attempt = 0
-        while attempt < 2 {
-            attempt += 1
-            guard let cachedTarget = cachedScannedBrowserTabTarget(workspaceID: workspaceID, windowID: windowID, targetURL: targetURL) else {
-                logBrowserFocus("workspace=\(workspaceID) indexed_miss window=\(windowID) target=\(targetURL) attempt=\(attempt)")
-                return false
+        for attempt in 1...2 {
+            guard let target = try scannedBrowserFocusTarget(workspaceID: workspaceID, targetURL: targetURL, forceRefresh: attempt == 2),
+                let cachedTarget = cachedScannedBrowserTabTarget(workspaceID: workspaceID, windowID: target.windowID, targetURL: target.matchedURL)
+            else {
+                logBrowserFocus("workspace=\(workspaceID) indexed_miss target=\(targetURL) attempt=\(attempt)")
+                continue
             }
 
             let focusByIndexStartedAt = currentDate()
-            let focused = try chrome.focusTab(windowID: windowID, tabIndex: cachedTarget.tabIndex)
+            let focused = try chrome.focusTab(windowID: target.windowID, tabIndex: target.tabIndex)
             logBrowserFocus(
-                "workspace=\(workspaceID) indexed_focus window=\(windowID) tab_index=\(cachedTarget.tabIndex) attempt=\(attempt) success=\(focused ? "1" : "0") focus_ms=\(elapsedMS(since: focusByIndexStartedAt))"
+                "workspace=\(workspaceID) indexed_focus window=\(target.windowID) tab_index=\(target.tabIndex) attempt=\(attempt) success=\(focused ? "1" : "0") focus_ms=\(elapsedMS(since: focusByIndexStartedAt))"
             )
 
             if focused {
@@ -3510,23 +3527,37 @@ public final class WorkspaceOrchestrator {
                     return browserURLMatchesWorkspace(activeURL, browserPrefixes: cachedTarget.browserPrefixes)
                 }()
                 logBrowserFocus(
-                    "workspace=\(workspaceID) indexed_verify window=\(windowID) tab_index=\(cachedTarget.tabIndex) attempt=\(attempt) exact_match=\(matchesTarget ? "1" : "0") workspace_match=\(matchesWorkspace ? "1" : "0") verify_ms=\(elapsedMS(since: verifyStartedAt)) url=\(activeURL ?? "")"
+                    "workspace=\(workspaceID) indexed_verify window=\(target.windowID) tab_index=\(target.tabIndex) attempt=\(attempt) exact_match=\(matchesTarget ? "1" : "0") workspace_match=\(matchesWorkspace ? "1" : "0") verify_ms=\(elapsedMS(since: verifyStartedAt)) url=\(activeURL ?? "")"
                 )
                 if matchesTarget {
                     logBrowserFocus(
-                        "workspace=\(workspaceID) indexed_done window=\(windowID) target=\(targetURL) refreshed=\(refreshed ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))"
+                        "workspace=\(workspaceID) indexed_done window=\(target.windowID) target=\(targetURL) refreshed=\(attempt == 2 ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))"
                     )
                     return true
                 }
             }
-            guard attempt == 1 else { break }
-            guard try refreshCachedBrowserWindows(workspaceID: workspaceID, browserPrefixes: cachedTarget.browserPrefixes) else { break }
-            refreshed = true
         }
-        logBrowserFocus(
-            "workspace=\(workspaceID) indexed_failed window=\(windowID) target=\(targetURL) refreshed=\(refreshed ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))"
-        )
+        logBrowserFocus("workspace=\(workspaceID) indexed_failed target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
         return false
+    }
+
+    private func scannedBrowserFocusTarget(workspaceID: String, targetURL: String, forceRefresh: Bool = false) throws -> ScannedBrowserFocusTarget? {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        let browserPrefixes = try resolvedBrowserSessionPrefixes(project: project, workspace: workspace)
+        guard !browserPrefixes.isEmpty else { return nil }
+        let windows = try liveBrowserWindows(workspaceID: workspaceID, browserPrefixes: browserPrefixes, forceRefresh: forceRefresh)
+        let matchedWindow = windows.compactMap { window -> (window: WindowRecord, score: Int)? in
+            guard let scannedURL = window.targetURL, let score = browserURLMatchScore(scannedURL, targetURL: targetURL) else { return nil }
+            return (window, score)
+        }.max(by: { lhs, rhs in
+            if lhs.score == rhs.score { return lhs.window.orderIndex > rhs.window.orderIndex }
+            return lhs.score < rhs.score
+        })?.window
+        guard let matchedWindow, let matchedURL = matchedWindow.targetURL, let chromeWindowID = matchedWindow.windowID else { return nil }
+        guard let cachedTarget = cachedScannedBrowserTabTarget(workspaceID: workspaceID, windowID: chromeWindowID, targetURL: matchedURL) else {
+            return nil
+        }
+        return ScannedBrowserFocusTarget(windowID: chromeWindowID, tabIndex: cachedTarget.tabIndex, matchedURL: matchedURL)
     }
 
     private func cachedScannedBrowserTabTarget(workspaceID: String, windowID: Int, targetURL: String) -> CachedScannedBrowserTabTarget? {
@@ -3538,21 +3569,38 @@ public final class WorkspaceOrchestrator {
         return CachedScannedBrowserTabTarget(tabIndex: tabIndex, browserPrefixes: entry.browserPrefixes)
     }
 
-    private func refreshCachedBrowserWindows(workspaceID: String, browserPrefixes: [String]) throws -> Bool {
-        guard !browserPrefixes.isEmpty else { return false }
-        let refreshStartedAt = currentDate()
-        _ = try liveBrowserWindows(workspaceID: workspaceID, browserPrefixes: browserPrefixes, forceRefresh: true)
-        logBrowserFocus("workspace=\(workspaceID) indexed_refresh success=1 elapsed_ms=\(elapsedMS(since: refreshStartedAt))")
-        return true
-    }
-
     private func browserURLMatchesWorkspace(_ url: String, browserPrefixes: [String]) -> Bool {
-        browserPrefixes.contains(where: { url.hasPrefix($0) })
+        browserPrefixes.contains(where: { browserURLMatchesTarget(url, targetURL: $0) })
     }
 
-    private func browserURLMatchesTarget(_ url: String, targetURL: String) -> Bool {
-        if url == targetURL { return true }
-        return url.hasPrefix(targetURL)
+    private func browserURLMatchesTarget(_ url: String, targetURL: String) -> Bool { browserURLMatchScore(url, targetURL: targetURL) != nil }
+
+    private struct ComparableBrowserURL {
+        let scheme: String
+        let host: String
+        let port: Int?
+        let path: String
+    }
+
+    private func comparableBrowserURL(_ raw: String) -> ComparableBrowserURL? {
+        guard let components = URLComponents(string: raw), let scheme = components.scheme?.lowercased(), var host = components.host?.lowercased()
+        else { return nil }
+        if host.hasPrefix("www.") { host.removeFirst(4) }
+        var path = components.percentEncodedPath
+        if path.isEmpty { path = "/" }
+        if path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        return ComparableBrowserURL(scheme: scheme, host: host, port: components.port, path: path)
+    }
+
+    private func browserURLMatchScore(_ url: String, targetURL: String) -> Int? {
+        if url == targetURL { return 3_000_000 + targetURL.count }
+        if url.hasPrefix(targetURL) { return 2_000_000 + targetURL.count }
+        guard let actual = comparableBrowserURL(url), let target = comparableBrowserURL(targetURL) else { return nil }
+        guard actual.scheme == target.scheme, actual.host == target.host, actual.port == target.port else { return nil }
+        if target.path == "/" { return 1_000_000 }
+        if actual.path == target.path { return 1_500_000 + target.path.count }
+        if actual.path.hasPrefix(target.path + "/") { return 1_000_000 + target.path.count }
+        return nil
     }
 
     private func elapsedMS(since startedAt: Date) -> Int { Int(currentDate().timeIntervalSince(startedAt) * 1000) }
@@ -3597,18 +3645,28 @@ public final class WorkspaceOrchestrator {
         struct MatchedTab {
             let tab: ChromeWindowMatch
             let prefixIndex: Int
+            let matchScore: Int
         }
         var matchedTabs: [MatchedTab] = []
         var seen = Set<String>()
         for tab in tabs {
-            guard let prefixIndex = browserPrefixes.firstIndex(where: { tab.url.hasPrefix($0) }) else { continue }
+            guard
+                let matchedPrefix = browserPrefixes.enumerated().compactMap({ index, prefix -> (index: Int, score: Int)? in
+                    guard let score = browserURLMatchScore(tab.url, targetURL: prefix) else { return nil }
+                    return (index, score)
+                }).max(by: { lhs, rhs in
+                    if lhs.score == rhs.score { return lhs.index > rhs.index }
+                    return lhs.score < rhs.score
+                })
+            else { continue }
             let key = "\(tab.windowID):\(tab.url)"
             guard !seen.contains(key) else { continue }
             seen.insert(key)
-            matchedTabs.append(MatchedTab(tab: tab, prefixIndex: prefixIndex))
+            matchedTabs.append(MatchedTab(tab: tab, prefixIndex: matchedPrefix.index, matchScore: matchedPrefix.score))
         }
         matchedTabs.sort { lhs, rhs in
             if lhs.prefixIndex != rhs.prefixIndex { return lhs.prefixIndex < rhs.prefixIndex }
+            if lhs.matchScore != rhs.matchScore { return lhs.matchScore > rhs.matchScore }
             if lhs.tab.url != rhs.tab.url { return lhs.tab.url < rhs.tab.url }
             if lhs.tab.windowID != rhs.tab.windowID { return lhs.tab.windowID < rhs.tab.windowID }
             return lhs.tab.title < rhs.tab.title
@@ -5619,9 +5677,15 @@ public final class WorkspaceOrchestrator {
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         let resolvedSessions = resolveBrowserSessions(sessions, env: env)
-        guard let matchedSession = resolvedSessions.filter({ targetURL.hasPrefix($0.prefix) }).max(by: { $0.prefix.count < $1.prefix.count }) else {
-            throw WorkspaceError.invalidArgument(message: "Browser session not found for recovery.")
-        }
+        guard
+            let matchedSession = resolvedSessions.compactMap({ resolved -> (session: ResolvedBrowserSession, score: Int)? in
+                guard let score = browserURLMatchScore(targetURL, targetURL: resolved.prefix) else { return nil }
+                return (resolved, score)
+            }).max(by: { lhs, rhs in
+                if lhs.score == rhs.score { return lhs.session.prefix.count < rhs.session.prefix.count }
+                return lhs.score < rhs.score
+            })?.session
+        else { throw WorkspaceError.invalidArgument(message: "Browser session not found for recovery.") }
 
         let snapshot = bestEffortYabaiWindowSnapshot()
         _ = try chrome.openWindow(url: matchedSession.prefix, background: false)
@@ -5637,7 +5701,7 @@ public final class WorkspaceOrchestrator {
         let trackedWindows = try store.windows(workspaceID: workspace.id)
         let existingWindow = trackedWindows.first(where: { window in
             guard window.role == "browser", let trackedTargetURL = window.targetURL else { return false }
-            return trackedTargetURL == matchedSession.prefix || matchedSession.prefix.hasPrefix(trackedTargetURL)
+            return browserURLMatchesTarget(matchedSession.prefix, targetURL: trackedTargetURL)
         })
         let storedWindow = WindowRecord(
             id: existingWindow?.id ?? UUID().uuidString, workspaceID: workspace.id, app: newWindow.app,
