@@ -155,6 +155,21 @@ import spacesterminalcore
         }
     }
 
+    @Test func globalWindowNavigationUsesRememberedBuiltInTerminalSessionOnlyDuringActiveTerminalFocus() {
+        #expect(
+            AppKitController.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
+                appIsActive: true, mainWindowIsFocused: false, commandPaletteIsFocused: false))
+        #expect(
+            !AppKitController.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
+                appIsActive: false, mainWindowIsFocused: false, commandPaletteIsFocused: false))
+        #expect(
+            !AppKitController.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
+                appIsActive: true, mainWindowIsFocused: true, commandPaletteIsFocused: false))
+        #expect(
+            !AppKitController.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
+                appIsActive: true, mainWindowIsFocused: false, commandPaletteIsFocused: true))
+    }
+
     @Test func commandPaletteSessionUsesCapturedMainWindowVisibilityForHotkeyState() {
         #expect(
             !AppKitController.effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: true, commandPaletteMainWindowVisibility: false))

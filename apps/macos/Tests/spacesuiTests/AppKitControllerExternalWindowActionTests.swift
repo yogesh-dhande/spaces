@@ -1,8 +1,33 @@
 import Testing
 
 @testable import spacesui
+@testable import workspacecore
 
 @Suite struct AppKitControllerExternalWindowActionTests {
+    @MainActor private final class EventRecorder { var events: [String] = [] }
+
+    @Test @MainActor func builtInTerminalWindowActionsRunInlineOnMainThread() {
+        let recorder = EventRecorder()
+
+        AppKitController.dispatchBuiltInTerminalWindowActionOnMainThread(
+            isMainThread: true, scheduler: { _ in recorder.events.append("scheduled") }, action: { recorder.events.append("ran") })
+
+        #expect(recorder.events == ["ran"])
+    }
+
+    @Test @MainActor func builtInTerminalWindowActionsScheduleOffMainThread() {
+        let recorder = EventRecorder()
+
+        AppKitController.dispatchBuiltInTerminalWindowActionOnMainThread(
+            isMainThread: false,
+            scheduler: { action in
+                recorder.events.append("scheduled")
+                MainActor.assumeIsolated { action() }
+            }, action: { recorder.events.append("ran") })
+
+        #expect(recorder.events == ["scheduled", "ran"])
+    }
+
     @Test func successfulExternalFocusActionsHideSpaces() {
         #expect(AppKitController.shouldHideAfterSuccessfulExternalWindowAction(true, action: .focus(hidesApp: true)))
     }
@@ -27,6 +52,12 @@ import Testing
         #expect(!AppKitController.shouldHideAfterSuccessfulExternalWindowAction(true, action: .open(hidesApp: false)))
         #expect(AppKitController.hideDelayAfterSuccessfulExternalWindowAction(true, action: .open(hidesApp: false)) == nil)
     }
+
+    @Test func builtInConfiguredAgentLaunchesDoNotHideSpaces() {
+        #expect(!AppKitController.shouldHideAfterConfiguredAgentLauncherOpen(terminalHost: .spaces))
+    }
+
+    @Test func builtInAgentFocusDoesNotHideSpaces() { #expect(!AppKitController.shouldHideAfterAgentWindowFocus(provider: .spaces)) }
 
     @Test func failedActionsDoNotHideSpaces() {
         #expect(!AppKitController.shouldHideAfterSuccessfulExternalWindowAction(false, action: .focus(hidesApp: true)))

@@ -88,6 +88,7 @@ import spacesterminalghostty
     private let pasteClipboardAction: (@MainActor () -> Bool)?
     private let ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)?
     private let ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)?
+    private let onWindowFocus: (@MainActor (String) -> Void)?
     private let onWindowClose: (@MainActor (String, String) -> Void)?
     private let loadWindowFrameAction: (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?
     private let saveWindowFrameAction: (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void
@@ -120,6 +121,9 @@ import spacesterminalghostty
     private var pendingOwnershipTransitionStartedAt: Date?
     private var pendingOwnershipTransitionTarget: OwnershipTransitionTarget?
     private var pendingOwnershipTransitionReason: String?
+    private var pendingFocusObservationStartedAt: Date?
+    private var pendingFocusObservationRequestID: String?
+    private var pendingFocusObservationRoute: String?
 
     public convenience init(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
@@ -129,7 +133,8 @@ import spacesterminalghostty
         attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
         pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
-        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
+        onWindowClose: (@MainActor (String, String) -> Void)? = nil,
         loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
         saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil
     ) {
@@ -137,8 +142,8 @@ import spacesterminalghostty
             sessionID: sessionID, paths: paths, preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh,
             sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
             detachClientAction: detachClientAction, copySelectionAction: copySelectionAction, pasteClipboardAction: pasteClipboardAction,
-            ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowClose: onWindowClose,
-            loadWindowFrameAction: loadWindowFrameAction, saveWindowFrameAction: saveWindowFrameAction,
+            ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowFocus: onWindowFocus,
+            onWindowClose: onWindowClose, loadWindowFrameAction: loadWindowFrameAction, saveWindowFrameAction: saveWindowFrameAction,
             sessionHostProvider: { launchConfiguration, paths in GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths) })
     }
 
@@ -150,7 +155,8 @@ import spacesterminalghostty
         attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
         pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
-        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
+        onWindowClose: (@MainActor (String, String) -> Void)? = nil,
         loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
         saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil,
         sessionHostProvider: @escaping @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
@@ -196,6 +202,7 @@ import spacesterminalghostty
         self.pasteClipboardAction = pasteClipboardAction
         self.ownerWindowFocusAction = ownerWindowFocusAction
         self.ownerSurfaceFocusAction = ownerSurfaceFocusAction
+        self.onWindowFocus = onWindowFocus
         self.onWindowClose = onWindowClose
         self.loadWindowFrameAction = loadWindowFrameAction ?? { mode in try TerminalSessionPersistence.readWindowFrame(mode: mode, paths: paths) }
         self.saveWindowFrameAction =
@@ -207,6 +214,7 @@ import spacesterminalghostty
         let window = TerminalSessionWindow(contentRect: contentRect, styleMask: styleMask, backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.title = "Terminal \(sessionID)"
+        window.setAccessibilityIdentifier("spaces-terminal:\(sessionID)")
         window.tabbingMode = .disallowed
         window.minSize = NSSize(width: 760, height: 420)
         super.init(window: window)
@@ -220,8 +228,9 @@ import spacesterminalghostty
 
     deinit { MainActor.assumeIsolated { stopObservingApplicationActivation() } }
 
-    public func show() {
+    public func show(requestID: String? = nil, route: String? = nil) {
         guard let window else { return }
+        let startedAt = Date()
         let wasVisible = isWindowPresented(window) && !didCloseWindow
         didCloseWindow = false
         attachLocalClientIfNeeded()
@@ -230,21 +239,36 @@ import spacesterminalghostty
             restorePersistedWindowFrame(window)
             constrainWindowToVisibleFrame(window)
         }
-        presentWindow(window)
-        if backend == .ghosttyEmbedded { ensureGhosttyHostAttached() }
+        presentWindow(window, forceFrontmost: !wasVisible)
+        if backend == .ghosttyEmbedded { ensureGhosttyHostAttached(requestID: requestID, reason: "show") }
         refreshNow()
         startRefreshing()
         assignPreferredFirstResponder()
+        logFocusMetric("terminal_window_show", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "show")")
     }
 
-    public func focusWindow() {
+    public func focusWindow(requestID: String? = nil, route: String? = nil) {
         guard let window else { return }
+        let startedAt = Date()
+        beginPendingFocusObservation(startedAt: startedAt, requestID: requestID, route: route ?? "focus")
         if window.isMiniaturized { window.deminiaturize(nil) }
-        presentWindow(window)
+        refreshNow(allowGhosttyOwnerAttach: false)
+        presentWindow(window, forceFrontmost: true)
         if backend == .ghosttyEmbedded {
-            ensureGhosttyHostAttached()
+            let reusedSurface = hasAttachedGhosttyOwnerSurface()
+            logFocusMetric(
+                "terminal_window_focus_stage", startedAt: startedAt, requestID: requestID,
+                detail: "stage=pre_focus reused_surface=\(reusedSurface ? 1 : 0) route=\(route ?? "focus")")
+            if !reusedSurface { ensureGhosttyHostAttached(requestID: requestID, reason: "focus_window") }
+            let syncStartedAt = Date()
             syncGhosttyOwnerFocus(reason: "window_focus_ipc", requestWindowFocus: true)
+            logFocusMetric(
+                "terminal_window_focus_stage", startedAt: syncStartedAt, requestID: requestID, detail: "stage=sync_focus route=\(route ?? "focus")")
         }
+        // Refresh immediately after focus so the window title and visible owner
+        // metadata are not left waiting for the background refresh interval.
+        refreshNow()
+        logFocusMetric("terminal_window_focus", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "focus")")
     }
 
     public func windowWillClose(_ notification: Notification) {
@@ -261,13 +285,21 @@ import spacesterminalghostty
         onWindowClose?(sessionID, client.id)
     }
 
-    public func windowDidBecomeKey(_ notification: Notification) { syncGhosttyOwnerFocus(reason: "window_key", requestWindowFocus: true) }
+    public func windowDidBecomeKey(_ notification: Notification) {
+        onWindowFocus?(sessionID)
+        completePendingFocusObservationIfNeeded(reason: "window_key")
+        syncGhosttyOwnerFocus(reason: "window_key", requestWindowFocus: true)
+    }
 
     public func windowDidResignKey(_ notification: Notification) {
         syncGhosttyOwnerFocus(reason: "window_key_lost", requestWindowFocus: false, focused: false)
     }
 
-    public func windowDidBecomeMain(_ notification: Notification) { syncGhosttyOwnerFocus(reason: "window_main", requestWindowFocus: true) }
+    public func windowDidBecomeMain(_ notification: Notification) {
+        onWindowFocus?(sessionID)
+        completePendingFocusObservationIfNeeded(reason: "window_main")
+        syncGhosttyOwnerFocus(reason: "window_main", requestWindowFocus: true)
+    }
 
     public func windowDidResignMain(_ notification: Notification) {
         syncGhosttyOwnerFocus(reason: "window_main_lost", requestWindowFocus: false, focused: false)
@@ -393,7 +425,7 @@ import spacesterminalghostty
                     }
                     self.preferredAttachmentMode = .owner
                     let attachStartedAt = Date()
-                    self.ensureGhosttyHostAttached()
+                    self.ensureGhosttyHostAttached(reason: "takeover")
                     let attachElapsedMS = TerminalPerformance.elapsedMS(since: attachStartedAt)
                     let refreshStartedAt = Date()
                     self.updateInputStatus(message: response.message, isError: false)
@@ -589,8 +621,9 @@ import spacesterminalghostty
         updateRendererVisibility()
     }
 
-    private func ensureGhosttyHostAttached() {
+    private func ensureGhosttyHostAttached(requestID: String? = nil, reason: String) {
         guard backend == .ghosttyEmbedded, let launchConfiguration else { return }
+        let startedAt = Date()
         do {
             window?.contentView?.layoutSubtreeIfNeeded()
             terminalContainer.layoutSubtreeIfNeeded()
@@ -602,7 +635,40 @@ import spacesterminalghostty
             syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: preferredAttachmentMode == .owner)
             completeOwnershipTransitionIfNeeded(target: .owner, renderer: "ghostty_owner")
             updateRendererVisibility()
+            logFocusMetric(
+                "terminal_window_attach_owner_surface", startedAt: startedAt, requestID: requestID,
+                detail: "reason=\(reason) mode=\(preferredAttachmentMode.rawValue)")
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
+    }
+
+    private func hasAttachedGhosttyOwnerSurface() -> Bool {
+        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner, let host = ghosttySessionHost,
+            host.hasRenderableSurface()
+        else { return false }
+        if let ownerClientID = host.activeOwnerClientID() ?? lastObservedOwnerClientID { return ownerClientID == client.id }
+        return true
+    }
+
+    private func logFocusMetric(_ metric: String, startedAt: Date, requestID: String?, detail: String) {
+        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+        TerminalPerformance.logMetric(
+            metric, target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
+            detail: "\(detail)\(requestDetail)")
+    }
+
+    private func beginPendingFocusObservation(startedAt: Date, requestID: String?, route: String) {
+        pendingFocusObservationStartedAt = requestID == nil ? nil : startedAt
+        pendingFocusObservationRequestID = requestID
+        pendingFocusObservationRoute = requestID == nil ? nil : route
+    }
+
+    private func completePendingFocusObservationIfNeeded(reason: String) {
+        guard let startedAt = pendingFocusObservationStartedAt, let requestID = pendingFocusObservationRequestID else { return }
+        let route = pendingFocusObservationRoute ?? "focus"
+        pendingFocusObservationStartedAt = nil
+        pendingFocusObservationRequestID = nil
+        pendingFocusObservationRoute = nil
+        logFocusMetric("terminal_window_focus_observed", startedAt: startedAt, requestID: requestID, detail: "reason=\(reason) route=\(route)")
     }
 
     private func beginOwnershipTransition(_ target: OwnershipTransitionTarget, reason: String) {
@@ -627,13 +693,21 @@ import spacesterminalghostty
         return window.isVisible
     }
 
-    private func presentWindow(_ window: NSWindow) {
+    private func presentWindow(_ window: NSWindow, forceFrontmost: Bool = false) {
         if Self.isRunningUnderXCTest {
             hasHeadlessPresentation = true
             return
         }
+        let appWasActive = NSApp.isActive
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+        guard forceFrontmost || !appWasActive else { return }
+        window.orderFrontRegardless()
+        Task { @MainActor [weak window] in
+            await Task.yield()
+            guard let window, window.isVisible, !window.isMiniaturized else { return }
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 
     private func startRefreshing() {
@@ -686,7 +760,7 @@ import spacesterminalghostty
                         beginOwnershipTransition(activeAttachment.mode == .owner ? .owner : .viewer, reason: "attachment_mode_changed")
                         lastObservedAttachmentMode = activeAttachment.mode
                         if activeAttachment.mode == .owner {
-                            if allowGhosttyOwnerAttach { ensureGhosttyHostAttached() }
+                            if allowGhosttyOwnerAttach { ensureGhosttyHostAttached(reason: "attachment_mode_changed") }
                         } else {
                             syncGhosttyOwnerFocus(reason: "ownership_demoted", requestWindowFocus: false, focused: false)
                         }
@@ -1282,6 +1356,7 @@ import spacesterminalghostty
     var debugWindowFrame: NSRect { window?.frame ?? .zero }
     public var attachmentMode: TerminalAttachmentMode { preferredAttachmentMode }
     public var didClose: Bool { didCloseWindow }
+    public var terminalSessionID: String { sessionID }
     var debugDidCloseWindow: Bool { didCloseWindow }
     func debugForceRefresh() { refreshNow() }
     func debugForceRefreshSkippingOwnerAttach() { refreshNow(allowGhosttyOwnerAttach: false) }

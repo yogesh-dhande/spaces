@@ -166,7 +166,7 @@ import workspacecore
         let entries = AppKitController.orderedWorkspaceRunProcessEntries(
             configuredProcesses: configuredProcesses, windows: windows, processes: processes, agentWindows: agentWindows)
 
-        #expect(entries.count == 1)
+        #expect(entries.count == 1, "entries: \(entries)")
         #expect(entries.first?.kind == .process)
         #expect(entries.first?.processID == "process-web")
     }

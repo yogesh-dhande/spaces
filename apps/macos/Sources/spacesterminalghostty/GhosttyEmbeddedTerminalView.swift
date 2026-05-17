@@ -29,7 +29,7 @@ import spacesterminalcore
     private nonisolated(unsafe) var keyObserver: NSObjectProtocol?
     private nonisolated(unsafe) var resignKeyObserver: NSObjectProtocol?
     private var isWindowVisible = true
-    private var outputHandler: (@Sendable (Data) -> Void)?
+    private nonisolated(unsafe) var outputHandler: (@Sendable (Data) -> Void)?
     private var lastGeometry: SurfaceGeometry?
     private var lastFocused: Bool?
     private var lastOccluded: Bool?
@@ -770,11 +770,15 @@ import spacesterminalcore
         return "\(shell) -l -c '\(escaped)'"
     }
 
+    nonisolated static func shouldDispatchSurfaceDataOutput(hasHandler: Bool, byteCount: Int) -> Bool { hasHandler && byteCount > 0 }
+
     private nonisolated(unsafe) static let surfaceDataCallback: ghostty_surface_data_cb = { userdata, bytes, len in
         guard let userdata, let bytes, len > 0 else { return }
         let view = Unmanaged<GhosttyEmbeddedTerminalView>.fromOpaque(userdata).takeUnretainedValue()
+        guard let outputHandler = view.outputHandler else { return }
+        guard shouldDispatchSurfaceDataOutput(hasHandler: true, byteCount: Int(len)) else { return }
         let data = Data(bytes: bytes, count: Int(len))
-        Task { @MainActor in view.outputHandler?(data) }
+        Task { @MainActor in outputHandler(data) }
     }
 
     var debugSurfaceRefreshRequestCount: Int { debugSurfaceRefreshRequestCountValue }

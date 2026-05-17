@@ -1,3 +1,5 @@
+import AppKit
+import ApplicationServices
 import ArgumentParser
 import Foundation
 import spacesterminalcore
@@ -14,9 +16,9 @@ struct MXE2ECommand: ParsableCommand {
             ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, SelectWorkspaceDetailCommand.self,
             OpenWorkspaceTerminalCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
             StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
-            SetWorkspaceStopScriptCommand.self, FocusWorkspaceWindowIndexCommand.self, CycleWorkspaceWindowCommand.self,
-            FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self,
-            CloseTerminalSessionWindowCommand.self, RecordScreenCommand.self,
+            SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self,
+            CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
+            CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, RecordScreenCommand.self,
         ])
 }
 
@@ -478,10 +480,13 @@ private struct CycleWorkspaceWindowCommand: ParsableCommand {
         }
         switch direction {
         case "next", "previous":
+            let requestID = UUID().uuidString
             DistributedNotificationCenter.default().postNotificationName(
                 IPCNotification.cycleWorkspaceWindow, object: nil,
-                userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.cycleDirectionUserInfoKey: direction],
-                options: [.deliverImmediately])
+                userInfo: [
+                    IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.cycleDirectionUserInfoKey: direction,
+                    IPCNotification.focusRequestIDUserInfoKey: requestID,
+                ], options: [.deliverImmediately])
         default: throw ValidationError("Unsupported direction: \(direction)")
         }
         try emitJSON(["workspaceID": workspace.id, "direction": direction])
@@ -542,6 +547,24 @@ private struct CloseTerminalSessionWindowCommand: ParsableCommand {
             IPCNotification.closeTerminalSessionWindow, object: nil, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID],
             options: [.deliverImmediately])
         try emitJSON(["sessionID": trimmedSessionID])
+    }
+}
+
+private struct SurfaceSnapshotCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "surface-snapshot")
+
+    @Option(name: .long) var spacesPID: Int32?
+
+    func run() throws {
+        let frontmostApplication = NSWorkspace.shared.frontmostApplication
+        let frontmostPID = frontmostApplication.map { Int($0.processIdentifier) }
+        let focusedWindowID = try? YabaiAdapter().focusedWindow()?.id
+        let spacesSurface = spacesPID.map { snapshotSpacesSurface(pid: $0, frontmostPID: frontmostPID) }
+        try emitJSON(
+            SurfaceSnapshotPayload(
+                frontmostProcessID: frontmostPID, frontmostApplicationName: frontmostApplication?.localizedName,
+                frontmostApplicationBundleID: frontmostApplication?.bundleIdentifier, yabaiFocusedWindowID: focusedWindowID ?? nil,
+                spaces: spacesSurface))
     }
 }
 
@@ -689,6 +712,42 @@ private struct SetWorkspaceBrowserSessionURLsCommand: ParsableCommand {
     }
 }
 
+private struct AddWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "add-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var name: String
+    @Option(name: .long) var command: String
+
+    /// Appends one process template through the production workspace-settings
+    /// path so the real-system harness can introduce additional runtime load
+    /// without scripting the nested settings UI.
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw ValidationError("Missing process name.") }
+        guard !trimmedCommand.isEmpty else { throw ValidationError("Missing process command.") }
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes.removeAll { ($0.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == trimmedName }
+            settings.processes.append(ProcessTemplate(name: trimmedName, command: trimmedCommand, executionMode: .shell))
+        }
+        guard let updated = try orchestrator.workspaceSettings(workspaceID: workspace.id) else {
+            throw ValidationError("Workspace settings missing at: \(normalizedWorkspaceDir)")
+        }
+        try emitJSON(
+            WorkspaceSettingsPayload(
+                stopScript: updated.stopScript, ports: updated.ports.map(\.name),
+                processes: updated.processes.map { .init(name: $0.name, command: $0.command) },
+                browserSessions: updated.browserSessions.map { .init(name: $0.name, url: $0.url) },
+                agentLaunchers: updated.agentLaunchers.map { .init(name: $0.name, command: $0.command) }))
+    }
+}
+
 private struct SeedFixturePayload: Codable {
     let projectID: String
     let defaultWorkspace: WorkspaceSummaryPayload?
@@ -764,6 +823,27 @@ private struct AgentWindowPayload: Codable {
     let yabaiWindowID: Int?
 }
 
+private struct SurfaceSnapshotPayload: Codable {
+    let frontmostProcessID: Int?
+    let frontmostApplicationName: String?
+    let frontmostApplicationBundleID: String?
+    let yabaiFocusedWindowID: Int?
+    let spaces: SpacesSurfacePayload?
+}
+
+private struct SpacesSurfacePayload: Codable {
+    let processID: Int
+    let appVisible: Bool
+    let frontWindowIdentifier: String?
+    let frontWindowTitle: String?
+    let frontWindowKind: String
+    let mainWindowVisible: Bool
+    let mainWindowFocused: Bool
+    let commandPaletteVisible: Bool
+    let commandPaletteFocused: Bool
+    let modalVisible: Bool
+}
+
 /// Looks up one workspace by project directory and title, matching the GUI's
 /// visible naming semantics rather than internal IDs.
 private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: String, title: String) throws -> WorkspaceSummaryPayload? {
@@ -792,5 +872,81 @@ private func makeOrchestrator() throws -> WorkspaceOrchestrator { try WorkspaceO
 /// Normalizes filesystem paths before lookups so shell callers can pass either
 /// relative or absolute values safely.
 private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
+
+private func snapshotSpacesSurface(pid: Int32, frontmostPID: Int?) -> SpacesSurfacePayload {
+    let appElement = AXUIElementCreateApplication(pid)
+    let windows = axElementArrayAttribute(appElement, attribute: kAXWindowsAttribute)
+    let focusedWindow =
+        axElementAttribute(appElement, attribute: kAXFocusedWindowAttribute) ?? axElementAttribute(appElement, attribute: kAXMainWindowAttribute)
+    let appVisible = !(NSRunningApplication(processIdentifier: pid)?.isHidden ?? true)
+
+    let frontWindowIdentifier = focusedWindow.flatMap { axStringAttribute($0, attribute: kAXIdentifierAttribute as String) }
+    let frontWindowTitle = focusedWindow.flatMap { axStringAttribute($0, attribute: kAXTitleAttribute as String) }
+    let frontWindowKind = classifySpacesWindow(focusedWindow)
+
+    let mainWindow = windows.first { window in
+        let identifier = axStringAttribute(window, attribute: kAXIdentifierAttribute as String)
+        let title = axStringAttribute(window, attribute: kAXTitleAttribute as String)
+        return identifier == "spaces-main-window" || title == "Spaces"
+    }
+    let paletteWindow = windows.first { window in axStringAttribute(window, attribute: kAXIdentifierAttribute as String) == "spaces-command-palette" }
+
+    let mainWindowVisible = appVisible && mainWindow.map(isVisibleWindow) == true
+    let commandPaletteVisible = appVisible && paletteWindow.map(isVisibleWindow) == true
+    let mainWindowFocused = frontmostPID == Int(pid) && frontWindowKind == "main"
+    let commandPaletteFocused = frontmostPID == Int(pid) && frontWindowKind == "palette"
+    let modalVisible = windows.contains { window in
+        if axStringAttribute(window, attribute: kAXSubroleAttribute as String) == kAXDialogSubrole as String { return true }
+        return !axElementArrayAttribute(window, attribute: "AXSheets").isEmpty
+    }
+
+    return SpacesSurfacePayload(
+        processID: Int(pid), appVisible: appVisible, frontWindowIdentifier: frontWindowIdentifier, frontWindowTitle: frontWindowTitle,
+        frontWindowKind: frontWindowKind, mainWindowVisible: mainWindowVisible, mainWindowFocused: mainWindowFocused,
+        commandPaletteVisible: commandPaletteVisible, commandPaletteFocused: commandPaletteFocused, modalVisible: modalVisible)
+}
+
+private func classifySpacesWindow(_ window: AXUIElement?) -> String {
+    guard let window else { return "none" }
+    let identifier = axStringAttribute(window, attribute: kAXIdentifierAttribute as String) ?? ""
+    let title = axStringAttribute(window, attribute: kAXTitleAttribute as String) ?? ""
+    let subrole = axStringAttribute(window, attribute: kAXSubroleAttribute as String) ?? ""
+
+    if subrole == kAXDialogSubrole as String { return "modal" }
+    if identifier == "spaces-command-palette" { return "palette" }
+    if identifier == "spaces-main-window" { return "main" }
+    if identifier.hasPrefix("spaces-terminal:") { return title.hasSuffix(" (viewer)") ? "terminal_viewer" : "terminal_owner" }
+    if title == "Spaces" { return "main" }
+    if title.hasSuffix(" (viewer)") { return "terminal_viewer" }
+    if !title.isEmpty { return "terminal_owner" }
+    return "other"
+}
+
+private func isVisibleWindow(_ window: AXUIElement) -> Bool {
+    if axBoolAttribute(window, attribute: kAXMinimizedAttribute) == true { return false }
+    if axBoolAttribute(window, attribute: "AXVisible") == false { return false }
+    return true
+}
+
+private func axAttributeValue(_ element: AXUIElement, attribute: String) -> CFTypeRef? {
+    var value: CFTypeRef?
+    let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+    guard result == .success else { return nil }
+    return value
+}
+
+private func axElementAttribute(_ element: AXUIElement, attribute: String) -> AXUIElement? {
+    axAttributeValue(element, attribute: attribute) as! AXUIElement?
+}
+
+private func axElementArrayAttribute(_ element: AXUIElement, attribute: String) -> [AXUIElement] {
+    (axAttributeValue(element, attribute: attribute) as? [AXUIElement]) ?? []
+}
+
+private func axStringAttribute(_ element: AXUIElement, attribute: String) -> String? { axAttributeValue(element, attribute: attribute) as? String }
+
+private func axBoolAttribute(_ element: AXUIElement, attribute: String) -> Bool? {
+    (axAttributeValue(element, attribute: attribute) as? NSNumber)?.boolValue
+}
 
 MXE2ECommand.main()

@@ -311,6 +311,49 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNotEqual(agentWindows.first?.terminalTrackingID, "stale-session")
     }
 
+    func testFocusAgentWindowRelaunchesClaimedSpacesLauncherWhenTrackedWindowIsClosed() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let dbPath = root.appendingPathComponent("spaces.db").path
+
+        let store = try makeTemporaryStore()
+        let openCapture = TerminalOpenCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { sessionID, mode in
+                openCapture.sessionIDs.append(sessionID)
+                openCapture.modes.append(mode)
+                let paths = try! TerminalSessionPaths.forSession(id: sessionID)
+                try! paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try! TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 101, childPID: 5432, state: .running,
+                        updatedAt: "2026-05-10T18:00:00Z"), paths: paths)
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
+        try orchestrator.updateProjectConfig(projectID: project.id) { project in
+            project.agentLaunchers = [AgentLauncher(name: "Claude", command: "claude")]
+        }
+        let staleRecord = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: nil, terminalNativeID: nil, status: .idle,
+            claimedLauncherName: "Claude")
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.focusAgentWindow(staleRecord) }
+            }
+        }
+
+        XCTAssertEqual(openCapture.modes, [.owner])
+        let agentWindows = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(agentWindows.count, 1)
+        XCTAssertEqual(agentWindows.first?.provider, .spaces)
+        XCTAssertNotNil(agentWindows.first?.terminalTrackingID)
+    }
+
     func testUpdateAgentWindowStatusFallsBackToConfiguredLabelForSpacesProvider() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1888,6 +1931,51 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedWindows, ["202"])
     }
 
+    func testFocusNextWindowHidesAppUsesChromeURLFocusFromBuiltInTerminal() throws {
+        let store = try makeTemporaryStore()
+        let root = try makeTempDirectory()
+        let chromeFocusLog = root.appendingPathComponent("browser-cycle-url-focus.log")
+        let yabaiFocusLog = root.appendingPathComponent("browser-cycle-url-yabai.log")
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Docs", url: "http://localhost:3001/docs/")])
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-browser", workspaceID: workspace.id, app: "Google Chrome", title: "Docs", targetURL: "http://localhost:3001/docs/",
+                windowID: 202, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+        let process = RunningProcessRecord(
+            id: "process-spaces-browser-cycle", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
+            terminalApp: TerminalHost.spaces.appName, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle",
+            terminalNativeID: "spaces-session-browser-cycle", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-terminal", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend", detail: "npm run frontend",
+                targetURL: nil, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle", terminalNativeID: "spaces-session-browser-cycle",
+                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeFocusLog.path) {
+                try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
+                    let hidesApp = try orchestrator.focusNextWindowHidesApp(
+                        workspaceID: workspace.id, requestID: "cycle-request-browser-focus",
+                        preferredFocusedBuiltInTerminalSessionID: "spaces-session-browser-cycle")
+                    XCTAssertTrue(hidesApp)
+                }
+            }
+        }
+
+        let focusedURLs = try String(contentsOf: chromeFocusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedURLs, ["http://localhost:3001/docs/"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: yabaiFocusLog.path))
+    }
+
     func testFocusNextWindowUsesFrontBrowserURLWhenYabaiHasNoFocusedWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let focusLog = root.appendingPathComponent("browser-cycle-fallback-focus.log")
@@ -1916,6 +2004,51 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedIDs, ["303"])
     }
 
+    func testFocusPreviousWindowUsesPreferredBuiltInTerminalSessionBeforeFallback() throws {
+        let store = try makeTemporaryStore()
+        let focusCapture = TerminalFocusCapture()
+        let root = try makeTempDirectory()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { _, _ in XCTFail("cycle focus should not reopen built-in sessions") },
+            builtInTerminalWindowFocuser: { sessionID, requestID in
+                focusCapture.sessionIDs.append(sessionID)
+                focusCapture.requestIDs.append(requestID)
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-browser", workspaceID: workspace.id, app: "Google Chrome", title: "Docs", targetURL: "http://localhost:3001/docs/",
+                windowID: 101, role: "browser", orderIndex: 0, lastSeenAt: "now"))
+        let process = RunningProcessRecord(
+            id: "process-spaces-cycle-priority", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
+            terminalApp: TerminalHost.spaces.appName, windowID: 202, terminalTrackingID: "spaces-session-priority",
+            terminalNativeID: "spaces-session-priority", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
+            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-process", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend", detail: "npm run frontend",
+                targetURL: nil, windowID: 202, terminalTrackingID: "spaces-session-priority", terminalNativeID: "spaces-session-priority",
+                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 1, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
+                try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
+            }
+            _ = try orchestrator.focusPreviousWindowHidesApp(
+                workspaceID: workspace.id, requestID: "cycle-request-1", preferredFocusedBuiltInTerminalSessionID: "spaces-session-priority")
+        }
+
+        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-priority"])
+        XCTAssertEqual(focusCapture.requestIDs, [nil])
+    }
+
     // Tests window cycling ignores missing browser windows and keeps moving to the next live tracked window.
     func testFocusNextWindowIgnoresMissingBrowserWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
@@ -1942,6 +2075,53 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedIDs, ["101"])
     }
 
+    func testFocusNextWindowDoesNotRequestAppHideForBuiltInProcessTarget() throws {
+        let store = try makeTemporaryStore()
+        let focusCapture = TerminalFocusCapture()
+        let root = try makeTempDirectory()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { _, _ in XCTFail("built-in cycle focus should not reopen the session") },
+            builtInTerminalWindowFocuser: { sessionID, requestID in
+                focusCapture.sessionIDs.append(sessionID)
+                focusCapture.requestIDs.append(requestID)
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-browser", workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
+                windowID: 101, role: "browser", orderIndex: 0, lastSeenAt: "now"))
+        let process = RunningProcessRecord(
+            id: "process-spaces-cycle", workspaceID: workspace.id, templateName: "api", command: "npm run api",
+            terminalApp: TerminalHost.spaces.appName, windowID: 202, terminalTrackingID: "spaces-session-cycle",
+            terminalNativeID: "spaces-session-cycle", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
+            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-process", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api", targetURL: nil,
+                windowID: 202, terminalTrackingID: "spaces-session-cycle", terminalNativeID: "spaces-session-cycle", terminalContainerID: nil,
+                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        var hidesApp = true
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
+                try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
+                    hidesApp = try orchestrator.focusNextWindowHidesApp(workspaceID: workspace.id)
+                }
+            }
+        }
+
+        XCTAssertFalse(hidesApp)
+        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-cycle"])
+        XCTAssertEqual(focusCapture.requestIDs, [nil])
+    }
+
     // Tests direct process focus throws a recoverable missing-window error when the tracked iTerm window no longer exists.
     func testFocusWorkspaceProcessThrowsRecoverableErrorForMissingProcessWindow() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
@@ -1966,12 +2146,12 @@ final class OrchestratorTests: XCTestCase {
 
     func testFocusWorkspaceProcessUsesBuiltInSpacesSessionWithoutTrackedYabaiWindowID() throws {
         let store = try makeTemporaryStore()
-        let capture = TerminalOpenCapture()
+        let focusCapture = TerminalFocusCapture()
         let orchestrator = WorkspaceOrchestrator(
             store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalWindowOpener: { sessionID, mode in
-                capture.sessionIDs.append(sessionID)
-                capture.modes.append(mode)
+            builtInTerminalWindowFocuser: { sessionID, requestID in
+                focusCapture.sessionIDs.append(sessionID)
+                focusCapture.requestIDs.append(requestID)
             })
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1993,8 +2173,8 @@ final class OrchestratorTests: XCTestCase {
 
         try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
 
-        XCTAssertEqual(capture.sessionIDs, ["spaces-session-1"])
-        XCTAssertEqual(capture.modes, [.owner])
+        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-1"])
+        XCTAssertEqual(focusCapture.requestIDs, [nil])
     }
 
     func testFocusWorkspaceProcessReusesLiveBuiltInSpacesSessionWithoutOpeningWhenWindowBindingIsMissing() throws {
@@ -2178,11 +2358,11 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(windows.map(\.id), ["process-api"])
     }
 
-    func testFocusWorkspaceProcessRefocusesLiveBuiltInSpacesWindowBySessionID() throws {
+    func testFocusWorkspaceProcessUsesBuiltInFocusIPCForLiveBuiltInSpacesWindow() throws {
         let store = try makeTemporaryStore()
         let focusCapture = TerminalFocusCapture()
         let root = try makeTempDirectory()
-        let focusLog = root.appendingPathComponent("yabai-focus.log")
+        let focusLog = root.appendingPathComponent("spaces-live-window-focus.log")
         let orchestrator = WorkspaceOrchestrator(
             store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
             builtInTerminalWindowOpener: { _, _ in XCTFail("live built-in window focus should not reopen the session") },
@@ -2210,14 +2390,17 @@ final class OrchestratorTests: XCTestCase {
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+                try withEnv(
+                    name: "YABAI_WINDOWS_JSON",
+                    value:
+                        #"[{"id":501,"pid":11,"app":"Spaces","title":"web","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                ) { try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id) }
             }
         }
 
-        let focusedWindowID = try String(contentsOf: focusLog, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-        XCTAssertEqual(focusedWindowID, "501")
         XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-live"])
         XCTAssertEqual(focusCapture.requestIDs, [nil])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: focusLog.path))
     }
 
     func testFocusWorkspaceProcessPassesRequestIDToBuiltInSpacesFocusIPC() throws {
@@ -2240,23 +2423,19 @@ final class OrchestratorTests: XCTestCase {
 
         let process = RunningProcessRecord(
             id: "process-spaces-request-id", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
-            terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-request-id",
+            terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: "spaces-session-request-id",
             terminalNativeID: "spaces-session-request-id", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil,
             status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-request-id", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-request-id", terminalNativeID: "spaces-session-request-id",
+                targetURL: nil, windowID: nil, terminalTrackingID: "spaces-session-request-id", terminalNativeID: "spaces-session-request-id",
                 terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try withEnv(
-                    name: "YABAI_WINDOWS_JSON",
-                    value:
-                        #"[{"id":777,"pid":11,"app":"Spaces","title":"web","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
-                ) { try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id, requestID: "focus-request-1") }
+                try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id, requestID: "focus-request-1")
             }
         }
 
@@ -2264,18 +2443,70 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusCapture.requestIDs, ["focus-request-1"])
     }
 
+    func testCycleFocusWorkspaceProcessSkipsStaleYabaiFocusProbeForBuiltInSpacesSession() throws {
+        let store = try makeTemporaryStore()
+        let focusCapture = TerminalFocusCapture()
+        let openCapture = TerminalOpenCapture()
+        let root = try makeTempDirectory()
+        let focusLog = root.appendingPathComponent("yabai-focus.log")
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { sessionID, mode in
+                openCapture.sessionIDs.append(sessionID)
+                openCapture.modes.append(mode)
+            },
+            builtInTerminalWindowFocuser: { sessionID, requestID in
+                focusCapture.sessionIDs.append(sessionID)
+                focusCapture.requestIDs.append(requestID)
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        let process = RunningProcessRecord(
+            id: "process-spaces-cycle-fast-path", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
+            terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-cycle-fast-path",
+            terminalNativeID: "spaces-session-cycle-fast-path", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-spaces-cycle-fast-path", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
+                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-cycle-fast-path",
+                terminalNativeID: "spaces-session-cycle-fast-path", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
+                    try withEnv(name: "YABAI_FOCUS_FAIL_IDS", value: "777") {
+                        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id, requestID: "cycle-request-1")
+                    }
+                }
+            }
+        }
+
+        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-cycle-fast-path"])
+        XCTAssertEqual(focusCapture.requestIDs, ["cycle-request-1"])
+        XCTAssertTrue(openCapture.sessionIDs.isEmpty)
+        XCTAssertTrue(openCapture.modes.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: focusLog.path))
+    }
+
     func testFocusWorkspaceProcessReopensBuiltInSpacesSessionAndClearsStaleWindowBinding() throws {
         let store = try makeTemporaryStore()
-        let capture = TerminalOpenCapture()
+        let focusCapture = TerminalFocusCapture()
         let pulseController = MockTerminalFocusPulseController()
+        let root = try makeTempDirectory()
         let orchestrator = WorkspaceOrchestrator(
             store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
             terminalFocusPulseController: pulseController,
-            builtInTerminalWindowOpener: { sessionID, mode in
-                capture.sessionIDs.append(sessionID)
-                capture.modes.append(mode)
+            builtInTerminalWindowFocuser: { sessionID, requestID in
+                focusCapture.sessionIDs.append(sessionID)
+                focusCapture.requestIDs.append(requestID)
             })
-        let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -2302,8 +2533,8 @@ final class OrchestratorTests: XCTestCase {
             }
         }
 
-        XCTAssertEqual(capture.sessionIDs, ["spaces-session-stale"])
-        XCTAssertEqual(capture.modes, [.owner])
+        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-stale"])
+        XCTAssertEqual(focusCapture.requestIDs, [nil])
         XCTAssertTrue(pulseController.pulsedWindowIDs.isEmpty)
 
         let updatedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
@@ -2379,19 +2610,19 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(queryLines.contains("query --windows"))
     }
 
-    func testFocusWorkspaceProcessUsesTrackedBuiltInSpacesWindowWhenLiveWindowIDExists() throws {
+    func testFocusWorkspaceProcessUsesTrackedBuiltInSessionWhenLiveWindowIDExists() throws {
         let store = try makeTemporaryStore()
-        let capture = TerminalOpenCapture()
+        let focusCapture = TerminalFocusCapture()
         let pulseController = MockTerminalFocusPulseController()
+        let root = try makeTempDirectory()
+        let focusLog = root.appendingPathComponent("spaces-tracked-live-window-focus.log")
         let orchestrator = WorkspaceOrchestrator(
             store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
             terminalFocusPulseController: pulseController,
-            builtInTerminalWindowOpener: { sessionID, mode in
-                capture.sessionIDs.append(sessionID)
-                capture.modes.append(mode)
+            builtInTerminalWindowFocuser: { sessionID, requestID in
+                focusCapture.sessionIDs.append(sessionID)
+                focusCapture.requestIDs.append(requestID)
             })
-        let root = try makeTempDirectory()
-        let focusLog = root.appendingPathComponent("spaces-built-in-focus.log")
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -2420,9 +2651,9 @@ final class OrchestratorTests: XCTestCase {
             }
         }
 
-        XCTAssertTrue(capture.sessionIDs.isEmpty)
-        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedIDs, ["777"])
+        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-live"])
+        XCTAssertEqual(focusCapture.requestIDs, [nil])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: focusLog.path))
         XCTAssertEqual(pulseController.pulsedWindowIDs, [777])
     }
 

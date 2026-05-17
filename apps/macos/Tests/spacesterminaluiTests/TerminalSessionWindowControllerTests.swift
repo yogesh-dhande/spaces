@@ -17,13 +17,18 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         var pastedClipboard = false
         var focusedStates: [(clientID: String, focused: Bool)] = []
         var focusWindowCount = 0
+        var attachCount = 0
+        var activeOwnerClientIDValue: String?
         var debugSurfaceRefreshRequestCount = 0
 
-        func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {}
+        func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
+            attachCount += 1
+            if mode == .owner { activeOwnerClientIDValue = client.id }
+        }
         func parkSurfaceInHiddenHostWindow() { didParkSurface = true }
         func setFocused(_ focused: Bool, for clientID: String) { focusedStates.append((clientID, focused)) }
         func focusWindow(_ window: NSWindow?) { focusWindowCount += 1 }
-        func activeOwnerClientID() -> String? { nil }
+        func activeOwnerClientID() -> String? { activeOwnerClientIDValue }
         func hasRenderableSurface() -> Bool { hasSurface }
         func snapshot() -> GhosttyTerminalSnapshot? { snapshotValue }
         func snapshotText() -> String? { snapshotTextValue }
@@ -845,6 +850,82 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertGreaterThan(focusWindowCalls, initialWindowFocusCalls)
         XCTAssertGreaterThan(focusedStates.count, initialFocusedStateCount)
+    }
+
+    @MainActor func testGhosttyOwnerFocusWindowDoesNotReattachExistingOwnerSurface() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-focus-fast-path", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-focus-fast-path", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotValue = ghosttySnapshot(text: "owner")
+        let controller = makeGhosttyController(sessionID: "session-focus-fast-path", paths: paths, host: fakeHost)
+
+        controller.show()
+        let attachCountAfterShow = fakeHost.attachCount
+
+        controller.focusWindow()
+
+        XCTAssertEqual(fakeHost.attachCount, attachCountAfterShow)
+        XCTAssertGreaterThan(fakeHost.focusWindowCount, 0)
+    }
+
+    @MainActor func testGhosttyOwnerFocusWindowRefreshesStaleViewerTitleBeforeFocus() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-focus-title-refresh", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work",
+                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-focus-title-refresh", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotValue = ghosttySnapshot(text: "owner")
+        let ownerController = makeGhosttyController(sessionID: "session-focus-title-refresh", paths: paths, host: fakeHost)
+        let viewerController = makeGhosttyController(
+            sessionID: "session-focus-title-refresh", paths: paths, preferredAttachmentMode: .viewer, host: fakeHost, attachClientAction: { _, _ in },
+            detachClientAction: { _ in })
+
+        let owner = TerminalClient(
+            id: ownerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        let viewer = TerminalClient(
+            id: viewerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            connectedAt: "2026-05-09T00:00:01Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-focus-title-refresh", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-focus-title-refresh", client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-05-09T00:00:01Z")
+
+        ownerController.show()
+        viewerController.show()
+
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: "session-focus-title-refresh", newOwnerClientID: viewer.id, paths: paths, transferredAt: "2026-05-09T00:00:02Z")
+        ownerController.debugForceRefresh()
+        XCTAssertEqual(ownerController.debugWindowTitle, "ghostty (viewer)")
+
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: "session-focus-title-refresh", newOwnerClientID: owner.id, paths: paths, transferredAt: "2026-05-09T00:00:03Z")
+        ownerController.focusWindow()
+
+        XCTAssertEqual(ownerController.debugWindowTitle, "ghostty")
     }
 
     @MainActor func testGhosttyOwnerMetadataRefreshCanSkipLiveAttachUntilShow() throws {

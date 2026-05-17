@@ -26,22 +26,38 @@ import workspacecore
     @Test func visibleWorkspaceDetailRefreshRequiresSelectedExistingWorkspace() {
         #expect(
             AppKitController.shouldRefreshVisibleWorkspaceDetail(
-                selectedWorkspaceID: "workspace-1", showingAlerts: false, showingSettings: false, workspaceExists: true))
+                selectedWorkspaceID: "workspace-1", showingAlerts: false, showingSettings: false, workspaceExists: true, mainWindowIsFocused: true,
+                commandPaletteIsVisible: false))
         #expect(
             !AppKitController.shouldRefreshVisibleWorkspaceDetail(
-                selectedWorkspaceID: nil, showingAlerts: false, showingSettings: false, workspaceExists: true))
+                selectedWorkspaceID: nil, showingAlerts: false, showingSettings: false, workspaceExists: true, mainWindowIsFocused: true,
+                commandPaletteIsVisible: false))
         #expect(
             !AppKitController.shouldRefreshVisibleWorkspaceDetail(
-                selectedWorkspaceID: "workspace-1", showingAlerts: false, showingSettings: false, workspaceExists: false))
+                selectedWorkspaceID: "workspace-1", showingAlerts: false, showingSettings: false, workspaceExists: false, mainWindowIsFocused: true,
+                commandPaletteIsVisible: false))
     }
 
     @Test func visibleWorkspaceDetailRefreshSkipsAlertsAndSettings() {
         #expect(
             !AppKitController.shouldRefreshVisibleWorkspaceDetail(
-                selectedWorkspaceID: "workspace-1", showingAlerts: true, showingSettings: false, workspaceExists: true))
+                selectedWorkspaceID: "workspace-1", showingAlerts: true, showingSettings: false, workspaceExists: true, mainWindowIsFocused: true,
+                commandPaletteIsVisible: false))
         #expect(
             !AppKitController.shouldRefreshVisibleWorkspaceDetail(
-                selectedWorkspaceID: "workspace-1", showingAlerts: false, showingSettings: true, workspaceExists: true))
+                selectedWorkspaceID: "workspace-1", showingAlerts: false, showingSettings: true, workspaceExists: true, mainWindowIsFocused: true,
+                commandPaletteIsVisible: false))
+    }
+
+    @Test func visibleWorkspaceDetailRefreshRequiresForegroundSurface() {
+        #expect(
+            !AppKitController.shouldRefreshVisibleWorkspaceDetail(
+                selectedWorkspaceID: "workspace-1", showingAlerts: false, showingSettings: false, workspaceExists: true, mainWindowIsFocused: false,
+                commandPaletteIsVisible: false))
+        #expect(
+            AppKitController.shouldRefreshVisibleWorkspaceDetail(
+                selectedWorkspaceID: "workspace-1", showingAlerts: false, showingSettings: false, workspaceExists: true, mainWindowIsFocused: false,
+                commandPaletteIsVisible: true))
     }
 
     @Test func configuredBrowserSessionsAlsoShowForStoppedWorkspaces() {

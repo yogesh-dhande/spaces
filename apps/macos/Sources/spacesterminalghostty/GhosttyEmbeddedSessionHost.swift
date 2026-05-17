@@ -50,6 +50,32 @@ extension Notification.Name {
 
 @MainActor public final class GhosttyEmbeddedSessionHost {
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    private static let incomingOutputCoalescingInterval: Duration = .milliseconds(16)
+
+    private final class IncomingOutputBuffer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pendingData = Data()
+        private var flushScheduled = false
+
+        func append(_ data: Data) -> Bool {
+            guard !data.isEmpty else { return false }
+            lock.lock()
+            defer { lock.unlock() }
+            pendingData.append(data)
+            guard !flushScheduled else { return false }
+            flushScheduled = true
+            return true
+        }
+
+        func drain() -> Data {
+            lock.lock()
+            defer { lock.unlock() }
+            let drained = pendingData
+            pendingData = Data()
+            flushScheduled = false
+            return drained
+        }
+    }
 
     public let launchConfiguration: TerminalSessionLaunchConfiguration
     public let paths: TerminalSessionPaths
@@ -69,6 +95,7 @@ extension Notification.Name {
     private var lastRuntimeStateWriteAt: Date?
     private var sessionStartedAt: Date?
     private var didLogFirstOutput = false
+    private let incomingOutputBuffer = IncomingOutputBuffer()
 
     public init(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
@@ -94,12 +121,7 @@ extension Notification.Name {
             try paths.ensureDirectories()
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             try ensureOutputHandle()
-            terminalView.setOutputHandler { [weak self] data in
-                Task { @MainActor [weak self] in
-                    self?.requestSurfaceRefreshAction()
-                    self?.appendOutput(data)
-                }
-            }
+            terminalView.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
             terminalView.ensureHostingWindowForSurface()
             try startControlServer()
             startRuntimeStateTimer()
@@ -337,7 +359,6 @@ extension Notification.Name {
         do {
             let outputHandle = try ensureOutputHandle()
             try outputHandle.write(contentsOf: data)
-            try outputHandle.synchronize()
             postOutputDidChange(byteCount: data.count)
             TerminalPerformance.logMetric(
                 "terminal_output_write", target: "session=\(launchConfiguration.sessionID)",
@@ -425,6 +446,20 @@ extension Notification.Name {
 
     private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
         "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
+    }
+
+    private nonisolated func enqueueIncomingOutput(_ data: Data) {
+        guard incomingOutputBuffer.append(data) else { return }
+        Task { [weak self] in
+            do { try await Task.sleep(for: Self.incomingOutputCoalescingInterval) } catch { return }
+            guard let self else { return }
+            let coalescedData = incomingOutputBuffer.drain()
+            guard !coalescedData.isEmpty else { return }
+            await MainActor.run {
+                self.requestSurfaceRefreshAction()
+                self.appendOutput(coalescedData)
+            }
+        }
     }
 
     var debugCurrentTitle: String? { currentTitle }

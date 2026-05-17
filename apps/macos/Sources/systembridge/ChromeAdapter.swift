@@ -62,6 +62,31 @@ public final class ChromeAdapter {
         return output == "1"
     }
 
+    public func focusFirstMatchingTab(urlPrefix: String) throws -> Bool {
+        let escaped = urlPrefix.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+            tell application "Google Chrome"
+              repeat with w in windows
+                set tabCount to count of tabs of w
+                repeat with i from 1 to tabCount
+                  set u to URL of tab i of w
+                  if u is not missing value then
+                    if u starts with "\(escaped)" then
+                      set active tab index of w to i
+                      set index of w to 1
+                      activate
+                      return "1"
+                    end if
+                  end if
+                end repeat
+              end repeat
+            end tell
+            return "0"
+            """
+        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
+    }
+
     public func extractTabToWindow(windowID: Int, tabIndex: Int) throws -> Int? {
         let script = """
             tell application "Google Chrome"
