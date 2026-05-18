@@ -2,7 +2,7 @@ name: Sync GhosttyKit Release
 
 on:
   schedule:
-    - cron: "18 11 * * *"
+    - cron: "18 11 * * 1"
   workflow_dispatch:
 
 permissions:
