@@ -188,12 +188,17 @@ public struct SpacesMobileBridgeResponse: Codable, Sendable, Equatable {
     public let message: String
     public let overview: SpacesMobileOverviewPayload?
     public let issuedAuthToken: String?
+    public let sessionState: GhosttyRemoteSessionStatePayload?
 
-    public init(ok: Bool, message: String, overview: SpacesMobileOverviewPayload? = nil, issuedAuthToken: String? = nil) {
+    public init(
+        ok: Bool, message: String, overview: SpacesMobileOverviewPayload? = nil, issuedAuthToken: String? = nil,
+        sessionState: GhosttyRemoteSessionStatePayload? = nil
+    ) {
         self.ok = ok
         self.message = message
         self.overview = overview
         self.issuedAuthToken = issuedAuthToken
+        self.sessionState = sessionState
     }
 }
 

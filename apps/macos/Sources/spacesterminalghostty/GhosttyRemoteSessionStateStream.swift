@@ -1,3 +1,4 @@
+import Darwin
 import Dispatch
 import Foundation
 import spacesterminalcore
@@ -23,6 +24,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
 
         var yes: Int32 = 1
         setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        try Self.setNoSIGPIPE(socketFD)
 
         var address = try Self.makeSocketAddress(path: socketPath)
         let bindResult = withUnsafePointer(to: &address) { pointer in
@@ -78,6 +80,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
             }
 
             do {
+                try Self.setNoSIGPIPE(clientFD)
                 try Self.setNonBlocking(clientFD)
                 Self.applySocketTimeouts(clientFD)
                 let source = DispatchSource.makeReadSource(fileDescriptor: clientFD, queue: queue)
@@ -141,6 +144,13 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
         guard fcntl(fileDescriptor, F_SETFL, currentFlags | O_NONBLOCK) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
+    fileprivate static func setNoSIGPIPE(_ fileDescriptor: Int32) throws {
+        var yes: Int32 = 1
+        guard setsockopt(fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
     private static func applySocketTimeouts(_ fileDescriptor: Int32) {
         var timeValue = timeval(seconds: 0.2)
         setsockopt(fileDescriptor, SOL_SOCKET, SO_RCVTIMEO, &timeValue, socklen_t(MemoryLayout<timeval>.size))
@@ -196,6 +206,7 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         guard socketFD < 0 else { return }
         let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        try GhosttyRemoteSessionStateStreamServer.setNoSIGPIPE(socketFD)
 
         var address = try GhosttyRemoteSessionStateStreamServer.makeSocketAddress(path: socketPath)
         let connectResult = withUnsafePointer(to: &address) { pointer in

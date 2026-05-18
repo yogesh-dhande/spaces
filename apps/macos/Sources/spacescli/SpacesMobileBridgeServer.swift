@@ -41,6 +41,7 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
 
         var yes: Int32 = 1
         setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        try setNoSIGPIPE(socketFD)
 
         var address = sockaddr_in()
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -98,6 +99,7 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
                 return
             }
             do {
+                try setNoSIGPIPE(clientFD)
                 try setBlocking(clientFD)
                 let requestData = try readRequest(from: clientFD)
                 let request = try SpacesMobileBridgeCodec.decodeRequest(requestData)
@@ -127,6 +129,7 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
             return SpacesMobileBridgeResponse(ok: true, message: "Paired iOS client.", issuedAuthToken: issuedToken)
         case "ping": return SpacesMobileBridgeResponse(ok: true, message: "pong")
         case "overview": return SpacesMobileBridgeResponse(ok: true, message: "Loaded mobile overview.", overview: try loadOverview())
+        case "state": return try handleStateRequest(request)
         case "attach": return try handleTerminalControlRequest(request, command: "attach")
         case "detach": return try handleTerminalControlRequest(request, command: "detach")
         case "heartbeat": return try handleTerminalControlRequest(request, command: "heartbeat")
@@ -173,6 +176,15 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
         }
         let sessions = try TerminalSessionCatalog.listLiveSessions()
         return SpacesMobileOverviewBuilder.build(workspaces: workspaces, sessions: sessions)
+    }
+
+    private func handleStateRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let sessionID = request.sessionID else { return SpacesMobileBridgeResponse(ok: false, message: "Missing session ID.") }
+        let startedAt = Date()
+        let payload = try loadCurrentState(sessionID: sessionID)
+        TerminalPerformance.logMetric(
+            "mobile_bridge_state", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
+        return SpacesMobileBridgeResponse(ok: true, message: "Loaded terminal state.", sessionState: payload)
     }
 
     private func handleSubscribeRequest(_ request: SpacesMobileBridgeRequest, clientFD: Int32) throws {
@@ -257,6 +269,7 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
     private func connectUnixSocket(path: String) throws -> Int32 {
         let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        try setNoSIGPIPE(socketFD)
         var address = try makeUnixSocketAddress(path: path)
         let connectResult = withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
@@ -283,6 +296,44 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
         return address
     }
 
+    private func loadCurrentState(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.subscriptionSocketPath) else {
+            throw NSError(
+                domain: "SpacesMobileBridgeServer", code: 404,
+                userInfo: [NSLocalizedDescriptionKey: "Terminal session '\(sessionID)' has no live state stream."])
+        }
+
+        let socketFD = try connectUnixSocket(path: paths.subscriptionSocketPath)
+        defer {
+            shutdown(socketFD, SHUT_RDWR)
+            close(socketFD)
+        }
+
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = read(socketFD, &buffer, buffer.count)
+            if count == 0 { break }
+            if count < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            data.append(buffer, count: count)
+            if let newlineIndex = data.firstIndex(of: 0x0A) {
+                data.removeSubrange(newlineIndex..<data.endIndex)
+                break
+            }
+        }
+
+        guard !data.isEmpty else {
+            throw NSError(
+                domain: "SpacesMobileBridgeServer", code: 500,
+                userInfo: [NSLocalizedDescriptionKey: "Terminal session '\(sessionID)' did not return a state payload."])
+        }
+        return try GhosttyRemoteSessionStateCodec.decodeLine(data)
+    }
+
     private func writeResponse(_ response: SpacesMobileBridgeResponse, to fileDescriptor: Int32) throws {
         let data = try SpacesMobileBridgeCodec.encodeResponse(response)
         try writeAll(data: data, to: fileDescriptor)
@@ -298,6 +349,13 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
         let currentFlags = fcntl(fileDescriptor, F_GETFL)
         guard currentFlags >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         guard fcntl(fileDescriptor, F_SETFL, currentFlags & ~O_NONBLOCK) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+
+    private func setNoSIGPIPE(_ fileDescriptor: Int32) throws {
+        var yes: Int32 = 1
+        guard setsockopt(fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     private static func resolveListeningPort(socketFD: Int32) throws -> Int {

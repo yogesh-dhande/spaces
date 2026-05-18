@@ -2,23 +2,32 @@ import SwiftUI
 import spacesmobilecore
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var selectedSession: SpacesMobileTerminalSessionSummary?
     let model: SpacesMobileAppModel
 
     var body: some View {
-        NavigationSplitView {
-            workspaceSidebar
-        } content: {
-            terminalListPane
-        } detail: {
-            terminalDetailPane
-        }
-        .toolbar {
-            toolbarContent
+        NavigationStack {
+            terminalHomeView
+                .navigationTitle("Terminals")
+                .toolbar {
+                    toolbarContent
+                }
         }
         .sheet(isPresented: connectionSettingsBinding) {
             ConnectionSettingsView(initialSettings: model.settings) { settings in
                 model.applyConnectionSettings(settings)
                 Task { await model.refresh() }
+            }
+        }
+        .fullScreenCover(item: selectedSessionBinding) { session in
+            NavigationStack {
+                TerminalDetailView(session: session, settings: model.settings)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("Back") { selectedSession = nil }
+                        }
+                    }
             }
         }
         .alert(
@@ -29,11 +38,19 @@ struct ContentView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
-        .task {
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
             if model.overview == nil {
                 if !model.settings.isPaired {
                     model.isShowingConnectionSettings = true
-                } else {
+                    return
+                }
+            }
+            await model.refresh()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
+                if !model.isShowingConnectionSettings, selectedSession == nil {
                     await model.refresh()
                 }
             }
@@ -54,42 +71,19 @@ struct ContentView: View {
         )
     }
 
-    private var workspaceSidebar: some View {
-        List {
-            Button {
-                model.selectedWorkspace = .all
-            } label: {
-                Label("All Terminals", systemImage: "rectangle.stack")
-            }
-            .buttonStyle(.plain)
-            .listRowBackground(
-                model.selectedWorkspace == .all ? Color.accentColor.opacity(0.14) : Color.clear
-            )
-            ForEach(model.workspaceSections) { section in
-                Section(section.projectName) {
-                    ForEach(section.workspaces) { workspace in
-                        Button {
-                            model.selectedWorkspace = .workspace(workspace.id)
-                        } label: {
-                            workspaceRow(workspace)
-                        }
-                        .buttonStyle(.plain)
-                        .listRowBackground(
-                            model.selectedWorkspace == .workspace(workspace.id) ? Color.accentColor.opacity(0.14) : Color.clear
-                        )
-                    }
-                }
-            }
-        }
-        .navigationTitle("Workspaces")
+    private var selectedSessionBinding: Binding<SpacesMobileTerminalSessionSummary?> {
+        Binding(
+            get: { selectedSession },
+            set: { selectedSession = $0 }
+        )
     }
 
-    private var terminalListPane: some View {
+    private var terminalHomeView: some View {
         Group {
             if model.isLoading && model.overview == nil {
                 ProgressView("Loading terminals…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if model.filteredSessions.isEmpty {
+            } else if model.terminalGroups.isEmpty {
                 ContentUnavailableView(
                     "No Terminals",
                     systemImage: "terminal",
@@ -97,34 +91,25 @@ struct ContentView: View {
                 )
             } else {
                 List {
-                    ForEach(model.filteredSessions) { session in
-                        Button {
-                            model.selectedSessionID = session.id
-                        } label: {
-                            sessionRow(session)
+                    ForEach(model.terminalGroups) { group in
+                        Section {
+                            ForEach(group.sessions) { session in
+                                Button {
+                                    selectedSession = session
+                                } label: {
+                                    sessionRow(session)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        } header: {
+                            workspaceHeader(group)
                         }
-                        .buttonStyle(.plain)
-                        .listRowBackground(
-                            model.selectedSessionID == session.id ? Color.accentColor.opacity(0.14) : Color.clear
-                        )
                     }
                 }
-                .navigationTitle("Terminals")
-            }
-        }
-    }
-
-    private var terminalDetailPane: some View {
-        Group {
-            if let session = model.selectedSession {
-                TerminalDetailView(session: session, settings: model.settings)
-                    .id("\(session.id)|\(model.settings.trimmedHost)|\(model.settings.port)|\(model.settings.trimmedAuthToken ?? "")")
-            } else {
-                ContentUnavailableView(
-                    "Select a Terminal",
-                    systemImage: "terminal",
-                    description: Text("Choose a workspace and terminal to connect.")
-                )
+                .listStyle(.insetGrouped)
+                .refreshable {
+                    await model.refresh()
+                }
             }
         }
     }
@@ -150,19 +135,20 @@ struct ContentView: View {
         }
     }
 
-    private func workspaceRow(_ workspace: SpacesMobileWorkspaceSummary) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: workspace.isRunning ? "circle.fill" : "circle")
-                .font(.caption)
-                .foregroundStyle(workspace.isRunning ? Color.green : Color.secondary)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(workspace.title)
-                    .font(.headline)
-                Text("\(workspace.sessionCount) terminals")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+    private func workspaceHeader(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(group.projectName)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(group.workspaceTitle)
+                .font(.headline)
+                .foregroundStyle(.primary)
+            Text(group.workspaceDirectory)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
+        .textCase(nil)
     }
 
     private func sessionRow(_ session: SpacesMobileTerminalSessionSummary) -> some View {
@@ -173,7 +159,7 @@ struct ContentView: View {
                 Text(session.title)
                     .font(.headline)
                 Spacer()
-                Text(session.workspaceTitle ?? "Unassigned")
+                Text(ownerLabel(for: session))
                     .font(.caption)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -185,12 +171,14 @@ struct ContentView: View {
                 .lineLimit(1)
             HStack(spacing: 8) {
                 Text(session.state.rawValue)
-                Text(ownerLabel(for: session))
+                Text(session.backend.rawValue)
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 
     private func ownerLabel(for session: SpacesMobileTerminalSessionSummary) -> String {

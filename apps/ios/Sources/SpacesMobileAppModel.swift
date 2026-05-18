@@ -19,22 +19,17 @@ private enum SpacesMobileSettingsStore {
     }
 }
 
-enum SpacesMobileWorkspaceSelection: Hashable {
-    case all
-    case workspace(String)
-}
-
-struct SpacesMobileWorkspaceSection: Identifiable {
+struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
     let id: String
     let projectName: String
-    let workspaces: [SpacesMobileWorkspaceSummary]
+    let workspaceTitle: String
+    let workspaceDirectory: String
+    let sessions: [SpacesMobileTerminalSessionSummary]
 }
 
 @MainActor @Observable final class SpacesMobileAppModel {
     var settings: SpacesMobileConnectionSettings
     var overview: SpacesMobileOverviewPayload?
-    var selectedWorkspace = SpacesMobileWorkspaceSelection.all
-    var selectedSessionID: String?
     var isLoading = false
     var isShowingConnectionSettings = false
     var errorMessage: String?
@@ -45,32 +40,36 @@ struct SpacesMobileWorkspaceSection: Identifiable {
         SpacesMobileSettingsStore.save(loadedSettings)
     }
 
-    var workspaceSections: [SpacesMobileWorkspaceSection] {
-        let grouped = Dictionary(grouping: overview?.workspaces ?? [], by: \.projectName)
-        return grouped.keys.sorted().map { projectName in
-            let workspaces = grouped[projectName, default: []].sorted {
-                $0.title.localizedStandardCompare($1.title) == .orderedAscending
-            }
-            return SpacesMobileWorkspaceSection(id: projectName, projectName: projectName, workspaces: workspaces)
+    var terminalGroups: [SpacesMobileTerminalWorkspaceGroup] {
+        let workspaceByID = Dictionary(uniqueKeysWithValues: (overview?.workspaces ?? []).map { ($0.id, $0) })
+        let grouped = Dictionary(grouping: overview?.sessions ?? []) { session in
+            session.workspaceID ?? "unassigned::\(session.projectID ?? session.projectName ?? "none")::\(session.workingDirectory)"
         }
-    }
 
-    var filteredSessions: [SpacesMobileTerminalSessionSummary] {
-        let sessions = overview?.sessions ?? []
-        return switch selectedWorkspace {
-        case .all:
-            sessions
-        case .workspace(let workspaceID):
-            sessions.filter { $0.workspaceID == workspaceID }
+        return grouped.values.compactMap { sessions in
+            guard let firstSession = sessions.first else { return nil }
+            let workspace = firstSession.workspaceID.flatMap { workspaceByID[$0] }
+            let projectName = workspace?.projectName ?? firstSession.projectName ?? "Unassigned"
+            let workspaceTitle = workspace?.title ?? firstSession.workspaceTitle ?? "Unassigned"
+            let workspaceDirectory = workspace?.dir ?? firstSession.workingDirectory
+            let orderedSessions = sessions.sorted(by: sessionSort)
+
+            return SpacesMobileTerminalWorkspaceGroup(
+                id: workspace?.id ?? "unassigned::\(projectName)::\(workspaceDirectory)",
+                projectName: projectName,
+                workspaceTitle: workspaceTitle,
+                workspaceDirectory: workspaceDirectory,
+                sessions: orderedSessions
+            )
         }
-    }
-
-    var selectedSession: SpacesMobileTerminalSessionSummary? {
-        guard let selectedSessionID else { return filteredSessions.first }
-        return (overview?.sessions ?? []).first { $0.id == selectedSessionID }
+        .sorted(by: groupSort)
     }
 
     var connectionSummary: String { "\(settings.trimmedHost):\(settings.port)" }
+
+    func session(id: String) -> SpacesMobileTerminalSessionSummary? {
+        overview?.sessions.first(where: { $0.id == id })
+    }
 
     func refresh() async {
         guard !isLoading else { return }
@@ -80,11 +79,6 @@ struct SpacesMobileWorkspaceSection: Identifiable {
             let overview = try await SpacesMobileBridgeClient(settings: settings).fetchOverview()
             self.overview = overview
             errorMessage = nil
-            if let selectedSessionID, !overview.sessions.contains(where: { $0.id == selectedSessionID }) {
-                self.selectedSessionID = overview.sessions.first?.id
-            } else if self.selectedSessionID == nil {
-                self.selectedSessionID = overview.sessions.first?.id
-            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -94,9 +88,24 @@ struct SpacesMobileWorkspaceSection: Identifiable {
         self.settings = settings
         SpacesMobileSettingsStore.save(settings)
         overview = nil
-        selectedSessionID = nil
-        selectedWorkspace = .all
     }
 
     func dismissError() { errorMessage = nil }
+
+    private func groupSort(_ lhs: SpacesMobileTerminalWorkspaceGroup, _ rhs: SpacesMobileTerminalWorkspaceGroup) -> Bool {
+        if lhs.projectName.localizedStandardCompare(rhs.projectName) != .orderedSame {
+            return lhs.projectName.localizedStandardCompare(rhs.projectName) == .orderedAscending
+        }
+        return lhs.workspaceTitle.localizedStandardCompare(rhs.workspaceTitle) == .orderedAscending
+    }
+
+    private func sessionSort(_ lhs: SpacesMobileTerminalSessionSummary, _ rhs: SpacesMobileTerminalSessionSummary) -> Bool {
+        if lhs.state != rhs.state {
+            return lhs.state == .running && rhs.state != .running
+        }
+        if lhs.title.localizedStandardCompare(rhs.title) != .orderedSame {
+            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }
+        return lhs.createdAt < rhs.createdAt
+    }
 }

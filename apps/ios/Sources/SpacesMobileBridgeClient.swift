@@ -9,6 +9,7 @@ enum SpacesMobileBridgeClientError: LocalizedError {
     case requestFailed(String)
     case missingOverview
     case streamFailed(String)
+    case requestTimedOut
 
     var errorDescription: String? {
         switch self {
@@ -20,6 +21,8 @@ enum SpacesMobileBridgeClientError: LocalizedError {
             "The mobile bridge did not return a workspace or terminal overview."
         case .streamFailed(let message):
             message
+        case .requestTimedOut:
+            "The mobile bridge request timed out."
         }
     }
 }
@@ -53,6 +56,17 @@ struct SpacesMobileBridgeClient: Sendable {
         return overview
     }
 
+    func fetchState(sessionID: String) async throws -> GhosttyRemoteSessionStatePayload {
+        let response = try await sendRequest(
+            .init(command: "state", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID)
+        )
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+        guard let sessionState = response.sessionState else {
+            throw SpacesMobileBridgeClientError.requestFailed("The mobile bridge did not return terminal state.")
+        }
+        return sessionState
+    }
+
     func attach(sessionID: String, client: TerminalClient, mode: TerminalAttachmentMode) async throws {
         let response = try await sendRequest(
             .init(
@@ -81,7 +95,13 @@ struct SpacesMobileBridgeClient: Sendable {
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
-    func sendLine(sessionID: String, clientID: String, text: String) async throws {
+    func sendText(
+        sessionID: String,
+        clientID: String,
+        text: String,
+        appendNewline: Bool = false,
+        timeout: Duration = .seconds(3)
+    ) async throws {
         let response = try await sendRequest(
             .init(
                 command: "send",
@@ -90,15 +110,17 @@ struct SpacesMobileBridgeClient: Sendable {
                 sessionID: sessionID,
                 clientID: clientID,
                 text: text,
-                appendNewline: true
-            )
+                appendNewline: appendNewline
+            ),
+            timeout: timeout
         )
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
-    func sendKey(sessionID: String, clientID: String, key: String) async throws {
+    func sendKey(sessionID: String, clientID: String, key: String, timeout: Duration = .seconds(3)) async throws {
         let response = try await sendRequest(
-            .init(command: "key", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID, clientID: clientID, key: key)
+            .init(command: "key", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID, clientID: clientID, key: key),
+            timeout: timeout
         )
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
@@ -118,11 +140,11 @@ struct SpacesMobileBridgeClient: Sendable {
         return SpacesMobileBridgeStreamHandle { connection.cancel() }
     }
 
-    private func sendRequest(_ request: SpacesMobileBridgeRequest) async throws -> SpacesMobileBridgeResponse {
+    private func sendRequest(_ request: SpacesMobileBridgeRequest, timeout: Duration = .seconds(3)) async throws -> SpacesMobileBridgeResponse {
         let connection = try makeConnection()
         let queue = DispatchQueue(label: "spaces.mobile.bridge.request.\(UUID().uuidString)")
         return try await withCheckedThrowingContinuation { continuation in
-            RequestExchange(connection: connection, request: request, continuation: continuation).start(on: queue)
+            RequestExchange(connection: connection, request: request, timeout: timeout, continuation: continuation).start(on: queue)
         }
     }
 
@@ -194,6 +216,8 @@ private final class StreamLifecycle: @unchecked Sendable {
 }
 
 private final class StreamSubscription: @unchecked Sendable {
+    private static let initialEventTimeout: Duration = .seconds(3)
+
     private let connection: NWConnection
     private let request: SpacesMobileBridgeRequest
     private let lifecycle: StreamLifecycle
@@ -214,6 +238,11 @@ private final class StreamSubscription: @unchecked Sendable {
     }
 
     func start(on queue: DispatchQueue) {
+        queue.asyncAfter(deadline: .now() + Self.initialEventTimeout.timeInterval) { [weak self] in
+            guard let self, !decodedState else { return }
+            lifecycle.finish(error: SpacesMobileBridgeClientError.streamFailed("Timed out waiting for terminal state."))
+            connection.cancel()
+        }
         connection.stateUpdateHandler = { [self] state in
             switch state {
             case .ready:
@@ -232,7 +261,7 @@ private final class StreamSubscription: @unchecked Sendable {
     private func sendInitialRequest() {
         do {
             let data = try encodeBridgeRequestLine(request)
-            connection.send(content: data, contentContext: .defaultMessage, isComplete: true, completion: .contentProcessed { [self] error in
+            connection.send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed { [self] error in
                 if let error {
                     lifecycle.finish(error: error)
                     connection.cancel()
@@ -294,20 +323,27 @@ private final class StreamSubscription: @unchecked Sendable {
 private final class RequestExchange: @unchecked Sendable {
     private let connection: NWConnection
     private let request: SpacesMobileBridgeRequest
+    private let timeout: Duration
     private let resolver: RequestResolver<SpacesMobileBridgeResponse>
     private var responseBuffer = Data()
 
     init(
         connection: NWConnection,
         request: SpacesMobileBridgeRequest,
+        timeout: Duration,
         continuation: CheckedContinuation<SpacesMobileBridgeResponse, Error>
     ) {
         self.connection = connection
         self.request = request
+        self.timeout = timeout
         resolver = RequestResolver(connection: connection, continuation: continuation)
     }
 
     func start(on queue: DispatchQueue) {
+        queue.asyncAfter(deadline: .now() + timeout.timeInterval) { [resolver, connection] in
+            resolver.fail(SpacesMobileBridgeClientError.requestTimedOut)
+            connection.cancel()
+        }
         connection.stateUpdateHandler = { [self] state in
             switch state {
             case .ready:
@@ -356,6 +392,12 @@ private final class RequestExchange: @unchecked Sendable {
             }
             receiveNext()
         }
+    }
+}
+
+private extension Duration {
+    var timeInterval: TimeInterval {
+        TimeInterval(components.seconds) + (TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000)
     }
 }
 
