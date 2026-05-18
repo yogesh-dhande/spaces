@@ -2,7 +2,7 @@ name: Sync GhosttyKit Release
 
 on:
   schedule:
-    - cron: "18 11 * * *"
+    - cron: "18 11 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -20,8 +20,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          chmod +x scripts/sync-ghosttykit-release.sh
-          scripts/sync-ghosttykit-release.sh
+          bash scripts/sync-ghosttykit-release.sh
 
       - name: Create pull request
         uses: peter-evans/create-pull-request@v7
