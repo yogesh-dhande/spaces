@@ -14,7 +14,8 @@ struct MXE2ECommand: ParsableCommand {
         subcommands: [
             SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
             ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, SelectWorkspaceDetailCommand.self,
-            OpenWorkspaceTerminalCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
+            OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self, RestartWorkspaceProcessCommand.self,
+            LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
             StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
             SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self,
             CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
@@ -102,6 +103,98 @@ private struct OpenWorkspaceTerminalCommand: ParsableCommand {
             WorkspaceSummaryPayload(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
                 notes: workspace.notes))
+    }
+}
+
+private struct RunWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "run-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var processName: String
+
+    /// Tells the running Spaces app to launch one configured process through
+    /// the same app-side path used by GUI recovery or focus actions.
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.runWorkspaceProcess, object: nil,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName],
+            options: [.deliverImmediately])
+        try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
+    }
+}
+
+private struct StopWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "stop-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var processName: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.stopWorkspaceProcess, object: nil,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName],
+            options: [.deliverImmediately])
+        try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
+    }
+}
+
+private struct RestartWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "restart-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var processName: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.restartWorkspaceProcess, object: nil,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName],
+            options: [.deliverImmediately])
+        try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
+    }
+}
+
+private struct LaunchWorkspaceAgentCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "launch-workspace-agent")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var name: String
+
+    /// Tells the running Spaces app to launch one configured coding agent
+    /// through the same app-side path used by the GUI.
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw ValidationError("Missing coding agent name.") }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.launchWorkspaceAgent, object: nil,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedName],
+            options: [.deliverImmediately])
+        try emitJSON(["workspaceID": workspace.id, "name": trimmedName])
     }
 }
 

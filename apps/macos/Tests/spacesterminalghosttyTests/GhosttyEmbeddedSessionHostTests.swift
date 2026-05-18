@@ -7,6 +7,64 @@ import spacesterminalcore
 @testable import spacesterminalghostty
 
 final class GhosttyEmbeddedSessionHostTests: XCTestCase {
+    private final class TranscriptBuffer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func append(_ chunk: Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            data.append(chunk)
+        }
+
+        func string() -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+    }
+
+    @MainActor private func makeHostingWindow() -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSView(frame: window.contentLayoutRect)
+        return window
+    }
+
+    @MainActor private func attach(_ terminalView: GhosttyEmbeddedTerminalView, to window: NSWindow) {
+        guard let contentView = window.contentView else {
+            XCTFail("Missing content view")
+            return
+        }
+
+        terminalView.removeFromSuperview()
+        terminalView.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(terminalView)
+        NSLayoutConstraint.activate([
+            terminalView.topAnchor.constraint(equalTo: contentView.topAnchor),
+            terminalView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            terminalView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            terminalView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+        ])
+        contentView.layoutSubtreeIfNeeded()
+        window.layoutIfNeeded()
+    }
+
+    @MainActor private func waitUntil(
+        timeout: TimeInterval = 10, pollInterval: TimeInterval = 0.05, file: StaticString = #filePath, line: UInt = #line,
+        _ condition: @escaping @MainActor () -> Bool
+    ) throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            RunLoop.main.run(until: Date().addingTimeInterval(pollInterval))
+        }
+
+        XCTFail("Timed out waiting for condition.", file: file, line: line)
+        throw NSError(domain: "GhosttyEmbeddedSessionHostTests", code: 1)
+    }
+
     @MainActor func testEmbeddedViewSuppressesFunctionKeyPrivateUseText() {
         let event = try! XCTUnwrap(
             NSEvent.keyEvent(
@@ -187,6 +245,63 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
         XCTAssertEqual(runtimeState.state, .exited)
         XCTAssertNotNil(runtimeState.exitedAt)
+    }
+
+    @MainActor func testEmbeddedViewRebindsLiveSurfaceAcrossWindowsWithoutRestartingShell() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let terminalView = GhosttyEmbeddedTerminalView(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "rebind-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "rebind",
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-17T00:00:00Z"))
+        defer { terminalView.terminateSession() }
+        let transcript = TranscriptBuffer()
+        terminalView.setOutputHandler { data in transcript.append(data) }
+
+        let firstWindow = makeHostingWindow()
+        let secondWindow = makeHostingWindow()
+        defer {
+            firstWindow.orderOut(nil)
+            secondWindow.orderOut(nil)
+            firstWindow.close()
+            secondWindow.close()
+        }
+
+        let surfaceReady = expectation(description: "embedded ghostty surface ready")
+        terminalView.onSurfaceReady = { surface in if surface != nil { surfaceReady.fulfill() } }
+
+        attach(terminalView, to: firstWindow)
+        firstWindow.makeKeyAndOrderFront(nil)
+        wait(for: [surfaceReady], timeout: 15)
+
+        let originalPID = try XCTUnwrap(terminalView.foregroundPID())
+        let originalSurface = try XCTUnwrap(terminalView.surface)
+        terminalView.sendRawBytes(Data("first window\n".utf8))
+        try waitUntil { transcript.string().contains("first window") }
+        XCTAssertEqual(terminalView.surface, originalSurface)
+
+        terminalView.parkInHiddenHostWindowIfNeeded()
+        try waitUntil { terminalView.window !== nil && terminalView.window !== firstWindow }
+        XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), originalPID)
+        XCTAssertEqual(terminalView.surface, originalSurface)
+
+        terminalView.sendRawBytes(Data("hidden host\n".utf8))
+        try waitUntil { transcript.string().contains("hidden host") }
+        XCTAssertEqual(terminalView.surface, originalSurface)
+
+        attach(terminalView, to: secondWindow)
+        secondWindow.makeKeyAndOrderFront(nil)
+        try waitUntil { terminalView.window === secondWindow }
+        XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), originalPID)
+        XCTAssertEqual(terminalView.surface, originalSurface)
+
+        terminalView.sendRawBytes(Data("second window\n".utf8))
+        try waitUntil { transcript.string().contains("second window") }
+        let reboundTranscript = transcript.string()
+        XCTAssertTrue(reboundTranscript.contains("first window"))
+        XCTAssertTrue(reboundTranscript.contains("hidden host"))
+        XCTAssertTrue(reboundTranscript.contains("second window"))
     }
 
     @MainActor func testControlAttachAndDetachRequestsUpdatePersistenceAndPostAttachmentChanges() throws {

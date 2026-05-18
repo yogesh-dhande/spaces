@@ -4,6 +4,7 @@
 #include <ghostty/vt.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,20 @@ typedef GhosttyResult (*GhosttyFormatterTerminalNewFn)(
 typedef GhosttyResult (*GhosttyFormatterFormatAllocFn)(GhosttyFormatter, const GhosttyAllocator *, uint8_t **, size_t *);
 typedef void (*GhosttyFormatterFreeFn)(GhosttyFormatter);
 typedef void (*GhosttyFreeFn)(const GhosttyAllocator *, uint8_t *, size_t);
+typedef GhosttyResult (*GhosttyRenderStateNewFn)(const GhosttyAllocator *, GhosttyRenderState *);
+typedef void (*GhosttyRenderStateFreeFn)(GhosttyRenderState);
+typedef GhosttyResult (*GhosttyRenderStateUpdateFn)(GhosttyRenderState, GhosttyTerminal);
+typedef GhosttyResult (*GhosttyRenderStateGetFn)(GhosttyRenderState, GhosttyRenderStateData, void *);
+typedef GhosttyResult (*GhosttyRenderStateColorsGetFn)(GhosttyRenderState, GhosttyRenderStateColors *);
+typedef GhosttyResult (*GhosttyRenderStateRowIteratorNewFn)(const GhosttyAllocator *, GhosttyRenderStateRowIterator *);
+typedef void (*GhosttyRenderStateRowIteratorFreeFn)(GhosttyRenderStateRowIterator);
+typedef bool (*GhosttyRenderStateRowIteratorNextFn)(GhosttyRenderStateRowIterator);
+typedef GhosttyResult (*GhosttyRenderStateRowGetFn)(GhosttyRenderStateRowIterator, GhosttyRenderStateRowData, void *);
+typedef GhosttyResult (*GhosttyRenderStateRowCellsNewFn)(const GhosttyAllocator *, GhosttyRenderStateRowCells *);
+typedef void (*GhosttyRenderStateRowCellsFreeFn)(GhosttyRenderStateRowCells);
+typedef bool (*GhosttyRenderStateRowCellsNextFn)(GhosttyRenderStateRowCells);
+typedef GhosttyResult (*GhosttyRenderStateRowCellsGetFn)(GhosttyRenderStateRowCells, GhosttyRenderStateRowCellsData, void *);
+typedef GhosttyResult (*GhosttyCellGetFn)(GhosttyCell, GhosttyCellData, void *);
 
 typedef struct {
     void *handle;
@@ -31,7 +46,42 @@ typedef struct {
     GhosttyFormatterFormatAllocFn formatter_format_alloc;
     GhosttyFormatterFreeFn formatter_free;
     GhosttyFreeFn ghostty_free;
+    GhosttyRenderStateNewFn render_state_new;
+    GhosttyRenderStateFreeFn render_state_free;
+    GhosttyRenderStateUpdateFn render_state_update;
+    GhosttyRenderStateGetFn render_state_get;
+    GhosttyRenderStateColorsGetFn render_state_colors_get;
+    GhosttyRenderStateRowIteratorNewFn row_iterator_new;
+    GhosttyRenderStateRowIteratorFreeFn row_iterator_free;
+    GhosttyRenderStateRowIteratorNextFn row_iterator_next;
+    GhosttyRenderStateRowGetFn row_get;
+    GhosttyRenderStateRowCellsNewFn row_cells_new;
+    GhosttyRenderStateRowCellsFreeFn row_cells_free;
+    GhosttyRenderStateRowCellsNextFn row_cells_next;
+    GhosttyRenderStateRowCellsGetFn row_cells_get;
+    GhosttyCellGetFn cell_get;
 } SpacesGhosttyVtSymbols;
+
+struct SpacesGhosttyVtSession {
+    SpacesGhosttyVtSymbols symbols;
+    GhosttyTerminal terminal;
+    GhosttyRenderState render_state;
+    GhosttyRenderStateRowIterator row_iterator;
+    GhosttyRenderStateRowCells row_cells;
+};
+
+void spaces_ghostty_vt_session_free(SpacesGhosttyVtSession *session);
+
+enum {
+    SPACES_GHOSTTY_VT_FLAG_BOLD = 1 << 0,
+    SPACES_GHOSTTY_VT_FLAG_ITALIC = 1 << 1,
+    SPACES_GHOSTTY_VT_FLAG_FAINT = 1 << 2,
+    SPACES_GHOSTTY_VT_FLAG_INVERSE = 1 << 4,
+    SPACES_GHOSTTY_VT_FLAG_INVISIBLE = 1 << 5,
+    SPACES_GHOSTTY_VT_FLAG_STRIKE = 1 << 6,
+    SPACES_GHOSTTY_VT_FLAG_UNDERLINE = 1 << 7,
+    SPACES_GHOSTTY_VT_FLAG_SPACER = 1 << 10,
+};
 
 static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     if (symbols == NULL) return false;
@@ -91,14 +141,13 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     }
 
     if (handle == NULL) {
-        const char *fallback_name = "libghostty-vt.dylib";
-        handle = dlopen(fallback_name, RTLD_NOW | RTLD_LOCAL);
+        handle = dlopen("libghostty-vt.dylib", RTLD_NOW | RTLD_LOCAL);
     }
 
     if (handle == NULL) {
-        const char *fallback_name = "libghostty-vt.0.dylib";
-        handle = dlopen(fallback_name, RTLD_NOW | RTLD_LOCAL);
+        handle = dlopen("libghostty-vt.0.dylib", RTLD_NOW | RTLD_LOCAL);
     }
+
     if (handle == NULL) return false;
 
     symbols->handle = handle;
@@ -109,6 +158,20 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     symbols->formatter_format_alloc = (GhosttyFormatterFormatAllocFn)dlsym(handle, "ghostty_formatter_format_alloc");
     symbols->formatter_free = (GhosttyFormatterFreeFn)dlsym(handle, "ghostty_formatter_free");
     symbols->ghostty_free = (GhosttyFreeFn)dlsym(handle, "ghostty_free");
+    symbols->render_state_new = (GhosttyRenderStateNewFn)dlsym(handle, "ghostty_render_state_new");
+    symbols->render_state_free = (GhosttyRenderStateFreeFn)dlsym(handle, "ghostty_render_state_free");
+    symbols->render_state_update = (GhosttyRenderStateUpdateFn)dlsym(handle, "ghostty_render_state_update");
+    symbols->render_state_get = (GhosttyRenderStateGetFn)dlsym(handle, "ghostty_render_state_get");
+    symbols->render_state_colors_get = (GhosttyRenderStateColorsGetFn)dlsym(handle, "ghostty_render_state_colors_get");
+    symbols->row_iterator_new = (GhosttyRenderStateRowIteratorNewFn)dlsym(handle, "ghostty_render_state_row_iterator_new");
+    symbols->row_iterator_free = (GhosttyRenderStateRowIteratorFreeFn)dlsym(handle, "ghostty_render_state_row_iterator_free");
+    symbols->row_iterator_next = (GhosttyRenderStateRowIteratorNextFn)dlsym(handle, "ghostty_render_state_row_iterator_next");
+    symbols->row_get = (GhosttyRenderStateRowGetFn)dlsym(handle, "ghostty_render_state_row_get");
+    symbols->row_cells_new = (GhosttyRenderStateRowCellsNewFn)dlsym(handle, "ghostty_render_state_row_cells_new");
+    symbols->row_cells_free = (GhosttyRenderStateRowCellsFreeFn)dlsym(handle, "ghostty_render_state_row_cells_free");
+    symbols->row_cells_next = (GhosttyRenderStateRowCellsNextFn)dlsym(handle, "ghostty_render_state_row_cells_next");
+    symbols->row_cells_get = (GhosttyRenderStateRowCellsGetFn)dlsym(handle, "ghostty_render_state_row_cells_get");
+    symbols->cell_get = (GhosttyCellGetFn)dlsym(handle, "ghostty_cell_get");
 
     if (
         symbols->terminal_new == NULL ||
@@ -117,7 +180,21 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->formatter_terminal_new == NULL ||
         symbols->formatter_format_alloc == NULL ||
         symbols->formatter_free == NULL ||
-        symbols->ghostty_free == NULL
+        symbols->ghostty_free == NULL ||
+        symbols->render_state_new == NULL ||
+        symbols->render_state_free == NULL ||
+        symbols->render_state_update == NULL ||
+        symbols->render_state_get == NULL ||
+        symbols->render_state_colors_get == NULL ||
+        symbols->row_iterator_new == NULL ||
+        symbols->row_iterator_free == NULL ||
+        symbols->row_iterator_next == NULL ||
+        symbols->row_get == NULL ||
+        symbols->row_cells_new == NULL ||
+        symbols->row_cells_free == NULL ||
+        symbols->row_cells_next == NULL ||
+        symbols->row_cells_get == NULL ||
+        symbols->cell_get == NULL
     ) {
         dlclose(handle);
         memset(symbols, 0, sizeof(*symbols));
@@ -131,6 +208,310 @@ static void spaces_ghostty_vt_unload_symbols(SpacesGhosttyVtSymbols *symbols) {
     if (symbols == NULL || symbols->handle == NULL) return;
     dlclose(symbols->handle);
     memset(symbols, 0, sizeof(*symbols));
+}
+
+static uint32_t spaces_ghostty_vt_pack_rgb(GhosttyColorRgb color) {
+    return ((uint32_t)color.r << 16) | ((uint32_t)color.g << 8) | (uint32_t)color.b;
+}
+
+static void spaces_ghostty_vt_snapshot_reset(SpacesGhosttyVtSnapshot *snapshot) {
+    if (snapshot == NULL) return;
+    if (snapshot->cells != NULL) free(snapshot->cells);
+    memset(snapshot, 0, sizeof(*snapshot));
+}
+
+static bool spaces_ghostty_vt_format_plain_for_terminal(
+    const SpacesGhosttyVtSymbols *symbols,
+    GhosttyTerminal terminal,
+    char **out_ptr,
+    size_t *out_len
+) {
+    if (symbols == NULL || terminal == NULL || out_ptr == NULL || out_len == NULL) return false;
+
+    *out_ptr = NULL;
+    *out_len = 0;
+
+    GhosttyFormatter formatter = NULL;
+    GhosttyFormatterTerminalOptions formatter_options = GHOSTTY_INIT_SIZED(GhosttyFormatterTerminalOptions);
+    formatter_options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
+    formatter_options.trim = true;
+    if (symbols->formatter_terminal_new(NULL, &formatter, terminal, formatter_options) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+
+    uint8_t *formatted = NULL;
+    size_t formatted_len = 0;
+    if (symbols->formatter_format_alloc(formatter, NULL, &formatted, &formatted_len) != GHOSTTY_SUCCESS) {
+        symbols->formatter_free(formatter);
+        return false;
+    }
+
+    char *result = (char *)malloc(formatted_len + 1);
+    if (result == NULL) {
+        symbols->ghostty_free(NULL, formatted, formatted_len);
+        symbols->formatter_free(formatter);
+        return false;
+    }
+
+    if (formatted_len > 0) memcpy(result, formatted, formatted_len);
+    result[formatted_len] = '\0';
+
+    symbols->ghostty_free(NULL, formatted, formatted_len);
+    symbols->formatter_free(formatter);
+
+    *out_ptr = result;
+    *out_len = formatted_len;
+    return true;
+}
+
+static uint16_t spaces_ghostty_vt_flags_for_style(const GhosttyStyle *style, GhosttyCellWide wide) {
+    uint16_t flags = 0;
+    if (style != NULL) {
+        if (style->bold) flags |= SPACES_GHOSTTY_VT_FLAG_BOLD;
+        if (style->italic) flags |= SPACES_GHOSTTY_VT_FLAG_ITALIC;
+        if (style->faint) flags |= SPACES_GHOSTTY_VT_FLAG_FAINT;
+        if (style->inverse) flags |= SPACES_GHOSTTY_VT_FLAG_INVERSE;
+        if (style->invisible) flags |= SPACES_GHOSTTY_VT_FLAG_INVISIBLE;
+        if (style->strikethrough) flags |= SPACES_GHOSTTY_VT_FLAG_STRIKE;
+        if (style->underline != 0) flags |= SPACES_GHOSTTY_VT_FLAG_UNDERLINE;
+    }
+    if (wide == GHOSTTY_CELL_WIDE_SPACER_HEAD || wide == GHOSTTY_CELL_WIDE_SPACER_TAIL) {
+        flags |= SPACES_GHOSTTY_VT_FLAG_SPACER;
+    }
+    return flags;
+}
+
+static void spaces_ghostty_vt_fill_default_cells(
+    SpacesGhosttyVtSnapshotCell *cells,
+    size_t start,
+    size_t end,
+    uint32_t foreground_rgb,
+    uint32_t background_rgb
+) {
+    if (cells == NULL || end <= start) return;
+    for (size_t index = start; index < end; index++) {
+        cells[index].codepoint = 0;
+        cells[index].foreground_rgb = foreground_rgb;
+        cells[index].background_rgb = background_rgb;
+        cells[index].flags = 0;
+    }
+}
+
+SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(uint16_t columns, uint16_t rows, size_t max_scrollback) {
+    if (columns == 0 || rows == 0) return NULL;
+
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)calloc(1, sizeof(SpacesGhosttyVtSession));
+    if (session == NULL) return NULL;
+
+    if (!spaces_ghostty_vt_load_symbols(&session->symbols)) {
+        free(session);
+        return NULL;
+    }
+
+    GhosttyTerminalOptions terminal_options = {
+        .cols = columns,
+        .rows = rows,
+        .max_scrollback = max_scrollback,
+    };
+    if (session->symbols.terminal_new(NULL, &session->terminal, terminal_options) != GHOSTTY_SUCCESS) {
+        spaces_ghostty_vt_session_free(session);
+        return NULL;
+    }
+
+    if (session->symbols.render_state_new(NULL, &session->render_state) != GHOSTTY_SUCCESS) {
+        spaces_ghostty_vt_session_free(session);
+        return NULL;
+    }
+
+    if (session->symbols.row_iterator_new(NULL, &session->row_iterator) != GHOSTTY_SUCCESS) {
+        spaces_ghostty_vt_session_free(session);
+        return NULL;
+    }
+
+    if (session->symbols.row_cells_new(NULL, &session->row_cells) != GHOSTTY_SUCCESS) {
+        spaces_ghostty_vt_session_free(session);
+        return NULL;
+    }
+
+    return session;
+}
+
+void spaces_ghostty_vt_session_free(SpacesGhosttyVtSession *session) {
+    if (session == NULL) return;
+
+    if (session->row_cells != NULL && session->symbols.row_cells_free != NULL) {
+        session->symbols.row_cells_free(session->row_cells);
+    }
+    if (session->row_iterator != NULL && session->symbols.row_iterator_free != NULL) {
+        session->symbols.row_iterator_free(session->row_iterator);
+    }
+    if (session->render_state != NULL && session->symbols.render_state_free != NULL) {
+        session->symbols.render_state_free(session->render_state);
+    }
+    if (session->terminal != NULL && session->symbols.terminal_free != NULL) {
+        session->symbols.terminal_free(session->terminal);
+    }
+
+    spaces_ghostty_vt_unload_symbols(&session->symbols);
+    free(session);
+}
+
+bool spaces_ghostty_vt_session_write(SpacesGhosttyVtSession *session, const uint8_t *input, size_t input_len) {
+    if (session == NULL || session->terminal == NULL) return false;
+    if (input == NULL || input_len == 0) return true;
+    session->symbols.terminal_vt_write(session->terminal, input, input_len);
+    return true;
+}
+
+bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, SpacesGhosttyVtSnapshot *out_snapshot) {
+    if (session == NULL || out_snapshot == NULL) return false;
+
+    spaces_ghostty_vt_snapshot_reset(out_snapshot);
+
+    if (session->symbols.render_state_update(session->render_state, session->terminal) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+
+    uint16_t columns = 0;
+    uint16_t rows = 0;
+    bool cursor_visible = false;
+    bool cursor_has_position = false;
+    uint16_t cursor_column = 0;
+    uint16_t cursor_row = 0;
+    size_t cell_count = 0;
+
+    if (
+        session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_COLS, &columns) != GHOSTTY_SUCCESS ||
+        session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_ROWS, &rows) != GHOSTTY_SUCCESS ||
+        session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE, &cursor_visible) != GHOSTTY_SUCCESS ||
+        session->symbols.render_state_get(
+            session->render_state,
+            GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE,
+            &cursor_has_position
+        ) != GHOSTTY_SUCCESS
+    ) {
+        return false;
+    }
+
+    if (cursor_has_position) {
+        if (
+            session->symbols.render_state_get(
+                session->render_state,
+                GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X,
+                &cursor_column
+            ) != GHOSTTY_SUCCESS ||
+            session->symbols.render_state_get(
+                session->render_state,
+                GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y,
+                &cursor_row
+            ) != GHOSTTY_SUCCESS
+        ) {
+            return false;
+        }
+    }
+
+    GhosttyRenderStateColors colors = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
+    if (session->symbols.render_state_colors_get(session->render_state, &colors) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+
+    cell_count = (size_t)columns * (size_t)rows;
+    SpacesGhosttyVtSnapshotCell *cells = NULL;
+    if (cell_count > 0) {
+        cells = (SpacesGhosttyVtSnapshotCell *)calloc(cell_count, sizeof(SpacesGhosttyVtSnapshotCell));
+        if (cells == NULL) return false;
+        spaces_ghostty_vt_fill_default_cells(
+            cells,
+            0,
+            cell_count,
+            spaces_ghostty_vt_pack_rgb(colors.foreground),
+            spaces_ghostty_vt_pack_rgb(colors.background)
+        );
+    }
+
+    if (session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &session->row_iterator) != GHOSTTY_SUCCESS) {
+        free(cells);
+        return false;
+    }
+
+    size_t cell_index = 0;
+    while (cell_index < cell_count && session->symbols.row_iterator_next(session->row_iterator)) {
+        if (
+            session->symbols.row_get(
+                session->row_iterator,
+                GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                &session->row_cells
+            ) != GHOSTTY_SUCCESS
+        ) {
+            free(cells);
+            return false;
+        }
+
+        size_t row_start = cell_index;
+        size_t row_end = row_start + (size_t)columns;
+        while (cell_index < row_end && session->symbols.row_cells_next(session->row_cells)) {
+            GhosttyCell raw_cell = 0;
+            GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
+            GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
+            GhosttyColorRgb foreground = colors.foreground;
+            GhosttyColorRgb background = colors.background;
+            uint32_t codepoint = 0;
+
+            session->symbols.row_cells_get(session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &raw_cell);
+            session->symbols.row_cells_get(session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
+            session->symbols.cell_get(raw_cell, GHOSTTY_CELL_DATA_CODEPOINT, &codepoint);
+            session->symbols.cell_get(raw_cell, GHOSTTY_CELL_DATA_WIDE, &wide);
+            if (
+                session->symbols.row_cells_get(session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR, &foreground) !=
+                GHOSTTY_SUCCESS
+            ) {
+                foreground = colors.foreground;
+            }
+            if (
+                session->symbols.row_cells_get(session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, &background) !=
+                GHOSTTY_SUCCESS
+            ) {
+                background = colors.background;
+            }
+
+            cells[cell_index].codepoint = codepoint;
+            cells[cell_index].foreground_rgb = spaces_ghostty_vt_pack_rgb(foreground);
+            cells[cell_index].background_rgb = spaces_ghostty_vt_pack_rgb(background);
+            cells[cell_index].flags = spaces_ghostty_vt_flags_for_style(&style, wide);
+            cell_index++;
+        }
+
+        if (cell_index < row_end) {
+            spaces_ghostty_vt_fill_default_cells(
+                cells,
+                cell_index,
+                row_end,
+                spaces_ghostty_vt_pack_rgb(colors.foreground),
+                spaces_ghostty_vt_pack_rgb(colors.background)
+            );
+            cell_index = row_end;
+        }
+    }
+
+    out_snapshot->columns = columns;
+    out_snapshot->rows = rows;
+    out_snapshot->cursor_column = cursor_column;
+    out_snapshot->cursor_row = cursor_row;
+    out_snapshot->cursor_visible = cursor_visible;
+    out_snapshot->default_foreground_rgb = spaces_ghostty_vt_pack_rgb(colors.foreground);
+    out_snapshot->default_background_rgb = spaces_ghostty_vt_pack_rgb(colors.background);
+    out_snapshot->cell_count = cell_count;
+    out_snapshot->cells = cells;
+    return true;
+}
+
+bool spaces_ghostty_vt_session_format_plain(SpacesGhosttyVtSession *session, char **out_ptr, size_t *out_len) {
+    if (session == NULL) return false;
+    return spaces_ghostty_vt_format_plain_for_terminal(&session->symbols, session->terminal, out_ptr, out_len);
+}
+
+void spaces_ghostty_vt_snapshot_free(SpacesGhosttyVtSnapshot *snapshot) {
+    spaces_ghostty_vt_snapshot_reset(snapshot);
 }
 
 bool spaces_ghostty_vt_render_plain(
@@ -149,63 +530,17 @@ bool spaces_ghostty_vt_render_plain(
     *out_ptr = NULL;
     *out_len = 0;
 
-    SpacesGhosttyVtSymbols symbols;
-    if (!spaces_ghostty_vt_load_symbols(&symbols)) return false;
+    SpacesGhosttyVtSession *session = spaces_ghostty_vt_session_new(columns, rows, max_scrollback);
+    if (session == NULL) return false;
 
-    GhosttyTerminal terminal = NULL;
-    GhosttyTerminalOptions terminal_options = {
-        .cols = columns,
-        .rows = rows,
-        .max_scrollback = max_scrollback,
-    };
-    if (symbols.terminal_new(NULL, &terminal, terminal_options) != GHOSTTY_SUCCESS) {
-        spaces_ghostty_vt_unload_symbols(&symbols);
+    if (!spaces_ghostty_vt_session_write(session, input, input_len)) {
+        spaces_ghostty_vt_session_free(session);
         return false;
     }
 
-    if (input != NULL && input_len > 0) {
-        symbols.terminal_vt_write(terminal, input, input_len);
-    }
-
-    GhosttyFormatter formatter = NULL;
-    GhosttyFormatterTerminalOptions formatter_options = GHOSTTY_INIT_SIZED(GhosttyFormatterTerminalOptions);
-    formatter_options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
-    formatter_options.trim = true;
-    if (symbols.formatter_terminal_new(NULL, &formatter, terminal, formatter_options) != GHOSTTY_SUCCESS) {
-        symbols.terminal_free(terminal);
-        spaces_ghostty_vt_unload_symbols(&symbols);
-        return false;
-    }
-
-    uint8_t *formatted = NULL;
-    size_t formatted_len = 0;
-    if (symbols.formatter_format_alloc(formatter, NULL, &formatted, &formatted_len) != GHOSTTY_SUCCESS) {
-        symbols.formatter_free(formatter);
-        symbols.terminal_free(terminal);
-        spaces_ghostty_vt_unload_symbols(&symbols);
-        return false;
-    }
-
-    char *result = (char *)malloc(formatted_len + 1);
-    if (result == NULL) {
-        symbols.ghostty_free(NULL, formatted, formatted_len);
-        symbols.formatter_free(formatter);
-        symbols.terminal_free(terminal);
-        spaces_ghostty_vt_unload_symbols(&symbols);
-        return false;
-    }
-
-    if (formatted_len > 0) memcpy(result, formatted, formatted_len);
-    result[formatted_len] = '\0';
-
-    symbols.ghostty_free(NULL, formatted, formatted_len);
-    symbols.formatter_free(formatter);
-    symbols.terminal_free(terminal);
-    spaces_ghostty_vt_unload_symbols(&symbols);
-
-    *out_ptr = result;
-    *out_len = formatted_len;
-    return true;
+    bool succeeded = spaces_ghostty_vt_session_format_plain(session, out_ptr, out_len);
+    spaces_ghostty_vt_session_free(session);
+    return succeeded;
 }
 
 void spaces_ghostty_vt_free_buffer(char *ptr) {

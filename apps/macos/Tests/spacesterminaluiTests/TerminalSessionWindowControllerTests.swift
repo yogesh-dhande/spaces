@@ -20,6 +20,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         var attachCount = 0
         var activeOwnerClientIDValue: String?
         var debugSurfaceRefreshRequestCount = 0
+        var prefersOutputFallbackWhenSurfaceUnavailable = false
 
         func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
             attachCount += 1
@@ -120,6 +121,29 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))
         XCTAssertEqual(capture.detachedClientID, capture.attachedClientID)
+    }
+
+    @MainActor func testCloseForSessionTerminationSkipsDetachAndSurfaceParking() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let capture = ClientCapture()
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        let controller = makeGhosttyController(
+            sessionID: "session-termination", paths: .init(rootDirectory: root.path), host: host,
+            attachClientAction: { client, _ in capture.attachedClientID = client.id },
+            detachClientAction: { clientID in capture.detachedClientID = clientID })
+
+        controller.show()
+        XCTAssertNotNil(capture.attachedClientID)
+
+        controller.closeForSessionTermination()
+
+        XCTAssertNil(capture.detachedClientID)
+        XCTAssertFalse(host.didParkSurface)
+        XCTAssertTrue(controller.debugDidCloseWindow)
     }
 
     @MainActor func testCommandWClosesOnlyTerminalWindow() throws {

@@ -14,6 +14,10 @@ REQUIRED_EXPORTS=(
     "ghostty_surface_send_input_raw"
 )
 
+if [[ "${SPACES_GHOSTTYKIT_REQUIRE_HOST_REBIND:-0}" == "1" ]]; then
+    REQUIRED_EXPORTS+=("ghostty_surface_set_host")
+fi
+
 file_contains_fixed() {
     local needle="$1"
     local path="$2"

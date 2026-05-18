@@ -1,11 +1,64 @@
 import AppKit
 import Testing
 import spacesterminalcore
+import spacesterminalghostty
 
 @testable import spacesterminalui
 @testable import spacesui
 
 @Suite struct AppKitControllerWindowSummonTests {
+    @MainActor @Test func terminalSessionHostUsesEmbeddedHostForLocallyOwnedSession() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: "local-session")
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "local-session", title: "local", workingDirectory: root.path, shell: "/bin/zsh", command: nil,
+            createdAt: "2026-05-18T00:00:00Z")
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let embeddedHost = GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths)
+
+        let resolvedHost = AppKitController.terminalSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+
+        #expect(resolvedHost as AnyObject === embeddedHost)
+    }
+
+    @MainActor @Test func localBuiltInWindowsSkipTerminalControlSocketClientActions() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: "local-session")
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "local-session", title: "local", workingDirectory: root.path, shell: "/bin/zsh", command: nil,
+            createdAt: "2026-05-18T00:00:00Z")
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        _ = GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths)
+
+        #expect(!AppKitController.shouldUseTerminalControlSocketClientActions(sessionID: "local-session"))
+        #expect(AppKitController.shouldUseTerminalControlSocketClientActions(sessionID: "remote-session"))
+    }
+
+    @MainActor @Test func terminalSessionHostFallsBackToRemoteHostWhenNoLocalOwnerExists() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-session", title: "remote", workingDirectory: root.path, shell: "/bin/zsh", command: nil,
+            createdAt: "2026-05-18T00:00:00Z")
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let resolvedHost = AppKitController.terminalSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+
+        #expect(resolvedHost is RemoteGhosttySessionHost)
+    }
+
     @Test func activeSpaceSummonAddsMoveToActiveSpaceBehavior() {
         let behavior = NSWindow.CollectionBehavior.fullScreenAuxiliary
 

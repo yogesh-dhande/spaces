@@ -19,6 +19,7 @@ let package = Package(
         .library(name: "spacesui", targets: ["spacesui"]),
         .library(name: "spacescli", targets: ["spacescli"]),
         .executable(name: "spacese2e", targets: ["spacese2e"]),
+        .executable(name: "SpacesTerminalService", targets: ["SpacesTerminalService"]),
         .executable(name: "spaces", targets: ["spaces"]),
         .executable(name: "SpacesApp", targets: ["SpacesApp"])
     ],
@@ -41,7 +42,7 @@ let package = Package(
         .target(name: "spacesterminalcore", dependencies: ["ghosttyvtshim"]),
         .target(
             name: "spacesterminalghostty",
-            dependencies: ["spacesterminalcore", "GhosttyKit"],
+            dependencies: ["spacesterminalcore", "ghosttyvtshim", "GhosttyKit"],
             linkerSettings: [.linkedLibrary("c++")]
         ),
         .target(
@@ -80,6 +81,11 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ],
             path: "Sources/spacese2e"
+        ),
+        .executableTarget(
+            name: "SpacesTerminalService",
+            dependencies: ["spacesterminalcore", "spacesterminalghostty"],
+            path: "Sources/SpacesTerminalService"
         ),
         .executableTarget(name: "spaces", dependencies: ["spacescli"], path: "Sources/spaces"),
         .executableTarget(

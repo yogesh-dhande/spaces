@@ -56,6 +56,7 @@ final class TerminalSessionModelTests: XCTestCase {
         let decoded = try JSONDecoder().decode(TerminalSessionLaunchConfiguration.self, from: json)
 
         XCTAssertEqual(decoded.backend, .ghosttyEmbedded)
+        XCTAssertEqual(decoded.lifetimePolicy, .persistent)
         XCTAssertEqual(decoded.sessionID, "session-legacy")
     }
 
@@ -74,6 +75,8 @@ final class TerminalSessionModelTests: XCTestCase {
 
         XCTAssertEqual(decoded.backend, .ghosttyEmbedded)
         XCTAssertEqual(decoded.childPID, 456)
+        XCTAssertNil(decoded.title)
+        XCTAssertNil(decoded.workingDirectory)
     }
 
     func testAttachAndDetachClientPersistsActiveOwner() throws {

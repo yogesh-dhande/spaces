@@ -56,20 +56,8 @@ struct TerminalListCommand: ParsableCommand {
 }
 
 func availableTerminalSessionRows(fileManager: FileManager = .default) throws -> [String] {
-    try TerminalSessionPersistence.listKnownSessions(fileManager: fileManager).compactMap { session in
-        let paths = try TerminalSessionPaths.forSession(id: session.sessionID)
-        guard fileManager.fileExists(atPath: paths.controlSocketPath), fileManager.fileExists(atPath: paths.statePath) else { return nil }
-        guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
-        guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }
-        guard isProcessAlive(pid: runtimeState.servicePID) else { return nil }
-        return "\(session.sessionID)\tstate=\(runtimeState.state.rawValue)\tcwd=\(session.workingDirectory)"
-    }
-}
-
-private func isProcessAlive(pid: Int32) -> Bool {
-    guard pid > 0 else { return false }
-    if kill(pid, 0) == 0 { return true }
-    return errno == EPERM
+    _ = fileManager
+    return try TerminalService.listSessions().map { session in "\(session.id)\tstate=\(session.state.rawValue)\tcwd=\(session.workingDirectory)" }
 }
 
 struct TerminalCommandCommand: ParsableCommand {
@@ -96,12 +84,9 @@ struct TerminalCommandCommand: ParsableCommand {
         let resolvedTitle = title ?? terminalDefaultTitle(command: command, cwd: workingDirectory)
         let createdAt = ISO8601DateFormatter().string(from: Date())
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: sessionID, backend: backend, title: resolvedTitle, workingDirectory: workingDirectory, shell: resolvedShell, command: command,
-            createdAt: createdAt)
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        try paths.ensureDirectories()
-        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
-        FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
+            sessionID: sessionID, backend: backend, lifetimePolicy: .whileAttached, title: resolvedTitle, workingDirectory: workingDirectory,
+            shell: resolvedShell, command: command, createdAt: createdAt)
+        let session = try TerminalService.createSession(launchConfiguration)
 
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.openTerminalSessionWindow, object: nil,
@@ -110,18 +95,7 @@ struct TerminalCommandCommand: ParsableCommand {
                 IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
             ], options: [.deliverImmediately])
 
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline {
-            if FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) { break }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-
-        guard FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) else {
-            throw WorkspaceError.invalidArgument(
-                message: "Timed out waiting for SpacesApp to create the Spaces terminal session. Ensure the app is running.")
-        }
-
-        print("Started terminal session \(sessionID)\ttitle=\(resolvedTitle)\tbackend=\(backend.rawValue)\tcwd=\(workingDirectory)")
+        print("Started terminal session \(session.id)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tcwd=\(session.workingDirectory)")
     }
 }
 

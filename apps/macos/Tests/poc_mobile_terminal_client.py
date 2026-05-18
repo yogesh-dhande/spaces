@@ -82,6 +82,15 @@ def wait_for_active_owner(paths_root: Path, session_id: str, excluded_client_ids
     raise RuntimeError(f"Timed out waiting for active owner attachment. Last snapshot:\n{last_snapshot}")
 
 
+def read_service_pid(paths_root: Path, session_id: str) -> int | None:
+    state_path = paths_root / "terminal" / "sessions" / session_id / "state.json"
+    if not state_path.exists():
+        return None
+    payload = json.loads(state_path.read_text())
+    pid = payload.get("servicePID")
+    return int(pid) if pid is not None else None
+
+
 def start_spaces_app(spaces_app: Path, env: dict[str, str]) -> subprocess.Popen[str]:
     return subprocess.Popen(
         [str(spaces_app)],
@@ -145,6 +154,7 @@ def main() -> int:
     session_id = None
     mobile_client = None
     send_request = None
+    service_pid = None
     try:
         if args.start_app:
             app_process = start_spaces_app(spaces_app, env)
@@ -169,6 +179,7 @@ def main() -> int:
         if not match:
             raise RuntimeError(f"Unable to parse session id from:\n{result.stdout}")
         session_id = match.group(1)
+        service_pid = read_service_pid(temp_root, session_id)
 
         auth_token = str(uuid.uuid4()).upper()
         proxy_process = subprocess.Popen(
@@ -292,6 +303,11 @@ def main() -> int:
                 app_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 app_process.kill()
+        if service_pid is not None:
+            try:
+                os.kill(service_pid, 15)
+            except ProcessLookupError:
+                pass
         shutil.rmtree(temp_root, ignore_errors=True)
 
 

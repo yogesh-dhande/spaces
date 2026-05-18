@@ -63,7 +63,8 @@ public final class GhosttyEmbeddedTerminalSessionRuntime: TerminalSessionBackend
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
-                state: .running, updatedAt: now(), columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows), paths: paths)
+                state: .running, updatedAt: now(), title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory,
+                columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows), paths: paths)
 
         try startControlServer()
         startStateTimer()
@@ -244,7 +245,8 @@ public final class GhosttyEmbeddedTerminalSessionRuntime: TerminalSessionBackend
         try? TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
-                state: .running, updatedAt: now(), columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows), paths: paths)
+                state: .running, updatedAt: now(), title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory,
+                columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows), paths: paths)
     }
 
     @MainActor private func observedChildPID() -> Int32? {
@@ -280,7 +282,8 @@ public final class GhosttyEmbeddedTerminalSessionRuntime: TerminalSessionBackend
         try? TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
-                state: .exited, updatedAt: now(), exitedAt: now(), columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows),
+                state: .exited, updatedAt: now(), exitedAt: now(), title: launchConfiguration.title,
+                workingDirectory: launchConfiguration.workingDirectory, columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows),
             paths: paths)
         exitCode = 0
         controlServer?.stop()

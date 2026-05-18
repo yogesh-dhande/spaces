@@ -84,6 +84,7 @@ import spacesterminalghostty
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
     private let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void
     private let detachClientAction: @Sendable (String) throws -> Void
+    private let usesCustomAttachClientAction: Bool
     private let copySelectionAction: (@MainActor () -> Bool)?
     private let pasteClipboardAction: (@MainActor () -> Bool)?
     private let ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)?
@@ -98,6 +99,7 @@ import spacesterminalghostty
     private var pendingWindowFramePersistTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
     private var isClientAttached = false
+    private var closesForSessionTermination = false
     private var didCloseWindow = false
     private var lastObservedAttachmentMode: TerminalAttachmentMode?
     private var ghosttySessionHost: (any TerminalGhosttySessionHosting)?
@@ -136,7 +138,8 @@ import spacesterminalghostty
         ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
         onWindowClose: (@MainActor (String, String) -> Void)? = nil,
         loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
-        saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil
+        saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil,
+        sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
     ) {
         self.init(
             sessionID: sessionID, paths: paths, preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh,
@@ -144,7 +147,9 @@ import spacesterminalghostty
             detachClientAction: detachClientAction, copySelectionAction: copySelectionAction, pasteClipboardAction: pasteClipboardAction,
             ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowFocus: onWindowFocus,
             onWindowClose: onWindowClose, loadWindowFrameAction: loadWindowFrameAction, saveWindowFrameAction: saveWindowFrameAction,
-            sessionHostProvider: { launchConfiguration, paths in GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths) })
+            sessionHostProvider: sessionHostProvider ?? { launchConfiguration, paths in
+                GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths)
+            })
     }
 
     init(
@@ -189,6 +194,7 @@ import spacesterminalghostty
                 try TerminalControlClient.send(
                     request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
             }
+        usesCustomAttachClientAction = attachClientAction != nil
         self.attachClientAction =
             attachClientAction ?? { client, mode in
                 try TerminalSessionPersistence.attachClient(
@@ -232,18 +238,34 @@ import spacesterminalghostty
         guard let window else { return }
         let startedAt = Date()
         let wasVisible = isWindowPresented(window) && !didCloseWindow
+        let defersGhosttyClientAttach = backend == .ghosttyEmbedded && !usesCustomAttachClientAction
         didCloseWindow = false
-        attachLocalClientIfNeeded()
+        if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
+        let attachStartedAt = Date()
+        if !defersGhosttyClientAttach { attachLocalClientIfNeeded() }
+        logShowStage(startedAt: attachStartedAt, requestID: requestID, detail: "stage=attach_client deferred=\(defersGhosttyClientAttach ? 1 : 0)")
+        let preRefreshStartedAt = Date()
         refreshNow(allowGhosttyOwnerAttach: false)
+        logShowStage(startedAt: preRefreshStartedAt, requestID: requestID, detail: "stage=refresh_before_show")
         if !wasVisible {
             restorePersistedWindowFrame(window)
             constrainWindowToVisibleFrame(window)
         }
+        let presentStartedAt = Date()
         presentWindow(window, forceFrontmost: !wasVisible)
+        logShowStage(startedAt: presentStartedAt, requestID: requestID, detail: "stage=present_window visible=\(wasVisible ? 1 : 0)")
+        let attachSurfaceStartedAt = Date()
         if backend == .ghosttyEmbedded { ensureGhosttyHostAttached(requestID: requestID, reason: "show") }
+        logShowStage(startedAt: attachSurfaceStartedAt, requestID: requestID, detail: "stage=attach_surface")
+        let postRefreshStartedAt = Date()
         refreshNow()
+        logShowStage(startedAt: postRefreshStartedAt, requestID: requestID, detail: "stage=refresh_after_show")
+        let startRefreshingStartedAt = Date()
         startRefreshing()
+        logShowStage(startedAt: startRefreshingStartedAt, requestID: requestID, detail: "stage=start_refresh")
+        let firstResponderStartedAt = Date()
         assignPreferredFirstResponder()
+        logShowStage(startedAt: firstResponderStartedAt, requestID: requestID, detail: "stage=assign_first_responder")
         logFocusMetric("terminal_window_show", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "show")")
     }
 
@@ -271,15 +293,22 @@ import spacesterminalghostty
         logFocusMetric("terminal_window_focus", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "focus")")
     }
 
+    public func closeForSessionTermination() {
+        closesForSessionTermination = true
+        window?.close()
+    }
+
     public func windowWillClose(_ notification: Notification) {
+        let sessionIsTerminating = closesForSessionTermination
+        closesForSessionTermination = false
         didCloseWindow = true
         hasHeadlessPresentation = false
         persistCurrentWindowFrame(immediately: true)
         if backend == .ghosttyEmbedded {
             syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false)
-            ghosttySessionHost?.parkSurfaceInHiddenHostWindow()
+            if !sessionIsTerminating { ghosttySessionHost?.parkSurfaceInHiddenHostWindow() }
         }
-        detachLocalClientIfNeeded()
+        if sessionIsTerminating { isClientAttached = false } else { detachLocalClientIfNeeded() }
         refreshTask?.cancel()
         refreshTask = nil
         onWindowClose?(sessionID, client.id)
@@ -630,6 +659,7 @@ import spacesterminalghostty
             let host = sessionHostProvider(launchConfiguration, paths)
             ghosttySessionHost = host
             try host.attach(client: client, mode: preferredAttachmentMode, into: preferredAttachmentMode == .owner ? terminalContainer : nil)
+            isClientAttached = true
             lastObservedAttachmentMode = preferredAttachmentMode
             lastObservedOwnerClientID = host.activeOwnerClientID()
             syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: preferredAttachmentMode == .owner)
@@ -654,6 +684,10 @@ import spacesterminalghostty
         TerminalPerformance.logMetric(
             metric, target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
             detail: "\(detail)\(requestDetail)")
+    }
+
+    private func logShowStage(startedAt: Date, requestID: String?, detail: String) {
+        logFocusMetric("terminal_window_show_stage", startedAt: startedAt, requestID: requestID, detail: detail)
     }
 
     private func beginPendingFocusObservation(startedAt: Date, requestID: String?, route: String) {
@@ -882,6 +916,37 @@ import spacesterminalghostty
                 completePendingPassiveOutputMeasurement(renderer: "viewer_exited_output", changedOutput: didUpdatePassivePresentation)
                 completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_exited_output")
             case .outputFallback:
+                if let snapshot = ghosttySessionHost?.snapshot() {
+                    outputView.textStorage?.setAttributedString(
+                        GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
+                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
+                    outputView.sizeToFit()
+                    lastRenderedOutput = outputView.string
+                    lastGhosttyViewerSnapshotText = outputView.string
+                    restoreOutputViewportState(viewportState)
+                    didUpdatePassivePresentation = true
+                    let rendererName = isOwner == true ? "owner_snapshot_fallback" : "viewer_snapshot_fallback"
+                    let transitionTarget: OwnershipTransitionTarget = isOwner == true ? .owner : .viewer
+                    completePendingPassiveOutputMeasurement(renderer: rendererName, changedOutput: true)
+                    completeOwnershipTransitionIfNeeded(target: transitionTarget, renderer: rendererName)
+                    return
+                }
+                if let snapshotText = ghosttySessionHost?.snapshotText() {
+                    if snapshotText != lastRenderedOutput {
+                        outputView.string = snapshotText
+                        if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
+                        outputView.sizeToFit()
+                        lastRenderedOutput = snapshotText
+                        didUpdatePassivePresentation = true
+                    }
+                    lastGhosttyViewerSnapshotText = snapshotText
+                    restoreOutputViewportState(viewportState)
+                    let rendererName = isOwner == true ? "owner_snapshot_text_fallback" : "viewer_snapshot_text_fallback"
+                    let transitionTarget: OwnershipTransitionTarget = isOwner == true ? .owner : .viewer
+                    completePendingPassiveOutputMeasurement(renderer: rendererName, changedOutput: didUpdatePassivePresentation)
+                    completeOwnershipTransitionIfNeeded(target: transitionTarget, renderer: rendererName)
+                    return
+                }
                 let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 200)) ?? ""
                 if output != lastRenderedOutput {
                     outputView.string = output
@@ -892,7 +957,7 @@ import spacesterminalghostty
                 }
                 restoreOutputViewportState(viewportState)
                 completePendingPassiveOutputMeasurement(renderer: "output_tail", changedOutput: didUpdatePassivePresentation)
-                completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "output_tail")
+                completeOwnershipTransitionIfNeeded(target: isOwner == true ? .owner : .viewer, renderer: "output_tail")
             case .ghosttyOwner: break
             }
         } catch {
@@ -1239,6 +1304,7 @@ import spacesterminalghostty
         guard case .ghosttyEmbedded = rendererMode else { return .outputFallback }
         if isOwner == true { return ghosttySessionHost?.hasRenderableSurface() == true ? .ghosttyOwner : .outputFallback }
         if ghosttySessionHost?.hasRenderableSurface() == true { return .ghosttyViewerSnapshot }
+        if ghosttySessionHost?.prefersOutputFallbackWhenSurfaceUnavailable == true { return .outputFallback }
         if isInteractiveRuntimeState(lastObservedRuntimeState) { return .ghosttyViewerLoading }
         return .ghosttyViewerExitedOutput
     }
@@ -1262,19 +1328,25 @@ import spacesterminalghostty
         case .ghosttyViewerLoading: return "Renderer: libghostty loading (viewer)"
         case .ghosttyViewerSnapshot: return "Renderer: libghostty snapshot (viewer)"
         case .ghosttyViewerExitedOutput: return "Renderer: final output (viewer)"
-        case .outputFallback: return "Renderer: output tail (owner fallback)"
+        case .outputFallback:
+            if backend == .ghosttyEmbedded, ghosttySessionHost?.prefersOutputFallbackWhenSurfaceUnavailable == false,
+                ghosttySessionHost?.snapshot() != nil || ghosttySessionHost?.snapshotText() != nil
+            {
+                return "Renderer: libghostty snapshot (owner fallback)"
+            }
+            return "Renderer: output tail (owner fallback)"
         }
     }
 
     private func currentWindowTitle(fallback: String, isOwner: Bool) -> String {
         guard backend == .ghosttyEmbedded else { return fallback }
-        let baseTitle = ghosttySessionHost?.effectiveTitle ?? fallback
+        let baseTitle = ghosttySessionHost?.effectiveTitle ?? lastObservedRuntimeState?.title ?? fallback
         return isOwner ? baseTitle : "\(baseTitle) (viewer)"
     }
 
     private func currentSummaryWorkingDirectory(fallback: String) -> String {
         guard backend == .ghosttyEmbedded else { return fallback }
-        return ghosttySessionHost?.effectiveWorkingDirectory ?? fallback
+        return ghosttySessionHost?.effectiveWorkingDirectory ?? lastObservedRuntimeState?.workingDirectory ?? fallback
     }
 
     private func currentRepresentedURL(workingDirectory: String) -> URL? {

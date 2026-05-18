@@ -8,8 +8,12 @@ RELEASE_TAG_FILE="$APP_ROOT/ghosttykit-release-tag.txt"
 LOCAL_ROOT="$APP_ROOT/.local/ghosttykit"
 XCFRAMEWORK_ROOT="$LOCAL_ROOT/GhosttyKit.xcframework"
 RESOURCES_ROOT="$LOCAL_ROOT/Resources"
+GHOSTTYVT_LOCAL_ROOT="$APP_ROOT/.local/ghosttyvt"
+GHOSTTYVT_SOURCE_ROOT="${SPACES_GHOSTTYVT_SOURCE_ROOT:-$GHOSTTYVT_LOCAL_ROOT/src}"
+GHOSTTYVT_TOOLCHAIN_ROOT="$GHOSTTYVT_LOCAL_ROOT/toolchain/zig-aarch64-macos-0.15.2"
 SOURCE_PROJECT_DIR="${SPACES_PROJECT_DIR:-}"
 FORK_REPO="${SPACES_GHOSTTYKIT_REPO:-yogesh-dhande/ghostty}"
+BUILD_FROM_SOURCE="${SPACES_GHOSTTYKIT_BUILD_FROM_SOURCE:-0}"
 
 if [[ -f "$RELEASE_TAG_FILE" ]]; then
     DEFAULT_RELEASE_TAG="$(tr -d '[:space:]' < "$RELEASE_TAG_FILE")"
@@ -48,7 +52,65 @@ copy_from_existing_checkout_if_available() {
     fi
 }
 
+build_local_source_if_requested() {
+    [[ "$BUILD_FROM_SOURCE" == "1" ]] || return 0
+
+    if [[ ! -d "$GHOSTTYVT_SOURCE_ROOT" ]]; then
+        echo "Ghostty source checkout not found at $GHOSTTYVT_SOURCE_ROOT. Run apps/macos/scripts/setup_ghosttyvt.sh first." >&2
+        exit 1
+    fi
+
+    local zig_bin="${SPACES_GHOSTTYKIT_ZIG_BIN:-$GHOSTTYVT_TOOLCHAIN_ROOT/zig}"
+    if [[ ! -x "$zig_bin" ]]; then
+        if command -v zig >/dev/null 2>&1; then
+            zig_bin="$(command -v zig)"
+        else
+            echo "Zig compiler not found. Run apps/macos/scripts/setup_ghosttyvt.sh first or set SPACES_GHOSTTYKIT_ZIG_BIN." >&2
+            exit 1
+        fi
+    fi
+
+    local version_line
+    version_line="$(grep -m1 '\.version = ' "$GHOSTTYVT_SOURCE_ROOT/build.zig.zon" || true)"
+    local app_version
+    app_version="$(sed -E 's/.*"([^"]+)".*/\1/' <<<"$version_line")"
+    if [[ -z "$app_version" || "$app_version" == "$version_line" ]]; then
+        echo "Failed to determine Ghostty version string from $GHOSTTYVT_SOURCE_ROOT/build.zig.zon" >&2
+        exit 1
+    fi
+
+    echo "==> Building GhosttyKit.xcframework from local Ghostty source at $GHOSTTYVT_SOURCE_ROOT"
+    (
+        cd "$GHOSTTYVT_SOURCE_ROOT"
+        "$zig_bin" build -Demit-xcframework=true -Demit-macos-app=false -Di18n=false -Dversion-string="$app_version"
+    )
+}
+
+copy_from_local_source_build_if_requested() {
+    [[ "$BUILD_FROM_SOURCE" == "1" ]] || return 0
+
+    local source_xcframework="$GHOSTTYVT_SOURCE_ROOT/macos/GhosttyKit.xcframework"
+    local source_ghostty_resources="$GHOSTTYVT_SOURCE_ROOT/zig-out/share/ghostty"
+    local source_terminfo_resources="$GHOSTTYVT_SOURCE_ROOT/zig-out/share/terminfo"
+
+    if [[ ! -d "$source_xcframework" || ! -d "$source_ghostty_resources" || ! -d "$source_terminfo_resources" ]]; then
+        echo "Local Ghostty source build artifacts are incomplete under $GHOSTTYVT_SOURCE_ROOT." >&2
+        exit 1
+    fi
+
+    echo "==> Installing GhosttyKit artifacts from local Ghostty source build"
+    rm -rf "$XCFRAMEWORK_ROOT"
+    cp -R "$source_xcframework" "$XCFRAMEWORK_ROOT"
+
+    mkdir -p "$RESOURCES_ROOT"
+    rm -rf "$RESOURCES_ROOT/ghostty" "$RESOURCES_ROOT/terminfo"
+    cp -R "$source_ghostty_resources" "$RESOURCES_ROOT/ghostty"
+    cp -R "$source_terminfo_resources" "$RESOURCES_ROOT/terminfo"
+}
+
 copy_from_existing_checkout_if_available
+build_local_source_if_requested
+copy_from_local_source_build_if_requested
 
 if [[ ! -d "$XCFRAMEWORK_ROOT" ]]; then
     echo "==> Downloading GhosttyKit.xcframework from $FORK_REPO ($RELEASE_TAG)"
@@ -71,8 +133,17 @@ if [[ -f "$MACOS_LIB_DIR/ghostty-internal.a" && -f "$MACOS_LIB_DIR/libghostty-in
     rm "$MACOS_LIB_DIR/ghostty-internal.a"
 fi
 if [[ -f "$XCFRAMEWORK_ROOT/Info.plist" ]]; then
-    /usr/libexec/PlistBuddy -c "Set :AvailableLibraries:2:BinaryPath libghostty-internal.a" "$XCFRAMEWORK_ROOT/Info.plist" >/dev/null 2>&1 || true
-    /usr/libexec/PlistBuddy -c "Set :AvailableLibraries:2:LibraryPath libghostty-internal.a" "$XCFRAMEWORK_ROOT/Info.plist" >/dev/null 2>&1 || true
+    for library_index in 0 1 2 3 4 5; do
+        platform="$(
+            /usr/libexec/PlistBuddy -c "Print :AvailableLibraries:${library_index}:SupportedPlatform" "$XCFRAMEWORK_ROOT/Info.plist" 2>/dev/null || true
+        )"
+        if [[ "$platform" == "macos" ]]; then
+            /usr/libexec/PlistBuddy -c "Set :AvailableLibraries:${library_index}:BinaryPath libghostty-internal.a" \
+                "$XCFRAMEWORK_ROOT/Info.plist" >/dev/null 2>&1 || true
+            /usr/libexec/PlistBuddy -c "Set :AvailableLibraries:${library_index}:LibraryPath libghostty-internal.a" \
+                "$XCFRAMEWORK_ROOT/Info.plist" >/dev/null 2>&1 || true
+        fi
+    done
 fi
 
 if [[ ! -d "$RESOURCES_ROOT/ghostty/shell-integration" || ! -d "$RESOURCES_ROOT/terminfo" ]]; then
@@ -89,7 +160,11 @@ fi
 
 if [[ -x "$VERIFY_SCRIPT" ]]; then
     echo "==> Verifying GhosttyKit additive PTY I/O exports"
-    "$VERIFY_SCRIPT" "$XCFRAMEWORK_ROOT"
+    if [[ "$BUILD_FROM_SOURCE" == "1" ]]; then
+        SPACES_GHOSTTYKIT_REQUIRE_HOST_REBIND=1 "$VERIFY_SCRIPT" "$XCFRAMEWORK_ROOT"
+    else
+        "$VERIFY_SCRIPT" "$XCFRAMEWORK_ROOT"
+    fi
 fi
 
 echo

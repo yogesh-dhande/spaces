@@ -16,6 +16,7 @@ extension Notification.Name {
     func focusWindow(_ window: NSWindow?)
     func activeOwnerClientID() -> String?
     func hasRenderableSurface() -> Bool
+    var prefersOutputFallbackWhenSurfaceUnavailable: Bool { get }
     func snapshot() -> GhosttyTerminalSnapshot?
     func snapshotText() -> String?
     func copySelectionToPasteboard() -> Bool
@@ -46,6 +47,8 @@ extension Notification.Name {
         guard let host = hosts.removeValue(forKey: sessionID) else { return }
         host.terminate()
     }
+
+    public func terminateAll() { for sessionID in Array(hosts.keys) { terminate(sessionID: sessionID) } }
 }
 
 @MainActor public final class GhosttyEmbeddedSessionHost {
@@ -232,6 +235,7 @@ extension Notification.Name {
     }
 
     public func hasRenderableSurface() -> Bool { terminalView.surface != nil }
+    public var prefersOutputFallbackWhenSurfaceUnavailable: Bool { false }
     public func snapshot() -> GhosttyTerminalSnapshot? { terminalView.snapshot() }
     public func snapshotText() -> String? { terminalView.snapshotText() }
     public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
@@ -254,7 +258,8 @@ extension Notification.Name {
         outputHandle = nil
         let exitedState = TerminalSessionRuntimeState(
             sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: childPID, state: .exited,
-            updatedAt: now, exitedAt: now, columns: lastKnownSurfaceSize?.columns, rows: lastKnownSurfaceSize?.rows)
+            updatedAt: now, exitedAt: now, title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, columns: lastKnownSurfaceSize?.columns,
+            rows: lastKnownSurfaceSize?.rows)
         try? TerminalSessionPersistence.writeRuntimeState(exitedState, paths: paths)
         lastPersistedRuntimeState = exitedState
         postRuntimeStateDidChange()
@@ -445,8 +450,8 @@ extension Notification.Name {
         let now = Date()
         let state = TerminalSessionRuntimeState(
             sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
-            state: .running, updatedAt: ISO8601DateFormatter().string(from: now), columns: observedSurfaceSize()?.columns,
-            rows: observedSurfaceSize()?.rows)
+            state: .running, updatedAt: ISO8601DateFormatter().string(from: now), title: effectiveTitle, workingDirectory: effectiveWorkingDirectory,
+            columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows)
         let shouldPersist = force || shouldPersistRuntimeState(state, now: now)
         guard shouldPersist else { return }
         let previousSignature = lastPersistedRuntimeState.map(runtimeStateSignature(for:))
@@ -575,7 +580,7 @@ extension Notification.Name {
     }
 
     private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
-        "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
+        "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
     }
 
     private nonisolated func enqueueIncomingOutput(_ data: Data) {

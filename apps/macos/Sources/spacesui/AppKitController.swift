@@ -52,6 +52,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 {
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
+    private final class MainThreadResultBox<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<T, Error>?
+
+        func set(_ result: Result<T, Error>) {
+            lock.lock()
+            self.result = result
+            lock.unlock()
+        }
+
+        func get() -> Result<T, Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return result
+        }
+    }
+
     private enum AlertsIconTint: Sendable {
         case browser
         case terminal
@@ -211,6 +228,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var showWindowIssueModalIPCObserver: NSObjectProtocol?
     private var cycleWorkspaceWindowIPCObserver: NSObjectProtocol?
     private var openWorkspaceTerminalIPCObserver: NSObjectProtocol?
+    private var runWorkspaceProcessIPCObserver: NSObjectProtocol?
+    private var stopWorkspaceProcessIPCObserver: NSObjectProtocol?
+    private var restartWorkspaceProcessIPCObserver: NSObjectProtocol?
+    private var launchWorkspaceAgentIPCObserver: NSObjectProtocol?
     private var openTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var focusTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var closeTerminalSessionWindowIPCObserver: NSObjectProtocol?
@@ -320,6 +341,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             let db = try DatabaseLocator.defaultPath()
             let store = try SQLiteStore(path: db)
+            WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(Self.launchLocalBuiltInTerminalSession)
+            WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(Self.terminateBuiltInTerminalSession)
             orchestrator = makeUIOrchestrator(store: store)
         } catch {
             showError(error)
@@ -345,11 +368,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupCycleWorkspaceWindowIPCObserver()
         setupSelectWorkspaceDetailIPCObserver()
         setupOpenWorkspaceTerminalIPCObserver()
+        setupRunWorkspaceProcessIPCObserver()
+        setupStopWorkspaceProcessIPCObserver()
+        setupRestartWorkspaceProcessIPCObserver()
+        setupLaunchWorkspaceAgentIPCObserver()
         setupOpenTerminalSessionWindowIPCObserver()
         setupFocusTerminalSessionWindowIPCObserver()
         setupCloseTerminalSessionWindowIPCObserver()
         setupAppActivationObservers()
         setupTerminalAttachmentStateObserver()
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(Self.launchLocalBuiltInTerminalSession)
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(Self.terminateBuiltInTerminalSession)
         logStartupProfile("ipc_observers_ready")
         Self.scheduleAfterNextRunLoopTurn { [weak self] in
             Task { @MainActor [weak self] in
@@ -375,7 +404,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             },
             builtInTerminalWindowCloser: { [weak self] sessionID in
                 Self.dispatchBuiltInTerminalWindowActionOnMainThread { self?.closeTerminalSessionWindows(sessionID: sessionID) }
-            })
+            }, builtInTerminalSessionTerminator: Self.terminateBuiltInTerminalSession,
+            builtInTerminalSessionLauncher: Self.launchLocalBuiltInTerminalSession)
     }
 
     nonisolated static func dispatchBuiltInTerminalWindowActionOnMainThread(
@@ -421,6 +451,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             DistributedNotificationCenter.default().removeObserver(openWorkspaceTerminalIPCObserver)
             self.openWorkspaceTerminalIPCObserver = nil
         }
+        if let runWorkspaceProcessIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(runWorkspaceProcessIPCObserver)
+            self.runWorkspaceProcessIPCObserver = nil
+        }
+        if let stopWorkspaceProcessIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(stopWorkspaceProcessIPCObserver)
+            self.stopWorkspaceProcessIPCObserver = nil
+        }
+        if let restartWorkspaceProcessIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(restartWorkspaceProcessIPCObserver)
+            self.restartWorkspaceProcessIPCObserver = nil
+        }
+        if let launchWorkspaceAgentIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(launchWorkspaceAgentIPCObserver)
+            self.launchWorkspaceAgentIPCObserver = nil
+        }
         if let openTerminalSessionWindowIPCObserver {
             DistributedNotificationCenter.default().removeObserver(openTerminalSessionWindowIPCObserver)
             self.openTerminalSessionWindowIPCObserver = nil
@@ -448,6 +494,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         commandPaletteLoadTask?.cancel()
         commandPaletteLoadTask = nil
         commandPalettePanel?.close()
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil)
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(nil)
+        GhosttyEmbeddedSessionRegistry.shared.terminateAll()
     }
 
     private func setupAgentEventIPCObserver() {
@@ -573,6 +622,58 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func setupRunWorkspaceProcessIPCObserver() {
+        runWorkspaceProcessIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.runWorkspaceProcess, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+            guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, workspaceID, processName] in
+                guard let self else { return }
+                self.runWorkspaceProcess(workspaceID: workspaceID, processName: processName)
+            }
+        }
+    }
+
+    private func setupStopWorkspaceProcessIPCObserver() {
+        stopWorkspaceProcessIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.stopWorkspaceProcess, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+            guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, workspaceID, processName] in
+                guard let self else { return }
+                self.stopWorkspaceProcess(workspaceID: workspaceID, processName: processName)
+            }
+        }
+    }
+
+    private func setupRestartWorkspaceProcessIPCObserver() {
+        restartWorkspaceProcessIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.restartWorkspaceProcess, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+            guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, workspaceID, processName] in
+                guard let self else { return }
+                self.restartWorkspaceProcess(workspaceID: workspaceID, processName: processName)
+            }
+        }
+    }
+
+    private func setupLaunchWorkspaceAgentIPCObserver() {
+        launchWorkspaceAgentIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.launchWorkspaceAgent, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+            guard let launcherName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, workspaceID, launcherName] in
+                guard let self else { return }
+                self.launchWorkspaceAgent(workspaceID: workspaceID, launcherName: launcherName)
+            }
+        }
+    }
+
     private func setupOpenTerminalSessionWindowIPCObserver() {
         openTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
             forName: IPCNotification.openTerminalSessionWindow, object: nil, queue: .main
@@ -634,12 +735,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     controller = existing
                     reusedExistingWindow = true
                 } else {
+                    let useControlSocketClientActions = Self.shouldUseTerminalControlSocketClientActions(sessionID: sessionID)
+                    let attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)?
+                    let detachClientAction: (@Sendable (String) throws -> Void)?
+                    if useControlSocketClientActions {
+                        attachClientAction = { client, attachmentMode in
+                            let response = try TerminalControlClient.send(
+                                request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
+                                socketPath: paths.controlSocketPath)
+                            guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                        }
+                        detachClientAction = { clientID in
+                            let response = try TerminalControlClient.send(
+                                request: TerminalControlRequest(command: "detach", clientID: clientID), socketPath: paths.controlSocketPath)
+                            guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                        }
+                    } else {
+                        attachClientAction = nil
+                        detachClientAction = nil
+                    }
                     let created = TerminalSessionWindowController(
                         sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false,
+                        attachClientAction: attachClientAction, detachClientAction: detachClientAction,
                         onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
                         onWindowClose: { [weak self] sessionID, clientID in
                             if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
                             self?.removeTerminalSessionWindowController(sessionID: sessionID, clientID: clientID)
+                        },
+                        sessionHostProvider: { launchConfiguration, paths in
+                            Self.terminalSessionHost(launchConfiguration: launchConfiguration, paths: paths)
                         })
                     terminalSessionWindowControllers[sessionID, default: []].append(created)
                     controller = created
@@ -674,10 +798,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func closeTerminalSessionWindows(sessionID: String) {
+    private func closeTerminalSessionWindows(sessionID: String, sessionIsTerminating: Bool = false) {
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
         guard let controllers = terminalSessionWindowControllers[sessionID], !controllers.isEmpty else { return }
-        for controller in controllers where !controller.didClose { controller.window?.close() }
+        for controller in controllers where !controller.didClose {
+            if sessionIsTerminating { controller.closeForSessionTermination() } else { controller.window?.close() }
+        }
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
     }
 
@@ -776,7 +902,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard Self.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: isConfiguredProcessSession, now: now) else {
             return
         }
-        GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
+        if !Self.terminateLocalBuiltInTerminalSessionIfPresent(sessionID: sessionID) { try? TerminalService.terminateSession(id: sessionID) }
         if (try? orchestrator.removeAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
     }
 
@@ -987,6 +1113,72 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private static var clickTargetAssocKey: UInt8 = 0
+
+    @MainActor static func terminalSessionHost(launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths)
+        -> any TerminalGhosttySessionHosting
+    {
+        if let host = GhosttyEmbeddedSessionRegistry.shared.existingHost(sessionID: launchConfiguration.sessionID) { return host }
+        return RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
+    }
+
+    @MainActor static func shouldUseTerminalControlSocketClientActions(sessionID: String) -> Bool {
+        GhosttyEmbeddedSessionRegistry.shared.existingHost(sessionID: sessionID) == nil
+    }
+
+    nonisolated static func launchLocalBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
+        -> TerminalServiceSessionSummary
+    {
+        try performBuiltInTerminalSessionWorkOnMainThread {
+            let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
+            let host = GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths)
+            try host.startIfNeeded()
+            let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+            return TerminalServiceSessionSummary(
+                id: launchConfiguration.sessionID, title: runtimeState.title ?? launchConfiguration.title,
+                workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, backend: launchConfiguration.backend,
+                lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
+                childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
+        }
+    }
+
+    nonisolated static func terminateLocalBuiltInTerminalSessionIfPresent(sessionID: String) -> Bool {
+        (try? performBuiltInTerminalSessionWorkOnMainThread {
+            guard GhosttyEmbeddedSessionRegistry.shared.existingHost(sessionID: sessionID) != nil else { return false }
+            GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
+            return true
+        }) ?? false
+    }
+
+    nonisolated static func terminateBuiltInTerminalSession(sessionID: String) {
+        try? performBuiltInTerminalSessionWorkOnMainThread {
+            (NSApp.delegate as? AppKitController)?.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: true)
+            if GhosttyEmbeddedSessionRegistry.shared.existingHost(sessionID: sessionID) != nil {
+                GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
+            } else {
+                try? TerminalService.terminateSession(id: sessionID)
+            }
+        }
+    }
+
+    nonisolated static func performBuiltInTerminalSessionWorkOnMainThread<T: Sendable>(
+        isMainThread: Bool = Thread.isMainThread,
+        scheduler: @escaping (@escaping @Sendable () -> Void) -> Void = { action in DispatchQueue.main.async(execute: action) },
+        work: @escaping @MainActor () throws -> T
+    ) throws -> T {
+        if isMainThread { return try MainActor.assumeIsolated { try work() } }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let resultBox = MainThreadResultBox<T>()
+        scheduler {
+            resultBox.set(Result { try MainActor.assumeIsolated { try work() } })
+            semaphore.signal()
+        }
+        semaphore.wait()
+        guard let result = resultBox.get() else {
+            throw WorkspaceError.invalidArgument(message: "Built-in terminal main-thread work did not return a result.")
+        }
+        return try result.get()
+    }
 
     nonisolated private static func startupProfileEnabled() -> Bool { ProcessInfo.processInfo.environment["SPACES_STARTUP_PROFILE"] == "1" }
 
@@ -6586,6 +6778,94 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 logPerfMetric(
                     "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,
                     detail: "route=\(route.rawValue)")
+                showError(error)
+            }
+        }
+    }
+
+    private func runWorkspaceProcess(workspaceID: String, processName: String) {
+        let startedAt = Date()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.performWindowFocusSnapshot(.workspaceMissingConfiguredProcess(workspaceID: workspaceID, processKey: processName))
+            let elapsedMS = windowShortcutElapsedMS(since: startedAt)
+            switch result {
+            case .success(let action):
+                logPerfMetric(
+                    "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: true,
+                    detail: "route=ipc name=\(processName)")
+                reloadData()
+                hideAfterSuccessfulExternalWindowAction(action)
+            case .failure(let error):
+                logPerfMetric(
+                    "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,
+                    detail: "route=ipc name=\(processName)")
+                showError(error)
+            }
+        }
+    }
+
+    private func stopWorkspaceProcess(workspaceID: String, processName: String) {
+        let startedAt = Date()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let process = try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.templateName == processName })
+                else { throw WorkspaceError.invalidArgument(message: "Configured process not found.") }
+                try orchestrator.stopWorkspaceProcess(workspaceID: workspaceID, processID: process.id)
+                logPerfMetric(
+                    "workspace_process_stop_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: true, detail: "route=ipc name=\(processName)")
+                reloadData()
+            } catch {
+                logPerfMetric(
+                    "workspace_process_stop_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: false, detail: "route=ipc name=\(processName)")
+                fputs("spaces: workspace process stop IPC failed for \(processName): \(error)\n", stderr)
+                showError(error)
+            }
+        }
+    }
+
+    private func restartWorkspaceProcess(workspaceID: String, processName: String) {
+        let startedAt = Date()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let process = try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.templateName == processName })
+                else { throw WorkspaceError.invalidArgument(message: "Configured process not found.") }
+                try orchestrator.restartWorkspaceProcess(workspaceID: workspaceID, processID: process.id)
+                logPerfMetric(
+                    "workspace_process_restart_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: true, detail: "route=ipc name=\(processName)")
+                reloadData()
+            } catch {
+                logPerfMetric(
+                    "workspace_process_restart_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: false, detail: "route=ipc name=\(processName)")
+                fputs("spaces: workspace process restart IPC failed for \(processName): \(error)\n", stderr)
+                showError(error)
+            }
+        }
+    }
+
+    private func launchWorkspaceAgent(workspaceID: String, launcherName: String) {
+        let startedAt = Date()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.performWindowFocusSnapshot(.workspaceAgentLauncher(workspaceID: workspaceID, name: launcherName))
+            let elapsedMS = windowShortcutElapsedMS(since: startedAt)
+            switch result {
+            case .success(let action):
+                logPerfMetric(
+                    "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: true,
+                    detail: "route=ipc name=\(launcherName)")
+                reloadData()
+                hideAfterSuccessfulExternalWindowAction(action)
+            case .failure(let error):
+                logPerfMetric(
+                    "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,
+                    detail: "route=ipc name=\(launcherName)")
                 showError(error)
             }
         }

@@ -76,7 +76,28 @@ The setup flow finishes by running `apps/macos/scripts/verify_ghosttykit.sh`, wh
 The GitHub Actions PR and release workflows run this setup before SwiftPM resolves the macOS package so clean runners have the pinned branch-local `GhosttyKit` artifact in place.
 
 If `SPACES_PROJECT_DIR` points at another checkout that already has `apps/macos/.local/ghosttykit/`, the setup script copies those local artifacts first and only falls back to GitHub release download when needed.
+If you are iterating on unpublished fork APIs, run `apps/macos/scripts/setup_ghosttyvt.sh` first and then set `SPACES_GHOSTTYKIT_BUILD_FROM_SOURCE=1` when invoking `apps/macos/scripts/setup_ghosttykit.sh`. That rebuilds `GhosttyKit.xcframework` from the branch-local Ghostty fork checkout under `apps/macos/.local/ghosttyvt/src/` and refreshes the local resources from the same source tree instead of downloading the pinned release artifact.
 The repo also runs [`.github/workflows/sync-ghosttykit-release.yml`](.github/workflows/sync-ghosttykit-release.yml) daily to bump that pinned tag to the latest published build from the Spaces-owned fork via pull request. The fork itself should run its own daily upstream-sync and rebuild automation; this repo only consumes the published release tag.
+
+To validate the real in-process Ghostty owner renderer path in `SpacesApp`, launch the app normally with an isolated database root:
+
+```bash
+apps/macos/scripts/setup_ghosttyvt.sh
+SPACES_GHOSTTYKIT_BUILD_FROM_SOURCE=1 apps/macos/scripts/setup_ghosttykit.sh
+export SPACES_DB_PATH="$TMPDIR/spaces-ghostty-owner/spaces.db"
+mkdir -p "$(dirname "$SPACES_DB_PATH")"
+pkill -x SpacesApp 2>/dev/null || true
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
+```
+
+When the app launches built-in Spaces terminals itself, owner windows use the live `GhosttyEmbeddedSessionRegistry` path automatically instead of the daemon replay bridge. Use the normal app flows:
+- Open a workspace terminal from the workspace detail pane.
+- Launch a workspace process while the configured terminal host is `Spaces`.
+- Launch a coding agent from the workspace detail pane.
+
+Close one of those owner windows and reopen it from the app. The shell or long-running process should stay attached to the same local Ghostty session without restarting.
+CLI-created sessions such as `spaces terminal command` and CLI-managed `spaces start` still use the daemon-owned compatibility path until the shared service renderer protocol lands.
+For scripted real-system checks against the running app, `spacese2e` exposes `open-workspace-terminal`, `run-workspace-process`, and `launch-workspace-agent` so the manual harness can exercise the same app-owned launch path without accessibility scripting.
 
 To verify the embedded Ghostty backend on an isolated database root:
 
@@ -134,6 +155,8 @@ apps/macos/scripts/setup_ghosttyvt.sh
 ```
 
 That script pins a local `ghostty` checkout to `apps/macos/ghosttyvt-revision.txt`, installs Zig `0.15.2` under `apps/macos/.local/ghosttyvt/toolchain/`, and builds `libghostty-vt` under `apps/macos/.local/ghosttyvt/src/zig-out/`.
+The default source remote is the same Spaces-owned fork that publishes `GhosttyKit.xcframework`, and the setup script rewrites a clean existing checkout back to that fork if it was cloned from upstream.
+When you use the repo defaults, the setup flow also verifies that `apps/macos/ghosttyvt-revision.txt` matches the commit behind `apps/macos/ghosttykit-release-tag.txt` so the editable Ghostty source, published xcframework, and local `libghostty-vt` build stay on the same fork lineage.
 The GitHub Actions PR and release workflows run this setup before the macOS build and coverage pass so clean runners have the matching `libghostty-vt` headers and dylib available.
 
 The terminal E2E, profiling, and soak scripts that launch `SpacesApp` acquire a shared harness lock before they run `setup_ghosttykit`, kill existing app instances, or launch a new app instance. Running them at the same time should serialize rather than tearing each other down mid-run.
