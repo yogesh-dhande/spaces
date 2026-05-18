@@ -53,16 +53,17 @@ apps/macos/.build/debug/spaces update --notes "Ready for review"
 apps/macos/.build/debug/spaces restart
 ```
 
-Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. The script sets `SPACES_DB_PATH` to `~/.spaces-dev/spaces.db` by default. Override it with `SPACES_DEV_DB_PATH=/custom/path/spaces.db` when you want a different isolated dev database.
+Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only the running app instance for that same profile before it relaunches.
 
-For branch-local manual testing against a clean database and terminal-runtime root, override `SPACES_DB_PATH` before launching either binary:
+For manual worktree-local shell sessions, export the same derived profile before launching the app, CLI, or E2E helper:
 
 ```bash
-export SPACES_DB_PATH="$TMPDIR/spaces-branch/spaces.db"
-mkdir -p "$(dirname "$SPACES_DB_PATH")"
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal list
+eval "$(apps/macos/.build/debug/spaces profile show --shell)"
+apps/macos/.build/debug/SpacesApp
+apps/macos/.build/debug/spaces terminal list
 ```
+
+Override `SPACES_DB_PATH` when you need a one-off isolated profile root. Override `SPACES_RUNTIME_DIR` only when the runtime files themselves also need to move with that profile.
 
 For branch-local libghostty artifact setup, run:
 
@@ -82,24 +83,25 @@ To verify the embedded Ghostty backend on an isolated database root:
 
 ```bash
 export SPACES_DB_PATH="$TMPDIR/spaces-ghostty/spaces.db"
+export SPACES_RUNTIME_DIR="$(dirname "$SPACES_DB_PATH")/runtime"
 apps/macos/scripts/setup_ghosttykit.sh
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/SpacesApp
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal command --backend ghostty-embedded --command cat --title verify-ghostty
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal list
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces terminal list
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal send <session-id> "hello from ghostty" --newline
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal tail <session-id> --lines 5
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal proxy <session-id> --host 127.0.0.1 --port 0 --auth-token local-test-token
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal show <session-id> --viewer
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal takeover <session-id> <viewer-client-id>
 ```
 
-For owner or viewer verification, keep exactly one `SpacesApp` process running for the chosen `SPACES_DB_PATH`. The current `ghostty-embedded` slice supports one live libghostty owner window plus one or more passive viewer windows that wait for live libghostty viewport readback while the session is active, then show persisted final output after exit, and can take over ownership without restarting the session.
+For owner or viewer verification, keep exactly one `SpacesApp` process running for the chosen profile root. The current `ghostty-embedded` slice supports one live libghostty owner window plus one or more passive viewer windows that wait for live libghostty viewport readback while the session is active, then show persisted final output after exit, and can take over ownership without restarting the session.
 
 For the headless mobile-shaped control proof of concept against the Ghostty-owner path:
 
@@ -136,7 +138,7 @@ apps/macos/scripts/setup_ghosttyvt.sh
 That script pins a local `ghostty` checkout to `apps/macos/ghosttyvt-revision.txt`, installs Zig `0.15.2` under `apps/macos/.local/ghosttyvt/toolchain/`, and builds `libghostty-vt` under `apps/macos/.local/ghosttyvt/src/zig-out/`.
 The GitHub Actions PR and release workflows run this setup before the macOS build and coverage pass so clean runners have the matching `libghostty-vt` headers and dylib available.
 
-The terminal E2E, profiling, and soak scripts that launch `SpacesApp` acquire a shared harness lock before they run `setup_ghosttykit`, kill existing app instances, or launch a new app instance. Running them at the same time should serialize rather than tearing each other down mid-run.
+The terminal E2E, profiling, and soak scripts that launch `SpacesApp` acquire a shared harness lock before they run `setup_ghosttykit` or launch a new app instance. They stop only the app instance for their own profile. Hotkey-sensitive and real-system desktop-control workflows also wait for desktop-global control instead of killing unrelated running Spaces instances. When desktop control is already owned by another Spaces instance, the wait path also posts a macOS notification that asks you to close the running app when you are done with it.
 
 For repeatable profiling of the built-in terminal owner and viewer flows:
 
@@ -263,6 +265,8 @@ Run the real-system GUI/CLI suite from the repository root with:
 ```bash
 apps/macos/Tests/e2e_real_system.sh
 ```
+
+Before the suite launches its isolated app instance, it waits for desktop-global control. A timeout from that wait is an environment-contention result and should be retried without killing unrelated running Spaces instances.
 
 To capture a product-demo video from the same suite, record the run with the native `ScreenCaptureKit` helper and optionally add short editing-friendly pauses between visible transitions:
 

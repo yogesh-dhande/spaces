@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 source "$SCRIPT_DIR/terminal_harness_lock.sh"
+source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
@@ -13,6 +14,7 @@ SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-workspace-profile.XXXXXX")}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
+RUNTIME_DIR="${SPACES_RUNTIME_DIR:-$WORK_ROOT/runtime}"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 SUMMARY_PATH="$WORK_ROOT/summary.txt"
 METRICS_PATH="$WORK_ROOT/metrics.json"
@@ -102,7 +104,7 @@ PY
 write_workspace_dump() {
   local workspace_dir="$1"
   local output_path="$2"
-  env SPACES_DB_PATH="$DB_PATH" "$MX_E2E_BIN" dump-workspace --workspace-dir "$workspace_dir" >"$output_path"
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$MX_E2E_BIN" dump-workspace --workspace-dir "$workspace_dir" >"$output_path"
 }
 
 process_field() {
@@ -175,17 +177,16 @@ mkdir -p "$PROJECT_DIR"
   git commit -q -m init
 )
 
-env SPACES_DB_PATH="$DB_PATH" "$MX_E2E_BIN" seed-fixture \
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$MX_E2E_BIN" seed-fixture \
   --project-dir "$PROJECT_DIR" \
   --workspace-title "workspace-profile" \
   --docs-url 'http://localhost:$APP_PORT/docs/' \
   --admin-url 'http://localhost:$APP_PORT/admin/' > /dev/null
-env SPACES_DB_PATH="$DB_PATH" "$MX_E2E_BIN" lookup-workspace --project-dir "$PROJECT_DIR" --title "workspace-profile" >"$WORKSPACE_INFO_JSON"
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$MX_E2E_BIN" lookup-workspace --project-dir "$PROJECT_DIR" --title "workspace-profile" >"$WORKSPACE_INFO_JSON"
 WORKSPACE_DIR="$(json_get "$WORKSPACE_INFO_JSON" "dir")"
 
-pkill -x SpacesApp >/dev/null 2>&1 || true
-pkill -f "$SPACES_APP" >/dev/null 2>&1 || true
-env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
+SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI"
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
 sleep 3
 
@@ -194,7 +195,7 @@ import time
 print(time.time())
 PY
 )"
-env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" start "$WORKSPACE_DIR" >/dev/null
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_CLI" start "$WORKSPACE_DIR" >/dev/null
 wait_for_process_session_id "$WORKSPACE_DIR" backend "$WORK_ROOT/after-start.json" 30
 START_MS="$(ms_since "$start_started_at")"
 
@@ -205,7 +206,7 @@ import time
 print(time.time())
 PY
 )"
-env SPACES_DB_PATH="$DB_PATH" "$MX_E2E_BIN" close-workspace-process-window --workspace-dir "$WORKSPACE_DIR" --process-name backend >/dev/null
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$MX_E2E_BIN" close-workspace-process-window --workspace-dir "$WORKSPACE_DIR" --process-name backend >/dev/null
 CLOSE_MS="$(ms_since "$close_started_at")"
 
 focus_started_at="$(python3 - <<'PY'
@@ -215,7 +216,7 @@ PY
 )"
 summon_pattern="spaces: perf metric=terminal_window_summon target=session=${BACKEND_SESSION_ID} success=1 .*mode=owner"
 summon_baseline="$(log_pattern_count "$summon_pattern")"
-env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name backend >/dev/null 2>"$FOCUS_LOG"
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name backend >/dev/null 2>"$FOCUS_LOG"
 wait_for_log_pattern_count_greater_than "$summon_pattern" "$summon_baseline" 30
 write_workspace_dump "$WORKSPACE_DIR" "$WORK_ROOT/after-focus.json"
 FOCUS_MS="$(ms_since "$focus_started_at")"

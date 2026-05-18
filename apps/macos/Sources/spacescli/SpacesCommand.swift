@@ -14,8 +14,10 @@ public struct SpacesCommand: ParsableCommand {
         commandName: "spaces", abstract: "Workspace registration, runtime, and coding-agent lifecycle commands for Spaces.",
         discussion: """
             Notes:
-              - All settings are stored in ~/.spaces/spaces.db.
-              - Runtime state is stored in ~/.spaces/spaces.db and migrated in place with additive schema changes.
+              - Explicit `SPACES_DB_PATH` overrides the default database location.
+              - Repo-local development builds default to a per-worktree profile under ~/.spaces-dev/profiles/spaces.
+              - Installed or non-dev builds default to ~/.spaces/spaces.db.
+              - Runtime state defaults to <profile-root>/runtime unless `SPACES_RUNTIME_DIR` overrides it.
               - Paths default to the current directory when omitted.
               - `import` registers the current directory by default and can apply `--title` or `--notes` when creating or re-importing a workspace.
               - `update` mutates workspace metadata after creation.
@@ -26,7 +28,7 @@ public struct SpacesCommand: ParsableCommand {
             """, version: AppVersion.current,
         subcommands: [
             ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, OpenCommand.self, SignalCommand.self,
-            TerminalCommand.self,
+            TerminalCommand.self, ProfileCommand.self,
         ])
 
     public init() {}
@@ -104,7 +106,7 @@ struct TerminalCommandCommand: ParsableCommand {
         FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
 
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.openTerminalSessionWindow, object: nil,
+            IPCNotification.openTerminalSessionWindow, object: try IPCNotification.currentObject(),
             userInfo: [
                 IPCNotification.terminalSessionIDUserInfoKey: sessionID,
                 IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
@@ -194,7 +196,7 @@ struct TerminalShowCommand: ParsableCommand {
         }
         let mode = viewer ? TerminalAttachmentMode.viewer : .owner
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.openTerminalSessionWindow, object: nil,
+            IPCNotification.openTerminalSessionWindow, object: try IPCNotification.currentObject(),
             userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalAttachmentModeUserInfoKey: mode.rawValue],
             options: [.deliverImmediately])
         print("Requested \(mode.rawValue) terminal window for session \(sessionID)")

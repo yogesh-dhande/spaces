@@ -34,7 +34,8 @@ struct CLIContext {
     }
 
     func fireAgentEventNotification() {
+        guard let object = try? IPCNotification.currentObject() else { return }
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.agentEventFired, object: nil, userInfo: nil, options: [.deliverImmediately])
+            IPCNotification.agentEventFired, object: object, userInfo: nil, options: [.deliverImmediately])
     }
 }

@@ -20,7 +20,8 @@
 ## Coding Agent Workflow
 - If on the `main` branch, switch to a new branch before committing changes. When asked to push, commit, push, and create a PR if there isn't one already. Do not add a coding agent name as a prefix to the branch name or the PR title. Please check the PR status before pushing to existing branches with previously opened PRs. If the PR is closed, create a new branch and a new PR.
 - When fixing a bug, reproduce it first using the real system, `~/projects/spaces/apps/macos/.build/debug/spaces` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
-- Before manually launching a Spaces app instance for debugging or profiling, close any existing Spaces instances so only one global hotkey listener is active.
+- Use the real-system scripts for hotkey-sensitive verification before resorting to ad hoc manual app launches. Those scripts may wait for desktop control instead of killing unrelated running Spaces instances.
+- When manually launching a repo-local debug build, use the derived profile helper or `scripts/dev-build-and-launch.sh` so the app, CLI, and E2E helpers stay on the same worktree-scoped profile.
 
 ## Verification Rules
 - Always run lint and build before finalizing macOS app changes.
@@ -45,7 +46,8 @@
 - When behavior is added through the CLI, update CLI help and architecture docs in the same change.
 
 ## Data and Migration Rules
-- Database path: `~/.spaces/spaces.db`.
+- Installed/default database path: `~/.spaces/spaces.db`.
+- Repo-local development builds default to `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`.
 - Use additive, non-destructive migrations that preserve existing data.
 - Never add any destructive migration or reset path that can remove existing projects or workspaces.
 
