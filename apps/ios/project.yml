@@ -1,0 +1,36 @@
+name: SpacesMobile
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  SpacesPackage:
+    path: ../macos
+targets:
+  SpacesMobile:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yogeshdhande.spacesmobile
+        PRODUCT_NAME: SpacesMobile
+        SWIFT_VERSION: 6.0
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Spaces
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Spaces connects to your Mac's first-party terminal bridge.
+        DEVELOPMENT_ASSET_PATHS: ""
+    dependencies:
+      - package: SpacesPackage
+        product: spacesmobilecore
+      - package: SpacesPackage
+        product: spacesterminalcore
+schemes:
+  SpacesMobile:
+    build:
+      targets:
+        SpacesMobile: all

@@ -50,6 +50,7 @@ Each live session also participates in a service-level control path:
 - `spaces terminal list` reads live session summaries from the service abstraction.
 - `spaces terminal show` asks `SpacesApp` to open a native owner or viewer window for an existing session ID.
 - `spaces terminal send`, `key`, and `takeover` still operate on the per-session control socket that the service owns.
+- `spaces mobile serve` publishes the first-party TCP bridge consumed by the iOS client.
 - Workspace process launch, built-in coding-agent launch, and app-opened workspace terminals use the local app-owned live Ghostty path when they are launched from `SpacesApp`.
 - CLI-managed workspace launches still use the daemon-owned compatibility path.
 
@@ -70,11 +71,13 @@ Each live session also participates in a service-level control path:
 - Replay uses the persisted terminal size from `state.json` so wrapping and redraw-heavy transcripts stay aligned with the last visible geometry.
 - The VT bridge feeds `spaces terminal tail` plus the fallback replay path, and it remains the intended bootstrap path for future snapshot-plus-delta clients because it can hold terminal state independently of a live renderer.
 
-## Remote Bridge
-- `spaces terminal proxy <session-id> --host ... --port ... --auth-token ...` remains a thin TCP bridge over the same session boundary.
-- The proxy answers `tail` from persisted session state and forwards the remaining first-party control requests into `control.sock`.
+## Mobile Bridge
+- `spaces mobile serve --host ... --port ... --pairing-code ...` is the first-party TCP bridge for the iOS client.
+- The bridge serves workspace and terminal overview data plus authenticated attach, subscribe, takeover, send, and key requests over the same session boundary.
+- Pairing is first-party only: the Mac bridge issues a per-install auth token after one-time pairing-code verification and persists the paired installation alongside the expected iOS bundle identifier.
+- Every later request must present both the stored auth token and the first-party iOS bundle identity, so an unpaired or non-first-party client is rejected before it can browse or control sessions.
 - Remote attachments are lease-based. Host time stamps the lease, and only client-identified activity refreshes that specific remote lease.
-- The proxy is an internal transport seam for first-party clients, not a stable third-party public API.
+- The mobile bridge is an internal first-party transport seam, not a stable third-party public API.
 
 ## Ghostty Compatibility Boundary
 - The current Ghostty fork still couples PTY ownership to a renderer instance.
@@ -94,4 +97,4 @@ The terminal slice is considered healthy when these flows work:
 - app quit followed by app relaunch and reopen of the same live session
 - owner or viewer attachment persistence and lease expiry
 - transcript replay from `output.log` with persisted geometry
-- remote proxy attach and takeover on top of the same session boundary
+- iOS viewer attach, ownership takeover to the remote client, ownership transfer back to a macOS owner, and streamed render or input freshness on top of the same session boundary

@@ -22,6 +22,8 @@ flowchart LR
   app["SpacesApp"] --> spacesui["spacesui"]
   spacesui --> stream
   spacesui --> terminalservice
+  ios["SpacesMobile"] --> mobilecore["spacesmobilecore"]
+  mobilecore --> spacescli
 
   stream --> store["SQLite store"]
   stream --> systembridge["systembridge adapters"]
@@ -41,6 +43,7 @@ flowchart LR
 - `spaces`: executable shim that boots the declarative CLI parser.
 - `spacescli`: declarative `swift-argument-parser` command tree for `spaces`, including command help, leaf validation, translation from CLI inputs into orchestration calls, and the built-in `spaces terminal` session controls for `command`, `send`, `key`, `tail`, `list`, `show`, and `takeover`.
 - `spacesterminalcore`: built-in terminal runtime primitives, per-session file layout, service protocol and bootstrap, PTY-session metadata persistence, output tailing, backend selection, and the runtime interface used by `spaces terminal command|send|tail|list`.
+- `spacesmobilecore`: first-party mobile bridge request and response types shared between the macOS bridge and the iOS client.
 - `spacesterminalghostty`: embedded libghostty integration for app-owned and daemon-owned sessions plus lightweight app-side host adapters for client windows.
 - `spacesterminalui`: native terminal-session window controllers owned by the Spaces app. The current slice opens one or more windows for a session ID, registers each local window as an owner or viewer client, and keeps those local windows attached through the same per-session control socket and attachment records used by the CLI and service.
 - `workspacecore`: core orchestration, lifecycle, validation, persistence coordination, environment building, and the shared `AppVersion` constants consumed by both the GUI and CLI. Those constants are generated from `apps/macos/AppVersion.plist`, which is also used to generate the app bundle `Info.plist`.
@@ -48,9 +51,10 @@ flowchart LR
 
 ### Terminal Session Slice
 - Built-in terminal ownership is currently split across two compatibility paths.
-- `spaces terminal command` creates sessions through the service. `spaces terminal list` reads live service summaries. `spaces terminal show` asks the app to open a native client window for an existing session ID. `send`, `key`, `takeover`, and `proxy` operate on the session control socket that the service owns.
+- `spaces terminal command` creates sessions through the service. `spaces terminal list` reads live service summaries. `spaces terminal show` asks the app to open a native client window for an existing session ID. `send`, `key`, and `takeover` operate on the session control socket that the service owns.
 - Each session is addressed by a stable session ID and stored under `~/.spaces/terminal/sessions/<session-id>/`.
 - `metadata.json` stores launch inputs including backend and lifetime policy. `state.json` stores runtime state including backend, child PID, title, working directory, and last known columns and rows. `clients.json` and `attachments.json` store client identity plus owner or viewer attachment history. `control.sock` accepts local control-plane commands. `subscription.sock` carries service-published session state and Ghostty snapshots for daemon-owned client windows. `output.log` records terminal output for replay, history, and fallback recovery.
+- `spaces mobile serve` runs a first-party TCP bridge for the iOS client. The bridge persists paired device records under the terminal root, issues per-install auth tokens after one-time pairing-code verification, requires the first-party iOS bundle identifier on every request, and forwards authenticated attach, subscribe, takeover, send, and key requests into the same session boundary.
 - `GhosttyEmbeddedSessionHost` in `spacesterminalghostty` is the current service-owned session runtime for `ghostty-embedded`. It owns the PTY, libghostty state, output logging, runtime-state refresh, active owner identity, host-stamped lease timestamps, and lease expiry for stale remote clients.
 - `SpacesApp` also keeps an in-process `GhosttyEmbeddedSessionRegistry` for the built-in sessions it launches itself. A process-wide `WorkspaceOrchestrator` launcher override routes app-created workspace terminals, process windows, and coding-agent windows through that registry even when the launch originates from detached background work.
 - The current Ghostty fork still couples PTY ownership to a libghostty renderer. Because of that, the service keeps the live hidden Ghostty host and exports full Ghostty snapshots over `subscription.sock` for other clients instead of attaching multiple native renderers to the same session.
@@ -61,7 +65,7 @@ flowchart LR
 - `WorkspaceOrchestrator` still uses `TerminalService` by default, but `SpacesApp` installs a process-wide override so app-created built-in terminals launch through the local Ghostty registry while CLI-managed sessions remain daemon-backed. Reopen continues to key off the stable session ID rather than an NSView identity.
 - Built-in `Spaces` process and terminal focus prefers the tracked live yabai window ID when one exists, falls back to reopening the session by stable session ID only when no live native window can be focused, and either clears the stale native window binding or replaces it with the freshly observed yabai window ID during that same reopen path so the next focus targets the live window without waiting for a later refresh pass.
 - `spacesterminalcore` reconstructs `spaces terminal tail` output from `output.log` with `libghostty-vt`. It also exposes a stateful VT bridge that can hold terminal state independently of a live Ghostty renderer and remains the transcript bootstrap and fallback path for clients that cannot consume the live service snapshot stream.
-- `spaces terminal proxy` remains a thin TCP bridge over the same session boundary. It is an internal first-party transport seam, not a third-party-stable public API.
+- `SpacesMobileBridgeServer` is the current first-party remote transport seam. It is intentionally scoped to the Spaces iOS client rather than a third-party-stable public API.
 - Ad hoc sessions use explicit lifetime policy. `.whileAttached` sessions are reaped once the final live attachment detaches or expires, while service restart recovery marks abandoned `starting` or `running` sessions as failed and removes stale control sockets.
 - `AppKitController` distinguishes built-in `Spaces` terminal opens and focuses from external-app window actions. External browsers, editors, and Finder windows still use the hide-after-success path, but built-in `Spaces` terminal windows stay visible alongside the main app so focusing or opening them does not hide the window that was just summoned.
 - Owner or viewer state is persisted in `attachments.json`. Local attachments stay explicit, while remote attachments are treated as leases that must be refreshed by client-identified proxy or control traffic and are stamped from host time when the attach lands. Only the active owner attachment may send input or drive PTY size.

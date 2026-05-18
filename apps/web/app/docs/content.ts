@@ -80,7 +80,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Use the spaces CLI for workspace actions plus daemon-owned built-in terminal session commands such as command, list, send, key, tail, owner or viewer windows, and ownership takeover.",
+      "Use the spaces CLI for workspace actions plus built-in terminal session commands, owner or viewer windows, ownership takeover, and the first-party mobile bridge for the iOS client.",
   },
 ];
 

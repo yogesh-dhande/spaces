@@ -113,7 +113,7 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
   terminal tail <session-id> --lines 5
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
-  terminal proxy <session-id> --host 127.0.0.1 --port 0 --auth-token local-test-token
+  mobile serve --host 127.0.0.1 --port 47071 --pairing-code 246810
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
   terminal show <session-id> --viewer
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
@@ -128,7 +128,7 @@ For the headless mobile-shaped control proof of concept against the Ghostty-owne
 python3 apps/macos/Tests/poc_mobile_terminal_client.py --start-app
 ```
 
-That flow launches an isolated `SpacesApp`, starts one `ghostty-embedded` session, exposes it through `spaces terminal proxy`, attaches an iPhone-shaped viewer, verifies viewer input rejection before takeover, closes the real macOS owner window, promotes the mobile client, sends text plus `Enter`, reopens the native owner window for the same session, and finally transfers ownership back to that reopened macOS owner.
+That flow launches an isolated `SpacesApp`, starts one `ghostty-embedded` session, exposes it through `spaces mobile serve`, pairs a first-party iPhone-shaped client, attaches that client as a viewer, verifies viewer input rejection before takeover, closes the real macOS owner window, promotes the mobile client, sends text plus `Enter`, reopens the native owner window for the same session, and finally transfers ownership back to that reopened macOS owner.
 
 For the maintained E2E wrapper around that same flow:
 
@@ -138,7 +138,7 @@ apps/macos/Tests/e2e_terminal_mobile_client.sh
 
 Use the shell wrapper when you want one command that exercises the full attach, takeover, owner-close, owner-reopen, send, and key path without remembering the Python invocation.
 
-`spaces terminal proxy` is the current low-level seam for that proof of concept. Treat it as a temporary integration primitive for remote-shaped clients rather than the long-term external API surface.
+`spaces mobile serve` is the current first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface.
 
 For direct CLI verification of Spaces terminal commands:
 
@@ -169,6 +169,27 @@ ITERATIONS=3 apps/macos/Tests/profile_built_in_terminal.sh
 
 The profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, exercises owner attach, viewer attach, send, `tail`, and takeover, then summarizes the built-in terminal perf metrics captured from the app log.
 It also writes `summary.txt` and `metrics.json` under its temp work root so baseline metric snapshots can be compared across terminal-window parity changes.
+
+For repeatable profiling of the first-party iOS bridge and ownership transfer path:
+
+```bash
+apps/macos/Tests/profile_mobile_bridge.sh
+```
+
+That profiler runs against an isolated `SPACES_DB_PATH`, pairs a first-party iOS-shaped installation, attaches a local-window owner plus remote viewer, measures time-to-initial-render, ownership transfer to the iOS viewer, ownership transfer back to the macOS owner, and the streamed visibility latency for both iOS-side and macOS-side input.
+
+For manual simulator verification of the iOS client:
+
+```bash
+export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
+mkdir -p "$(dirname "$SPACES_DB_PATH")"
+pkill -x SpacesApp 2>/dev/null || true
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces mobile serve --host 127.0.0.1 --port 47071 --pairing-code 246810
+xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)' build
+```
+
+On first launch, the iOS client opens its connection sheet. Enter the bridge host and port, then the pairing code from `spaces mobile serve`. After pairing, the iOS client stores the issued credential and reconnects automatically on later launches. The current client is terminal-only: it lists workspaces and live terminal sessions, renders one session at a time, opens as a viewer by default, and exposes a `Take Over` action in the detail pane.
 
 For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
 
