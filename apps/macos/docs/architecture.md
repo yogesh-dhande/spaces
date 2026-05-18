@@ -33,8 +33,8 @@ flowchart LR
 - `SpacesApp`: minimal app entry point that boots AppKit.
 - `spacesui`: AppKit UI layer that renders state and dispatches actions into `workspacecore`. Shared visual language lives in `Theme.swift` (brand color tokens mirroring `apps/web/app/globals.css`) and `RowPrimitives.swift` (status dot, type icon tile, shortcut/project/branch chips, `ColoredBackgroundView` helper). The workspace detail pane is a single scrollable `NSStackView`; it stacks the header, directory meta row, inline notes editor, and five configuration sections (Processes, Browser sessions, Coding agents, Named ports, Stop script) in order. Each section is a self-contained class (e.g. `ProcessesSection.swift`) that owns its transient form state, swaps each row between collapsed and editing subviews via `NSAnimationContext`, and publishes commits through an `onCommit` closure that the host bridges to `orchestrator.updateWorkspaceSettings`. Named-port rows render the configured env-var name plus the currently reserved port number from `workspace_ports`, mirroring how browser-session rows separate configured input from resolved display output. The `⋯` overflow menu is built by the static `AppKitController.makeWorkspaceOverflowMenu(workspaceID:path:target:)`, which emits a stock `NSMenu` whose path-based items forward to `copyDirectoryPath(_:)` and `revealDirectoryInFinder(_:)`, while workspace actions use the same shared `senderIdentifier(_:)` helper for `NSMenuItem` and `NSControl` senders. Update delivery also lives here: `AppKitController` owns a programmatic `SPUStandardUpdaterController` from Sparkle, wires the application menu’s `Check for Updates...` item directly to Sparkle, and relies on one stable appcast feed configured in the app bundle metadata. That stable feed serves one universal Sparkle archive and one manual-download DMG rather than arch-specific release artifacts.
 - `spaces`: executable shim that boots the declarative CLI parser.
-- `spacescli`: declarative `swift-argument-parser` command tree for `spaces`, including command help, leaf validation, translation from CLI inputs into orchestration calls, and the built-in `spaces terminal` session controls for `command`, `send`, `key`, `tail`, `list`, `show`, and `takeover`.
-- `spacesterminalcore`: built-in terminal runtime primitives, PTY-session metadata persistence, per-session file layout, output tailing, backend selection, and the backend runtime interface used by `spaces terminal command|send|tail|list`.
+- `spacescli`: declarative `swift-argument-parser` command tree for `spaces`, including command help, leaf validation, translation from CLI inputs into orchestration calls, the built-in `spaces terminal` session controls for `command`, `send`, `key`, `tail`, `list`, `show`, and `takeover`, and profile or desktop-control inspection helpers used by dev and real-system workflows.
+- `spacesterminalcore`: built-in terminal runtime primitives, PTY-session metadata persistence, per-session file layout, output tailing, backend selection, the shared profile resolver used by the app, CLI, and E2E helpers, and the backend runtime interface used by `spaces terminal command|send|tail|list`.
 - `spacesterminalghostty`: embedded libghostty integration, including local artifact discovery, app-hosted session runtime, runtime callbacks, control-plane bridging, and renderer availability.
 - `spacesterminalui`: native terminal-session window controllers owned by the Spaces app. The current slice opens one or more windows for a session ID, registers each local window as an owner or viewer client, and keeps those local windows attached through the same per-session control socket and attachment records used by the CLI.
 - `workspacecore`: core orchestration, lifecycle, validation, persistence coordination, environment building, and the shared `AppVersion` constants consumed by both the GUI and CLI. Those constants are generated from `apps/macos/AppVersion.plist`, which is also used to generate the app bundle `Info.plist`.
@@ -44,7 +44,7 @@ flowchart LR
 - The first built-in terminal slice is intentionally CLI-first.
 - `spaces terminal command` persists launch metadata and asks the running Spaces app to create the session in-process with libghostty.
 - `spaces terminal show` asks the running Spaces app to open a native session window for a specific session ID through distributed notifications.
-- Each session is addressed by a stable session ID and stored under `~/.spaces/terminal/sessions/<session-id>/`.
+- Each session is addressed by a stable session ID and stored under `<runtime-root>/terminal/sessions/<session-id>/`.
 - `metadata.json` stores launch inputs including the declared backend, `state.json` stores live runtime state including the active backend plus the last known terminal columns and rows, `clients.json` and `attachments.json` store client identity and owner or viewer attachment history, `control.sock` accepts local owner commands through a small request/response protocol for both text send and named-key send, and `output.log` records terminal output for `spaces terminal tail`.
 - `spaces terminal proxy` binds a local TCP listener on top of that same session boundary. It reuses the control request/response codec, requires a shared auth token, answers `tail` directly from persisted session state, and forwards attachment lifecycle plus the rest of the control plane back into `control.sock`. Client-identified remote activity can still refresh that specific lease, but the renewal happens through the app-owned control socket instead of by rewriting attachment snapshots from the proxy process.
 - `apps/macos/Tests/e2e_terminal_mobile_client.sh` is the repository-level regression harness for that path. It drives an isolated app instance through the TCP proxy seam, closes the real owner window, verifies that a viewer can take over, reopens a native owner window for the same session, and confirms that ownership plus input can move back onto that reopened macOS window without restarting the Ghostty-owned session.
@@ -85,11 +85,25 @@ flowchart LR
 ## Persistence
 
 ### Database
-- Path: `~/.spaces/spaces.db`
+- Installed/default path: `~/.spaces/spaces.db`
+- Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
 - SQLite stores projects, workspaces, runtime state, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
 - `migration_state.current_version` records the canonical schema version. The active schema is version `1`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
+
+### Profile Resolution
+- `SPACES_DB_PATH` wins when it is set for the current process.
+- Otherwise repo-local development binaries derive one profile root from the current git branch plus the canonical worktree path.
+- Installed binaries and non-dev fall back to `~/.spaces/`.
+- The default runtime root is `<profile-root>/runtime`, unless `SPACES_RUNTIME_DIR` overrides it explicitly.
+- Distributed notification IPC uses one profile-scoped object token derived from the resolved profile root so app, CLI, and E2E helpers only talk to the matching profile instance.
+
+### App Ownership and Desktop Control
+- App launch acquires one per-profile owner lease before the store, IPC observers, hotkeys, or windows are created.
+- Duplicate app launch for the same profile fails fast and reports the existing owner pid, executable path, and profile root.
+- Desktop-global control such as Carbon hotkey registration uses a separate user-global lease shared by every profile.
+- When another profile already owns that lease, the second app loads normally in passive mode, keeps local in-app shortcuts, and suppresses desktop-global listeners until the lease becomes available.
 
 ### Migration Rules
 - Fresh installs create the latest schema directly and record the current schema version.
@@ -386,6 +400,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 ## Shortcut Architecture
 - Shortcut defaults and user overrides are stored in SQLite global settings and edited from the GUI settings panel.
 - Global shortcuts use Carbon hotkey registration for actions that must work while Spaces is not frontmost.
+- Carbon hotkeys are registered only while the running app owns the desktop-control lease for its user account.
 - The command palette is implemented as a separate AppKit panel instead of reusing the main split-view window, so the hotkey can surface a focused search field without depending on the full app shell staying visible.
 - `AppKitController` treats the main Spaces window as the primary UI surface and built-in terminal windows plus the command palette as auxiliary windows. Global toggle behavior depends only on the main window's visible state and hides or summons only that window instead of app-wide unhiding or fronting every Spaces-owned window. Command-palette presentation similarly depends only on the palette panel's visible state and shows or hides only that panel without ordering the main window out. When the focused auxiliary window is a built-in terminal, the app resolves that terminal session back to its tracked workspace row before restoring the main window or choosing the command-palette context. Those hotkey paths skip the generic focused-window workspace lookup whenever the terminal session already resolves to a workspace, which keeps built-in terminal toggles from paying unnecessary focused-window tracking work. When the main window or command palette is later hidden through the same hotkey path, the controller explicitly restores focus either to the remembered built-in terminal session or to the previously frontmost non-Spaces app instead of leaving the return leg to AppKit window ordering.
 - Command-palette items are built from two sources: Alerts attention entries and the same ordered workspace run-target model that powers workspace-detail numbered shortcuts. With an empty query, the panel shows Alerts attention first and then only the current workspace's run targets. Once the user types, the fuzzy matcher ranks across the full combined item set.

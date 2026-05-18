@@ -38,12 +38,6 @@ public enum TerminalPerformance {
     }
 
     private static func perfLogDirectory(fileManager: FileManager) throws -> URL {
-        if let override = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-            !override.isEmpty
-        {
-            return URL(fileURLWithPath: override, isDirectory: true)
-        }
-        let home = fileManager.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".spaces", isDirectory: true).appendingPathComponent("runtime", isDirectory: true)
+        URL(fileURLWithPath: try SpacesProfile.current().runtimeDirectory, isDirectory: true)
     }
 }

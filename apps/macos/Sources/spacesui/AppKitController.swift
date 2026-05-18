@@ -216,6 +216,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var closeTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
+    private var workspaceDidTerminateApplicationObserver: NSObjectProtocol?
     private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
     private var setupManager: SetupManager?
@@ -224,6 +225,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var activeWindowShortcutProfile: WindowShortcutProfile?
     private let startupProfileStartTime = startupProfileBaselineUptime
     private var didLogFirstStartupInteraction = false
+    private let launchProfile: SpacesProfile
+    private let appOwnerLease: SpacesProcessLease
+    private var desktopControlLease: SpacesProcessLease?
+    private var passiveDesktopControlOwner: SpacesProcessLeaseOwner?
+    private let ipcNotificationObject: String
 
     private var configCache: AppConfig?
     private let defaultSplitViewWidth: CGFloat = 360
@@ -292,6 +298,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private static let isRunningFromAppBundle = Bundle.main.bundleURL.pathExtension == "app"
 
+    public init(launchContext: SpacesAppLaunchContext) {
+        launchProfile = launchContext.profile
+        appOwnerLease = launchContext.appOwnerLease
+        ipcNotificationObject = launchContext.profile.ipcNotificationObject
+        switch launchContext.desktopControlState {
+        case .active(let lease):
+            desktopControlLease = lease
+            passiveDesktopControlOwner = nil
+        case .passive(let owner):
+            desktopControlLease = nil
+            passiveDesktopControlOwner = owner
+        }
+        super.init()
+    }
+
     private lazy var hotkeyHandlerProc: EventHandlerUPP = { _, event, userData in
         guard let userData else { return noErr }
         let controller = Unmanaged<AppKitController>.fromOpaque(userData).takeUnretainedValue()
@@ -316,12 +337,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
-        logStartupProfile("did_finish_launching")
+        logStartupProfile(
+            "did_finish_launching",
+            details:
+                "profile_root=\(launchProfile.rootDirectory) runtime_root=\(launchProfile.runtimeDirectory) source=\(launchProfile.source.rawValue) desktop_control=\(desktopControlLease == nil ? "passive" : "active")"
+        )
         do {
-            let db = try DatabaseLocator.defaultPath()
-            let store = try SQLiteStore(path: db)
+            let store = try SQLiteStore(path: launchProfile.databasePath)
             orchestrator = makeUIOrchestrator(store: store)
         } catch {
+            releaseLaunchLeases()
             showError(error)
             return
         }
@@ -335,7 +360,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         loadShortcutSpecs()
         logStartupProfile("shortcut_specs_loaded")
         setupGlobalHotkey()
-        logStartupProfile("global_hotkeys_ready")
+        logStartupProfile("global_hotkeys_ready", details: "desktop_control=\(desktopControlLease == nil ? "passive" : "active")")
         setupShortcutMonitor()
         logStartupProfile("shortcut_monitor_ready")
         setupAgentEventIPCObserver()
@@ -349,6 +374,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupFocusTerminalSessionWindowIPCObserver()
         setupCloseTerminalSessionWindowIPCObserver()
         setupAppActivationObservers()
+        setupWorkspaceApplicationObservers()
         setupTerminalAttachmentStateObserver()
         logStartupProfile("ipc_observers_ready")
         Self.scheduleAfterNextRunLoopTurn { [weak self] in
@@ -441,6 +467,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             NotificationCenter.default.removeObserver(appDidResignActiveObserver)
             self.appDidResignActiveObserver = nil
         }
+        if let workspaceDidTerminateApplicationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceDidTerminateApplicationObserver)
+            self.workspaceDidTerminateApplicationObserver = nil
+        }
         if let terminalAttachmentStateDidChangeObserver {
             NotificationCenter.default.removeObserver(terminalAttachmentStateDidChangeObserver)
             self.terminalAttachmentStateDidChangeObserver = nil
@@ -448,11 +478,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         commandPaletteLoadTask?.cancel()
         commandPaletteLoadTask = nil
         commandPalettePanel?.close()
+        releaseLaunchLeases()
     }
 
     private func setupAgentEventIPCObserver() {
         agentEventIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.agentEventFired, object: nil, queue: .main
+            forName: IPCNotification.agentEventFired, object: ipcNotificationObject, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -463,7 +494,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func setupShowMainWindowIPCObserver() {
         showMainWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.showMainWindow, object: nil, queue: .main
+            forName: IPCNotification.showMainWindow, object: ipcNotificationObject, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, let window = self.window else { return }
@@ -474,7 +505,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func setupHideMainWindowIPCObserver() {
         hideMainWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.hideMainWindow, object: nil, queue: .main
+            forName: IPCNotification.hideMainWindow, object: ipcNotificationObject, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, let window = self.window else { return }
@@ -489,7 +520,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func setupShowWindowIssueModalIPCObserver() {
         showWindowIssueModalIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.showWindowIssueModal, object: nil, queue: .main
+            forName: IPCNotification.showWindowIssueModal, object: ipcNotificationObject, queue: .main
         ) { [weak self] notification in
             guard let title = notification.userInfo?[IPCNotification.titleUserInfoKey] as? String else { return }
             guard let detail = notification.userInfo?[IPCNotification.detailUserInfoKey] as? String else { return }
@@ -502,7 +533,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func setupCycleWorkspaceWindowIPCObserver() {
         cycleWorkspaceWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.cycleWorkspaceWindow, object: nil, queue: .main
+            forName: IPCNotification.cycleWorkspaceWindow, object: ipcNotificationObject, queue: .main
         ) { [weak self] notification in
             guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
             guard let direction = notification.userInfo?[IPCNotification.cycleDirectionUserInfoKey] as? String else { return }
@@ -541,7 +572,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func setupSelectWorkspaceDetailIPCObserver() {
         selectWorkspaceDetailIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.selectWorkspaceDetail, object: nil, queue: .main
+            forName: IPCNotification.selectWorkspaceDetail, object: ipcNotificationObject, queue: .main
         ) { [weak self] notification in
             guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
             Task { @MainActor [weak self, workspaceID] in
@@ -563,7 +594,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func setupOpenWorkspaceTerminalIPCObserver() {
         openWorkspaceTerminalIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.openWorkspaceTerminal, object: nil, queue: .main
+            forName: IPCNotification.openWorkspaceTerminal, object: ipcNotificationObject, queue: .main
         ) { [weak self] notification in
             guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
             Task { @MainActor [weak self, workspaceID] in
@@ -575,7 +606,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func setupOpenTerminalSessionWindowIPCObserver() {
         openTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.openTerminalSessionWindow, object: nil, queue: .main
+            forName: IPCNotification.openTerminalSessionWindow, object: ipcNotificationObject, queue: .main
         ) { [weak self] notification in
             guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
             let modeRawValue = notification.userInfo?[IPCNotification.terminalAttachmentModeUserInfoKey] as? String
@@ -590,7 +621,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func setupCloseTerminalSessionWindowIPCObserver() {
         closeTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.closeTerminalSessionWindow, object: nil, queue: .main
+            forName: IPCNotification.closeTerminalSessionWindow, object: ipcNotificationObject, queue: .main
         ) { [weak self] notification in
             guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
             Task { @MainActor [weak self, sessionID] in
@@ -602,7 +633,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func setupFocusTerminalSessionWindowIPCObserver() {
         focusTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.focusTerminalSessionWindow, object: nil, queue: .main
+            forName: IPCNotification.focusTerminalSessionWindow, object: ipcNotificationObject, queue: .main
         ) { [weak self] notification in
             guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
             let requestID = notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String
@@ -793,6 +824,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                self.attemptDesktopControlRecoveryIfNeeded()
                 self.logHotkeyDebug("app_did_become_active \(self.hotkeyWindowStateSummary())")
                 if let profile = self.activeWindowShortcutProfile {
                     let routeElapsedMS = profile.routeCompletedAt.map { self.windowShortcutElapsedMS(since: $0) } ?? -1
@@ -817,6 +849,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     "stage=app_resigned_active index=\(profile.index) elapsed_ms=\(self.windowShortcutElapsedMS(since: profile.startedAt)) route_gap_ms=\(routeElapsedMS)"
                 )
                 self.activeWindowShortcutProfile = nil
+            }
+        }
+    }
+
+    private func setupWorkspaceApplicationObservers() {
+        workspaceDidTerminateApplicationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            let terminatedPID = application.map(\.processIdentifier)
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard
+                    Self.shouldAttemptDesktopControlRecovery(
+                        passiveOwnerPID: self.passiveDesktopControlOwner?.pid, terminatedApplicationPID: terminatedPID)
+                else { return }
+                self.attemptDesktopControlRecoveryIfNeeded()
             }
         }
     }
@@ -2131,6 +2180,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         window.setAccessibilityIdentifier("spaces-main-window")
         window.backgroundColor = sidebarPanelBackgroundColor()
         window.titlebarAppearsTransparent = true
+        refreshDesktopControlStatusUI()
         window.center()
         window.delegate = self
         presentWindowIfAllowed(window)
@@ -6642,6 +6692,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
 
     private func setupGlobalHotkey() {
+        guard desktopControlLease != nil else {
+            logHotkeyDebug("setup skipped no_desktop_control_lease")
+            teardownGlobalHotkey()
+            return
+        }
         guard let toggleShortcutSpec else {
             logHotkeyDebug("setup skipped missing_toggle_spec")
             teardownGlobalHotkey()
@@ -6731,6 +6786,42 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             return event
         }
+    }
+
+    private func releaseLaunchLeases() {
+        desktopControlLease?.release()
+        desktopControlLease = nil
+        appOwnerLease.release()
+    }
+
+    private func attemptDesktopControlRecoveryIfNeeded() {
+        guard desktopControlLease == nil else { return }
+        do {
+            switch try SpacesLeaseCoordinator.acquireDesktopControlLease(profile: launchProfile) {
+            case .acquired(let lease):
+                desktopControlLease = lease
+                passiveDesktopControlOwner = nil
+                setupGlobalHotkey()
+                refreshDesktopControlStatusUI()
+            case .busy(let owner):
+                passiveDesktopControlOwner = owner
+                refreshDesktopControlStatusUI()
+            }
+        } catch { logHotkeyDebug("desktop_control_recovery_failed error=\(error.localizedDescription)") }
+    }
+
+    private func refreshDesktopControlStatusUI() {
+        guard let window else { return }
+        if passiveDesktopControlOwner != nil {
+            window.subtitle = "Global shortcuts unavailable while another Spaces instance owns desktop control."
+        } else {
+            window.subtitle = ""
+        }
+    }
+
+    nonisolated static func shouldAttemptDesktopControlRecovery(passiveOwnerPID: Int32?, terminatedApplicationPID: Int32?) -> Bool {
+        guard let passiveOwnerPID, let terminatedApplicationPID else { return false }
+        return passiveOwnerPID == terminatedApplicationPID
     }
 
     static func shouldBypassLocalShortcutMonitor(for keyWindow: NSWindow?) -> Bool {
