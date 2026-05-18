@@ -142,54 +142,78 @@ import spacesterminalcore
 
     public override func mouseDown(with event: NSEvent) {
         focusWindow()
-        if sendMousePosition(for: event), sendMouseButton(event: event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_LEFT) { return }
-        super.mouseDown(with: event)
+        _ = sendMousePosition(for: event)
+        _ = sendMouseButton(event: event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_LEFT)
+        requestSurfaceRefresh()
     }
 
     public override func mouseUp(with event: NSEvent) {
-        if sendMousePosition(for: event), sendMouseButton(event: event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT) { return }
-        super.mouseUp(with: event)
+        _ = sendMousePosition(for: event)
+        _ = sendMouseButton(event: event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT)
+        requestSurfaceRefresh()
     }
 
     public override func rightMouseDown(with event: NSEvent) {
         focusWindow()
-        if sendMousePosition(for: event), sendMouseButton(event: event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_RIGHT) { return }
+        _ = sendMousePosition(for: event)
+        if sendMouseButton(event: event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_RIGHT) {
+            requestSurfaceRefresh()
+            return
+        }
         super.rightMouseDown(with: event)
     }
 
     public override func rightMouseUp(with event: NSEvent) {
-        if sendMousePosition(for: event), sendMouseButton(event: event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_RIGHT) { return }
+        _ = sendMousePosition(for: event)
+        if sendMouseButton(event: event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_RIGHT) {
+            requestSurfaceRefresh()
+            return
+        }
         super.rightMouseUp(with: event)
     }
 
     public override func otherMouseDown(with event: NSEvent) {
         focusWindow()
-        if sendMousePosition(for: event), sendMouseButton(event: event, state: GHOSTTY_MOUSE_PRESS, button: mouseButton(for: event)) { return }
-        super.otherMouseDown(with: event)
+        _ = sendMousePosition(for: event)
+        _ = sendMouseButton(event: event, state: GHOSTTY_MOUSE_PRESS, button: mouseButton(for: event))
+        requestSurfaceRefresh()
     }
 
     public override func otherMouseUp(with event: NSEvent) {
-        if sendMousePosition(for: event), sendMouseButton(event: event, state: GHOSTTY_MOUSE_RELEASE, button: mouseButton(for: event)) { return }
-        super.otherMouseUp(with: event)
+        _ = sendMousePosition(for: event)
+        _ = sendMouseButton(event: event, state: GHOSTTY_MOUSE_RELEASE, button: mouseButton(for: event))
+        requestSurfaceRefresh()
     }
 
     public override func mouseMoved(with event: NSEvent) {
-        if sendMousePosition(for: event) { return }
+        if sendMousePosition(for: event) {
+            if shouldRefreshSurfaceAfterMousePositionChange() { requestSurfaceRefresh() }
+            return
+        }
         super.mouseMoved(with: event)
     }
 
     public override func mouseDragged(with event: NSEvent) {
-        if sendMousePosition(for: event) { return }
+        if sendMousePosition(for: event) {
+            requestSurfaceRefresh()
+            return
+        }
         super.mouseDragged(with: event)
     }
 
     public override func rightMouseDragged(with event: NSEvent) {
-        if sendMousePosition(for: event) { return }
+        if sendMousePosition(for: event) {
+            requestSurfaceRefresh()
+            return
+        }
         super.rightMouseDragged(with: event)
     }
 
     public override func otherMouseDragged(with event: NSEvent) {
-        if sendMousePosition(for: event) { return }
+        if sendMousePosition(for: event) {
+            requestSurfaceRefresh()
+            return
+        }
         super.otherMouseDragged(with: event)
     }
 
@@ -678,6 +702,12 @@ import spacesterminalcore
     private func sendMouseButton(event: NSEvent, state: ghostty_input_mouse_state_e, button: ghostty_input_mouse_button_e) -> Bool {
         guard let surface else { return false }
         return ghostty_surface_mouse_button(surface, state, button, ghosttyModifiers(from: event.modifierFlags))
+    }
+
+    private func shouldRefreshSurfaceAfterMousePositionChange() -> Bool {
+        if NSEvent.pressedMouseButtons != 0 { return true }
+        guard let surface else { return false }
+        return ghostty_surface_mouse_captured(surface)
     }
 
     private func mouseButton(for event: NSEvent) -> ghostty_input_mouse_button_e {

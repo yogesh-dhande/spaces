@@ -51,6 +51,15 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         window.layoutIfNeeded()
     }
 
+    @MainActor private func makeMouseEvent(
+        type: NSEvent.EventType, point: NSPoint, window: NSWindow, eventNumber: Int = 1, clickCount: Int = 1, pressure: Float = 1
+    ) -> NSEvent {
+        let event = NSEvent.mouseEvent(
+            with: type, location: point, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: eventNumber,
+            clickCount: clickCount, pressure: pressure)
+        return try! XCTUnwrap(event)
+    }
+
     @MainActor private func waitUntil(
         timeout: TimeInterval = 10, pollInterval: TimeInterval = 0.05, file: StaticString = #filePath, line: UInt = #line,
         _ condition: @escaping @MainActor () -> Bool
@@ -338,6 +347,51 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(reboundTranscript.contains("first window"))
         XCTAssertTrue(reboundTranscript.contains("hidden host"))
         XCTAssertTrue(reboundTranscript.contains("second window"))
+    }
+
+    @MainActor func testEmbeddedViewMouseDragRequestsSurfaceRefreshForSelectionRendering() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let terminalView = GhosttyEmbeddedTerminalView(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "selection-refresh-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "selection",
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-18T00:00:00Z"))
+        defer { terminalView.terminateSession() }
+
+        let window = makeHostingWindow()
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+
+        let surfaceReady = expectation(description: "embedded ghostty surface ready")
+        terminalView.onSurfaceReady = { surface in if surface != nil { surfaceReady.fulfill() } }
+
+        attach(terminalView, to: window)
+        window.makeKeyAndOrderFront(nil)
+        wait(for: [surfaceReady], timeout: 15)
+
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        let baselineRefreshCount = terminalView.debugSurfaceRefreshRequestCount
+
+        let movedEvent = makeMouseEvent(type: .mouseMoved, point: NSPoint(x: 80, y: 80), window: window, eventNumber: 2, pressure: 0)
+        terminalView.mouseMoved(with: movedEvent)
+        XCTAssertEqual(
+            terminalView.debugSurfaceRefreshRequestCount, baselineRefreshCount,
+            "Passive mouse movement should not trigger redraws when the terminal has not captured the mouse.")
+
+        let downEvent = makeMouseEvent(type: .leftMouseDown, point: NSPoint(x: 80, y: 80), window: window, eventNumber: 3, pressure: 1)
+        let dragEvent = makeMouseEvent(type: .leftMouseDragged, point: NSPoint(x: 160, y: 80), window: window, eventNumber: 4, pressure: 1)
+        let upEvent = makeMouseEvent(type: .leftMouseUp, point: NSPoint(x: 160, y: 80), window: window, eventNumber: 5, pressure: 0)
+
+        terminalView.mouseDown(with: downEvent)
+        terminalView.mouseDragged(with: dragEvent)
+        terminalView.mouseUp(with: upEvent)
+
+        XCTAssertGreaterThanOrEqual(
+            terminalView.debugSurfaceRefreshRequestCount, baselineRefreshCount + 3,
+            "Drag selection should schedule redraws so Ghostty can paint selection changes.")
     }
 
     @MainActor func testControlAttachAndDetachRequestsUpdatePersistenceAndPostAttachmentChanges() throws {
