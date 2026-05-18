@@ -71,9 +71,9 @@ public struct SpacesAppLaunchContext {
 public enum SpacesAppLaunchPreparationError: Error { case duplicateProfileOwner(profile: SpacesProfile, owner: SpacesProcessLeaseOwner) }
 
 public enum SpacesLeaseCoordinator {
-    public static func prepareAppLaunchContext(
-        profile: SpacesProfile? = nil, fileManager: FileManager = .default, homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser
-    ) throws -> SpacesAppLaunchContext {
+    public static func prepareAppLaunchContext(profile: SpacesProfile? = nil, fileManager: FileManager = .default, homeDirectoryURL: URL? = nil)
+        throws -> SpacesAppLaunchContext
+    {
         let resolvedProfile: SpacesProfile
         if let profile { resolvedProfile = profile } else { resolvedProfile = try SpacesProfile.current() }
         switch try acquireProfileAppOwnerLease(profile: resolvedProfile, fileManager: fileManager) {
@@ -92,11 +92,12 @@ public enum SpacesLeaseCoordinator {
         -> SpacesProcessLeaseAcquisitionResult
     { try acquireLease(at: appOwnerLeaseDirectory(profileRoot: profile.rootDirectory), profileRoot: profile.rootDirectory, fileManager: fileManager) }
 
-    public static func acquireDesktopControlLease(
-        profile: SpacesProfile, fileManager: FileManager = .default, homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser
-    ) throws -> SpacesProcessLeaseAcquisitionResult {
+    public static func acquireDesktopControlLease(profile: SpacesProfile, fileManager: FileManager = .default, homeDirectoryURL: URL? = nil) throws
+        -> SpacesProcessLeaseAcquisitionResult
+    {
         try acquireLease(
-            at: desktopControlLeaseDirectory(homeDirectoryURL: homeDirectoryURL), profileRoot: profile.rootDirectory, fileManager: fileManager)
+            at: desktopControlLeaseDirectory(homeDirectoryURL: homeDirectoryURL, fileManager: fileManager), profileRoot: profile.rootDirectory,
+            fileManager: fileManager)
     }
 
     public static func currentProfileAppOwner(profile: SpacesProfile? = nil, fileManager: FileManager = .default) throws -> SpacesProcessLeaseOwner? {
@@ -105,15 +106,17 @@ public enum SpacesLeaseCoordinator {
         return try readLiveOwner(fromLeaseDirectoryPath: appOwnerLeaseDirectory(profileRoot: resolvedProfile.rootDirectory), fileManager: fileManager)
     }
 
-    public static func currentDesktopControlOwner(
-        fileManager: FileManager = .default, homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser
-    ) throws -> SpacesProcessLeaseOwner? {
-        try readLiveOwner(fromLeaseDirectoryPath: desktopControlLeaseDirectory(homeDirectoryURL: homeDirectoryURL), fileManager: fileManager)
+    public static func currentDesktopControlOwner(fileManager: FileManager = .default, homeDirectoryURL: URL? = nil) throws
+        -> SpacesProcessLeaseOwner?
+    {
+        try readLiveOwner(
+            fromLeaseDirectoryPath: desktopControlLeaseDirectory(homeDirectoryURL: homeDirectoryURL, fileManager: fileManager),
+            fileManager: fileManager)
     }
 
     @discardableResult public static func waitForDesktopControlAvailability(
         timeoutSeconds: TimeInterval, pollIntervalSeconds: TimeInterval = 1, logIntervalSeconds: TimeInterval = 5,
-        fileManager: FileManager = .default, homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser, logger: (String) -> Void
+        fileManager: FileManager = .default, homeDirectoryURL: URL? = nil, logger: (String) -> Void
     ) throws -> Bool {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         var lastLoggedOwnerToken: String?
@@ -159,8 +162,9 @@ public enum SpacesLeaseCoordinator {
                     SpacesProcessLease(owner: owner, leaseDirectoryPath: leaseDirectoryPath, metadataPath: metadataPath, fileManager: fileManager))
             } catch {
                 if !isFileExistsError(error) { throw error }
-                let existingOwner = try readOwner(fromLeaseDirectoryPath: leaseDirectoryPath, fileManager: fileManager)
-                if let existingOwner, isProcessAlive(pid: existingOwner.pid) { return .busy(existingOwner) }
+                if let existingOwner = try readLiveOwner(fromLeaseDirectoryPath: leaseDirectoryPath, fileManager: fileManager) {
+                    return .busy(existingOwner)
+                }
                 try? fileManager.removeItem(atPath: leaseDirectoryPath)
             }
         }
@@ -180,17 +184,39 @@ public enum SpacesLeaseCoordinator {
             if fileManager.fileExists(atPath: leaseDirectoryPath) { try? fileManager.removeItem(atPath: leaseDirectoryPath) }
             return nil
         }
-        guard isProcessAlive(pid: owner.pid) else {
+        guard isLiveOwnerProcess(owner) else {
             try? fileManager.removeItem(atPath: leaseDirectoryPath)
             return nil
         }
         return owner
     }
 
+    static func desktopControlLeaseDirectory(homeDirectoryURL: URL? = nil, fileManager: FileManager = .default) -> String {
+        let resolvedHomeDirectoryURL = homeDirectoryURL ?? currentUserHomeDirectoryURL(fileManager: fileManager)
+        return resolvedHomeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true).appendingPathComponent("leases", isDirectory: true)
+            .appendingPathComponent("desktop-control", isDirectory: true).path
+    }
+
     private static func isProcessAlive(pid: Int32) -> Bool {
         guard pid > 0 else { return false }
         if Darwin.kill(pid, 0) == 0 { return true }
         return errno == EPERM
+    }
+
+    private static func isLiveOwnerProcess(_ owner: SpacesProcessLeaseOwner) -> Bool {
+        guard isProcessAlive(pid: owner.pid) else { return false }
+        guard let executablePath = executablePath(for: owner.pid) else { return false }
+        return executablePath == SpacesProfile.canonicalPath(owner.executablePath)
+    }
+
+    private static func executablePath(for pid: Int32) -> String? {
+        guard pid > 0 else { return nil }
+        var buffer = [CChar](repeating: 0, count: 4096)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        let terminatorIndex = buffer.firstIndex(of: 0) ?? Int(length)
+        let utf8Bytes = buffer[..<terminatorIndex].map { UInt8(bitPattern: $0) }
+        return SpacesProfile.canonicalPath(String(decoding: utf8Bytes, as: UTF8.self))
     }
 
     private static func isFileExistsError(_ error: Error) -> Bool {
@@ -204,9 +230,22 @@ public enum SpacesLeaseCoordinator {
         ).path
     }
 
-    private static func desktopControlLeaseDirectory(homeDirectoryURL: URL) -> String {
-        homeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true).appendingPathComponent("leases", isDirectory: true)
-            .appendingPathComponent("desktop-control", isDirectory: true).path
+    private static func currentUserHomeDirectoryURL(fileManager: FileManager) -> URL {
+        if let accountHomePath = currentUserAccountHomePath() { return URL(fileURLWithPath: accountHomePath, isDirectory: true) }
+        return fileManager.homeDirectoryForCurrentUser
+    }
+
+    private static func currentUserAccountHomePath() -> String? {
+        let uid = getuid()
+        let rawSize = sysconf(_SC_GETPW_R_SIZE_MAX)
+        let bufferSize = rawSize > 0 ? Int(rawSize) : 16_384
+        var buffer = [CChar](repeating: 0, count: bufferSize)
+        var record = passwd()
+        var result: UnsafeMutablePointer<passwd>?
+        let status = getpwuid_r(uid, &record, &buffer, buffer.count, &result)
+        guard status == 0, let entry = result else { return nil }
+        let path = String(cString: entry.pointee.pw_dir)
+        return path.isEmpty ? nil : path
     }
 
     private static func metadataPath(forLeaseDirectoryPath leaseDirectoryPath: String) -> String {

@@ -155,6 +155,35 @@ final class SpacesProfileTests: XCTestCase {
         XCTAssertEqual(owner.profileRoot, firstProfile.rootDirectory)
     }
 
+    func testDesktopControlLeaseDirectoryIgnoresHomeEnvironmentOverrideByDefault() throws {
+        let originalHome = ProcessInfo.processInfo.environment["HOME"]
+        setenv("HOME", tempHomeURL.path, 1)
+        defer { if let originalHome { setenv("HOME", originalHome, 1) } else { unsetenv("HOME") } }
+
+        let accountHomePath = try XCTUnwrap(currentUserAccountHomePath())
+        let leaseDirectory = SpacesLeaseCoordinator.desktopControlLeaseDirectory()
+
+        XCTAssertEqual(leaseDirectory, "\(accountHomePath)/.spaces/leases/desktop-control")
+        XCTAssertNotEqual(leaseDirectory, "\(tempHomeURL!.path)/.spaces/leases/desktop-control")
+    }
+
+    func testProfileAppOwnerLeaseRecoversWhenPIDIsReusedByDifferentExecutable() throws {
+        let profile = try explicitProfile(named: "mismatched-owner")
+        let leaseDirectory = URL(fileURLWithPath: profile.rootDirectory).appendingPathComponent("leases/app-owner", isDirectory: true)
+        try FileManager.default.createDirectory(at: leaseDirectory, withIntermediateDirectories: true)
+        let staleOwner = SpacesProcessLeaseOwner(
+            pid: getpid(), executablePath: "/tmp/not-the-current-process", profileRoot: profile.rootDirectory, token: "stale-token",
+            acquiredAt: "2026-05-17T00:00:00Z")
+        let data = try JSONEncoder().encode(staleOwner)
+        try data.write(to: leaseDirectory.appendingPathComponent("owner.json"), options: .atomic)
+
+        let result = try SpacesLeaseCoordinator.acquireProfileAppOwnerLease(profile: profile)
+        guard case .acquired(let lease) = result else { return XCTFail("Expected mismatched owner to be replaced.") }
+        defer { lease.release() }
+        XCTAssertEqual(lease.owner.profileRoot, profile.rootDirectory)
+        XCTAssertNotEqual(lease.owner.token, staleOwner.token)
+    }
+
     private func explicitProfile(named name: String) throws -> SpacesProfile {
         let databasePath = tempHomeURL.appendingPathComponent("profiles/\(name)/spaces.db").path
         return try SpacesProfile.resolve(
@@ -175,4 +204,16 @@ final class SpacesProfileTests: XCTestCase {
 private struct StubGitProfileProbe: SpacesGitProfileProbe {
     let context: SpacesDevelopmentContext?
     func resolveDevelopmentContext(repoRootPath _: String) throws -> SpacesDevelopmentContext? { context }
+}
+
+private func currentUserAccountHomePath() -> String? {
+    let uid = getuid()
+    let rawSize = sysconf(_SC_GETPW_R_SIZE_MAX)
+    let bufferSize = rawSize > 0 ? Int(rawSize) : 16_384
+    var buffer = [CChar](repeating: 0, count: bufferSize)
+    var record = passwd()
+    var result: UnsafeMutablePointer<passwd>?
+    let status = getpwuid_r(uid, &record, &buffer, buffer.count, &result)
+    guard status == 0, let entry = result else { return nil }
+    return String(cString: entry.pointee.pw_dir)
 }
