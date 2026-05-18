@@ -18,6 +18,17 @@ if [[ "${SPACES_GHOSTTYKIT_REQUIRE_HOST_REBIND:-0}" == "1" ]]; then
     REQUIRED_EXPORTS+=("ghostty_surface_set_host")
 fi
 
+if [[ "${SPACES_GHOSTTYKIT_REQUIRE_SESSION_RENDER_SPLIT:-0}" == "1" ]]; then
+    REQUIRED_EXPORTS+=(
+        "ghostty_surface_export_snapshot"
+        "ghostty_session_new"
+        "ghostty_session_export_snapshot"
+        "ghostty_renderer_attach"
+        "ghostty_renderer_detach"
+        "ghostty_terminal_snapshot_free"
+    )
+fi
+
 file_contains_fixed() {
     local needle="$1"
     local path="$2"
@@ -71,4 +82,4 @@ for export_name in "${REQUIRED_EXPORTS[@]}"; do
     fi
 done
 
-echo "Verified GhosttyKit additive PTY I/O exports in $XCFRAMEWORK_ROOT"
+echo "Verified GhosttyKit additive embedded terminal exports in $XCFRAMEWORK_ROOT"

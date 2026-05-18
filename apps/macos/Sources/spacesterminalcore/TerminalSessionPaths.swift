@@ -9,9 +9,16 @@ public struct TerminalSessionPaths: Sendable, Equatable {
     public let clientsPath: String
     public let attachmentsPath: String
     public let controlSocketPath: String
+    public let subscriptionSocketPath: String
     public let serviceLogPath: String
 
-    public init(rootDirectory: String, controlSocketPath: String? = nil) {
+    public init(rootDirectory: String) { self.init(rootDirectory: rootDirectory, controlSocketPath: nil, subscriptionSocketPath: nil) }
+
+    public init(rootDirectory: String, controlSocketPath: String?) {
+        self.init(rootDirectory: rootDirectory, controlSocketPath: controlSocketPath, subscriptionSocketPath: nil)
+    }
+
+    public init(rootDirectory: String, controlSocketPath: String?, subscriptionSocketPath: String?) {
         self.rootDirectory = rootDirectory
         metadataPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("metadata.json").path
         statePath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("state.json").path
@@ -20,6 +27,7 @@ public struct TerminalSessionPaths: Sendable, Equatable {
         clientsPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("clients.json").path
         attachmentsPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("attachments.json").path
         self.controlSocketPath = controlSocketPath ?? URL(fileURLWithPath: rootDirectory).appendingPathComponent("control.sock").path
+        self.subscriptionSocketPath = subscriptionSocketPath ?? URL(fileURLWithPath: rootDirectory).appendingPathComponent("subscription.sock").path
         serviceLogPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("service.log").path
     }
 
@@ -29,9 +37,10 @@ public struct TerminalSessionPaths: Sendable, Equatable {
             .appendingPathComponent(id, isDirectory: true)
         let socketRoot = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent("spaces-terminal-sockets", isDirectory: true)
         try FileManager.default.createDirectory(at: socketRoot, withIntermediateDirectories: true)
-        let socketName = "\(socketPathComponent(for: spacesDirectory.path, sessionID: id)).sock"
-        let socketPath = socketRoot.appendingPathComponent(socketName).path
-        return TerminalSessionPaths(rootDirectory: root.path, controlSocketPath: socketPath)
+        let socketNamePrefix = socketPathComponent(for: spacesDirectory.path, sessionID: id)
+        let controlSocketPath = socketRoot.appendingPathComponent("\(socketNamePrefix).sock").path
+        let subscriptionSocketPath = socketRoot.appendingPathComponent("\(socketNamePrefix)-subscription.sock").path
+        return TerminalSessionPaths(rootDirectory: root.path, controlSocketPath: controlSocketPath, subscriptionSocketPath: subscriptionSocketPath)
     }
 
     public static func sessionsRootDirectory(fileManager: FileManager = .default) throws -> String {

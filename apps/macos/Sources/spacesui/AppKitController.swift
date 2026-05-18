@@ -1117,12 +1117,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @MainActor static func terminalSessionHost(launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths)
         -> any TerminalGhosttySessionHosting
     {
-        if let host = GhosttyEmbeddedSessionRegistry.shared.existingHost(sessionID: launchConfiguration.sessionID) { return host }
+        if GhosttyEmbeddedSessionRegistry.shared.existingCore(sessionID: launchConfiguration.sessionID) != nil {
+            return GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths)
+        }
         return RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
     }
 
     @MainActor static func shouldUseTerminalControlSocketClientActions(sessionID: String) -> Bool {
-        GhosttyEmbeddedSessionRegistry.shared.existingHost(sessionID: sessionID) == nil
+        GhosttyEmbeddedSessionRegistry.shared.existingCore(sessionID: sessionID) == nil
     }
 
     nonisolated static func launchLocalBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
@@ -1130,8 +1132,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     {
         try performBuiltInTerminalSessionWorkOnMainThread {
             let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
-            let host = GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths)
-            try host.startIfNeeded()
+            let sessionCore = GhosttyEmbeddedSessionRegistry.shared.core(for: launchConfiguration, paths: paths)
+            try sessionCore.startIfNeeded()
             let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
             return TerminalServiceSessionSummary(
                 id: launchConfiguration.sessionID, title: runtimeState.title ?? launchConfiguration.title,
@@ -1143,7 +1145,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     nonisolated static func terminateLocalBuiltInTerminalSessionIfPresent(sessionID: String) -> Bool {
         (try? performBuiltInTerminalSessionWorkOnMainThread {
-            guard GhosttyEmbeddedSessionRegistry.shared.existingHost(sessionID: sessionID) != nil else { return false }
+            guard GhosttyEmbeddedSessionRegistry.shared.existingCore(sessionID: sessionID) != nil else { return false }
             GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
             return true
         }) ?? false
@@ -1152,7 +1154,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     nonisolated static func terminateBuiltInTerminalSession(sessionID: String) {
         try? performBuiltInTerminalSessionWorkOnMainThread {
             (NSApp.delegate as? AppKitController)?.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: true)
-            if GhosttyEmbeddedSessionRegistry.shared.existingHost(sessionID: sessionID) != nil {
+            if GhosttyEmbeddedSessionRegistry.shared.existingCore(sessionID: sessionID) != nil {
                 GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
             } else {
                 try? TerminalService.terminateSession(id: sessionID)

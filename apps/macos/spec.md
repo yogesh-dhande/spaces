@@ -116,8 +116,8 @@ Spaces focuses those windows; it does not decide their geometry.
 - `spaces terminal` sessions should remain owned by a per-user Spaces terminal service so they can survive `SpacesApp` quit and reopen against the same live shell session as long as the service remains alive and the session lifetime is still valid.
 - `ghostty-embedded` terminal sessions should remain Mac-owned at the session boundary: either the app-local Ghostty host or the service host owns the PTY, terminal parsing, output capture, attachment leases, and input or resize authority, while windows and other clients attach by stable session ID.
 - Built-in process windows should keep a compact metadata header instead of expanding to fit full exported environment wrappers.
-- Native Spaces terminal windows should attach to an existing session as an owner or viewer without restarting the shell, preferring the live in-process Ghostty host when the app already owns that session and falling back to the daemon-owned compatibility client otherwise.
-- The current macOS compatibility client should rebuild a passive terminal snapshot from daemon-owned session output plus runtime metadata until the Ghostty fork exposes a true session-core plus attachable-renderer split.
+- Native Spaces terminal windows should attach to an existing session as an owner or viewer without restarting the shell, preferring the live in-process Ghostty host when the app already owns that session and otherwise subscribing to the daemon-owned session state stream for live Ghostty snapshots.
+- Daemon-owned macOS client windows should render from service-published Ghostty snapshots while the session is live, with `output.log` replay reserved for transcript history, tail, and fallback recovery when the live stream is unavailable.
 - Attached terminal windows should follow live session metadata where possible, including title and working directory updates emitted by the session backend instead of staying frozen at launch-time values.
 - Owner and viewer windows should show the same persisted terminal history immediately on open, including already-buffered workspace-process output, without requiring the user to restart or recreate the shell session.
 - `Spaces`-hosted terminal windows opened or focused from the app stay visible with the Spaces app instead of following the external-app hide behavior used for browsers, Finder, or editors.
@@ -154,6 +154,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Direct mode also supports deterministic interpolation of Spaces-provided environment variables such as named ports and `SPACES_*` paths inside executable arguments and leading env assignments, for example `PORT=$PORT1 npm run dev`.
 - Direct mode accepts only simple Spaces variable references such as `$PORT1` or `${PORT1}`. Other shell expansions such as `${PORT1:-3000}`, `$$`, or `$?` must be rejected and require Shell mode instead.
 - Shell mode supports composite shell behavior such as `cd x && y`, pipes, redirection, and shell expansion.
+- Configured coding-agent launchers should run inside an interactive login shell so user shell PATH and tool initialization are available to commands such as `claude` or `codex`.
 - App-level configuration is changed in the app only, not through `spaces`.
 - The global shell choice for shell-mode processes is configurable in Settings; the default is `zsh`.
 - The project and workspace editors validate process commands when they are saved. Direct mode rejects shell-only syntax, while Shell mode requires only a non-empty command.

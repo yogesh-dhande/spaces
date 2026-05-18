@@ -214,6 +214,23 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(output, "echo hello\n")
     }
 
+    @MainActor func testIncomingOutputUsesRendererRefreshSchedulerByDefault() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-output-default-refresh", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+            shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-18T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: .init(rootDirectory: root.path))
+
+        XCTAssertEqual(host.debugSurfaceRefreshRequestCount, 0)
+
+        host.debugHandleIncomingOutput(Data("prompt".utf8))
+
+        XCTAssertEqual(host.debugSurfaceRefreshRequestCount, 1)
+    }
+
     @MainActor func testRuntimeStateRemainsRunningWhenCachedChildPIDHasDied() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -283,7 +300,12 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
 
         let surfaceReady = expectation(description: "embedded ghostty surface ready")
-        terminalView.onSurfaceReady = { surface in if surface != nil { surfaceReady.fulfill() } }
+        var didFulfillSurfaceReady = false
+        terminalView.onSurfaceReady = { surface in
+            guard surface != nil, !didFulfillSurfaceReady else { return }
+            didFulfillSurfaceReady = true
+            surfaceReady.fulfill()
+        }
 
         attach(terminalView, to: firstWindow)
         firstWindow.makeKeyAndOrderFront(nil)
@@ -296,7 +318,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(terminalView.surface, originalSurface)
 
         terminalView.parkInHiddenHostWindowIfNeeded()
-        try waitUntil { terminalView.window !== nil && terminalView.window !== firstWindow }
+        try waitUntil { terminalView.window == nil }
         XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), originalPID)
         XCTAssertEqual(terminalView.surface, originalSurface)
 

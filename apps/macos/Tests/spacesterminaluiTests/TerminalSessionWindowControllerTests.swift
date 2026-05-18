@@ -151,7 +151,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let controller = TerminalSessionWindowController(sessionID: "session-close-w", paths: .init(rootDirectory: root.path))
+        let controller = makeGhosttyController(sessionID: "session-close-w", paths: .init(rootDirectory: root.path))
         controller.show()
 
         let event = try XCTUnwrap(
@@ -168,7 +168,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let controller = TerminalSessionWindowController(sessionID: "session-close-q", paths: .init(rootDirectory: root.path))
+        let controller = makeGhosttyController(sessionID: "session-close-q", paths: .init(rootDirectory: root.path))
         controller.show()
 
         let event = try XCTUnwrap(

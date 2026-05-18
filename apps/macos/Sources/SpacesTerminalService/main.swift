@@ -15,7 +15,7 @@ import spacesterminalghostty
             }
         }
     }
-    private var hosts: [String: GhosttyEmbeddedSessionHost] = [:]
+    private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
     private var lifecycleTimer: Timer?
 
     init() throws { socketPath = try TerminalServicePaths.socketPath() }
@@ -29,7 +29,7 @@ import spacesterminalghostty
     func shutdown() {
         lifecycleTimer?.invalidate()
         lifecycleTimer = nil
-        for sessionID in Array(hosts.keys) { _ = terminateSession(id: sessionID) }
+        for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) }
         server.stop()
     }
 
@@ -53,8 +53,8 @@ import spacesterminalghostty
 
     private func createSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) -> TerminalServiceResponse {
         do {
-            let host = try host(for: launchConfiguration)
-            try host.startIfNeeded()
+            let sessionCore = try sessionCore(for: launchConfiguration)
+            try sessionCore.startIfNeeded()
             return TerminalServiceResponse(
                 ok: true, message: "Started terminal session \(launchConfiguration.sessionID).",
                 session: try sessionSummary(for: launchConfiguration.sessionID))
@@ -71,8 +71,8 @@ import spacesterminalghostty
 
     private func terminateSession(id sessionID: String) -> TerminalServiceResponse {
         do {
-            if let host = hosts.removeValue(forKey: sessionID) {
-                host.terminate()
+            if let sessionCore = sessionCores.removeValue(forKey: sessionID) {
+                sessionCore.terminate()
                 return TerminalServiceResponse(
                     ok: true, message: "Stopped terminal session \(sessionID).", session: try? sessionSummary(for: sessionID))
             }
@@ -95,16 +95,17 @@ import spacesterminalghostty
                     rows: runtimeState.rows)
                 try? TerminalSessionPersistence.writeRuntimeState(exitedState, paths: paths)
                 try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
+                try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
             }
             return TerminalServiceResponse(ok: true, message: "Terminal session \(sessionID) is not active.")
         } catch { return TerminalServiceResponse(ok: false, message: String(describing: error)) }
     }
 
-    private func host(for launchConfiguration: TerminalSessionLaunchConfiguration) throws -> GhosttyEmbeddedSessionHost {
-        if let existing = hosts[launchConfiguration.sessionID] { return existing }
+    private func sessionCore(for launchConfiguration: TerminalSessionLaunchConfiguration) throws -> GhosttyEmbeddedSessionCore {
+        if let existing = sessionCores[launchConfiguration.sessionID] { return existing }
         let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
-        let created = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
-        hosts[launchConfiguration.sessionID] = created
+        let created = GhosttyEmbeddedSessionCore(launchConfiguration: launchConfiguration, paths: paths)
+        sessionCores[launchConfiguration.sessionID] = created
         return created
     }
 
@@ -146,9 +147,11 @@ import spacesterminalghostty
     }
 
     private func reapInactiveSessions() {
-        for (sessionID, host) in hosts {
-            guard host.launchConfiguration.lifetimePolicy == .whileAttached else { continue }
-            guard let liveAttachments = try? TerminalSessionPersistence.liveAttachments(paths: host.paths), liveAttachments.isEmpty else { continue }
+        for (sessionID, sessionCore) in sessionCores {
+            guard sessionCore.launchConfiguration.lifetimePolicy == .whileAttached else { continue }
+            guard let liveAttachments = try? TerminalSessionPersistence.liveAttachments(paths: sessionCore.paths), liveAttachments.isEmpty else {
+                continue
+            }
             _ = terminateSession(id: sessionID)
         }
     }
@@ -168,6 +171,7 @@ import spacesterminalghostty
                 rows: runtimeState.rows)
             try? TerminalSessionPersistence.writeRuntimeState(failedState, paths: paths)
             try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
+            try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
         }
     }
 

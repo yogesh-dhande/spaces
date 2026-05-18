@@ -241,6 +241,24 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let openCapture = TerminalOpenCapture()
         let terminateCapture = TerminalTerminateCapture()
+        let launchedConfigurations = TerminalLaunchConfigurationCapture()
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher { configuration in
+            launchedConfigurations.append(configuration)
+            let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                .init(
+                    sessionID: configuration.sessionID, backend: configuration.backend, servicePID: Int32(ProcessInfo.processInfo.processIdentifier),
+                    childPID: 5432, state: .running, updatedAt: "2026-05-18T18:00:00Z", title: configuration.title,
+                    workingDirectory: configuration.workingDirectory), paths: paths)
+            return TerminalServiceSessionSummary(
+                id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running,
+                servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 5432, controlSocketPath: paths.controlSocketPath,
+                outputPath: paths.outputPath)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil) }
         let orchestrator = WorkspaceOrchestrator(
             store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
             builtInTerminalWindowOpener: { sessionID, mode in
@@ -272,6 +290,11 @@ final class OrchestratorTests: XCTestCase {
         }
 
         XCTAssertEqual(openCapture.modes, [.owner])
+        let launchedConfiguration = try XCTUnwrap(launchedConfigurations.snapshot().first)
+        let launchedCommand = try XCTUnwrap(launchedConfiguration.command)
+        XCTAssertTrue(launchedCommand.contains(" -ilc "))
+        XCTAssertTrue(launchedCommand.contains("\\033]0;Codex\\007"))
+        XCTAssertTrue(launchedCommand.contains("codex --dangerously-skip-permissions"))
         let agentWindows = try store.agentWindows(workspaceID: workspace.id)
         XCTAssertEqual(agentWindows.count, 1)
         XCTAssertEqual(agentWindows.first?.provider, .spaces)

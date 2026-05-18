@@ -145,9 +145,9 @@ PY
     30
 
   viewer_payload="viewer-ping-$iteration"
-  viewer_snapshot_baseline="$(
+  viewer_output_baseline="$(
     grep -Ec \
-      "spaces: perf metric=terminal_snapshot_stream_refresh target=session=${session_id} success=1 .*replayed_bytes=[1-9][0-9]*" \
+      "spaces: perf metric=terminal_viewer_output_present target=session=${session_id} success=1 .*changed=1" \
       "$PERF_LOG" || true
   )"
   viewer_update_started_at="$(python3 - <<'PY'
@@ -159,8 +159,8 @@ PY
     "$SPACES_CLI" terminal send "$session_id" "$viewer_payload" --newline >/dev/null
   wait_for_log_pattern_count_greater_than \
     "$PERF_LOG" \
-    "spaces: perf metric=terminal_snapshot_stream_refresh target=session=${session_id} success=1 .*replayed_bytes=[1-9][0-9]*" \
-    "$viewer_snapshot_baseline" \
+    "spaces: perf metric=terminal_viewer_output_present target=session=${session_id} success=1 .*changed=1" \
+    "$viewer_output_baseline" \
     30
   viewer_update_wall_ms="$(ms_since "$viewer_update_started_at")"
   printf '%s\t%s\n' "$session_id" "$viewer_update_wall_ms" >>"$VIEWER_UPDATE_WALL_SAMPLES"
@@ -209,6 +209,8 @@ viewer_update_wall_samples = load_wall_samples(viewer_update_wall_path)
 service_ensure_by_launch = defaultdict(list)
 snapshot_refresh_by_renderer = defaultdict(list)
 viewer_output_by_renderer = defaultdict(list)
+remote_state_publish_by_reason = defaultdict(list)
+remote_state_receive_by_reason = defaultdict(list)
 service_create_samples = []
 window_summon_by_mode = defaultdict(list)
 show_records_by_mode = defaultdict(list)
@@ -243,6 +245,10 @@ with open(perf_log_path, "r", encoding="utf-8", errors="replace") as handle:
             snapshot_refresh_by_renderer[detail_map.get("renderer", "unknown")].append(elapsed)
         elif metric == "terminal_viewer_output_present":
             viewer_output_by_renderer[detail_map.get("renderer", "unknown")].append(elapsed)
+        elif metric == "terminal_remote_state_publish":
+            remote_state_publish_by_reason[detail_map.get("reason", "unknown")].append(elapsed)
+        elif metric == "terminal_remote_state_receive":
+            remote_state_receive_by_reason[detail_map.get("reason", "unknown")].append(elapsed)
         elif metric == "terminal_window_show_stage" and session_id:
             pending_show_stages_by_session[session_id].append((detail_map.get("stage", "unknown"), elapsed))
         elif metric == "terminal_window_show" and session_id:
@@ -325,6 +331,26 @@ if viewer_output_by_renderer:
         payload["metrics"][f"terminal_viewer_output_present:{renderer}"] = summary
         print(
             f"terminal_viewer_output_present renderer={renderer}: count={summary['count']} min={summary['min_ms']}ms "
+            f"avg={summary['avg_ms']}ms p95={summary['p95_ms']}ms max={summary['max_ms']}ms")
+
+if remote_state_publish_by_reason:
+    print()
+    for reason in sorted(remote_state_publish_by_reason):
+        values = remote_state_publish_by_reason[reason]
+        summary = summarize(values)
+        payload["metrics"][f"terminal_remote_state_publish:{reason}"] = summary
+        print(
+            f"terminal_remote_state_publish reason={reason}: count={summary['count']} min={summary['min_ms']}ms "
+            f"avg={summary['avg_ms']}ms p95={summary['p95_ms']}ms max={summary['max_ms']}ms")
+
+if remote_state_receive_by_reason:
+    print()
+    for reason in sorted(remote_state_receive_by_reason):
+        values = remote_state_receive_by_reason[reason]
+        summary = summarize(values)
+        payload["metrics"][f"terminal_remote_state_receive:{reason}"] = summary
+        print(
+            f"terminal_remote_state_receive reason={reason}: count={summary['count']} min={summary['min_ms']}ms "
             f"avg={summary['avg_ms']}ms p95={summary['p95_ms']}ms max={summary['max_ms']}ms")
 
 with open(json_path, "w", encoding="utf-8") as handle:

@@ -55,8 +55,8 @@ import GhosttyKit
         runtimeConfig.write_clipboard_cb = { _, _, content, len, _ in GhosttyClipboardBridge.writeClipboard(content: content, len: UInt(len)) }
         runtimeConfig.close_surface_cb = { userdata, _ in
             guard let userdata else { return }
-            let view = Unmanaged<GhosttyEmbeddedTerminalView>.fromOpaque(userdata).takeUnretainedValue()
-            DispatchQueue.main.async { MainActor.assumeIsolated { view.handleSurfaceClosed() } }
+            let surfaceUserData = Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue()
+            DispatchQueue.main.async { MainActor.assumeIsolated { surfaceUserData.handleClose() } }
         }
 
         guard let app = ghostty_app_new(&runtimeConfig, config) else {

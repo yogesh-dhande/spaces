@@ -2,8 +2,8 @@ import AppKit
 import Foundation
 import GhosttyKit
 
-public struct GhosttyTerminalSnapshot: Equatable {
-    public struct Cell: Equatable {
+public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
+    public struct Cell: Codable, Sendable, Equatable {
         public let codepoint: UInt32
         public let foregroundRGB: UInt32
         public let backgroundRGB: UInt32
@@ -42,9 +42,20 @@ public struct GhosttyTerminalSnapshot: Equatable {
 }
 
 public enum GhosttyTerminalSnapshotCapture {
-    public static func capture(from surface: ghostty_surface_t?) -> GhosttyTerminalSnapshot? {
-        guard surface != nil else { return nil }
-        return nil
+    public static func captureFromSurface(_ surface: ghostty_surface_t?) -> GhosttyTerminalSnapshot? {
+        guard let surface else { return nil }
+        var snapshot = ghostty_terminal_snapshot_s()
+        guard ghostty_surface_export_snapshot(surface, &snapshot) else { return nil }
+        defer { ghostty_terminal_snapshot_free(&snapshot) }
+        return makeSnapshot(from: snapshot)
+    }
+
+    public static func captureFromSession(_ session: ghostty_session_t?) -> GhosttyTerminalSnapshot? {
+        guard let session else { return nil }
+        var snapshot = ghostty_terminal_snapshot_s()
+        guard ghostty_session_export_snapshot(session, &snapshot) else { return nil }
+        defer { ghostty_terminal_snapshot_free(&snapshot) }
+        return makeSnapshot(from: snapshot)
     }
 
     public static func captureText(from surface: ghostty_surface_t?) -> String? {
@@ -68,6 +79,25 @@ public enum GhosttyTerminalSnapshotCapture {
             top_left: ghostty_point_s(tag: GHOSTTY_POINT_SURFACE, coord: GHOSTTY_POINT_COORD_TOP_LEFT, x: 0, y: 0),
             bottom_right: ghostty_point_s(tag: GHOSTTY_POINT_SURFACE, coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT, x: maxColumn, y: maxRow),
             rectangle: false)
+    }
+
+    private static func makeSnapshot(from snapshot: ghostty_terminal_snapshot_s) -> GhosttyTerminalSnapshot {
+        let cellCount = Int(snapshot.cell_count)
+        let cells: [GhosttyTerminalSnapshot.Cell]
+        if let rawCells = snapshot.cells, cellCount > 0 {
+            let buffer = UnsafeBufferPointer(start: rawCells, count: cellCount)
+            cells = buffer.map {
+                GhosttyTerminalSnapshot.Cell(
+                    codepoint: $0.codepoint, foregroundRGB: $0.foreground_rgb, backgroundRGB: $0.background_rgb, flags: $0.flags)
+            }
+        } else {
+            cells = []
+        }
+
+        return GhosttyTerminalSnapshot(
+            columns: Int(snapshot.columns), rows: Int(snapshot.rows), cursorColumn: Int(snapshot.cursor_column), cursorRow: Int(snapshot.cursor_row),
+            cursorVisible: snapshot.cursor_visible, defaultForegroundRGB: snapshot.default_foreground_rgb,
+            defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells)
     }
 }
 

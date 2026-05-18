@@ -5669,7 +5669,8 @@ public final class WorkspaceOrchestrator {
             let agentSessionID = UUID().uuidString
             launchEnv[Self.terminalTrackingIDEnvVar] = agentSessionID
             let sessionCommand = commandPrefixedWithShellEnvironment(
-                wrappedAgentLauncherCommand(name: launcher.name, command: applyEnvVars(launcher.command, env: env)), env: launchEnv)
+                wrappedAgentLauncherCommand(
+                    name: launcher.name, command: applyEnvVars(launcher.command, env: env), shellPath: terminalShellPathOverride()), env: launchEnv)
             let session = try launchSpacesTerminalSession(
                 title: launcher.name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
                 readinessPolicy: .sessionReady, sessionID: agentSessionID)
@@ -5681,8 +5682,9 @@ public final class WorkspaceOrchestrator {
             let snapshot = bestEffortYabaiWindowSnapshot()
             terminalHandle = try openManagedTerminalWindow(
                 terminalHost: terminalHost,
-                command: wrappedAgentLauncherCommand(name: launcher.name, command: applyEnvVars(launcher.command, env: env)), cwd: workspace.dir,
-                environment: launchEnv, background: background)
+                command: wrappedAgentLauncherCommand(
+                    name: launcher.name, command: applyEnvVars(launcher.command, env: env), shellPath: terminalShellPathOverride()),
+                cwd: workspace.dir, environment: launchEnv, background: background)
             capturedWindowID =
                 bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         }
@@ -5700,9 +5702,16 @@ public final class WorkspaceOrchestrator {
         return !trimmedName.isEmpty && trimmedName == key
     }
 
-    private func wrappedAgentLauncherCommand(name: String, command: String) -> String {
+    private func wrappedAgentLauncherCommand(name: String, command: String, shellPath: String?) -> String {
         let escapedName = name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "'\\''")
-        return "printf '\\033]0;\(escapedName)\\007'; \(command)"
+        let wrappedCommand = "printf '\\033]0;\(escapedName)\\007'; \(command)"
+        let resolvedShell: String
+        if let trimmedShell = shellPath?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedShell.isEmpty {
+            resolvedShell = trimmedShell
+        } else {
+            resolvedShell = "/bin/zsh"
+        }
+        return "exec \(shellQuoted(resolvedShell)) -ilc \(shellQuoted(wrappedCommand))"
     }
 
     public func recoverRunningWorkspaceProcessIfPossible(workspaceID: String, processID: String) throws -> Bool {

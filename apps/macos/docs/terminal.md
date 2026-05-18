@@ -28,6 +28,7 @@ The session directory keeps:
 - `clients.json`: known client identities
 - `attachments.json`: owner or viewer attachment history
 - `control.sock`: local control-plane socket for attach, detach, send, key, takeover, and related requests
+- `subscription.sock`: service-published session state and Ghostty snapshot stream for daemon-owned client windows
 
 Each live session also participates in a service-level control path:
 - `~/.spaces/terminal/service.sock` is the service command socket used for session creation, listing, and termination.
@@ -54,10 +55,10 @@ Each live session also participates in a service-level control path:
 
 ## macOS Window Behavior
 - `SpacesApp` reuses an in-process `GhosttyEmbeddedSessionHost` when the target session already exists in `GhosttyEmbeddedSessionRegistry`.
-- If no in-process host exists for that session ID, `SpacesApp` falls back to `RemoteGhosttySessionHost` and rebuilds a passive VT snapshot from persisted session files.
+- If no in-process host exists for that session ID, `SpacesApp` falls back to `RemoteGhosttySessionHost` and subscribes to the daemon-owned session state stream for live Ghostty snapshots.
 - `TerminalSessionWindowController` attaches a local owner or viewer client record to the daemon-owned session and keeps window reuse keyed by stable session ID.
 - The embedded Ghostty owner view can rebind a live surface to a replacement AppKit host view without restarting the underlying terminal session, which is the current fork-level bridge toward detachable renderers.
-- The current macOS compatibility path replays `output.log` through `libghostty-vt` into a renderer-state snapshot for passive macOS windows, with `state.json` providing the replay geometry and runtime metadata.
+- The current macOS daemon client path uses the service snapshot stream as its primary live renderer feed, with `output.log` replay through `libghostty-vt` retained for transcript history, `spaces terminal tail`, and fallback recovery when the live stream is unavailable.
 - Title and working-directory updates still follow live session metadata emitted by the service.
 - Owner or viewer attachment state is still authoritative in `attachments.json`.
 - Only the active owner attachment may send input or drive PTY size.
@@ -67,7 +68,7 @@ Each live session also participates in a service-level control path:
 - `spaces terminal tail` reads `output.log`, not a live client window.
 - ANSI and full-screen output are replayed through `libghostty-vt`.
 - Replay uses the persisted terminal size from `state.json` so wrapping and redraw-heavy transcripts stay aligned with the last visible geometry.
-- The VT bridge feeds both `spaces terminal tail` and the passive macOS snapshot path, and it remains the intended bootstrap path for future snapshot-plus-delta clients because it can hold terminal state independently of a live renderer.
+- The VT bridge feeds `spaces terminal tail` plus the fallback replay path, and it remains the intended bootstrap path for future snapshot-plus-delta clients because it can hold terminal state independently of a live renderer.
 
 ## Remote Bridge
 - `spaces terminal proxy <session-id> --host ... --port ... --auth-token ...` remains a thin TCP bridge over the same session boundary.
@@ -77,7 +78,7 @@ Each live session also participates in a service-level control path:
 
 ## Ghostty Compatibility Boundary
 - The current Ghostty fork still couples PTY ownership to a renderer instance.
-- Because of that, the service keeps the live hidden Ghostty host and exports `output.log` plus metadata to other clients, which rebuild passive render state with `libghostty-vt` instead of attaching multiple native renderers to the same session.
+- Because of that, the service keeps the live hidden Ghostty host and exports full Ghostty snapshots over `subscription.sock` to other clients instead of attaching multiple native renderers to the same session. `output.log` remains the transcript and recovery surface, not the primary live-view path.
 - The intended fork boundary is a true session core plus attachable renderers:
   - session-owned PTY and terminal state
   - attach or detach renderer instances without killing the session

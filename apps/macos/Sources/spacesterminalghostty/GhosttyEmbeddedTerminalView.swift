@@ -20,16 +20,15 @@ import spacesterminalcore
     public var onActionEvent: (@MainActor (GhosttyActionEvent) -> Void)?
     public var onSurfaceCellSizeChanged: (@MainActor (Int, Int) -> Void)?
 
-    public nonisolated(unsafe) private(set) var surface: ghostty_surface_t?
-
     private let launchConfiguration: TerminalSessionLaunchConfiguration
+    private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
+    private var renderer: ghostty_renderer_t?
     private var pendingSurfaceCreation = false
     private nonisolated(unsafe) var screenChangeObserver: NSObjectProtocol?
     private nonisolated(unsafe) var occlusionObserver: NSObjectProtocol?
     private nonisolated(unsafe) var keyObserver: NSObjectProtocol?
     private nonisolated(unsafe) var resignKeyObserver: NSObjectProtocol?
     private var isWindowVisible = true
-    private nonisolated(unsafe) var outputHandler: (@Sendable (Data) -> Void)?
     private var lastGeometry: SurfaceGeometry?
     private var lastFocused: Bool?
     private var lastOccluded: Bool?
@@ -40,18 +39,27 @@ import spacesterminalcore
     private var lastSurfaceCreationFailureMessage: String?
     private var refreshScheduled = false
     private var surfaceCreationRetryWorkItem: DispatchWorkItem?
-    private var hiddenHostWindow: NSWindow?
-    private weak var hiddenHostContainerView: NSView?
     private var surfaceHostView = GhosttyEmbeddedSurfaceHostView(frame: .zero)
     private var boundSurfaceWindowNumber: Int?
     private var debugSurfaceRefreshRequestCountValue = 0
     private var debugSurfaceRefreshPerformedCountValue = 0
 
-    public init(launchConfiguration: TerminalSessionLaunchConfiguration) {
+    public var surface: ghostty_surface_t? { sessionDriver.surface }
+
+    public convenience init(launchConfiguration: TerminalSessionLaunchConfiguration) {
+        self.init(
+            launchConfiguration: launchConfiguration, sessionDriver: GhosttyEmbeddedTerminalSessionDriver(launchConfiguration: launchConfiguration))
+    }
+
+    init(launchConfiguration: TerminalSessionLaunchConfiguration, sessionDriver: GhosttyEmbeddedTerminalSessionDriver) {
         self.launchConfiguration = launchConfiguration
+        self.sessionDriver = sessionDriver
         super.init(frame: .zero)
         wantsLayer = true
         installSurfaceHostView(surfaceHostView)
+        self.sessionDriver.onActionEvent = { [weak self] event in self?.onActionEvent?(event) }
+        self.sessionDriver.onSurfaceCellSizeChanged = { [weak self] columns, rows in self?.onSurfaceCellSizeChanged?(columns, rows) }
+        self.sessionDriver.onSurfaceClosed = { [weak self] in self?.handleSurfaceClosed() }
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -60,8 +68,8 @@ import spacesterminalcore
         MainActor.assumeIsolated {
             teardownWindowObservation()
             surfaceCreationRetryWorkItem?.cancel()
+            if let renderer { ghostty_renderer_free(renderer) }
         }
-        if let surface { ghostty_surface_free(surface) }
     }
 
     public override var acceptsFirstResponder: Bool { true }
@@ -278,33 +286,16 @@ import spacesterminalcore
         return true
     }
 
-    public func sendRawBytes(_ data: Data) {
-        guard let surface, !data.isEmpty else { return }
-        data.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
-            ghostty_surface_send_input_raw(surface, baseAddress, UInt(data.count))
-        }
-        requestSurfaceRefresh()
-    }
+    public func sendRawBytes(_ data: Data) { sessionDriver.sendRawBytes(data) }
 
-    public func foregroundPID() -> Int32? {
-        guard let surface else { return nil }
-        let pid = ghostty_surface_foreground_pid(surface)
-        guard pid > 0 else { return nil }
-        return Int32(pid)
-    }
+    public func foregroundPID() -> Int32? { sessionDriver.foregroundPID() }
 
-    public func surfaceCellSize() -> (columns: Int, rows: Int)? {
-        guard let surface else { return nil }
-        let size = ghostty_surface_size(surface)
-        guard size.columns > 0, size.rows > 0 else { return nil }
-        return (Int(size.columns), Int(size.rows))
-    }
+    public func surfaceCellSize() -> (columns: Int, rows: Int)? { sessionDriver.surfaceCellSize() }
 
-    public func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { outputHandler = handler }
+    public func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { sessionDriver.setOutputHandler(handler) }
     public func setFocused(_ focused: Bool) { setSurfaceFocus(focused) }
-    public func snapshot() -> GhosttyTerminalSnapshot? { GhosttyTerminalSnapshotCapture.capture(from: surface) }
-    public func snapshotText() -> String? { GhosttyTerminalSnapshotCapture.captureText(from: surface) }
+    public func snapshot() -> GhosttyTerminalSnapshot? { sessionDriver.snapshot() }
+    public func snapshotText() -> String? { sessionDriver.snapshotText() }
 
     private func installSurfaceHostView(_ hostView: GhosttyEmbeddedSurfaceHostView) {
         hostView.translatesAutoresizingMaskIntoConstraints = false
@@ -320,12 +311,12 @@ import spacesterminalcore
         var host = ghostty_surface_host_s()
         host.platform_tag = GHOSTTY_PLATFORM_MACOS
         host.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(nsview: Unmanaged.passUnretained(hostView).toOpaque()))
-        host.scale_factor = Double(window?.backingScaleFactor ?? hiddenHostWindow?.backingScaleFactor ?? 2.0)
+        host.scale_factor = Double(window?.backingScaleFactor ?? 2.0)
         return host
     }
 
     private func rebindSurfaceHostIfNeeded() {
-        guard let surface, let window else { return }
+        guard let window else { return }
         let windowNumber = window.windowNumber
         guard boundSurfaceWindowNumber != windowNumber else { return }
 
@@ -333,7 +324,7 @@ import spacesterminalcore
         installSurfaceHostView(replacementHostView)
 
         var replacementHost = makeSurfaceHost(for: replacementHostView)
-        guard ghostty_surface_set_host(surface, &replacementHost) else {
+        guard sessionDriver.updateRendererHost(renderer, host: &replacementHost) else {
             replacementHostView.removeFromSuperview()
             fputs("spaces: ghostty host rebind failed for session \(launchConfiguration.sessionID)\n", stderr)
             return
@@ -349,25 +340,26 @@ import spacesterminalcore
         updateSurfaceGeometry()
         updateWindowVisibility()
         setSurfaceFocus(window.isKeyWindow && window.firstResponder === self)
-        ghostty_surface_refresh(surface)
+        sessionDriver.requestSurfaceRefresh()
     }
 
     public func ensureHostingWindowForSurface() {
-        if window == nil { parkInHiddenHostWindowIfNeeded() }
+        if window == nil {
+            try? sessionDriver.startIfNeeded()
+            return
+        }
         createSurfaceIfNeeded()
     }
 
     public func parkInHiddenHostWindowIfNeeded() {
-        let hostWindow = ensureHiddenHostWindow()
-        guard let hostContainerView = hiddenHostContainerView else { return }
-        if superview !== hostContainerView {
-            removeFromSuperview()
-            frame = hostContainerView.bounds
-            autoresizingMask = [.width, .height]
-            hostContainerView.addSubview(self)
-            hiddenHostWindow?.layoutIfNeeded()
-        }
-        if hostWindow.isVisible { hostWindow.orderOut(nil) }
+        surfaceCreationRetryWorkItem?.cancel()
+        surfaceCreationRetryWorkItem = nil
+        _ = sessionDriver.detachRenderer(renderer)
+        removeFromSuperview()
+        boundSurfaceWindowNumber = nil
+        lastGeometry = nil
+        lastFocused = nil
+        lastOccluded = nil
     }
 
     public func requestSurfaceRefresh() {
@@ -388,15 +380,17 @@ import spacesterminalcore
         surfaceCreationRetryWorkItem?.cancel()
         surfaceCreationRetryWorkItem = nil
         destroySurface()
-        if superview === hiddenHostContainerView { removeFromSuperview() }
-        hiddenHostWindow?.orderOut(nil)
+        sessionDriver.terminate()
+        onSurfaceReady?(nil)
     }
 
-    func handleSurfaceClosed() { destroySurface() }
+    func handleSurfaceClosed() {
+        destroySurface()
+        onSurfaceReady?(nil)
+    }
 
     private func createSurfaceIfNeeded() {
-        if window == nil { parkInHiddenHostWindowIfNeeded() }
-        guard surface == nil else { return }
+        guard window != nil else { return }
         if let nextSurfaceCreationRetryAt, Date() < nextSurfaceCreationRetryAt { return }
         let startedAt = Date()
 
@@ -408,36 +402,15 @@ import spacesterminalcore
         pendingSurfaceCreation = false
 
         do {
-            try GhosttyEmbeddedAppService.shared.startIfNeeded()
-            guard let app = GhosttyEmbeddedAppService.shared.app else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty app missing") }
-
-            var surfaceConfig = ghostty_surface_config_new()
-            surfaceConfig.platform_tag = GHOSTTY_PLATFORM_MACOS
-            surfaceConfig.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(nsview: Unmanaged.passUnretained(surfaceHostView).toOpaque()))
-            surfaceConfig.userdata = Unmanaged.passUnretained(self).toOpaque()
-            surfaceConfig.scale_factor = Double(window?.backingScaleFactor ?? 2.0)
-            surfaceConfig.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
-
-            var allocatedStrings: [UnsafeMutablePointer<CChar>] = []
-            defer { for pointer in allocatedStrings { free(pointer) } }
-
-            if let command = launchConfiguration.command,
-                let wrapped = strdup(Self.loginShellCommand(shell: launchConfiguration.shell, command: command))
-            {
-                allocatedStrings.append(wrapped)
-                surfaceConfig.command = UnsafePointer(wrapped)
-                surfaceConfig.wait_after_command = false
+            try sessionDriver.startIfNeeded()
+            if renderer == nil {
+                var initialHost = makeSurfaceHost(for: surfaceHostView)
+                renderer = ghostty_renderer_new(&initialHost)
+            }
+            guard renderer != nil, sessionDriver.attachRenderer(renderer) else {
+                throw GhosttyEmbeddedAppServiceError.configuration("ghostty_renderer_attach failed")
             }
 
-            let workingDirectory = launchConfiguration.workingDirectory
-            let createdSurface = workingDirectory.withCString { cwd -> ghostty_surface_t? in
-                surfaceConfig.working_directory = cwd
-                return ghostty_surface_new(app, &surfaceConfig)
-            }
-
-            guard let createdSurface else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_surface_new failed") }
-
-            surface = createdSurface
             boundSurfaceWindowNumber = window?.windowNumber
             surfaceCreationRetryWorkItem?.cancel()
             surfaceCreationRetryWorkItem = nil
@@ -446,20 +419,15 @@ import spacesterminalcore
             lastGeometry = nil
             lastFocused = nil
             lastOccluded = nil
-            GhosttyEmbeddedAppService.shared.registerActionHandler(for: createdSurface) { [weak self] event in
-                guard let self else { return }
-                self.onActionEvent?(event)
-            }
-            ghostty_surface_set_data_callback(createdSurface, Self.surfaceDataCallback, Unmanaged.passUnretained(self).toOpaque())
             updateSurfaceGeometry()
             updateWindowVisibility()
             setSurfaceFocus(window?.isKeyWindow == true && window?.firstResponder === self)
-            ghostty_surface_refresh(createdSurface)
+            sessionDriver.requestSurfaceRefresh()
             TerminalPerformance.logMetric(
                 "terminal_surface_create", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
                 detail: "width=\(backingSize.width) height=\(backingSize.height)")
-            onSurfaceReady?(createdSurface)
+            onSurfaceReady?(surface)
         } catch {
             TerminalPerformance.logMetric(
                 "terminal_surface_create", target: "session=\(launchConfiguration.sessionID)",
@@ -497,48 +465,21 @@ import spacesterminalcore
     }
 
     private func destroySurface() {
-        guard let surface else { return }
-        onSurfaceReady?(nil)
-        GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface)
-        ghostty_surface_set_data_callback(surface, nil, nil)
-        ghostty_surface_free(surface)
-        self.surface = nil
+        _ = sessionDriver.detachRenderer(renderer)
         boundSurfaceWindowNumber = nil
         lastGeometry = nil
         lastFocused = nil
         lastOccluded = nil
     }
 
-    private func ensureHiddenHostWindow() -> NSWindow {
-        if let hiddenHostWindow { return hiddenHostWindow }
-        let frame = NSRect(x: 0, y: 0, width: 960, height: 640)
-        let hostWindow = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        hostWindow.isReleasedWhenClosed = false
-        hostWindow.alphaValue = 0
-        hostWindow.ignoresMouseEvents = true
-        hostWindow.backgroundColor = .clear
-        let hostContainerView = NSView(frame: frame)
-        hostContainerView.wantsLayer = true
-        hostWindow.contentView = hostContainerView
-        hostWindow.orderOut(nil)
-        hiddenHostWindow = hostWindow
-        hiddenHostContainerView = hostContainerView
-        return hostWindow
-    }
-
     private func updateSurfaceGeometry() {
-        guard let surface, let window, let backingSize = backingPixelSize() else { return }
+        guard surface != nil, let window, let backingSize = backingPixelSize() else { return }
         let scale = Double(window.backingScaleFactor)
         let displayID = (window.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
         let geometry = SurfaceGeometry(width: backingSize.width, height: backingSize.height, scale: scale, displayID: displayID)
         guard geometry != lastGeometry else { return }
         layer?.contentsScale = window.backingScaleFactor
-        if lastGeometry?.scale != geometry.scale { ghostty_surface_set_content_scale(surface, scale, scale) }
-        if lastGeometry?.displayID != geometry.displayID, let displayID { ghostty_surface_set_display_id(surface, displayID) }
-        if lastGeometry?.width != geometry.width || lastGeometry?.height != geometry.height {
-            ghostty_surface_set_size(surface, geometry.width, geometry.height)
-            if let cellSize = surfaceCellSize() { onSurfaceCellSizeChanged?(cellSize.columns, cellSize.rows) }
-        }
+        sessionDriver.updateGeometry(width: geometry.width, height: geometry.height, scale: scale, displayID: displayID)
         lastGeometry = geometry
     }
 
@@ -755,29 +696,29 @@ import spacesterminalcore
     }
 
     private func setSurfaceFocus(_ focused: Bool) {
-        guard let surface else { return }
+        guard surface != nil else { return }
         guard lastFocused != focused else { return }
         lastFocused = focused
-        ghostty_surface_set_focus(surface, focused)
+        sessionDriver.setFocused(focused)
     }
 
     private func setSurfaceOcclusion(_ occluded: Bool) {
-        guard let surface else { return }
+        guard surface != nil else { return }
         guard lastOccluded != occluded else { return }
         lastOccluded = occluded
-        ghostty_surface_set_occlusion(surface, occluded)
+        sessionDriver.setOccluded(occluded)
     }
 
     private func performSurfaceRefresh() {
         let startedAt = Date()
         refreshScheduled = false
-        guard let surface else { return }
+        guard surface != nil else { return }
         debugSurfaceRefreshPerformedCountValue += 1
         superview?.layoutSubtreeIfNeeded()
         surfaceHostView.layoutSubtreeIfNeeded()
         window?.contentView?.layoutSubtreeIfNeeded()
         GhosttyEmbeddedAppService.shared.tick()
-        ghostty_surface_refresh(surface)
+        sessionDriver.requestSurfaceRefresh()
         surfaceHostView.needsDisplay = true
         surfaceHostView.layer?.setNeedsDisplay()
         needsDisplay = true
@@ -809,21 +750,7 @@ import spacesterminalcore
         observedWindow = nil
     }
 
-    private static func loginShellCommand(shell: String, command: String) -> String {
-        let escaped = command.replacingOccurrences(of: "'", with: "'\\''")
-        return "\(shell) -l -c '\(escaped)'"
-    }
-
     nonisolated static func shouldDispatchSurfaceDataOutput(hasHandler: Bool, byteCount: Int) -> Bool { hasHandler && byteCount > 0 }
-
-    private nonisolated(unsafe) static let surfaceDataCallback: ghostty_surface_data_cb = { userdata, bytes, len in
-        guard let userdata, let bytes, len > 0 else { return }
-        let view = Unmanaged<GhosttyEmbeddedTerminalView>.fromOpaque(userdata).takeUnretainedValue()
-        guard let outputHandler = view.outputHandler else { return }
-        guard shouldDispatchSurfaceDataOutput(hasHandler: true, byteCount: Int(len)) else { return }
-        let data = Data(bytes: bytes, count: Int(len))
-        Task { @MainActor in outputHandler(data) }
-    }
 
     var debugSurfaceRefreshRequestCount: Int { debugSurfaceRefreshRequestCountValue }
     var debugSurfaceRefreshPerformedCount: Int { debugSurfaceRefreshPerformedCountValue }

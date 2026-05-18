@@ -159,9 +159,9 @@ else
 fi
 
 if [[ -x "$VERIFY_SCRIPT" ]]; then
-    echo "==> Verifying GhosttyKit additive PTY I/O exports"
+    echo "==> Verifying GhosttyKit additive embedded terminal exports"
     if [[ "$BUILD_FROM_SOURCE" == "1" ]]; then
-        SPACES_GHOSTTYKIT_REQUIRE_HOST_REBIND=1 "$VERIFY_SCRIPT" "$XCFRAMEWORK_ROOT"
+        SPACES_GHOSTTYKIT_REQUIRE_HOST_REBIND=1 SPACES_GHOSTTYKIT_REQUIRE_SESSION_RENDER_SPLIT=1 "$VERIFY_SCRIPT" "$XCFRAMEWORK_ROOT"
     else
         "$VERIFY_SCRIPT" "$XCFRAMEWORK_ROOT"
     fi

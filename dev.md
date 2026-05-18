@@ -96,7 +96,7 @@ When the app launches built-in Spaces terminals itself, owner windows use the li
 - Launch a coding agent from the workspace detail pane.
 
 Close one of those owner windows and reopen it from the app. The shell or long-running process should stay attached to the same local Ghostty session without restarting.
-CLI-created sessions such as `spaces terminal command` and CLI-managed `spaces start` still use the daemon-owned compatibility path until the shared service renderer protocol lands.
+CLI-created sessions such as `spaces terminal command` and CLI-managed `spaces start` use the daemon-owned snapshot-stream path. The service publishes live Ghostty snapshots to native client windows over the per-session subscription socket, while `output.log` remains the transcript fallback and `spaces terminal tail` source.
 For scripted real-system checks against the running app, `spacese2e` exposes `open-workspace-terminal`, `run-workspace-process`, and `launch-workspace-agent` so the manual harness can exercise the same app-owned launch path without accessibility scripting.
 
 To verify the embedded Ghostty backend on an isolated database root:
