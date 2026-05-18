@@ -691,10 +691,8 @@ import spacesterminalcore
     private func sendMousePosition(for event: NSEvent) -> Bool {
         guard let surface else { return false }
         let point = convert(event.locationInWindow, from: nil)
-        let backingPoint = convertToBacking(point)
-        let backingHeight = convertToBacking(bounds).height
-        let x = max(0, backingPoint.x)
-        let y = max(0, backingHeight - backingPoint.y)
+        let x = max(0, point.x)
+        let y = max(0, Self.ghosttyMouseY(point.y, boundsHeight: bounds.height))
         ghostty_surface_mouse_pos(surface, Double(x), Double(y), ghosttyModifiers(from: event.modifierFlags))
         return true
     }
@@ -781,6 +779,8 @@ import spacesterminalcore
     }
 
     nonisolated static func shouldDispatchSurfaceDataOutput(hasHandler: Bool, byteCount: Int) -> Bool { hasHandler && byteCount > 0 }
+
+    static func ghosttyMouseY(_ localY: CGFloat, boundsHeight: CGFloat) -> CGFloat { boundsHeight - localY }
 
     var debugSurfaceRefreshRequestCount: Int { debugSurfaceRefreshRequestCountValue }
     var debugSurfaceRefreshPerformedCount: Int { debugSurfaceRefreshPerformedCountValue }

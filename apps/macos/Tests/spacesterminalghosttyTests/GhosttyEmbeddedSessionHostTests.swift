@@ -141,6 +141,12 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(Int32(GhosttyEmbeddedTerminalView.makeScrollMods(hasPreciseDeltas: false, momentumPhase: [])), Int32(0))
     }
 
+    @MainActor func testEmbeddedViewMouseCoordinatesUseLogicalViewPoints() {
+        XCTAssertEqual(GhosttyEmbeddedTerminalView.ghosttyMouseY(0, boundsHeight: 200), 200)
+        XCTAssertEqual(GhosttyEmbeddedTerminalView.ghosttyMouseY(32, boundsHeight: 200), 168)
+        XCTAssertEqual(GhosttyEmbeddedTerminalView.ghosttyMouseY(199.5, boundsHeight: 200), 0.5)
+    }
+
     @MainActor func testSurfaceDataOutputDispatchRequiresHandlerAndBytes() {
         XCTAssertFalse(GhosttyEmbeddedTerminalView.shouldDispatchSurfaceDataOutput(hasHandler: false, byteCount: 32))
         XCTAssertFalse(GhosttyEmbeddedTerminalView.shouldDispatchSurfaceDataOutput(hasHandler: true, byteCount: 0))
