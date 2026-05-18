@@ -9,12 +9,17 @@ extension Notification.Name {
     public static let spacesTerminalOutputDidChange = Notification.Name("spaces.terminal.output-did-change")
 }
 
-@MainActor public protocol TerminalGhosttySessionHosting: AnyObject {
+@MainActor public protocol TerminalGhosttySessionInfoProviding: AnyObject {
+    func activeOwnerClientID() -> String?
+    var effectiveTitle: String { get }
+    var effectiveWorkingDirectory: String { get }
+}
+
+@MainActor public protocol TerminalGhosttyRendererHosting: AnyObject {
     func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws
     func parkSurfaceInHiddenHostWindow()
     func setFocused(_ focused: Bool, for clientID: String)
     func focusWindow(_ window: NSWindow?)
-    func activeOwnerClientID() -> String?
     func hasRenderableSurface() -> Bool
     var prefersOutputFallbackWhenSurfaceUnavailable: Bool { get }
     func snapshot() -> GhosttyTerminalSnapshot?
@@ -23,8 +28,100 @@ extension Notification.Name {
     func pasteClipboardContents() -> Bool
     @discardableResult func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool
     var debugSurfaceRefreshRequestCount: Int { get }
-    var effectiveTitle: String { get }
-    var effectiveWorkingDirectory: String { get }
+}
+
+@MainActor public protocol TerminalGhosttySessionHosting: TerminalGhosttySessionInfoProviding, TerminalGhosttyRendererHosting {}
+
+@MainActor public final class GhosttyEmbeddedRendererHost: TerminalGhosttyRendererHosting {
+    private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
+    private let launchConfiguration: TerminalSessionLaunchConfiguration
+    private let terminalView: GhosttyEmbeddedTerminalView
+    private var isOwnerClient: (@MainActor (String) -> Bool)?
+
+    init(launchConfiguration: TerminalSessionLaunchConfiguration, terminalView: GhosttyEmbeddedTerminalView) {
+        self.launchConfiguration = launchConfiguration
+        self.terminalView = terminalView
+    }
+
+    func setOwnerClientResolver(_ resolver: @escaping @MainActor (String) -> Bool) { isOwnerClient = resolver }
+
+    func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { terminalView.setOutputHandler(handler) }
+
+    func ensureHostingWindowForSurface() { terminalView.ensureHostingWindowForSurface() }
+
+    func requestSurfaceRefresh() { terminalView.requestSurfaceRefresh() }
+
+    func sendRawBytes(_ data: Data) { terminalView.sendRawBytes(data) }
+
+    func foregroundPID() -> Int32? { terminalView.foregroundPID() }
+
+    func surfaceCellSize() -> (columns: Int, rows: Int)? { terminalView.surfaceCellSize() }
+
+    func terminateSession() { terminalView.terminateSession() }
+
+    func setSurfaceFocused(_ focused: Bool) { terminalView.setFocused(focused) }
+
+    public func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
+        guard mode == .owner, let container else { return }
+        if terminalView.superview !== container {
+            terminalView.removeFromSuperview()
+            terminalView.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(terminalView)
+            NSLayoutConstraint.activate([
+                terminalView.topAnchor.constraint(equalTo: container.topAnchor),
+                terminalView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                terminalView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                terminalView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            ])
+        }
+        container.needsLayout = true
+        container.layoutSubtreeIfNeeded()
+    }
+
+    public func parkSurfaceInHiddenHostWindow() {
+        guard hasRenderableSurface() else { return }
+        terminalView.parkInHiddenHostWindowIfNeeded()
+    }
+
+    public func setFocused(_ focused: Bool, for clientID: String) {
+        guard isOwnerClient?(clientID) == true else {
+            terminalView.setFocused(false)
+            return
+        }
+        terminalView.setFocused(focused)
+    }
+
+    public func focusWindow(_ window: NSWindow?) {
+        guard let window else { return }
+        if Self.isRunningUnderXCTest {
+            window.makeFirstResponder(terminalView)
+            terminalView.setFocused(true)
+            return
+        }
+        if !window.isVisible { window.orderFront(nil) }
+        if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
+        window.makeFirstResponder(terminalView)
+        terminalView.setFocused(window.isKeyWindow)
+    }
+
+    public func hasRenderableSurface() -> Bool { terminalView.surface != nil }
+
+    public var prefersOutputFallbackWhenSurfaceUnavailable: Bool { false }
+
+    public func snapshot() -> GhosttyTerminalSnapshot? { terminalView.snapshot() }
+
+    public func snapshotText() -> String? { terminalView.snapshotText() }
+
+    public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
+
+    public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
+
+    @discardableResult public func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+        terminalView.sendScroll(horizontal: horizontal, vertical: vertical)
+    }
+
+    public var debugSurfaceRefreshRequestCount: Int { terminalView.debugSurfaceRefreshRequestCount }
 }
 
 @MainActor public final class GhosttyEmbeddedSessionRegistry {
@@ -85,6 +182,7 @@ extension Notification.Name {
 
     private let controlQueue: DispatchQueue
     private let terminalView: GhosttyEmbeddedTerminalView
+    private lazy var rendererHostStorage = GhosttyEmbeddedRendererHost(launchConfiguration: launchConfiguration, terminalView: terminalView)
     private let requestSurfaceRefreshAction: @MainActor () -> Void
     private var runtimeStateTimer: Timer?
     private var controlServer: TerminalControlServer?
@@ -115,6 +213,7 @@ extension Notification.Name {
             self.lastKnownSurfaceSize = (columns, rows)
             self.refreshRuntimeState(force: true)
         }
+        rendererHostStorage.setOwnerClientResolver { [weak self] clientID in self?.isOwner(clientID: clientID) ?? false }
     }
 
     public func startIfNeeded() throws {
@@ -124,8 +223,8 @@ extension Notification.Name {
             try paths.ensureDirectories()
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             try ensureOutputHandle()
-            terminalView.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
-            terminalView.ensureHostingWindowForSurface()
+            rendererHostStorage.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
+            rendererHostStorage.ensureHostingWindowForSurface()
             try startControlServer()
             startRuntimeStateTimer()
             refreshRuntimeState(force: true)
@@ -146,22 +245,8 @@ extension Notification.Name {
     public func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
         let startedAt = Date()
         do {
-            if mode == .owner, let container {
-                if terminalView.superview !== container {
-                    terminalView.removeFromSuperview()
-                    terminalView.translatesAutoresizingMaskIntoConstraints = false
-                    container.addSubview(terminalView)
-                    NSLayoutConstraint.activate([
-                        terminalView.topAnchor.constraint(equalTo: container.topAnchor),
-                        terminalView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                        terminalView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-                        terminalView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-                    ])
-                }
-                container.needsLayout = true
-                container.layoutSubtreeIfNeeded()
-            }
             try startIfNeeded()
+            try rendererHostStorage.attach(client: client, mode: mode, into: container)
             let activeAttachments = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
             let currentAttachment = activeAttachments.first { $0.clientID == client.id }
             if currentAttachment?.mode != mode {
@@ -171,8 +256,8 @@ extension Notification.Name {
                 postAttachmentStateDidChange()
             }
             if mode == .owner, let container {
-                terminalView.requestSurfaceRefresh()
-                focusWindow(container.window)
+                rendererHostStorage.requestSurfaceRefresh()
+                rendererHostStorage.focusWindow(container.window)
             }
             refreshRuntimeState(force: true)
             TerminalPerformance.logMetric(
@@ -191,40 +276,18 @@ extension Notification.Name {
         try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
         let remainingOwnerClientID = activeOwnerClientID()
         if Self.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: detachedClientWasOwner, remainingOwnerClientID: remainingOwnerClientID) {
-            terminalView.setFocused(false)
+            rendererHostStorage.setSurfaceFocused(false)
         }
-        if remainingOwnerClientID == nil, hasRenderableSurface() { terminalView.parkInHiddenHostWindowIfNeeded() }
+        if remainingOwnerClientID == nil, hasRenderableSurface() { rendererHostStorage.parkSurfaceInHiddenHostWindow() }
         postAttachmentStateDidChange()
         refreshRuntimeState(force: true)
     }
 
     public func takeover(client: TerminalClient, into container: NSView?) throws { try attach(client: client, mode: .owner, into: container) }
 
-    public func parkSurfaceInHiddenHostWindow() {
-        guard hasRenderableSurface() else { return }
-        terminalView.parkInHiddenHostWindowIfNeeded()
-    }
+    public func parkSurfaceInHiddenHostWindow() { rendererHostStorage.parkSurfaceInHiddenHostWindow() }
 
-    public func setFocused(_ focused: Bool, for clientID: String) {
-        guard isOwner(clientID: clientID) else {
-            terminalView.setFocused(false)
-            return
-        }
-        terminalView.setFocused(focused)
-    }
-
-    public func focusWindow(_ window: NSWindow?) {
-        guard let window else { return }
-        if Self.isRunningUnderXCTest {
-            window.makeFirstResponder(terminalView)
-            terminalView.setFocused(true)
-            return
-        }
-        if !window.isVisible { window.orderFront(nil) }
-        if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
-        window.makeFirstResponder(terminalView)
-        terminalView.setFocused(window.isKeyWindow)
-    }
+    public func setFocused(_ focused: Bool, for clientID: String) { rendererHostStorage.setFocused(focused, for: clientID) }
 
     public func isOwner(clientID: String) -> Bool {
         ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).contains { $0.clientID == clientID && $0.mode == .owner }
@@ -234,16 +297,18 @@ extension Notification.Name {
         ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).first(where: { $0.mode == .owner })?.clientID
     }
 
-    public func hasRenderableSurface() -> Bool { terminalView.surface != nil }
-    public var prefersOutputFallbackWhenSurfaceUnavailable: Bool { false }
-    public func snapshot() -> GhosttyTerminalSnapshot? { terminalView.snapshot() }
-    public func snapshotText() -> String? { terminalView.snapshotText() }
-    public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
-    public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
+    public var rendererHost: any TerminalGhosttyRendererHosting { rendererHostStorage }
+    public func focusWindow(_ window: NSWindow?) { rendererHostStorage.focusWindow(window) }
+    public func hasRenderableSurface() -> Bool { rendererHostStorage.hasRenderableSurface() }
+    public var prefersOutputFallbackWhenSurfaceUnavailable: Bool { rendererHostStorage.prefersOutputFallbackWhenSurfaceUnavailable }
+    public func snapshot() -> GhosttyTerminalSnapshot? { rendererHostStorage.snapshot() }
+    public func snapshotText() -> String? { rendererHostStorage.snapshotText() }
+    public func copySelectionToPasteboard() -> Bool { rendererHostStorage.copySelectionToPasteboard() }
+    public func pasteClipboardContents() -> Bool { rendererHostStorage.pasteClipboardContents() }
     @discardableResult public func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
-        terminalView.sendScroll(horizontal: horizontal, vertical: vertical)
+        rendererHostStorage.debugSendScroll(horizontal: horizontal, vertical: vertical)
     }
-    public var debugSurfaceRefreshRequestCount: Int { terminalView.debugSurfaceRefreshRequestCount }
+    public var debugSurfaceRefreshRequestCount: Int { rendererHostStorage.debugSurfaceRefreshRequestCount }
     public func terminate() {
         let now = ISO8601DateFormatter().string(from: Date())
         let childPID = observedChildPID()
@@ -252,7 +317,7 @@ extension Notification.Name {
         controlServer?.stop()
         controlServer = nil
         started = false
-        terminalView.terminateSession()
+        rendererHostStorage.terminateSession()
         try? outputHandle?.synchronize()
         try? outputHandle?.close()
         outputHandle = nil
@@ -383,7 +448,7 @@ extension Notification.Name {
         }
         guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
         let payload = text + (request.appendNewline ? "\n" : "")
-        terminalView.sendRawBytes(Data(payload.utf8))
+        rendererHostStorage.sendRawBytes(Data(payload.utf8))
         TerminalPerformance.logMetric(
             "terminal_control_send", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: true, detail: "bytes=\(payload.utf8.count)")
@@ -405,7 +470,7 @@ extension Notification.Name {
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
             return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
         }
-        terminalView.sendRawBytes(Data(bytes))
+        rendererHostStorage.sendRawBytes(Data(bytes))
         TerminalPerformance.logMetric(
             "terminal_control_key", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: true, detail: "key=\(key)")
@@ -470,9 +535,9 @@ extension Notification.Name {
         for clientID in staleClientIDs { try? TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: detachedAt) }
         let remainingOwnerClientID = activeOwnerClientID()
         if Self.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: false, remainingOwnerClientID: remainingOwnerClientID) {
-            terminalView.setFocused(false)
+            rendererHostStorage.setSurfaceFocused(false)
         }
-        if remainingOwnerClientID == nil, hasRenderableSurface() { terminalView.parkInHiddenHostWindowIfNeeded() }
+        if remainingOwnerClientID == nil, hasRenderableSurface() { rendererHostStorage.parkSurfaceInHiddenHostWindow() }
         postAttachmentStateDidChange()
         refreshRuntimeState(force: true)
         return staleClientIDs
@@ -527,7 +592,7 @@ extension Notification.Name {
     }
 
     private func observedChildPID() -> Int32? {
-        if let foregroundPID = terminalView.foregroundPID() {
+        if let foregroundPID = rendererHostStorage.foregroundPID() {
             lastKnownChildPID = foregroundPID
             return foregroundPID
         }
@@ -535,7 +600,7 @@ extension Notification.Name {
     }
 
     private func observedSurfaceSize() -> (columns: Int, rows: Int)? {
-        if let size = terminalView.surfaceCellSize() {
+        if let size = rendererHostStorage.surfaceCellSize() {
             lastKnownSurfaceSize = size
             return size
         }

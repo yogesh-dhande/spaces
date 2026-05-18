@@ -102,7 +102,8 @@ import spacesterminalghostty
     private var closesForSessionTermination = false
     private var didCloseWindow = false
     private var lastObservedAttachmentMode: TerminalAttachmentMode?
-    private var ghosttySessionHost: (any TerminalGhosttySessionHosting)?
+    private var ghosttyRendererHost: (any TerminalGhosttyRendererHosting)?
+    private var ghosttySessionInfoProvider: (any TerminalGhosttySessionInfoProviding)?
     private var visibleRenderer: VisibleRenderer = .outputFallback
     private var lastObservedOwnerClientID: String?
     private var lastObservedRuntimeState: TerminalSessionRuntimeState?
@@ -306,7 +307,7 @@ import spacesterminalghostty
         persistCurrentWindowFrame(immediately: true)
         if backend == .ghosttyEmbedded {
             syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false)
-            if !sessionIsTerminating { ghosttySessionHost?.parkSurfaceInHiddenHostWindow() }
+            if !sessionIsTerminating { ghosttyRendererHost?.parkSurfaceInHiddenHostWindow() }
         }
         if sessionIsTerminating { isClientAttached = false } else { detachLocalClientIfNeeded() }
         refreshTask?.cancel()
@@ -374,7 +375,7 @@ import spacesterminalghostty
                 NSSound.beep()
                 return
             }
-            guard copySelectionAction?() ?? ghosttySessionHost?.copySelectionToPasteboard() ?? false else {
+            guard copySelectionAction?() ?? ghosttyRendererHost?.copySelectionToPasteboard() ?? false else {
                 NSSound.beep()
                 return
             }
@@ -395,7 +396,7 @@ import spacesterminalghostty
                 NSSound.beep()
                 return
             }
-            guard pasteClipboardAction?() ?? ghosttySessionHost?.pasteClipboardContents() ?? false else {
+            guard pasteClipboardAction?() ?? ghosttyRendererHost?.pasteClipboardContents() ?? false else {
                 NSSound.beep()
                 return
             }
@@ -657,7 +658,9 @@ import spacesterminalghostty
             window?.contentView?.layoutSubtreeIfNeeded()
             terminalContainer.layoutSubtreeIfNeeded()
             let host = sessionHostProvider(launchConfiguration, paths)
-            ghosttySessionHost = host
+            let resolvedHostComponents = Self.resolveGhosttyHostComponents(host)
+            ghosttyRendererHost = resolvedHostComponents.rendererHost
+            ghosttySessionInfoProvider = resolvedHostComponents.sessionInfoProvider
             try host.attach(client: client, mode: preferredAttachmentMode, into: preferredAttachmentMode == .owner ? terminalContainer : nil)
             isClientAttached = true
             lastObservedAttachmentMode = preferredAttachmentMode
@@ -672,10 +675,10 @@ import spacesterminalghostty
     }
 
     private func hasAttachedGhosttyOwnerSurface() -> Bool {
-        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner, let host = ghosttySessionHost,
+        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner, let host = ghosttyRendererHost,
             host.hasRenderableSurface()
         else { return false }
-        if let ownerClientID = host.activeOwnerClientID() ?? lastObservedOwnerClientID { return ownerClientID == client.id }
+        if let ownerClientID = ghosttySessionInfoProvider?.activeOwnerClientID() ?? lastObservedOwnerClientID { return ownerClientID == client.id }
         return true
     }
 
@@ -826,7 +829,7 @@ import spacesterminalghostty
             var didUpdatePassivePresentation = false
             switch visibleRenderer {
             case .ghosttyViewerLoading:
-                if let snapshot = ghosttySessionHost?.snapshot() {
+                if let snapshot = ghosttyRendererHost?.snapshot() {
                     outputView.textStorage?.setAttributedString(
                         GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
                     if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
@@ -839,7 +842,7 @@ import spacesterminalghostty
                     completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_snapshot")
                     return
                 }
-                if let snapshotText = ghosttySessionHost?.snapshotText() {
+                if let snapshotText = ghosttyRendererHost?.snapshotText() {
                     if snapshotText != lastRenderedOutput {
                         outputView.string = snapshotText
                         if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
@@ -865,7 +868,7 @@ import spacesterminalghostty
                 completePendingPassiveOutputMeasurement(renderer: "viewer_loading", changedOutput: didUpdatePassivePresentation)
                 completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_loading")
             case .ghosttyViewerSnapshot:
-                if let snapshot = ghosttySessionHost?.snapshot() {
+                if let snapshot = ghosttyRendererHost?.snapshot() {
                     outputView.textStorage?.setAttributedString(
                         GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
                     if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
@@ -878,7 +881,7 @@ import spacesterminalghostty
                     completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_snapshot")
                     return
                 }
-                if let snapshotText = ghosttySessionHost?.snapshotText() {
+                if let snapshotText = ghosttyRendererHost?.snapshotText() {
                     if snapshotText != lastRenderedOutput {
                         outputView.string = snapshotText
                         if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
@@ -916,7 +919,7 @@ import spacesterminalghostty
                 completePendingPassiveOutputMeasurement(renderer: "viewer_exited_output", changedOutput: didUpdatePassivePresentation)
                 completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_exited_output")
             case .outputFallback:
-                if let snapshot = ghosttySessionHost?.snapshot() {
+                if let snapshot = ghosttyRendererHost?.snapshot() {
                     outputView.textStorage?.setAttributedString(
                         GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
                     if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
@@ -931,7 +934,7 @@ import spacesterminalghostty
                     completeOwnershipTransitionIfNeeded(target: transitionTarget, renderer: rendererName)
                     return
                 }
-                if let snapshotText = ghosttySessionHost?.snapshotText() {
+                if let snapshotText = ghosttyRendererHost?.snapshotText() {
                     if snapshotText != lastRenderedOutput {
                         outputView.string = snapshotText
                         if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
@@ -1138,8 +1141,8 @@ import spacesterminalghostty
         guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner else { return }
         let startedAt = Date()
         let focused = explicitFocused ?? (NSApp.isActive && window?.isMainWindow == true && window?.isKeyWindow == true)
-        if requestWindowFocus { if let ownerWindowFocusAction { ownerWindowFocusAction(window) } else { ghosttySessionHost?.focusWindow(window) } }
-        if let ownerSurfaceFocusAction { ownerSurfaceFocusAction(focused) } else { ghosttySessionHost?.setFocused(focused, for: client.id) }
+        if requestWindowFocus { if let ownerWindowFocusAction { ownerWindowFocusAction(window) } else { ghosttyRendererHost?.focusWindow(window) } }
+        if let ownerSurfaceFocusAction { ownerSurfaceFocusAction(focused) } else { ghosttyRendererHost?.setFocused(focused, for: client.id) }
         TerminalPerformance.logMetric(
             "terminal_owner_focus_sync", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
             detail: "reason=\(reason) focused=\(focused ? 1 : 0) request_window_focus=\(requestWindowFocus ? 1 : 0)")
@@ -1302,9 +1305,9 @@ import spacesterminalghostty
 
     private func resolveVisibleRenderer(isOwner: Bool?) -> VisibleRenderer {
         guard case .ghosttyEmbedded = rendererMode else { return .outputFallback }
-        if isOwner == true { return ghosttySessionHost?.hasRenderableSurface() == true ? .ghosttyOwner : .outputFallback }
-        if ghosttySessionHost?.hasRenderableSurface() == true { return .ghosttyViewerSnapshot }
-        if ghosttySessionHost?.prefersOutputFallbackWhenSurfaceUnavailable == true { return .outputFallback }
+        if isOwner == true { return ghosttyRendererHost?.hasRenderableSurface() == true ? .ghosttyOwner : .outputFallback }
+        if ghosttyRendererHost?.hasRenderableSurface() == true { return .ghosttyViewerSnapshot }
+        if ghosttyRendererHost?.prefersOutputFallbackWhenSurfaceUnavailable == true { return .outputFallback }
         if isInteractiveRuntimeState(lastObservedRuntimeState) { return .ghosttyViewerLoading }
         return .ghosttyViewerExitedOutput
     }
@@ -1329,8 +1332,8 @@ import spacesterminalghostty
         case .ghosttyViewerSnapshot: return "Renderer: libghostty snapshot (viewer)"
         case .ghosttyViewerExitedOutput: return "Renderer: final output (viewer)"
         case .outputFallback:
-            if backend == .ghosttyEmbedded, ghosttySessionHost?.prefersOutputFallbackWhenSurfaceUnavailable == false,
-                ghosttySessionHost?.snapshot() != nil || ghosttySessionHost?.snapshotText() != nil
+            if backend == .ghosttyEmbedded, ghosttyRendererHost?.prefersOutputFallbackWhenSurfaceUnavailable == false,
+                ghosttyRendererHost?.snapshot() != nil || ghosttyRendererHost?.snapshotText() != nil
             {
                 return "Renderer: libghostty snapshot (owner fallback)"
             }
@@ -1340,13 +1343,13 @@ import spacesterminalghostty
 
     private func currentWindowTitle(fallback: String, isOwner: Bool) -> String {
         guard backend == .ghosttyEmbedded else { return fallback }
-        let baseTitle = ghosttySessionHost?.effectiveTitle ?? lastObservedRuntimeState?.title ?? fallback
+        let baseTitle = ghosttySessionInfoProvider?.effectiveTitle ?? lastObservedRuntimeState?.title ?? fallback
         return isOwner ? baseTitle : "\(baseTitle) (viewer)"
     }
 
     private func currentSummaryWorkingDirectory(fallback: String) -> String {
         guard backend == .ghosttyEmbedded else { return fallback }
-        return ghosttySessionHost?.effectiveWorkingDirectory ?? lastObservedRuntimeState?.workingDirectory ?? fallback
+        return ghosttySessionInfoProvider?.effectiveWorkingDirectory ?? lastObservedRuntimeState?.workingDirectory ?? fallback
     }
 
     private func currentRepresentedURL(workingDirectory: String) -> URL? {
@@ -1382,7 +1385,19 @@ import spacesterminalghostty
 
     private func updateGhosttySessionHostReference(for launchConfiguration: TerminalSessionLaunchConfiguration) {
         guard launchConfiguration.backend == .ghosttyEmbedded else { return }
-        if ghosttySessionHost == nil { ghosttySessionHost = sessionHostProvider(launchConfiguration, paths) }
+        if ghosttyRendererHost == nil || ghosttySessionInfoProvider == nil {
+            let host = sessionHostProvider(launchConfiguration, paths)
+            let resolvedHostComponents = Self.resolveGhosttyHostComponents(host)
+            if ghosttyRendererHost == nil { ghosttyRendererHost = resolvedHostComponents.rendererHost }
+            if ghosttySessionInfoProvider == nil { ghosttySessionInfoProvider = resolvedHostComponents.sessionInfoProvider }
+        }
+    }
+
+    private static func resolveGhosttyHostComponents(_ host: any TerminalGhosttySessionHosting) -> (
+        sessionInfoProvider: any TerminalGhosttySessionInfoProviding, rendererHost: any TerminalGhosttyRendererHosting
+    ) {
+        if let embeddedHost = host as? GhosttyEmbeddedSessionHost { return (embeddedHost, embeddedHost.rendererHost) }
+        return (host, host)
     }
 
     private func activeOwnerClient(snapshot: TerminalSessionAttachmentSnapshot?) -> TerminalClient? {
@@ -1503,10 +1518,10 @@ import spacesterminalghostty
         }
     }
     @discardableResult func debugSendGhosttyScroll(horizontal: CGFloat = 0, vertical: CGFloat) -> Bool {
-        ghosttySessionHost?.debugSendScroll(horizontal: horizontal, vertical: vertical) ?? false
+        ghosttyRendererHost?.debugSendScroll(horizontal: horizontal, vertical: vertical) ?? false
     }
-    var debugGhosttyHasRenderableSurface: Bool { ghosttySessionHost?.hasRenderableSurface() ?? false }
-    var debugGhosttySurfaceRefreshRequestCount: Int { ghosttySessionHost?.debugSurfaceRefreshRequestCount ?? 0 }
+    var debugGhosttyHasRenderableSurface: Bool { ghosttyRendererHost?.hasRenderableSurface() ?? false }
+    var debugGhosttySurfaceRefreshRequestCount: Int { ghosttyRendererHost?.debugSurfaceRefreshRequestCount ?? 0 }
     var debugOutputDisablesSmartSubstitutions: Bool {
         !outputView.isAutomaticQuoteSubstitutionEnabled && !outputView.isAutomaticDashSubstitutionEnabled
             && !outputView.isAutomaticTextReplacementEnabled && !outputView.isAutomaticSpellingCorrectionEnabled

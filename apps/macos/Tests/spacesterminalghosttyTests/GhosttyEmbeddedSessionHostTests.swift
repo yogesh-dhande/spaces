@@ -181,6 +181,20 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(host.effectiveWorkingDirectory, "/tmp/original")
     }
 
+    @MainActor func testEmbeddedHostExposesDistinctRendererAdapter() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-renderer-adapter", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: nil, createdAt: "2026-05-18T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: .init(rootDirectory: root.path))
+
+        XCTAssertTrue((host.rendererHost as AnyObject) is GhosttyEmbeddedRendererHost)
+        XCTAssertFalse((host.rendererHost as AnyObject) === host)
+    }
+
     @MainActor func testIncomingOutputRequestsSurfaceRefreshImmediately() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
