@@ -216,6 +216,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var closeTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
+    private var workspaceDidTerminateApplicationObserver: NSObjectProtocol?
     private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
     private var setupManager: SetupManager?
@@ -373,6 +374,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupFocusTerminalSessionWindowIPCObserver()
         setupCloseTerminalSessionWindowIPCObserver()
         setupAppActivationObservers()
+        setupWorkspaceApplicationObservers()
         setupTerminalAttachmentStateObserver()
         logStartupProfile("ipc_observers_ready")
         Self.scheduleAfterNextRunLoopTurn { [weak self] in
@@ -464,6 +466,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let appDidResignActiveObserver {
             NotificationCenter.default.removeObserver(appDidResignActiveObserver)
             self.appDidResignActiveObserver = nil
+        }
+        if let workspaceDidTerminateApplicationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceDidTerminateApplicationObserver)
+            self.workspaceDidTerminateApplicationObserver = nil
         }
         if let terminalAttachmentStateDidChangeObserver {
             NotificationCenter.default.removeObserver(terminalAttachmentStateDidChangeObserver)
@@ -843,6 +849,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     "stage=app_resigned_active index=\(profile.index) elapsed_ms=\(self.windowShortcutElapsedMS(since: profile.startedAt)) route_gap_ms=\(routeElapsedMS)"
                 )
                 self.activeWindowShortcutProfile = nil
+            }
+        }
+    }
+
+    private func setupWorkspaceApplicationObservers() {
+        workspaceDidTerminateApplicationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            let terminatedPID = application.map(\.processIdentifier)
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard
+                    Self.shouldAttemptDesktopControlRecovery(
+                        passiveOwnerPID: self.passiveDesktopControlOwner?.pid, terminatedApplicationPID: terminatedPID)
+                else { return }
+                self.attemptDesktopControlRecoveryIfNeeded()
             }
         }
     }
@@ -6794,6 +6817,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } else {
             window.subtitle = ""
         }
+    }
+
+    nonisolated static func shouldAttemptDesktopControlRecovery(passiveOwnerPID: Int32?, terminatedApplicationPID: Int32?) -> Bool {
+        guard let passiveOwnerPID, let terminatedApplicationPID else { return false }
+        return passiveOwnerPID == terminatedApplicationPID
     }
 
     static func shouldBypassLocalShortcutMonitor(for keyWindow: NSWindow?) -> Bool {

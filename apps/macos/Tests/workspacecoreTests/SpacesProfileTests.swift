@@ -112,6 +112,47 @@ final class SpacesProfileTests: XCTestCase {
         XCTAssertNotEqual(first, third)
     }
 
+    func testCurrentProfileReadsLiveProcessOverridesAfterCacheWarmup() throws {
+        let initialDatabasePath = tempHomeURL.appendingPathComponent("profiles/cache-warmup/spaces.db").path
+        let initialRuntimePath = tempHomeURL.appendingPathComponent("profiles/cache-warmup/runtime").path
+        let databasePath = tempHomeURL.appendingPathComponent("profiles/live-env/spaces.db").path
+        let runtimePath = tempHomeURL.appendingPathComponent("profiles/live-env/runtime-override").path
+        let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
+        let originalRuntimePath = ProcessInfo.processInfo.environment[SpacesProfile.runtimeDirectoryEnvironmentVariable]
+        SpacesProfile.resetCacheForTesting()
+        defer {
+            if let originalDatabasePath {
+                setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
+            } else {
+                unsetenv(SpacesProfile.databasePathEnvironmentVariable)
+            }
+            if let originalRuntimePath {
+                setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimePath, 1)
+            } else {
+                unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
+            }
+            SpacesProfile.resetCacheForTesting()
+        }
+
+        setenv(SpacesProfile.databasePathEnvironmentVariable, initialDatabasePath, 1)
+        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, initialRuntimePath, 1)
+        _ = try SpacesProfile.current()
+
+        setenv(SpacesProfile.databasePathEnvironmentVariable, databasePath, 1)
+        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimePath, 1)
+
+        let profile = try SpacesProfile.current()
+        let databaseLocatorPath = try DatabaseLocator.defaultPath()
+        let sessionPaths = try TerminalSessionPaths.forSession(id: "session-live-env")
+
+        XCTAssertEqual(profile.source, .explicitDatabasePath)
+        XCTAssertEqual(profile.databasePath, databasePath)
+        XCTAssertEqual(profile.runtimeDirectory, runtimePath)
+        XCTAssertNotEqual(profile.databasePath, initialDatabasePath)
+        XCTAssertEqual(databaseLocatorPath, databasePath)
+        XCTAssertTrue(sessionPaths.rootDirectory.hasPrefix(runtimePath + "/terminal/sessions/"))
+    }
+
     func testProfileAppOwnerLeaseRejectsDuplicateLaunches() throws {
         let profile = try explicitProfile(named: "duplicate")
         let first = try SpacesLeaseCoordinator.acquireProfileAppOwnerLease(profile: profile)
@@ -153,6 +194,34 @@ final class SpacesProfileTests: XCTestCase {
         guard case .busy(let owner) = second else { return XCTFail("Expected second desktop lease to be busy.") }
         XCTAssertEqual(owner.pid, firstLease.owner.pid)
         XCTAssertEqual(owner.profileRoot, firstProfile.rootDirectory)
+    }
+
+    func testProfileAppOwnerLeaseWaitsForOwnerMetadataBeforeDeclaringStale() throws {
+        let profile = try explicitProfile(named: "pending-owner")
+        let leaseDirectory = URL(fileURLWithPath: profile.rootDirectory).appendingPathComponent("leases/app-owner", isDirectory: true)
+        try FileManager.default.createDirectory(at: leaseDirectory, withIntermediateDirectories: true)
+        let executablePath = try XCTUnwrap(SpacesProfile.currentExecutablePath(currentDirectoryPath: FileManager.default.currentDirectoryPath))
+        let expectedOwner = SpacesProcessLeaseOwner(
+            pid: getpid(), executablePath: executablePath, profileRoot: profile.rootDirectory, token: "pending-owner-token",
+            acquiredAt: "2026-05-18T00:00:00Z")
+        let writerFinished = expectation(description: "lease metadata written")
+        let writerError = LockedValueBox<Error>()
+        Thread {
+            do {
+                Thread.sleep(forTimeInterval: 0.1)
+                let data = try JSONEncoder().encode(expectedOwner)
+                try data.write(to: leaseDirectory.appendingPathComponent("owner.json"), options: .atomic)
+            } catch { writerError.set(error) }
+            writerFinished.fulfill()
+        }.start()
+
+        let result = try SpacesLeaseCoordinator.acquireProfileAppOwnerLease(profile: profile)
+
+        wait(for: [writerFinished], timeout: 2)
+
+        XCTAssertNil(writerError.value)
+        guard case .busy(let owner) = result else { return XCTFail("Expected pending owner metadata to resolve as busy.") }
+        XCTAssertEqual(owner, expectedOwner)
     }
 
     func testDesktopControlLeaseDirectoryIgnoresHomeEnvironmentOverrideByDefault() throws {
@@ -204,6 +273,23 @@ final class SpacesProfileTests: XCTestCase {
 private struct StubGitProfileProbe: SpacesGitProfileProbe {
     let context: SpacesDevelopmentContext?
     func resolveDevelopmentContext(repoRootPath _: String) throws -> SpacesDevelopmentContext? { context }
+}
+
+private final class LockedValueBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Value?
+
+    func set(_ value: Value) {
+        lock.lock()
+        storage = value
+        lock.unlock()
+    }
+
+    var value: Value? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
 }
 
 private func currentUserAccountHomePath() -> String? {

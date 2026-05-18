@@ -71,6 +71,9 @@ public struct SpacesAppLaunchContext {
 public enum SpacesAppLaunchPreparationError: Error { case duplicateProfileOwner(profile: SpacesProfile, owner: SpacesProcessLeaseOwner) }
 
 public enum SpacesLeaseCoordinator {
+    private static let missingMetadataGraceSeconds: TimeInterval = 1
+    private static let missingMetadataPollIntervalSeconds: TimeInterval = 0.05
+
     public static func prepareAppLaunchContext(profile: SpacesProfile? = nil, fileManager: FileManager = .default, homeDirectoryURL: URL? = nil)
         throws -> SpacesAppLaunchContext
     {
@@ -180,15 +183,24 @@ public enum SpacesLeaseCoordinator {
 
     private static func readLiveOwner(fromLeaseDirectoryPath leaseDirectoryPath: String, fileManager: FileManager) throws -> SpacesProcessLeaseOwner?
     {
-        guard let owner = try readOwner(fromLeaseDirectoryPath: leaseDirectoryPath, fileManager: fileManager) else {
-            if fileManager.fileExists(atPath: leaseDirectoryPath) { try? fileManager.removeItem(atPath: leaseDirectoryPath) }
-            return nil
+        let deadline = Date().addingTimeInterval(missingMetadataGraceSeconds)
+
+        while true {
+            guard let owner = try readOwner(fromLeaseDirectoryPath: leaseDirectoryPath, fileManager: fileManager) else {
+                guard fileManager.fileExists(atPath: leaseDirectoryPath) else { return nil }
+                if Date() >= deadline {
+                    try? fileManager.removeItem(atPath: leaseDirectoryPath)
+                    return nil
+                }
+                Thread.sleep(forTimeInterval: missingMetadataPollIntervalSeconds)
+                continue
+            }
+            guard isLiveOwnerProcess(owner) else {
+                try? fileManager.removeItem(atPath: leaseDirectoryPath)
+                return nil
+            }
+            return owner
         }
-        guard isLiveOwnerProcess(owner) else {
-            try? fileManager.removeItem(atPath: leaseDirectoryPath)
-            return nil
-        }
-        return owner
     }
 
     static func desktopControlLeaseDirectory(homeDirectoryURL: URL? = nil, fileManager: FileManager = .default) -> String {

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum SpacesProfileSource: String, Sendable, Codable, Equatable {
@@ -44,7 +45,7 @@ public struct SpacesProfile: Sendable, Equatable {
     }
 
     public static func current() throws -> SpacesProfile {
-        let environment = ProcessInfo.processInfo.environment
+        let environment = currentProcessEnvironment()
         let fingerprint = cacheFingerprint(
             environment: environment, currentDirectoryPath: FileManager.default.currentDirectoryPath,
             executablePath: currentExecutablePath(currentDirectoryPath: FileManager.default.currentDirectoryPath))
@@ -65,6 +66,13 @@ public struct SpacesProfile: Sendable, Equatable {
         cachedProfileFingerprint = fingerprint
         cachedProfileLock.unlock()
         return resolved
+    }
+
+    static func resetCacheForTesting() {
+        cachedProfileLock.lock()
+        cachedProfile = nil
+        cachedProfileFingerprint = nil
+        cachedProfileLock.unlock()
     }
 
     public static func resolve(
@@ -157,6 +165,19 @@ public struct SpacesProfile: Sendable, Equatable {
             environment[databasePathEnvironmentVariable] ?? "", environment[runtimeDirectoryEnvironmentVariable] ?? "", environment["HOME"] ?? "",
             currentDirectoryPath, executablePath ?? "",
         ].joined(separator: "\u{1f}")
+    }
+
+    private static func currentProcessEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        for key in [databasePathEnvironmentVariable, runtimeDirectoryEnvironmentVariable] {
+            if let value = currentEnvironmentValue(for: key) { environment[key] = value } else { environment.removeValue(forKey: key) }
+        }
+        return environment
+    }
+
+    private static func currentEnvironmentValue(for key: String) -> String? {
+        guard let rawValue = getenv(key) else { return nil }
+        return String(cString: rawValue)
     }
 
     private static func resolveDevelopmentContext(

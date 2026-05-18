@@ -18,6 +18,19 @@ import Testing
         #expect(!AppKitController.shouldDeferSetupChecksUntilAfterSplash(entryContext: .deferredRequirement))
     }
 
+    @Test func passiveDesktopControlRecoveryIgnoresUnrelatedTermination() {
+        #expect(!AppKitController.shouldAttemptDesktopControlRecovery(passiveOwnerPID: 101, terminatedApplicationPID: 202))
+    }
+
+    @Test func passiveDesktopControlRecoveryRequiresKnownOwnerAndTerminationPID() {
+        #expect(!AppKitController.shouldAttemptDesktopControlRecovery(passiveOwnerPID: nil, terminatedApplicationPID: 202))
+        #expect(!AppKitController.shouldAttemptDesktopControlRecovery(passiveOwnerPID: 101, terminatedApplicationPID: nil))
+    }
+
+    @Test func passiveDesktopControlRecoveryRetriesWhenCurrentOwnerTerminates() {
+        #expect(AppKitController.shouldAttemptDesktopControlRecovery(passiveOwnerPID: 101, terminatedApplicationPID: 101))
+    }
+
     @MainActor @Test func startupSetupFlowSchedulesChecksAfterRunLoopTurn() async {
         var didRun = false
         await withCheckedContinuation { continuation in
