@@ -6,6 +6,17 @@
       "**/.*",
       "**/node_modules/**"
     ],
+    "headers": [
+      {
+        "source": "**/*.@(mp4|m4v|mov|webm)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=14400, no-transform"
+          }
+        ]
+      }
+    ],
     "rewrites": [
       {
         "source": "**",
