@@ -63,7 +63,7 @@ public struct TerminalSessionPaths: Sendable, Equatable {
             return directoryURL
         }
 
-        let root = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".spaces", isDirectory: true)
+        let root = try TerminalPlatformDirectories.defaultSpacesDirectory(fileManager: fileManager)
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }

@@ -8,13 +8,15 @@ let ghosttyVTIncludeDirectory = "\(packageDirectory)/.local/ghosttyvt/src/zig-ou
 let package = Package(
     name: "spaces",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v14),
+        .iOS(.v17)
     ],
     products: [
         .library(name: "systembridge", targets: ["systembridge"]),
         .library(name: "spacesterminalcore", targets: ["spacesterminalcore"]),
         .library(name: "spacesterminalghostty", targets: ["spacesterminalghostty"]),
         .library(name: "spacesterminalui", targets: ["spacesterminalui"]),
+        .library(name: "spacesmobilecore", targets: ["spacesmobilecore"]),
         .library(name: "workspacecore", targets: ["workspacecore"]),
         .library(name: "spacesui", targets: ["spacesui"]),
         .library(name: "spacescli", targets: ["spacescli"]),
@@ -40,6 +42,7 @@ let package = Package(
         ),
         .target(name: "systembridge"),
         .target(name: "spacesterminalcore", dependencies: ["ghosttyvtshim"]),
+        .target(name: "spacesmobilecore", dependencies: ["spacesterminalcore"]),
         .target(
             name: "spacesterminalghostty",
             dependencies: ["spacesterminalcore", "ghosttyvtshim", "GhosttyKit"],
@@ -66,6 +69,7 @@ let package = Package(
         .target(
             name: "spacescli",
             dependencies: [
+                "spacesmobilecore",
                 "workspacecore",
                 "spacesterminalcore",
                 "spacesterminalghostty",

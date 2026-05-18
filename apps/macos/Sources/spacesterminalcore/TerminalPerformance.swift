@@ -43,7 +43,6 @@ public enum TerminalPerformance {
         {
             return URL(fileURLWithPath: override, isDirectory: true)
         }
-        let home = fileManager.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".spaces", isDirectory: true).appendingPathComponent("runtime", isDirectory: true)
+        return try TerminalPlatformDirectories.defaultRuntimeDirectory(fileManager: fileManager)
     }
 }

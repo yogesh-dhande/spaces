@@ -190,10 +190,19 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(command.authToken, "SECRET")
     }
 
+    func testMobileServeParsesHostPortAndPairingCode() throws {
+        let command = try MobileServeCommand.parse(["--host", "0.0.0.0", "--port", "47071", "--pairing-code", "246810"])
+
+        XCTAssertEqual(command.host, "0.0.0.0")
+        XCTAssertEqual(command.port, 47071)
+        XCTAssertEqual(command.pairingCode, "246810")
+    }
+
     func testSpacesCommandListsFlattenedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
         XCTAssertEqual(
-            subcommands, ["ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "SignalCommand", "TerminalCommand"])
+            subcommands,
+            ["ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "SignalCommand", "TerminalCommand", "MobileCommand"])
     }
 
     private func captureStandardOutput(_ body: () throws -> Void) throws -> String {

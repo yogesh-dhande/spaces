@@ -2,6 +2,7 @@ import ArgumentParser
 import Darwin
 import Dispatch
 import Foundation
+import spacesmobilecore
 import spacesterminalcore
 import spacesterminalghostty
 import systembridge
@@ -26,7 +27,7 @@ public struct SpacesCommand: ParsableCommand {
             """, version: AppVersion.current,
         subcommands: [
             ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, OpenCommand.self, SignalCommand.self,
-            TerminalCommand.self,
+            TerminalCommand.self, MobileCommand.self,
         ])
 
     public init() {}
@@ -56,8 +57,9 @@ struct TerminalListCommand: ParsableCommand {
 }
 
 func availableTerminalSessionRows(fileManager: FileManager = .default) throws -> [String] {
-    _ = fileManager
-    return try TerminalService.listSessions().map { session in "\(session.id)\tstate=\(session.state.rawValue)\tcwd=\(session.workingDirectory)" }
+    try TerminalSessionCatalog.listLiveSessions(fileManager: fileManager).map { session in
+        "\(session.sessionID)\tstate=\(session.runtimeState.state.rawValue)\tcwd=\(session.effectiveWorkingDirectory)"
+    }
 }
 
 struct TerminalCommandCommand: ParsableCommand {
@@ -223,6 +225,34 @@ struct TerminalProxyCommand: ParsableCommand {
         }
         try server.start()
         print("Terminal proxy ready\tsession=\(sessionID)\thost=\(host)\tport=\(server.listeningPort)")
+        fflush(stdout)
+        dispatchMain()
+    }
+}
+
+struct MobileCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mobile", abstract: "Expose first-party workspace and terminal browsing for the iOS client.",
+        subcommands: [MobileServeCommand.self])
+}
+
+struct MobileServeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "serve", abstract: "Run the first-party mobile bridge for the iOS client.")
+
+    @Option(name: .long, help: "TCP host to bind. Use 127.0.0.1 for simulator-only access.") var host = "127.0.0.1"
+    @Option(name: .long, help: "TCP port to bind. Defaults to 47071 for the first-party iOS client.") var port = 47071
+    @Option(name: .long, help: "One-time pairing code accepted by the first-party iOS client. Defaults to a generated 6-digit code.") var pairingCode:
+        String?
+
+    func run() throws {
+        let trimmedPairingCode = pairingCode?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedPairingCode =
+            if let trimmedPairingCode, !trimmedPairingCode.isEmpty { trimmedPairingCode } else { SpacesMobileBridgeServer.generatePairingCode() }
+        let server = try SpacesMobileBridgeServer(host: host, port: port, pairingCode: resolvedPairingCode)
+        try server.start()
+        print(
+            "Spaces mobile bridge ready\thost=\(host)\tport=\(server.listeningPort)\tpairing_code=\(resolvedPairingCode)\tbundle=\(SpacesMobileFirstPartyPolicy.allowedBundleID)"
+        )
         fflush(stdout)
         dispatchMain()
     }
