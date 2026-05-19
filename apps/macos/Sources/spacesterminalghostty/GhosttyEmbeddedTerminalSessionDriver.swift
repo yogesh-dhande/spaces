@@ -15,6 +15,7 @@ import spacesterminalcore
     private nonisolated(unsafe) var outputHandler: (@Sendable (Data) -> Void)?
     private var didHandleSurfaceClose = false
     private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
+    private var lastKnownPixelSize: (width: UInt32, height: UInt32)?
 
     var onActionEvent: (@MainActor (GhosttyActionEvent) -> Void)?
     var onSurfaceClosed: (@MainActor () -> Void)?
@@ -84,6 +85,7 @@ import spacesterminalcore
         ghostty_session_set_focus(createdSession, false)
         ghostty_session_set_occlusion(createdSession, true)
         ghostty_session_set_size(createdSession, 960, 640)
+        lastKnownPixelSize = (960, 640)
         ghostty_session_refresh(createdSession)
         notifySurfaceCellSizeIfChanged()
     }
@@ -97,6 +99,7 @@ import spacesterminalcore
         self.surfaceUserData = nil
         ghostty_session_free(session)
         lastKnownSurfaceSize = nil
+        lastKnownPixelSize = nil
         hiddenHostWindow?.orderOut(nil)
     }
 
@@ -160,7 +163,35 @@ import spacesterminalcore
         ghostty_session_set_content_scale(session, scale, scale)
         if let displayID { ghostty_session_set_display_id(session, displayID) }
         ghostty_session_set_size(session, width, height)
+        lastKnownPixelSize = (width, height)
         notifySurfaceCellSizeIfChanged()
+    }
+
+    @discardableResult func resizeCellGrid(columns: Int, rows: Int) -> Bool {
+        guard let session else { return false }
+        let targetColumns = max(columns, 1)
+        let targetRows = max(rows, 1)
+        guard let currentSize = surfaceCellSize(), currentSize.columns > 0, currentSize.rows > 0 else { return false }
+
+        let currentPixels = lastKnownPixelSize ?? (width: 960, height: 640)
+        var nextWidth = Double(currentPixels.width)
+        var nextHeight = Double(currentPixels.height)
+
+        for _ in 0..<3 {
+            guard let measuredSize = surfaceCellSize(), measuredSize.columns > 0, measuredSize.rows > 0 else { break }
+            let widthScale = Double(targetColumns) / Double(measuredSize.columns)
+            let heightScale = Double(targetRows) / Double(measuredSize.rows)
+            nextWidth = max((nextWidth * widthScale).rounded(), 1)
+            nextHeight = max((nextHeight * heightScale).rounded(), 1)
+            ghostty_session_set_size(session, UInt32(nextWidth), UInt32(nextHeight))
+            lastKnownPixelSize = (UInt32(nextWidth), UInt32(nextHeight))
+            ghostty_session_refresh(session)
+            GhosttyEmbeddedAppService.shared.tick()
+        }
+
+        notifySurfaceCellSizeIfChanged()
+        guard let resolvedSize = surfaceCellSize() else { return false }
+        return resolvedSize.columns == targetColumns && resolvedSize.rows == targetRows
     }
 
     func snapshot() -> GhosttyTerminalSnapshot? {

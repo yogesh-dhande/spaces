@@ -71,6 +71,11 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
         overview?.sessions.first(where: { $0.id == id })
     }
 
+    var debugAutoOpenSession: SpacesMobileTerminalSessionSummary? {
+        let sessions = overview?.sessions ?? []
+        return sessions.first(where: { $0.state == .running }) ?? sessions.first
+    }
+
     func refresh() async {
         guard !isLoading else { return }
         isLoading = true

@@ -4,6 +4,7 @@ import spacesmobilecore
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedSession: SpacesMobileTerminalSessionSummary?
+    @State private var didAutoOpenDebugSession = false
     let model: SpacesMobileAppModel
 
     var body: some View {
@@ -25,7 +26,11 @@ struct ContentView: View {
                 TerminalDetailView(session: session, settings: model.settings)
                     .toolbar {
                         ToolbarItem(placement: .topBarLeading) {
-                            Button("Back") { selectedSession = nil }
+                            Button {
+                                selectedSession = nil
+                            } label: {
+                                Image(systemName: "chevron.left")
+                            }
                         }
                     }
             }
@@ -47,11 +52,13 @@ struct ContentView: View {
                 }
             }
             await model.refresh()
+            autoOpenDebugSessionIfNeeded()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled else { return }
                 if !model.isShowingConnectionSettings, selectedSession == nil {
                     await model.refresh()
+                    autoOpenDebugSessionIfNeeded()
                 }
             }
         }
@@ -184,5 +191,21 @@ struct ContentView: View {
     private func ownerLabel(for session: SpacesMobileTerminalSessionSummary) -> String {
         let ownerClientID = session.attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
         return session.attachmentSnapshot.clients.first(where: { $0.id == ownerClientID })?.identity.label ?? "No owner"
+    }
+
+    private func autoOpenDebugSessionIfNeeded() {
+        guard Self.debugAutoOpenFirstTerminal else { return }
+        guard !didAutoOpenDebugSession else { return }
+        guard selectedSession == nil else { return }
+        guard let session = model.debugAutoOpenSession else { return }
+        didAutoOpenDebugSession = true
+        selectedSession = session
+    }
+
+    private static var debugAutoOpenFirstTerminal: Bool {
+        let value = ProcessInfo.processInfo.environment["SPACES_MOBILE_DEBUG_AUTO_OPEN_FIRST_TERMINAL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return value == "1" || value == "true" || value == "yes"
     }
 }

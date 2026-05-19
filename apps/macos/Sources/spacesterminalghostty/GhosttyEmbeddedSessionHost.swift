@@ -54,6 +54,8 @@ extension Notification.Name {
 
     func surfaceCellSize() -> (columns: Int, rows: Int)? { terminalView.surfaceCellSize() }
 
+    @discardableResult func resizeCellGrid(columns: Int, rows: Int) -> Bool { terminalView.resizeCellGrid(columns: columns, rows: rows) }
+
     func terminateSession() { terminalView.terminateSession() }
 
     func setSurfaceFocused(_ focused: Bool) { terminalView.setFocused(focused) }
@@ -347,6 +349,7 @@ extension Notification.Name {
         case "send": controlResponseForSendRequest(request)
         case "key": controlResponseForKeyRequest(request)
         case "takeover": controlResponseForTakeoverRequest(request)
+        case "resize": controlResponseForResizeRequest(request)
         default: TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
         }
     }
@@ -488,6 +491,27 @@ extension Notification.Name {
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
             return TerminalControlResponse(ok: false, message: String(describing: error))
         }
+    }
+
+    private func controlResponseForResizeRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        let startedAt = Date()
+        if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
+        if let clientID = request.clientID, !isOwner(clientID: clientID) {
+            TerminalPerformance.logMetric(
+                "terminal_control_resize", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            return TerminalControlResponse(ok: false, message: "Only the active owner can resize the terminal.")
+        }
+        guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
+            return TerminalControlResponse(ok: false, message: "Missing terminal size.")
+        }
+        let resized = rendererHostStorage.resizeCellGrid(columns: columns, rows: rows)
+        refreshRuntimeState(force: true)
+        TerminalPerformance.logMetric(
+            "terminal_control_resize", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            success: resized, detail: "columns=\(columns) rows=\(rows)")
+        broadcastCurrentState(reason: "resize")
+        return TerminalControlResponse(ok: resized, message: resized ? "Resized terminal." : "Unable to match the requested terminal size.")
     }
 
     private func startRuntimeStateTimer() {

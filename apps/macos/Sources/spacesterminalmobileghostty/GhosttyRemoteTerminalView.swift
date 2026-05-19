@@ -11,17 +11,20 @@ import Foundation
         public let fallbackText: String
         public let acceptsInput: Bool
         public let isBusy: Bool
+        public let onViewportSizeChanged: @MainActor (Int, Int) -> Void
         public let onSendText: @MainActor (String) -> Void
         public let onSendKey: @MainActor (String) -> Void
 
         public init(
             snapshot: GhosttyTerminalSnapshot?, fallbackText: String, acceptsInput: Bool, isBusy: Bool,
-            onSendText: @escaping @MainActor (String) -> Void, onSendKey: @escaping @MainActor (String) -> Void
+            onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void, onSendText: @escaping @MainActor (String) -> Void,
+            onSendKey: @escaping @MainActor (String) -> Void
         ) {
             self.snapshot = snapshot
             self.fallbackText = fallbackText
             self.acceptsInput = acceptsInput
             self.isBusy = isBusy
+            self.onViewportSizeChanged = onViewportSizeChanged
             self.onSendText = onSendText
             self.onSendKey = onSendKey
         }
@@ -30,6 +33,7 @@ import Foundation
 
         public func updateUIView(_ hostView: GhosttyRemoteTerminalHostView, context: Context) {
             hostView.acceptsTerminalInput = acceptsInput && !isBusy
+            hostView.onViewportSizeChanged = { columns, rows in Task { @MainActor in onViewportSizeChanged(columns, rows) } }
             hostView.onSendText = { text in Task { @MainActor in onSendText(text) } }
             hostView.onSendKey = { key in Task { @MainActor in onSendKey(key) } }
             hostView.update(snapshot: snapshot, fallbackText: fallbackText)
@@ -37,16 +41,20 @@ import Foundation
     }
 
     @MainActor public final class GhosttyRemoteTerminalHostView: UIView, UIKeyInput {
+        private static let carrierCommand = "while :; do /bin/sleep 3600; done"
+        private static let defaultFontSize: Float = 13
         private var session: ghostty_session_t?
         private var lastSnapshot: GhosttyTerminalSnapshot?
+        private var lastViewportSnapshot: GhosttyTerminalSnapshot?
+        private var lastReplayPixelSize = CGSize.zero
         private let fallbackLabel = UILabel()
         private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput))
 
         public var acceptsTerminalInput = false
+        public var onViewportSizeChanged: ((Int, Int) -> Void)?
         public var onSendText: ((String) -> Void)?
         public var onSendKey: ((String) -> Void)?
 
-        public override class var layerClass: AnyClass { CAMetalLayer.self }
         public override var canBecomeFirstResponder: Bool { acceptsTerminalInput }
 
         public var hasText: Bool { false }
@@ -108,9 +116,24 @@ import Foundation
             fallbackLabel.isHidden = snapshot != nil
             syncFirstResponder()
 
-            guard let session, let snapshot, snapshot != lastSnapshot else { return }
-            replay(snapshot: snapshot, into: session)
+            if let snapshot {
+                let firstVisibleCell = snapshot.cells.first { $0.codepoint != 0 && $0.codepoint != 32 }
+                NSLog(
+                    "[GhosttyRemote] update snapshot cols=%ld rows=%ld pixels=%ldx%ld defaultFg=%u defaultBg=%u firstCode=%u firstFg=%u firstBg=%u",
+                    snapshot.columns, snapshot.rows, Int(self.currentPixelSize.width), Int(self.currentPixelSize.height),
+                    snapshot.defaultForegroundRGB, snapshot.defaultBackgroundRGB, firstVisibleCell?.codepoint ?? 0,
+                    firstVisibleCell?.foregroundRGB ?? 0, firstVisibleCell?.backgroundRGB ?? 0)
+            } else {
+                NSLog("[GhosttyRemote] update without snapshot fallbackLength=%ld", fallbackText.count)
+            }
+
+            guard let session, let snapshot else { return }
+            let viewportSnapshot = viewportSnapshot(for: snapshot, session: session)
+            guard lastViewportSnapshot != viewportSnapshot || lastReplayPixelSize != currentPixelSize else { return }
+            replay(snapshot: viewportSnapshot, into: session)
             lastSnapshot = snapshot
+            lastViewportSnapshot = viewportSnapshot
+            lastReplayPixelSize = currentPixelSize
         }
 
         public func insertText(_ text: String) {
@@ -167,10 +190,12 @@ import Foundation
                 try GhosttyMobileAppService.shared.startIfNeeded()
                 guard let app = GhosttyMobileAppService.shared.app else { return }
                 session = createSession(app: app)
+                NSLog("[GhosttyRemote] session created hasSession=%d", self.session != nil)
                 syncSessionState()
             } catch {
                 fallbackLabel.text = error.localizedDescription
                 fallbackLabel.isHidden = false
+                NSLog("[GhosttyRemote] session creation failed error=%@", error.localizedDescription)
             }
         }
 
@@ -179,20 +204,22 @@ import Foundation
             sessionConfig.surface.platform_tag = GHOSTTY_PLATFORM_IOS
             sessionConfig.surface.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(uiview: Unmanaged.passUnretained(self).toOpaque()))
             sessionConfig.surface.scale_factor = scaleFactor
-            sessionConfig.surface.font_size = 0
-
-            var createdSession: ghostty_session_t?
-            "cat".withCString { commandCString in
-                sessionConfig.surface.command = commandCString
-                createdSession = ghostty_session_new(app, &sessionConfig)
+            sessionConfig.surface.font_size = Self.defaultFontSize
+            let createdSession = Self.carrierCommand.withCString { commandPointer in
+                sessionConfig.surface.command = commandPointer
+                return ghostty_session_new(app, &sessionConfig)
             }
 
             guard let createdSession else { return nil }
+            NSLog("[GhosttyRemote] created session with carrier command %@", Self.carrierCommand)
             return createdSession
         }
 
         private func replay(snapshot: GhosttyTerminalSnapshot, into session: ghostty_session_t) {
             let vt = GhosttyTerminalSnapshotVTEncoder.encode(snapshot)
+            NSLog(
+                "[GhosttyRemote] replay snapshot cols=%ld rows=%ld bytes=%ld pixels=%ldx%ld", snapshot.columns, snapshot.rows, vt.count,
+                Int(self.currentPixelSize.width), Int(self.currentPixelSize.height))
             vt.withUnsafeBytes { rawBuffer in
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
                 ghostty_session_process_output(session, baseAddress, UInt(vt.count))
@@ -204,11 +231,23 @@ import Foundation
         private func syncSessionState() {
             guard let session else { return }
             let scale = scaleFactor
+            let pixelSize = currentPixelSize
             ghostty_session_set_content_scale(session, scale, scale)
             ghostty_session_set_focus(session, isFirstResponder)
             ghostty_session_set_occlusion(session, window != nil && !isHidden && alpha > 0.001)
-            ghostty_session_set_size(session, UInt32(max(bounds.width * scale, 1)), UInt32(max(bounds.height * scale, 1)))
+            ghostty_session_set_size(session, UInt32(max(pixelSize.width, 1)), UInt32(max(pixelSize.height, 1)))
+            ghostty_session_refresh(session)
             GhosttyMobileAppService.shared.tick()
+            notifyViewportSizeIfChanged()
+            NSLog(
+                "[GhosttyRemote] sync state focus=%d visible=%d pixels=%ldx%ld", self.isFirstResponder, self.window != nil && !self.isHidden,
+                Int(pixelSize.width), Int(pixelSize.height))
+            if let lastSnapshot, pixelSize.width > 1, pixelSize.height > 1, lastReplayPixelSize != pixelSize {
+                let viewportSnapshot = viewportSnapshot(for: lastSnapshot, session: session)
+                replay(snapshot: viewportSnapshot, into: session)
+                lastViewportSnapshot = viewportSnapshot
+                lastReplayPixelSize = pixelSize
+            }
             syncFirstResponder()
         }
 
@@ -217,6 +256,45 @@ import Foundation
             if acceptsTerminalInput { if !isFirstResponder { becomeFirstResponder() } } else if isFirstResponder { resignFirstResponder() }
         }
 
+        private func viewportSnapshot(for snapshot: GhosttyTerminalSnapshot, session: ghostty_session_t) -> GhosttyTerminalSnapshot {
+            let localSize = ghostty_session_size(session)
+            let localColumns = Int(localSize.columns)
+            let localRows = Int(localSize.rows)
+            guard localColumns > 0, localRows > 0 else { return snapshot }
+            return GhosttyTerminalSnapshotViewport.crop(snapshot, columns: localColumns, rows: localRows)
+        }
+
         private var scaleFactor: Double { Double(window?.screen.scale ?? UIScreen.main.scale) }
+        private var currentPixelSize: CGSize { CGSize(width: max(bounds.width * scaleFactor, 1), height: max(bounds.height * scaleFactor, 1)) }
+
+        private func notifyViewportSizeIfChanged() {
+            guard let session else { return }
+            let size = ghostty_session_size(session)
+            guard size.columns > 0, size.rows > 0 else { return }
+            onViewportSizeChanged?(Int(size.columns), Int(size.rows))
+        }
+
+        func capturedSnapshotForTesting() -> GhosttyTerminalSnapshot? {
+            guard let session else { return nil }
+            var snapshot = ghostty_terminal_snapshot_s()
+            guard ghostty_session_export_snapshot(session, &snapshot) else { return nil }
+            defer { ghostty_terminal_snapshot_free(&snapshot) }
+
+            let cells: [GhosttyTerminalSnapshot.Cell]
+            if let rawCells = snapshot.cells, snapshot.cell_count > 0 {
+                let buffer = UnsafeBufferPointer(start: rawCells, count: Int(snapshot.cell_count))
+                cells = buffer.map {
+                    GhosttyTerminalSnapshot.Cell(
+                        codepoint: $0.codepoint, foregroundRGB: $0.foreground_rgb, backgroundRGB: $0.background_rgb, flags: $0.flags)
+                }
+            } else {
+                cells = []
+            }
+
+            return GhosttyTerminalSnapshot(
+                columns: Int(snapshot.columns), rows: Int(snapshot.rows), cursorColumn: Int(snapshot.cursor_column),
+                cursorRow: Int(snapshot.cursor_row), cursorVisible: snapshot.cursor_visible, defaultForegroundRGB: snapshot.default_foreground_rgb,
+                defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells)
+        }
     }
 #endif

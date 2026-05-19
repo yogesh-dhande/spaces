@@ -118,12 +118,14 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
     public let attachmentMode: TerminalAttachmentMode?
     public let text: String?
     public let key: String?
+    public let columns: Int?
+    public let rows: Int?
     public let appendNewline: Bool
 
     public init(
         command: String, authToken: String? = nil, pairingCode: String? = nil, clientApp: SpacesMobileClientApp? = nil, sessionID: String? = nil,
         clientID: String? = nil, client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil, text: String? = nil,
-        key: String? = nil, appendNewline: Bool = false
+        key: String? = nil, columns: Int? = nil, rows: Int? = nil, appendNewline: Bool = false
     ) {
         self.command = command
         self.authToken = authToken
@@ -135,6 +137,8 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         self.attachmentMode = attachmentMode
         self.text = text
         self.key = key
+        self.columns = columns
+        self.rows = rows
         self.appendNewline = appendNewline
     }
 
@@ -149,6 +153,8 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         case attachmentMode
         case text
         case key
+        case columns
+        case rows
         case appendNewline
     }
 
@@ -164,6 +170,8 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         attachmentMode = try container.decodeIfPresent(TerminalAttachmentMode.self, forKey: .attachmentMode)
         text = try container.decodeIfPresent(String.self, forKey: .text)
         key = try container.decodeIfPresent(String.self, forKey: .key)
+        columns = try container.decodeIfPresent(Int.self, forKey: .columns)
+        rows = try container.decodeIfPresent(Int.self, forKey: .rows)
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
     }
 
@@ -179,6 +187,8 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(attachmentMode, forKey: .attachmentMode)
         try container.encodeIfPresent(text, forKey: .text)
         try container.encodeIfPresent(key, forKey: .key)
+        try container.encodeIfPresent(columns, forKey: .columns)
+        try container.encodeIfPresent(rows, forKey: .rows)
         try container.encode(appendNewline, forKey: .appendNewline)
     }
 }

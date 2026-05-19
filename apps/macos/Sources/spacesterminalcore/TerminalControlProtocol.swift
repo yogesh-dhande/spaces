@@ -9,11 +9,13 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let client: TerminalClient?
     public let attachmentMode: TerminalAttachmentMode?
     public let lineCount: Int?
+    public let columns: Int?
+    public let rows: Int?
     public let appendNewline: Bool
 
     public init(
         command: String, authToken: String? = nil, text: String? = nil, key: String? = nil, clientID: String? = nil, client: TerminalClient? = nil,
-        attachmentMode: TerminalAttachmentMode? = nil, lineCount: Int? = nil, appendNewline: Bool = false
+        attachmentMode: TerminalAttachmentMode? = nil, lineCount: Int? = nil, columns: Int? = nil, rows: Int? = nil, appendNewline: Bool = false
     ) {
         self.command = command
         self.authToken = authToken
@@ -23,6 +25,8 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         self.client = client
         self.attachmentMode = attachmentMode
         self.lineCount = lineCount
+        self.columns = columns
+        self.rows = rows
         self.appendNewline = appendNewline
     }
 
@@ -35,6 +39,8 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         case client
         case attachmentMode
         case lineCount
+        case columns
+        case rows
         case appendNewline
     }
 
@@ -48,6 +54,8 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         client = try container.decodeIfPresent(TerminalClient.self, forKey: .client)
         attachmentMode = try container.decodeIfPresent(TerminalAttachmentMode.self, forKey: .attachmentMode)
         lineCount = try container.decodeIfPresent(Int.self, forKey: .lineCount)
+        columns = try container.decodeIfPresent(Int.self, forKey: .columns)
+        rows = try container.decodeIfPresent(Int.self, forKey: .rows)
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
     }
 
@@ -61,6 +69,8 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(client, forKey: .client)
         try container.encodeIfPresent(attachmentMode, forKey: .attachmentMode)
         try container.encodeIfPresent(lineCount, forKey: .lineCount)
+        try container.encodeIfPresent(columns, forKey: .columns)
+        try container.encodeIfPresent(rows, forKey: .rows)
         try container.encode(appendNewline, forKey: .appendNewline)
     }
 }

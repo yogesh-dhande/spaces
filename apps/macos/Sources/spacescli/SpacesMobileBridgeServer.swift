@@ -136,6 +136,7 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
         case "takeover": return try handleTerminalControlRequest(request, command: "takeover")
         case "send": return try handleTerminalControlRequest(request, command: "send")
         case "key": return try handleTerminalControlRequest(request, command: "key")
+        case "resize": return try handleTerminalControlRequest(request, command: "resize")
         default: return SpacesMobileBridgeResponse(ok: false, message: "Unsupported mobile bridge command '\(request.command)'.")
         }
     }
@@ -158,7 +159,7 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
 
         let terminalRequest = TerminalControlRequest(
             command: command, text: request.text, key: request.key, clientID: request.clientID, client: request.client,
-            attachmentMode: request.attachmentMode, appendNewline: request.appendNewline)
+            attachmentMode: request.attachmentMode, columns: request.columns, rows: request.rows, appendNewline: request.appendNewline)
         let response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath)
         TerminalPerformance.logMetric(
             "mobile_bridge_\(command)", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),

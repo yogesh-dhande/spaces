@@ -21,6 +21,9 @@ struct TerminalDetailView: View {
                 fallbackText: model.visibleText,
                 acceptsInput: model.isOwner,
                 isBusy: model.isBusy,
+                onViewportSizeChanged: { columns, rows in
+                    model.updateViewportSize(columns: columns, rows: rows)
+                },
                 onSendText: { text in
                     Task { await model.sendText(text) }
                 },
@@ -50,7 +53,6 @@ struct TerminalDetailView: View {
                     Button("Take Over") {
                         Task { await model.takeOver() }
                     }
-                    .buttonStyle(.borderedProminent)
                     .disabled(model.isBusy)
                 }
             }

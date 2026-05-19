@@ -29,8 +29,28 @@ targets:
         product: spacesmobilecore
       - package: SpacesPackage
         product: spacesterminalcore
+      - package: SpacesPackage
+        product: spacesterminalmobileghostty
+  SpacesMobileTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - Tests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - package: SpacesPackage
+        product: spacesterminalcore
+      - package: SpacesPackage
+        product: spacesterminalmobileghostty
 schemes:
   SpacesMobile:
     build:
       targets:
         SpacesMobile: all
+        SpacesMobileTests: all
+    test:
+      targets:
+        - SpacesMobileTests

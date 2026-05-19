@@ -125,6 +125,22 @@ struct SpacesMobileBridgeClient: Sendable {
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
+    func resize(sessionID: String, clientID: String, columns: Int, rows: Int, timeout: Duration = .seconds(3)) async throws {
+        let response = try await sendRequest(
+            .init(
+                command: "resize",
+                authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity,
+                sessionID: sessionID,
+                clientID: clientID,
+                columns: columns,
+                rows: rows
+            ),
+            timeout: timeout
+        )
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+    }
+
     func subscribe(
         sessionID: String,
         clientID: String,

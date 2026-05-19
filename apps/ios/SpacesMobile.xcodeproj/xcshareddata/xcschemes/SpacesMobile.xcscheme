@@ -21,6 +21,20 @@
                ReferencedContainer = "container:SpacesMobile.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A22491DEE0C1C690D99FCFB0"
+               BuildableName = "SpacesMobileTests.xctest"
+               BlueprintName = "SpacesMobileTests"
+               ReferencedContainer = "container:SpacesMobile.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -39,7 +53,20 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A22491DEE0C1C690D99FCFB0"
+               BuildableName = "SpacesMobileTests.xctest"
+               BlueprintName = "SpacesMobileTests"
+               ReferencedContainer = "container:SpacesMobile.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
+      <CommandLineArguments>
+      </CommandLineArguments>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"

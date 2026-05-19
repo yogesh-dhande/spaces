@@ -21,10 +21,14 @@ import spacesterminalcore
     private var bufferedInputText = ""
     private var bufferedInputFlushTask: Task<Void, Never>?
     private var pendingInputSendTask: Task<Void, Never>?
+    private var pendingResizeTask: Task<Void, Never>?
+    private var viewportSize: (columns: Int, rows: Int)?
+    private var lastSentResize: (columns: Int, rows: Int)?
     private var isStopping = false
 
     private static let inputBatchDelay: Duration = .milliseconds(35)
     private static let inputRequestTimeout: Duration = .seconds(6)
+    private static let resizeDebounceDelay: Duration = .milliseconds(120)
 
     init(session: SpacesMobileTerminalSessionSummary, settings: SpacesMobileConnectionSettings) {
         self.session = session
@@ -78,7 +82,11 @@ import spacesterminalcore
         bufferedInputFlushTask = nil
         pendingInputSendTask?.cancel()
         pendingInputSendTask = nil
+        pendingResizeTask?.cancel()
+        pendingResizeTask = nil
         bufferedInputText = ""
+        viewportSize = nil
+        lastSentResize = nil
         streamHandle?.cancel()
         streamHandle = nil
         Task { try? await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id) }
@@ -90,9 +98,17 @@ import spacesterminalcore
         defer { isBusy = false }
         do {
             try await bridgeClient.takeOver(sessionID: session.id, clientID: remoteClient.id)
+            scheduleResizeIfNeeded(force: true)
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    func updateViewportSize(columns: Int, rows: Int) {
+        let resolved = (columns: max(columns, 1), rows: max(rows, 1))
+        guard viewportSize?.columns != resolved.columns || viewportSize?.rows != resolved.rows else { return }
+        viewportSize = resolved
+        scheduleResizeIfNeeded(force: false)
     }
 
     func sendText(_ text: String, appendNewline: Bool = false) async {
@@ -213,6 +229,12 @@ import spacesterminalcore
                 latestState = initialState
                 isSessionUnavailable = false
                 errorMessage = nil
+                NSLog(
+                    "[TerminalViewer] initial state cols=%ld rows=%ld textLength=%ld",
+                    initialState.snapshot?.columns ?? -1,
+                    initialState.snapshot?.rows ?? -1,
+                    initialState.snapshotText?.count ?? 0
+                )
             }
             let handle = try bridgeClient.subscribe(sessionID: session.id, clientID: remoteClient.id) { [weak self] payload in
                 guard let self else { return }
@@ -220,6 +242,13 @@ import spacesterminalcore
                 isSessionUnavailable = false
                 errorMessage = nil
                 isConnecting = false
+                scheduleResizeIfNeeded(force: false)
+                NSLog(
+                    "[TerminalViewer] stream state cols=%ld rows=%ld textLength=%ld",
+                    payload.snapshot?.columns ?? -1,
+                    payload.snapshot?.rows ?? -1,
+                    payload.snapshotText?.count ?? 0
+                )
             } onDisconnect: { [weak self] error in
                 Task { @MainActor [weak self] in
                     await self?.handleDisconnect(error)
@@ -269,6 +298,43 @@ import spacesterminalcore
             return "This terminal session ended. Return to Terminals to open the current live session."
         default:
             return nil
+        }
+    }
+
+    private func scheduleResizeIfNeeded(force: Bool) {
+        guard isOwner else { return }
+        guard let viewportSize else { return }
+        if !force, lastSentResize?.columns == viewportSize.columns, lastSentResize?.rows == viewportSize.rows { return }
+        pendingResizeTask?.cancel()
+        pendingResizeTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.resizeDebounceDelay)
+            guard !Task.isCancelled else { return }
+            await self?.sendResizeIfNeeded(force: force)
+        }
+    }
+
+    private func sendResizeIfNeeded(force: Bool) async {
+        guard isOwner else { return }
+        guard let viewportSize else { return }
+        if !force, lastSentResize?.columns == viewportSize.columns, lastSentResize?.rows == viewportSize.rows { return }
+        let bridgeClient = bridgeClient
+        let sessionID = session.id
+        let clientID = remoteClient.id
+        let columns = viewportSize.columns
+        let rows = viewportSize.rows
+        do {
+            try await Self.performInputRequest {
+                try await bridgeClient.resize(
+                    sessionID: sessionID,
+                    clientID: clientID,
+                    columns: columns,
+                    rows: rows,
+                    timeout: Self.inputRequestTimeout
+                )
+            }
+            lastSentResize = viewportSize
+        } catch {
+            handleInputSendError(error)
         }
     }
 

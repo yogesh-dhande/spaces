@@ -316,6 +316,8 @@ import spacesterminalcore
 
     public func surfaceCellSize() -> (columns: Int, rows: Int)? { sessionDriver.surfaceCellSize() }
 
+    @discardableResult public func resizeCellGrid(columns: Int, rows: Int) -> Bool { sessionDriver.resizeCellGrid(columns: columns, rows: rows) }
+
     public func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { sessionDriver.setOutputHandler(handler) }
     public func setFocused(_ focused: Bool) { setSurfaceFocus(focused) }
     public func snapshot() -> GhosttyTerminalSnapshot? { sessionDriver.snapshot() }

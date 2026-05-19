@@ -7,16 +7,19 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1BF92F57C51FD34F3F9B3E05 /* spacesterminalmobileghostty in Frameworks */ = {isa = PBXBuildFile; productRef = 5C91403688DCC6A2B90B5AC8 /* spacesterminalmobileghostty */; };
 		1CEC201CDB2F0F869548081A /* spacesmobilecore in Frameworks */ = {isa = PBXBuildFile; productRef = 69AE1995F1B3C38E8A9708D4 /* spacesmobilecore */; };
-		22A1E4E9A0B84E54A1E9C001 /* spacesterminalmobileghostty in Frameworks */ = {isa = PBXBuildFile; productRef = 22A1E4E8A0B84E54A1E9C001 /* spacesterminalmobileghostty */; };
 		246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */; };
 		317C6199E7E4075EFA52B4F7 /* SpacesMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A8A24AA9252CFEE41B435E /* SpacesMobileApp.swift */; };
 		33641B9B5F7C4A0AE09EEA5D /* ConnectionSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEBBC1D6B0751E287CF24826 /* ConnectionSettingsView.swift */; };
 		3E6556FA28213E142655B870 /* SpacesMobileBridgeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAC519ED5515A6509CAD7C1F /* SpacesMobileBridgeClient.swift */; };
+		4073E59B929A6A3937DC57A8 /* GhosttyMobileAppServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */; };
 		63CAF57DC64D2ABDDFFD193A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9747BD35A2E71FC54E592EEA /* ContentView.swift */; };
 		A09A88A72DBD3C5715B03A0D /* spacesterminalcore in Frameworks */ = {isa = PBXBuildFile; productRef = 496FCCD383CAF3E9BD137D1B /* spacesterminalcore */; };
 		BF1953C7983E74DEEBABC73C /* SpacesMobileConnectionSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */; };
+		CC7C2A2DA9176A2A7993FCD5 /* spacesterminalmobileghostty in Frameworks */ = {isa = PBXBuildFile; productRef = 822087096353D1C543E2C4F3 /* spacesterminalmobileghostty */; };
 		ECD7605414703F81C20D3C1F /* SpacesMobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */; };
+		EF5A873F100F9A6B3757F99E /* spacesterminalcore in Frameworks */ = {isa = PBXBuildFile; productRef = 43EB21BA2206002F56560C15 /* spacesterminalcore */; };
 		F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */; };
 /* End PBXBuildFile section */
 
@@ -25,11 +28,13 @@
 		35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModel.swift; sourceTree = "<group>"; };
 		41C157DD37A42EDAF1DC5407 /* macos */ = {isa = PBXFileReference; lastKnownFileType = folder; name = macos; path = ../macos; sourceTree = SOURCE_ROOT; };
 		7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalDetailView.swift; sourceTree = "<group>"; };
+		89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyMobileAppServiceTests.swift; sourceTree = "<group>"; };
 		963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileConnectionSettings.swift; sourceTree = "<group>"; };
 		9747BD35A2E71FC54E592EEA /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A1A8A24AA9252CFEE41B435E /* SpacesMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileApp.swift; sourceTree = "<group>"; };
 		BEBBC1D6B0751E287CF24826 /* ConnectionSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSettingsView.swift; sourceTree = "<group>"; };
 		CAC519ED5515A6509CAD7C1F /* SpacesMobileBridgeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileBridgeClient.swift; sourceTree = "<group>"; };
+		E27B3DF6C14953F91F1A311D /* SpacesMobileTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewerModel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -39,8 +44,17 @@
 			buildActionMask = 2147483647;
 			files = (
 				1CEC201CDB2F0F869548081A /* spacesmobilecore in Frameworks */,
-				22A1E4E9A0B84E54A1E9C001 /* spacesterminalmobileghostty in Frameworks */,
 				A09A88A72DBD3C5715B03A0D /* spacesterminalcore in Frameworks */,
+				CC7C2A2DA9176A2A7993FCD5 /* spacesterminalmobileghostty in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E6954CB73A82D0C98D3D4957 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EF5A873F100F9A6B3757F99E /* spacesterminalcore in Frameworks */,
+				1BF92F57C51FD34F3F9B3E05 /* spacesterminalmobileghostty in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -62,10 +76,19 @@
 			path = Sources;
 			sourceTree = "<group>";
 		};
+		504A7EEA4BE7AE55C6855384 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
 		80C53D729D7E7F3AB9BBDC82 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				2A942269988694E66C1CA6F4 /* SpacesMobile.app */,
+				E27B3DF6C14953F91F1A311D /* SpacesMobileTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -75,6 +98,7 @@
 			children = (
 				CB2D338B9B55AD82C84E6311 /* Packages */,
 				503B7623EC298940F0110912 /* Sources */,
+				504A7EEA4BE7AE55C6855384 /* Tests */,
 				80C53D729D7E7F3AB9BBDC82 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -104,12 +128,32 @@
 			name = SpacesMobile;
 			packageProductDependencies = (
 				69AE1995F1B3C38E8A9708D4 /* spacesmobilecore */,
-				22A1E4E8A0B84E54A1E9C001 /* spacesterminalmobileghostty */,
 				496FCCD383CAF3E9BD137D1B /* spacesterminalcore */,
+				822087096353D1C543E2C4F3 /* spacesterminalmobileghostty */,
 			);
 			productName = SpacesMobile;
 			productReference = 2A942269988694E66C1CA6F4 /* SpacesMobile.app */;
 			productType = "com.apple.product-type.application";
+		};
+		A22491DEE0C1C690D99FCFB0 /* SpacesMobileTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 96517D12E198C57740C2A889 /* Build configuration list for PBXNativeTarget "SpacesMobileTests" */;
+			buildPhases = (
+				D00E6A34212395C2A91512F6 /* Sources */,
+				E6954CB73A82D0C98D3D4957 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SpacesMobileTests;
+			packageProductDependencies = (
+				43EB21BA2206002F56560C15 /* spacesterminalcore */,
+				5C91403688DCC6A2B90B5AC8 /* spacesterminalmobileghostty */,
+			);
+			productName = SpacesMobileTests;
+			productReference = E27B3DF6C14953F91F1A311D /* SpacesMobileTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -140,6 +184,7 @@
 			projectRoot = "";
 			targets = (
 				4949E5F0DB06D967871C1581 /* SpacesMobile */,
+				A22491DEE0C1C690D99FCFB0 /* SpacesMobileTests */,
 			);
 		};
 /* End PBXProject section */
@@ -157,6 +202,14 @@
 				BF1953C7983E74DEEBABC73C /* SpacesMobileConnectionSettings.swift in Sources */,
 				246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */,
 				F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D00E6A34212395C2A91512F6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4073E59B929A6A3937DC57A8 /* GhosttyMobileAppServiceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -328,6 +381,38 @@
 			};
 			name = Release;
 		};
+		F07128855F6F753318FD2BC7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		FC4A32922D4BBBE8C90A5DAE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -336,6 +421,15 @@
 			buildConfigurations = (
 				32CCF7925A66533B41036DDA /* Debug */,
 				985CD486AA72A37850F6CB23 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		96517D12E198C57740C2A889 /* Build configuration list for PBXNativeTarget "SpacesMobileTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FC4A32922D4BBBE8C90A5DAE /* Debug */,
+				F07128855F6F753318FD2BC7 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
@@ -359,17 +453,25 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		43EB21BA2206002F56560C15 /* spacesterminalcore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = spacesterminalcore;
+		};
 		496FCCD383CAF3E9BD137D1B /* spacesterminalcore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = spacesterminalcore;
 		};
-		22A1E4E8A0B84E54A1E9C001 /* spacesterminalmobileghostty */ = {
+		5C91403688DCC6A2B90B5AC8 /* spacesterminalmobileghostty */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = spacesterminalmobileghostty;
 		};
 		69AE1995F1B3C38E8A9708D4 /* spacesmobilecore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = spacesmobilecore;
+		};
+		822087096353D1C543E2C4F3 /* spacesterminalmobileghostty */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = spacesterminalmobileghostty;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

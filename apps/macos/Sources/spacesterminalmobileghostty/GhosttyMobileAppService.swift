@@ -19,6 +19,7 @@ import Foundation
 
             let resourcesPath = try resolveResourcesPath()
             setenv("GHOSTTY_RESOURCES_DIR", resourcesPath, 1)
+            configureProcessEnvironment()
 
             if !initialized {
                 let result = ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv)
@@ -44,15 +45,7 @@ import Foundation
         }
 
         private func startApp(config: ghostty_config_t) throws {
-            var runtimeConfig = ghostty_runtime_config_s()
-            runtimeConfig.userdata = nil
-            runtimeConfig.supports_selection_clipboard = false
-            runtimeConfig.wakeup_cb = { _ in Task { @MainActor in GhosttyMobileAppService.shared.tick() } }
-            runtimeConfig.write_clipboard_cb = { _, _, content, len, _ in
-                guard let content, len > 0 else { return }
-                let data = Data(bytes: content, count: Int(len))
-                UIPasteboard.general.string = String(decoding: data, as: UTF8.self)
-            }
+            var runtimeConfig = Self.makeRuntimeConfig()
 
             guard let app = ghostty_app_new(&runtimeConfig, config) else {
                 throw GhosttyMobileAppServiceError.configuration("ghostty_app_new failed")
@@ -60,6 +53,23 @@ import Foundation
 
             ghostty_app_set_color_scheme(app, Self.currentColorScheme())
             self.app = app
+        }
+
+        static func makeRuntimeConfig() -> ghostty_runtime_config_s {
+            var runtimeConfig = ghostty_runtime_config_s()
+            runtimeConfig.userdata = nil
+            runtimeConfig.supports_selection_clipboard = false
+            runtimeConfig.wakeup_cb = { _ in Task { @MainActor in GhosttyMobileAppService.shared.tick() } }
+            runtimeConfig.action_cb = { _, _, _ in true }
+            runtimeConfig.read_clipboard_cb = { _, _, _ in false }
+            runtimeConfig.confirm_read_clipboard_cb = { _, _, _, _ in }
+            runtimeConfig.write_clipboard_cb = { _, _, content, len, _ in
+                guard let content, len > 0 else { return }
+                let data = Data(bytes: content, count: Int(len))
+                UIPasteboard.general.string = String(decoding: data, as: UTF8.self)
+            }
+            runtimeConfig.close_surface_cb = { _, _ in }
+            return runtimeConfig
         }
 
         private func resolveResourcesPath() throws -> String {
@@ -81,6 +91,12 @@ import Foundation
 
         private static func currentColorScheme() -> ghostty_color_scheme_e {
             UIScreen.main.traitCollection.userInterfaceStyle == .dark ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT
+        }
+
+        private func configureProcessEnvironment() {
+            let environment = ProcessInfo.processInfo.environment
+            if environment["HOME"]?.isEmpty != false { setenv("HOME", NSHomeDirectory(), 0) }
+            if environment["SHELL"]?.isEmpty != false { setenv("SHELL", "/bin/sh", 0) }
         }
     }
 
