@@ -29,6 +29,15 @@ if [[ "${SPACES_GHOSTTYKIT_REQUIRE_SESSION_RENDER_SPLIT:-0}" == "1" ]]; then
     )
 fi
 
+if [[ "${SPACES_GHOSTTYKIT_REQUIRE_SESSION_STATE_CALLBACK:-0}" == "1" ]]; then
+    REQUIRED_EXPORTS+=(
+        "ghostty_session_state_revision"
+        "ghostty_session_title"
+        "ghostty_session_working_directory"
+        "ghostty_session_set_state_callback"
+    )
+fi
+
 file_contains_fixed() {
     local needle="$1"
     local path="$2"
