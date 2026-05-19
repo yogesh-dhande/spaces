@@ -39,6 +39,14 @@ if [[ "${SPACES_GHOSTTYKIT_REQUIRE_SESSION_STATE_CALLBACK:-0}" == "1" ]]; then
     )
 fi
 
+if [[ "${SPACES_GHOSTTYKIT_REQUIRE_MULTI_RENDERER_ATTACHMENTS:-0}" == "1" ]]; then
+    REQUIRED_EXPORTS+=(
+        "ghostty_renderer_attach_viewer"
+        "ghostty_renderer_take_ownership"
+        "ghostty_renderer_is_owner"
+    )
+fi
+
 file_contains_fixed() {
     local needle="$1"
     local path="$2"
