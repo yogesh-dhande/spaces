@@ -196,6 +196,44 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(host.effectiveWorkingDirectory, "/tmp/original")
     }
 
+    @MainActor func testSessionStateChangesUpdateEffectiveTitleAndWorkingDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-state-1", backend: .ghosttyEmbedded, title: "fallback-title", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "cat", createdAt: "2026-05-19T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: .init(rootDirectory: root.path))
+
+        host.applySessionStateChange(
+            .init(flags: [.title, .workingDirectory], revision: 1, title: " live-title ", workingDirectory: " /tmp/updated "))
+
+        XCTAssertEqual(host.debugCurrentTitle, "live-title")
+        XCTAssertEqual(host.debugCurrentWorkingDirectory, "/tmp/updated")
+        XCTAssertEqual(host.effectiveTitle, "live-title")
+        XCTAssertEqual(host.effectiveWorkingDirectory, "/tmp/updated")
+    }
+
+    @MainActor func testBlankSessionStateValuesResetToLaunchConfigurationFallbacks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-state-2", backend: .ghosttyEmbedded, title: "fallback-title", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: nil, createdAt: "2026-05-19T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: .init(rootDirectory: root.path))
+
+        host.applySessionStateChange(.init(flags: [.title, .workingDirectory], revision: 1, title: "custom", workingDirectory: "/tmp/custom"))
+        host.applySessionStateChange(.init(flags: [.title, .workingDirectory], revision: 2, title: "   ", workingDirectory: "\n"))
+
+        XCTAssertNil(host.debugCurrentTitle)
+        XCTAssertNil(host.debugCurrentWorkingDirectory)
+        XCTAssertEqual(host.effectiveTitle, "fallback-title")
+        XCTAssertEqual(host.effectiveWorkingDirectory, "/tmp/original")
+    }
+
     @MainActor func testEmbeddedHostExposesDistinctRendererAdapter() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

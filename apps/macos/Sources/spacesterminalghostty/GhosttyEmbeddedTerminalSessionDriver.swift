@@ -16,10 +16,13 @@ import spacesterminalcore
     private var didHandleSurfaceClose = false
     private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
     private var lastKnownPixelSize: (width: UInt32, height: UInt32)?
+    private var lastDeliveredSessionStateRevision: UInt64 = 0
+    private var sessionStateDeliveryScheduled = false
 
     var onActionEvent: (@MainActor (GhosttyActionEvent) -> Void)?
     var onSurfaceClosed: (@MainActor () -> Void)?
     var onSurfaceCellSizeChanged: (@MainActor (Int, Int) -> Void)?
+    var onSessionStateChanged: (@MainActor (GhosttyEmbeddedSessionStateChange) -> Void)?
 
     init(launchConfiguration: TerminalSessionLaunchConfiguration) { self.launchConfiguration = launchConfiguration }
 
@@ -78,6 +81,7 @@ import spacesterminalcore
         session = createdSession
         didHandleSurfaceClose = false
         ghostty_session_set_data_callback(createdSession, Self.surfaceDataCallback, Unmanaged.passUnretained(self).toOpaque())
+        ghostty_session_set_state_callback(createdSession, Self.sessionStateCallback, Unmanaged.passUnretained(self).toOpaque())
         if let surface = surface {
             GhosttyEmbeddedAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.onActionEvent?(event) }
         }
@@ -87,6 +91,7 @@ import spacesterminalcore
         ghostty_session_set_size(createdSession, 960, 640)
         lastKnownPixelSize = (960, 640)
         ghostty_session_refresh(createdSession)
+        deliverSessionStateChange(forcedFlags: .allKnown)
         notifySurfaceCellSizeIfChanged()
     }
 
@@ -95,8 +100,11 @@ import spacesterminalcore
         let surface = ghostty_session_surface(session)
         GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface)
         ghostty_session_set_data_callback(session, nil, nil)
+        ghostty_session_set_state_callback(session, nil, nil)
         self.session = nil
         self.surfaceUserData = nil
+        lastDeliveredSessionStateRevision = 0
+        sessionStateDeliveryScheduled = false
         ghostty_session_free(session)
         lastKnownSurfaceSize = nil
         lastKnownPixelSize = nil
@@ -204,6 +212,16 @@ import spacesterminalcore
         return GhosttyTerminalSnapshotCapture.captureText(from: surface)
     }
 
+    func sessionTitle() -> String? {
+        guard let session else { return nil }
+        return Self.takeString(ghostty_session_title(session))
+    }
+
+    func sessionWorkingDirectory() -> String? {
+        guard let session else { return nil }
+        return Self.takeString(ghostty_session_working_directory(session))
+    }
+
     func copySelectionToPasteboard() -> Bool { GhosttyClipboardBridge.copySelection(from: surface) }
 
     func pasteClipboardContents() -> Bool {
@@ -242,6 +260,28 @@ import spacesterminalcore
         onSurfaceClosed?()
     }
 
+    private func scheduleSessionStateDelivery() {
+        guard !sessionStateDeliveryScheduled else { return }
+        sessionStateDeliveryScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.sessionStateDeliveryScheduled = false
+            self.deliverSessionStateChange()
+        }
+    }
+
+    private func deliverSessionStateChange(forcedFlags: GhosttyEmbeddedSessionStateChange.Flags? = nil) {
+        guard let session else { return }
+        let revision = ghostty_session_state_revision(session)
+        let flags = forcedFlags ?? GhosttyEmbeddedSessionStateChange.Flags(rawValue: ghostty_session_take_pending_state_flags(session))
+        guard !flags.isEmpty || revision != lastDeliveredSessionStateRevision else { return }
+        lastDeliveredSessionStateRevision = revision
+        onSessionStateChanged?(
+            GhosttyEmbeddedSessionStateChange(
+                flags: flags, revision: revision, title: flags.contains(.title) ? sessionTitle() : nil,
+                workingDirectory: flags.contains(.workingDirectory) ? sessionWorkingDirectory() : nil))
+    }
+
     private static func loginShellCommand(shell: String, command: String) -> String {
         let escaped = command.replacingOccurrences(of: "'", with: "'\\''")
         return "\(shell) -l -c '\(escaped)'"
@@ -253,5 +293,18 @@ import spacesterminalcore
         if runtime.outputHandler == nil { return }
         let data = Data(bytes: bytes, count: Int(len))
         runtime.outputHandler?(data)
+    }
+
+    private nonisolated static let sessionStateCallback: ghostty_session_state_cb = { userdata, _ in
+        guard let userdata else { return }
+        let runtime = Unmanaged<GhosttyEmbeddedTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
+        Task { @MainActor in runtime.scheduleSessionStateDelivery() }
+    }
+
+    private static func takeString(_ raw: ghostty_string_s) -> String? {
+        defer { ghostty_string_free(raw) }
+        guard let pointer = raw.ptr else { return nil }
+        let bytes = UnsafeRawBufferPointer(start: UnsafeRawPointer(pointer), count: Int(raw.len))
+        return String(decoding: bytes, as: UTF8.self)
     }
 }

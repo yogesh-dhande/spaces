@@ -219,6 +219,7 @@ extension Notification.Name {
         terminalView = GhosttyEmbeddedTerminalView(launchConfiguration: launchConfiguration, sessionDriver: sessionDriver)
         self.requestSurfaceRefreshAction = requestSurfaceRefreshAction ?? { [terminalView] in terminalView.requestSurfaceRefresh() }
         terminalView.onActionEvent = { [weak self] event in self?.applyActionEvent(event) }
+        sessionDriver.onSessionStateChanged = { [weak self] change in self?.applySessionStateChange(change) }
         terminalView.onSurfaceCellSizeChanged = { [weak self] columns, rows in
             guard let self else { return }
             self.lastKnownSurfaceSize = (columns, rows)
@@ -595,15 +596,38 @@ extension Notification.Name {
 
     func applyActionEvent(_ event: GhosttyActionEvent) {
         switch event {
-        case .setTitle(let title):
-            let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            currentTitle = trimmed.isEmpty ? nil : trimmed
-        case .setWorkingDirectory(let path):
-            let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-            currentWorkingDirectory = trimmed.isEmpty ? nil : trimmed
+        case .setTitle(let title): currentTitle = Self.normalizedSessionMetadataValue(title)
+        case .setWorkingDirectory(let path): currentWorkingDirectory = Self.normalizedSessionMetadataValue(path)
         }
         postSessionMetadataDidChange()
         refreshRuntimeState(force: true)
+    }
+
+    func applySessionStateChange(_ change: GhosttyEmbeddedSessionStateChange) {
+        var metadataChanged = false
+
+        if change.flags.contains(.title) {
+            let nextTitle = Self.normalizedSessionMetadataValue(change.title)
+            if currentTitle != nextTitle {
+                currentTitle = nextTitle
+                metadataChanged = true
+            }
+        }
+
+        if change.flags.contains(.workingDirectory) {
+            let nextWorkingDirectory = Self.normalizedSessionMetadataValue(change.workingDirectory)
+            if currentWorkingDirectory != nextWorkingDirectory {
+                currentWorkingDirectory = nextWorkingDirectory
+                metadataChanged = true
+            }
+        }
+
+        if metadataChanged { postSessionMetadataDidChange() }
+
+        if change.flags.contains(.foregroundProcess), let foregroundPID = rendererHostStorage.foregroundPID() { lastKnownChildPID = foregroundPID }
+        if change.flags.contains(.size), let size = rendererHostStorage.surfaceCellSize() { lastKnownSurfaceSize = size }
+
+        if metadataChanged || !change.flags.intersection(.runtimeState).isEmpty { refreshRuntimeState(force: true) }
     }
 
     private func observedChildPID() -> Int32? {
@@ -647,6 +671,12 @@ extension Notification.Name {
     }
 
     private func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
+
+    private static func normalizedSessionMetadataValue(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 
     private static func clientForAttachLease(_ client: TerminalClient, attachedAt: String) -> TerminalClient {
         guard client.kind != .localWindow else { return client }
@@ -796,6 +826,7 @@ extension Notification.Name {
 
     func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse { core.handleControlRequest(request) }
     func applyActionEvent(_ event: GhosttyActionEvent) { core.applyActionEvent(event) }
+    func applySessionStateChange(_ change: GhosttyEmbeddedSessionStateChange) { core.applySessionStateChange(change) }
     @discardableResult func expireStaleRemoteClientsIfNeeded(now: Date = Date()) -> [String] { core.expireStaleRemoteClientsIfNeeded(now: now) }
 
     nonisolated static func shouldClearFocusAfterDetachingClient(detachedClientWasOwner: Bool, remainingOwnerClientID: String?) -> Bool {
