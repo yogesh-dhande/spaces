@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		1CEC201CDB2F0F869548081A /* spacesmobilecore in Frameworks */ = {isa = PBXBuildFile; productRef = 69AE1995F1B3C38E8A9708D4 /* spacesmobilecore */; };
+		22A1E4E9A0B84E54A1E9C001 /* spacesterminalmobileghostty in Frameworks */ = {isa = PBXBuildFile; productRef = 22A1E4E8A0B84E54A1E9C001 /* spacesterminalmobileghostty */; };
 		246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */; };
 		317C6199E7E4075EFA52B4F7 /* SpacesMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A8A24AA9252CFEE41B435E /* SpacesMobileApp.swift */; };
 		33641B9B5F7C4A0AE09EEA5D /* ConnectionSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEBBC1D6B0751E287CF24826 /* ConnectionSettingsView.swift */; };
@@ -38,6 +39,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1CEC201CDB2F0F869548081A /* spacesmobilecore in Frameworks */,
+				22A1E4E9A0B84E54A1E9C001 /* spacesterminalmobileghostty in Frameworks */,
 				A09A88A72DBD3C5715B03A0D /* spacesterminalcore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -102,6 +104,7 @@
 			name = SpacesMobile;
 			packageProductDependencies = (
 				69AE1995F1B3C38E8A9708D4 /* spacesmobilecore */,
+				22A1E4E8A0B84E54A1E9C001 /* spacesterminalmobileghostty */,
 				496FCCD383CAF3E9BD137D1B /* spacesterminalcore */,
 			);
 			productName = SpacesMobile;
@@ -359,6 +362,10 @@
 		496FCCD383CAF3E9BD137D1B /* spacesterminalcore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = spacesterminalcore;
+		};
+		22A1E4E8A0B84E54A1E9C001 /* spacesterminalmobileghostty */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = spacesterminalmobileghostty;
 		};
 		69AE1995F1B3C38E8A9708D4 /* spacesmobilecore */ = {
 			isa = XCSwiftPackageProductDependency;

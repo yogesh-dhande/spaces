@@ -51,6 +51,7 @@ Each live session also participates in a service-level control path:
 - `spaces terminal show` asks `SpacesApp` to open a native owner or viewer window for an existing session ID.
 - `spaces terminal send`, `key`, and `takeover` still operate on the per-session control socket that the service owns.
 - `spaces mobile serve` publishes the first-party TCP bridge consumed by the iOS client.
+- `SpacesMobile` consumes that bridge, keeps one selected terminal detail at a time, and renders streamed snapshots through the iOS Ghostty surface adapter when live state is available.
 - Workspace process launch, built-in coding-agent launch, and app-opened workspace terminals use the local app-owned live Ghostty path when they are launched from `SpacesApp`.
 - CLI-managed workspace launches still use the daemon-owned compatibility path.
 
@@ -78,10 +79,12 @@ Each live session also participates in a service-level control path:
 - Every later request must present both the stored auth token and the first-party iOS bundle identity, so an unpaired or non-first-party client is rejected before it can browse or control sessions.
 - Remote attachments are lease-based. Host time stamps the lease, and only client-identified activity refreshes that specific remote lease.
 - The mobile bridge is an internal first-party transport seam, not a stable third-party public API.
+- Simulator-based manual verification should use `127.0.0.1` as the bridge host. A real device still needs a reachable Mac network address instead of simulator loopback.
 
 ## Ghostty Compatibility Boundary
 - The current Ghostty fork still couples PTY ownership to a renderer instance.
 - Because of that, the service keeps the live hidden Ghostty host and exports full Ghostty snapshots over `subscription.sock` to other clients instead of attaching multiple native renderers to the same session. `output.log` remains the transcript and recovery surface, not the primary live-view path.
+- The current iOS client uses a compatibility renderer bridge on top of that snapshot stream: it boots a local Ghostty renderer session on iOS, converts each streamed snapshot into VT output, and replays that VT into the local Ghostty surface. This preserves Ghostty rendering characteristics on iOS without requiring the full session-core attach or detach fork boundary yet.
 - The intended fork boundary is a true session core plus attachable renderers:
   - session-owned PTY and terminal state
   - attach or detach renderer instances without killing the session

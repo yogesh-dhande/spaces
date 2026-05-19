@@ -123,7 +123,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - `Spaces`-hosted terminal windows opened or focused from the app stay visible with the Spaces app instead of following the external-app hide behavior used for browsers, Finder, or editors.
 - The first-party iOS client should show a read-only workspace catalog plus live terminal session browsing only: no browser-session UI, no project creation, and no workspace mutation controls.
 - The iOS client should authenticate once with a pairing code from the Mac bridge, store the issued credential, reconnect without prompting on later launches, and reject non-first-party bundle identities.
-- The iOS client should be able to browse all live terminal sessions, render one session at a time, attach as a passive viewer by default, and take over ownership without restarting the shell session.
+- The iOS client should be able to browse all live terminal sessions, render one session at a time through a Ghostty-backed terminal surface, attach as a passive viewer by default, and take over ownership without restarting the shell session.
 - Ad hoc built-in terminal windows opened from Spaces, including the `New terminal` shortcut path, should remain listed in the workspace detail view even before their native yabai window ID has been backfilled.
 - Opening a built-in `Spaces` terminal from the app should not block the sidebar window while the session backend becomes ready; session bootstrap latency may still exist, but the workspace UI should stay interactive during that wait.
 - When Spaces focuses an already-open built-in process window from the normal workspace flow, the owner attachment should still belong to that client and remain ready for input without restarting the session.

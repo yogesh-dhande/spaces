@@ -15,6 +15,7 @@ let package = Package(
         .library(name: "systembridge", targets: ["systembridge"]),
         .library(name: "spacesterminalcore", targets: ["spacesterminalcore"]),
         .library(name: "spacesterminalghostty", targets: ["spacesterminalghostty"]),
+        .library(name: "spacesterminalmobileghostty", targets: ["spacesterminalmobileghostty"]),
         .library(name: "spacesterminalui", targets: ["spacesterminalui"]),
         .library(name: "spacesmobilecore", targets: ["spacesmobilecore"]),
         .library(name: "workspacecore", targets: ["workspacecore"]),
@@ -46,6 +47,11 @@ let package = Package(
         .target(
             name: "spacesterminalghostty",
             dependencies: ["spacesterminalcore", "ghosttyvtshim", "GhosttyKit"],
+            linkerSettings: [.linkedLibrary("c++")]
+        ),
+        .target(
+            name: "spacesterminalmobileghostty",
+            dependencies: ["spacesterminalcore", "GhosttyKit"],
             linkerSettings: [.linkedLibrary("c++")]
         ),
         .target(
