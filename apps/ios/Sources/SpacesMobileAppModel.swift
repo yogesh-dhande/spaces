@@ -32,6 +32,7 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
     var overview: SpacesMobileOverviewPayload?
     var isLoading = false
     var isShowingConnectionSettings = false
+    var connectionNotice: String?
     var errorMessage: String?
 
     init() {
@@ -71,11 +72,6 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
         overview?.sessions.first(where: { $0.id == id })
     }
 
-    var debugAutoOpenSession: SpacesMobileTerminalSessionSummary? {
-        let sessions = overview?.sessions ?? []
-        return sessions.first(where: { $0.state == .running }) ?? sessions.first
-    }
-
     func refresh() async {
         guard !isLoading else { return }
         isLoading = true
@@ -83,8 +79,13 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
         do {
             let overview = try await SpacesMobileBridgeClient(settings: settings).fetchOverview()
             self.overview = overview
+            connectionNotice = nil
             errorMessage = nil
         } catch {
+            if let recoveryMessage = SpacesMobileBridgeAuthentication.recoveryMessage(for: error) {
+                handleAuthenticationFailure(message: recoveryMessage)
+                return
+            }
             errorMessage = error.localizedDescription
         }
     }
@@ -93,9 +94,19 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
         self.settings = settings
         SpacesMobileSettingsStore.save(settings)
         overview = nil
+        connectionNotice = nil
     }
 
     func dismissError() { errorMessage = nil }
+
+    func handleAuthenticationFailure(message: String) {
+        settings.authToken = ""
+        SpacesMobileSettingsStore.save(settings)
+        overview = nil
+        connectionNotice = message
+        errorMessage = nil
+        isShowingConnectionSettings = true
+    }
 
     private func groupSort(_ lhs: SpacesMobileTerminalWorkspaceGroup, _ rhs: SpacesMobileTerminalWorkspaceGroup) -> Bool {
         if lhs.projectName.localizedStandardCompare(rhs.projectName) != .orderedSame {

@@ -192,6 +192,18 @@ xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destin
 On first launch, the iOS client opens its connection sheet. Enter the bridge host and port, then the pairing code from `spaces mobile serve`. After pairing, the iOS client stores the issued credential and reconnects automatically on later launches. The current client is terminal-only: it lists workspaces and live terminal sessions, renders one session at a time, opens as a viewer by default, and exposes a `Take Over` action in the detail pane.
 For the iOS simulator, keep the bridge host on `127.0.0.1`. A real device needs a reachable Mac network address instead of loopback. The current iOS terminal detail path renders streamed Ghostty snapshots through a local iOS Ghostty surface, so the simulator should show a terminal-like view rather than the earlier plain-text fallback once a session detail is opened.
 
+For a disposable one-command demo stack that launches the macOS app, starts `spaces mobile serve`, pairs both the iPad and iPhone simulators, and opens the mobile app on each:
+
+```bash
+apps/macos/Tests/run_mobile_terminal_demo.sh
+```
+
+The launcher expects the debug macOS binaries, a built `SpacesMobile.app` in DerivedData, and the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It refuses to start if another `SpacesApp` instance or bridge listener is already running so the global hotkey and mobile port stay unambiguous. It prints the disposable temp root, PIDs, logs, screenshots, and session ID as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
+
+Useful overrides:
+- `SPACES_MOBILE_DEMO_KEEP_ROOT=1` keeps the temp root after shutdown for log inspection.
+- `SPACES_MOBILE_DEMO_IPAD_NAME=...` and `SPACES_MOBILE_DEMO_IPHONE_NAME=...` target different simulator names when the defaults are unavailable.
+
 For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
 
 ```bash

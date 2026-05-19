@@ -8,10 +8,16 @@ struct ConnectionSettingsView: View {
     @State private var pairingCode = ""
     @State private var isPairing = false
     @State private var errorMessage: String?
+    let noticeMessage: String?
     let onSave: (SpacesMobileConnectionSettings) -> Void
 
-    init(initialSettings: SpacesMobileConnectionSettings, onSave: @escaping (SpacesMobileConnectionSettings) -> Void) {
+    init(
+        initialSettings: SpacesMobileConnectionSettings,
+        noticeMessage: String? = nil,
+        onSave: @escaping (SpacesMobileConnectionSettings) -> Void
+    ) {
         _settings = State(initialValue: initialSettings)
+        self.noticeMessage = noticeMessage
         self.onSave = onSave
     }
 
@@ -54,6 +60,12 @@ struct ConnectionSettingsView: View {
                         }
                     }
                     .disabled(!settings.isValid || pairingCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isPairing)
+
+                    if let noticeMessage {
+                        Text(noticeMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
 
                     if let errorMessage {
                         Text(errorMessage)

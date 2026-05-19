@@ -122,7 +122,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Owner and viewer windows should show the same persisted terminal history immediately on open, including already-buffered workspace-process output, without requiring the user to restart or recreate the shell session.
 - `Spaces`-hosted terminal windows opened or focused from the app stay visible with the Spaces app instead of following the external-app hide behavior used for browsers, Finder, or editors.
 - The first-party iOS client should show a read-only workspace catalog plus live terminal session browsing only: no browser-session UI, no project creation, and no workspace mutation controls.
-- The iOS client should authenticate once with a pairing code from the Mac bridge, store the issued credential, reconnect without prompting on later launches, and reject non-first-party bundle identities.
+- The iOS client should authenticate once with a pairing code from the Mac bridge, store the issued credential, reconnect without prompting on later launches, reject non-first-party bundle identities, and clear the stored credential with a re-pair prompt if the Mac later rejects that device token.
 - The iOS client should be able to browse all live terminal sessions, render one session at a time through a Ghostty-backed terminal surface, attach as a passive viewer by default, and take over ownership without restarting the shell session.
 - Ad hoc built-in terminal windows opened from Spaces, including the `New terminal` shortcut path, should remain listed in the workspace detail view even before their native yabai window ID has been backfilled.
 - Opening a built-in `Spaces` terminal from the app should not block the sidebar window while the session backend becomes ready; session bootstrap latency may still exist, but the workspace UI should stay interactive during that wait.
@@ -130,6 +130,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - A terminal session may have one active owner client and one or more passive viewer clients attached at the same time.
 - Ad hoc built-in terminal sessions should stay alive while any local client or recently active remote/mobile client remains attached and should clean up once the final live attachment detaches or expires.
 - Only the active owner client may send input or control PTY size.
+- The Mac app should remain alive while it coordinates native windows, remote/mobile viewers, or bridge-driven terminal ownership changes even if the main window is hidden or the app is backgrounded.
 - Viewer windows should remain readable, be able to take over ownership without restarting the underlying shell session, and keep passive chrome minimal: the native titlebar may identify the session, but the in-window experience should prioritize the terminal content plus a clear takeover action.
 - For git projects, new workspaces are branch-oriented and should support an existing-branch picker, a new-branch entry path, target branch, directory name, title, and notes inputs.
 - Git workspace creation must require an explicit branch choice. `Create branch` must reject any branch name that already exists, while `Use existing` is the only path allowed to attach or revive a workspace on an existing branch.

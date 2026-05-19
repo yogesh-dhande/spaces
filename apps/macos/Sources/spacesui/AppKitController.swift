@@ -46,6 +46,13 @@ private final class CommandPalettePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+protocol ProcessLifecyclePolicyController {
+    func disableAutomaticTermination(_ reason: String)
+    func disableSuddenTermination()
+}
+
+extension ProcessInfo: ProcessLifecyclePolicyController {}
+
 @MainActor
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate,
     NSWindowDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSComboBoxDelegate, NSTableViewDelegate, NSTableViewDataSource
@@ -337,6 +344,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.applyPersistentTerminationPolicy()
         logStartupProfile("did_finish_launching")
         do {
             let db = try DatabaseLocator.defaultPath()
@@ -391,6 +399,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
         }
         Task { @MainActor in WorkspaceOrchestrator.prepareUserNotificationAuthorization() }
+    }
+
+    nonisolated static func persistentTerminationPolicyReason() -> String {
+        "Spaces coordinates long-lived workspace windows, terminal sessions, and mobile bridge clients."
+    }
+
+    nonisolated static func applyPersistentTerminationPolicy(processInfo: any ProcessLifecyclePolicyController = ProcessInfo.processInfo) {
+        let reason = persistentTerminationPolicyReason()
+        processInfo.disableAutomaticTermination(reason)
+        processInfo.disableSuddenTermination()
     }
 
     private func makeUIOrchestrator(store: SQLiteStore) -> WorkspaceOrchestrator {

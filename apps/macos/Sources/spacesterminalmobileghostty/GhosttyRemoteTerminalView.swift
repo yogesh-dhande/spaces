@@ -43,6 +43,7 @@ import Foundation
     @MainActor public final class GhosttyRemoteTerminalHostView: UIView, UIKeyInput {
         private static let carrierCommand = "while :; do /bin/sleep 3600; done"
         private static let defaultFontSize: Float = 13
+        private static let contentInsets = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         private var session: ghostty_session_t?
         private var lastSnapshot: GhosttyTerminalSnapshot?
         private var lastViewportSnapshot: GhosttyTerminalSnapshot?
@@ -116,17 +117,6 @@ import Foundation
             fallbackLabel.isHidden = snapshot != nil
             syncFirstResponder()
 
-            if let snapshot {
-                let firstVisibleCell = snapshot.cells.first { $0.codepoint != 0 && $0.codepoint != 32 }
-                NSLog(
-                    "[GhosttyRemote] update snapshot cols=%ld rows=%ld pixels=%ldx%ld defaultFg=%u defaultBg=%u firstCode=%u firstFg=%u firstBg=%u",
-                    snapshot.columns, snapshot.rows, Int(self.currentPixelSize.width), Int(self.currentPixelSize.height),
-                    snapshot.defaultForegroundRGB, snapshot.defaultBackgroundRGB, firstVisibleCell?.codepoint ?? 0,
-                    firstVisibleCell?.foregroundRGB ?? 0, firstVisibleCell?.backgroundRGB ?? 0)
-            } else {
-                NSLog("[GhosttyRemote] update without snapshot fallbackLength=%ld", fallbackText.count)
-            }
-
             guard let session, let snapshot else { return }
             let viewportSnapshot = viewportSnapshot(for: snapshot, session: session)
             guard lastViewportSnapshot != viewportSnapshot || lastReplayPixelSize != currentPixelSize else { return }
@@ -190,12 +180,10 @@ import Foundation
                 try GhosttyMobileAppService.shared.startIfNeeded()
                 guard let app = GhosttyMobileAppService.shared.app else { return }
                 session = createSession(app: app)
-                NSLog("[GhosttyRemote] session created hasSession=%d", self.session != nil)
                 syncSessionState()
             } catch {
                 fallbackLabel.text = error.localizedDescription
                 fallbackLabel.isHidden = false
-                NSLog("[GhosttyRemote] session creation failed error=%@", error.localizedDescription)
             }
         }
 
@@ -211,15 +199,11 @@ import Foundation
             }
 
             guard let createdSession else { return nil }
-            NSLog("[GhosttyRemote] created session with carrier command %@", Self.carrierCommand)
             return createdSession
         }
 
         private func replay(snapshot: GhosttyTerminalSnapshot, into session: ghostty_session_t) {
             let vt = GhosttyTerminalSnapshotVTEncoder.encode(snapshot)
-            NSLog(
-                "[GhosttyRemote] replay snapshot cols=%ld rows=%ld bytes=%ld pixels=%ldx%ld", snapshot.columns, snapshot.rows, vt.count,
-                Int(self.currentPixelSize.width), Int(self.currentPixelSize.height))
             vt.withUnsafeBytes { rawBuffer in
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
                 ghostty_session_process_output(session, baseAddress, UInt(vt.count))
@@ -239,9 +223,6 @@ import Foundation
             ghostty_session_refresh(session)
             GhosttyMobileAppService.shared.tick()
             notifyViewportSizeIfChanged()
-            NSLog(
-                "[GhosttyRemote] sync state focus=%d visible=%d pixels=%ldx%ld", self.isFirstResponder, self.window != nil && !self.isHidden,
-                Int(pixelSize.width), Int(pixelSize.height))
             if let lastSnapshot, pixelSize.width > 1, pixelSize.height > 1, lastReplayPixelSize != pixelSize {
                 let viewportSnapshot = viewportSnapshot(for: lastSnapshot, session: session)
                 replay(snapshot: viewportSnapshot, into: session)
@@ -265,7 +246,10 @@ import Foundation
         }
 
         private var scaleFactor: Double { Double(window?.screen.scale ?? UIScreen.main.scale) }
-        private var currentPixelSize: CGSize { CGSize(width: max(bounds.width * scaleFactor, 1), height: max(bounds.height * scaleFactor, 1)) }
+        private var currentPixelSize: CGSize {
+            let insetBounds = bounds.inset(by: Self.contentInsets)
+            return CGSize(width: max(insetBounds.width * scaleFactor, 1), height: max(insetBounds.height * scaleFactor, 1))
+        }
 
         private func notifyViewportSizeIfChanged() {
             guard let session else { return }

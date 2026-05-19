@@ -4,7 +4,7 @@ import spacesmobilecore
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedSession: SpacesMobileTerminalSessionSummary?
-    @State private var didAutoOpenDebugSession = false
+    @State private var pendingAuthenticationMessage: String?
     let model: SpacesMobileAppModel
 
     var body: some View {
@@ -16,23 +16,21 @@ struct ContentView: View {
                 }
         }
         .sheet(isPresented: connectionSettingsBinding) {
-            ConnectionSettingsView(initialSettings: model.settings) { settings in
+            ConnectionSettingsView(initialSettings: model.settings, noticeMessage: model.connectionNotice) { settings in
                 model.applyConnectionSettings(settings)
                 Task { await model.refresh() }
             }
         }
         .fullScreenCover(item: selectedSessionBinding) { session in
-            NavigationStack {
-                TerminalDetailView(session: session, settings: model.settings)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button {
-                                selectedSession = nil
-                            } label: {
-                                Image(systemName: "chevron.left")
-                            }
-                        }
-                    }
+            TerminalDetailView(
+                session: session,
+                settings: model.settings,
+                onAuthenticationRequired: { message in
+                    pendingAuthenticationMessage = message
+                    selectedSession = nil
+                }
+            ) {
+                selectedSession = nil
             }
         }
         .alert(
@@ -52,14 +50,20 @@ struct ContentView: View {
                 }
             }
             await model.refresh()
-            autoOpenDebugSessionIfNeeded()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled else { return }
                 if !model.isShowingConnectionSettings, selectedSession == nil {
                     await model.refresh()
-                    autoOpenDebugSessionIfNeeded()
                 }
+            }
+        }
+        .onChange(of: selectedSession?.id) { _, newValue in
+            guard newValue == nil, let message = pendingAuthenticationMessage else { return }
+            pendingAuthenticationMessage = nil
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(300))
+                model.handleAuthenticationFailure(message: message)
             }
         }
     }
@@ -87,7 +91,18 @@ struct ContentView: View {
 
     private var terminalHomeView: some View {
         Group {
-            if model.isLoading && model.overview == nil {
+            if !model.settings.isPaired {
+                ContentUnavailableView {
+                    Label("Pair This Device", systemImage: "iphone.gen3.radiowaves.left.and.right")
+                } description: {
+                    Text(model.connectionNotice ?? "Open Connection and pair this device again.")
+                } actions: {
+                    Button("Open Connection") {
+                        model.isShowingConnectionSettings = true
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.isLoading && model.overview == nil {
                 ProgressView("Loading terminals…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if model.terminalGroups.isEmpty {
@@ -191,21 +206,5 @@ struct ContentView: View {
     private func ownerLabel(for session: SpacesMobileTerminalSessionSummary) -> String {
         let ownerClientID = session.attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
         return session.attachmentSnapshot.clients.first(where: { $0.id == ownerClientID })?.identity.label ?? "No owner"
-    }
-
-    private func autoOpenDebugSessionIfNeeded() {
-        guard Self.debugAutoOpenFirstTerminal else { return }
-        guard !didAutoOpenDebugSession else { return }
-        guard selectedSession == nil else { return }
-        guard let session = model.debugAutoOpenSession else { return }
-        didAutoOpenDebugSession = true
-        selectedSession = session
-    }
-
-    private static var debugAutoOpenFirstTerminal: Bool {
-        let value = ProcessInfo.processInfo.environment["SPACES_MOBILE_DEBUG_AUTO_OPEN_FIRST_TERMINAL"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return value == "1" || value == "true" || value == "yes"
     }
 }
