@@ -155,8 +155,8 @@ apps/macos/scripts/setup_ghosttyvt.sh
 ```
 
 That script pins a local `ghostty` checkout to `apps/macos/ghosttyvt-revision.txt`, installs Zig `0.15.2` under `apps/macos/.local/ghosttyvt/toolchain/`, and builds `libghostty-vt` under `apps/macos/.local/ghosttyvt/src/zig-out/`.
-The default source remote is the same Spaces-owned fork that publishes `GhosttyKit.xcframework`, and the setup script rewrites a clean existing checkout back to that fork if it was cloned from upstream.
-For a browser view of fork drift against upstream, open [ghostty-org/ghostty compare view](https://github.com/ghostty-org/ghostty/compare/main...yogesh-dhande:ghostty:main).
+The default source remote is the same Spaces-owned fork that publishes `GhosttyKit.xcframework`, and the setup script clones or refetches that fork through its `spaces` branch. The fork keeps `main` mirrored from upstream, so the reviewable fork delta lives in the `spaces -> main` pull request.
+For a browser view of fork drift against upstream, open [ghostty-org/ghostty compare view](https://github.com/ghostty-org/ghostty/compare/main...yogesh-dhande:ghostty:spaces).
 When you use the repo defaults, the setup flow also verifies that `apps/macos/ghosttyvt-revision.txt` matches the commit behind `apps/macos/ghosttykit-release-tag.txt` so the editable Ghostty source, published xcframework, and local `libghostty-vt` build stay on the same fork lineage.
 The GitHub Actions PR and release workflows run this setup before the macOS build and coverage pass so clean runners have the matching `libghostty-vt` headers and dylib available.
 

@@ -9,7 +9,9 @@ LOCAL_ROOT="$APP_ROOT/.local/ghosttyvt"
 SOURCE_ROOT="$LOCAL_ROOT/src"
 TOOLCHAIN_ROOT="$LOCAL_ROOT/toolchain"
 DEFAULT_REPO="https://github.com/yogesh-dhande/ghostty.git"
+DEFAULT_BRANCH="spaces"
 REPO_URL="${SPACES_GHOSTTYVT_REPO:-$DEFAULT_REPO}"
+REPO_BRANCH="${SPACES_GHOSTTYVT_BRANCH:-$DEFAULT_BRANCH}"
 
 if [[ -f "$REVISION_FILE" ]]; then
     DEFAULT_REVISION="$(tr -d '[:space:]' < "$REVISION_FILE")"
@@ -61,7 +63,7 @@ fi
 
 if [[ ! -d "$SOURCE_ROOT/.git" ]]; then
     echo "==> Cloning ghostty source for libghostty-vt"
-    git clone "$REPO_URL" "$SOURCE_ROOT"
+    git clone --branch "$REPO_BRANCH" --single-branch "$REPO_URL" "$SOURCE_ROOT"
 else
     echo "==> ghostty source already present at $SOURCE_ROOT"
 fi
@@ -85,7 +87,7 @@ fi
         fi
     fi
 
-    git fetch origin
+    git fetch origin "refs/heads/$REPO_BRANCH:refs/remotes/origin/$REPO_BRANCH"
 
     if [[ -n "$EXPECTED_RELEASE_TAG" ]]; then
         git fetch --force origin "refs/tags/$EXPECTED_RELEASE_TAG:refs/tags/$EXPECTED_RELEASE_TAG"
