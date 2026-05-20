@@ -74,6 +74,22 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         throw NSError(domain: "GhosttyEmbeddedSessionHostTests", code: 1)
     }
 
+    func testSessionDriverLaunchCommandWrapsRegularCommandsInLoginShell() {
+        XCTAssertEqual(
+            GhosttyEmbeddedTerminalSessionDriver.launchCommand(shell: "/bin/zsh", command: "echo 'hello'"), "/bin/zsh -l -c 'echo '\\''hello'\\'''")
+    }
+
+    func testSessionDriverLaunchCommandPreservesDirectCommands() {
+        XCTAssertEqual(GhosttyEmbeddedTerminalSessionDriver.launchCommand(shell: "/bin/zsh", command: "direct:/bin/cat"), "direct:/bin/cat")
+        XCTAssertEqual(GhosttyEmbeddedTerminalSessionDriver.launchCommand(shell: "/bin/zsh", command: "shell:printf hello"), "shell:printf hello")
+    }
+
+    func testSessionDriverDirectCommandsSkipLoginShellWrapping() {
+        XCTAssertFalse(GhosttyEmbeddedTerminalSessionDriver.usesLoginShell(command: "direct:/bin/cat"))
+        XCTAssertTrue(GhosttyEmbeddedTerminalSessionDriver.usesLoginShell(command: "echo hello"))
+        XCTAssertTrue(GhosttyEmbeddedTerminalSessionDriver.usesLoginShell(command: "shell:printf hello"))
+    }
+
     @MainActor func testEmbeddedViewSuppressesFunctionKeyPrivateUseText() {
         let event = try! XCTUnwrap(
             NSEvent.keyEvent(
@@ -391,6 +407,56 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(reboundTranscript.contains("first window"))
         XCTAssertTrue(reboundTranscript.contains("hidden host"))
         XCTAssertTrue(reboundTranscript.contains("second window"))
+    }
+
+    @MainActor func testEmbeddedViewCanMirrorViewerSurfaceAndPromoteToOwnerWithoutRestartingShell() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let terminalView = GhosttyEmbeddedTerminalView(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "viewer-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "viewer",
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-19T00:00:00Z"))
+        defer { terminalView.terminateSession() }
+        let transcript = TranscriptBuffer()
+        terminalView.setOutputHandler { data in transcript.append(data) }
+
+        let hostingWindow = makeHostingWindow()
+        defer {
+            hostingWindow.orderOut(nil)
+            hostingWindow.close()
+        }
+
+        terminalView.setAttachmentMode(.viewer)
+        attach(terminalView, to: hostingWindow)
+        hostingWindow.makeKeyAndOrderFront(nil)
+
+        try waitUntil { terminalView.surface != nil }
+        let viewerSurface = try XCTUnwrap(terminalView.surface)
+        let childPID = try XCTUnwrap(terminalView.foregroundPID())
+
+        terminalView.sendRawBytes(Data("viewer mode\n".utf8))
+        try waitUntil { transcript.string().contains("viewer mode") }
+        terminalView.requestSurfaceRefresh()
+        try waitUntil {
+            guard let snapshot = terminalView.snapshot() else { return false }
+            return GhosttyTerminalSnapshotRenderer.render(snapshot).string.contains("viewer mode")
+        }
+        XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), childPID)
+
+        terminalView.setAttachmentMode(.owner)
+
+        try waitUntil { terminalView.surface != nil && terminalView.surface != viewerSurface }
+        let ownerSurface = try XCTUnwrap(terminalView.surface)
+        XCTAssertNotEqual(ownerSurface, viewerSurface)
+        XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), childPID)
+
+        terminalView.sendRawBytes(Data("owner mode\n".utf8))
+        terminalView.requestSurfaceRefresh()
+        try waitUntil {
+            guard let snapshot = terminalView.snapshot() else { return false }
+            return GhosttyTerminalSnapshotRenderer.render(snapshot).string.contains("owner mode")
+        }
     }
 
     @MainActor func testEmbeddedViewMouseDragRequestsSurfaceRefreshForSelectionRendering() throws {

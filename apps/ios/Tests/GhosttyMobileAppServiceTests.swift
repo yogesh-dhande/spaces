@@ -30,7 +30,7 @@
             hostView.frame = viewController.view.bounds
             viewController.view.layoutIfNeeded()
 
-            hostView.update(snapshot: nil, fallbackText: "Waiting for terminal state…")
+            hostView.update(snapshot: nil, replayStateKey: "viewer|runtime=0x0|snapshot=0x0|interactive=0", fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -39,6 +39,18 @@
             XCTAssertNotNil(terminalSurfaceLayer(in: hostView))
 
             window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewDisablesSmartTextFeatures() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+
+            XCTAssertEqual(hostView.autocapitalizationType, .none)
+            XCTAssertEqual(hostView.autocorrectionType, .no)
+            XCTAssertEqual(hostView.spellCheckingType, .no)
+            XCTAssertEqual(hostView.smartQuotesType, .no)
+            XCTAssertEqual(hostView.smartDashesType, .no)
+            XCTAssertEqual(hostView.smartInsertDeleteType, .no)
+            XCTAssertEqual(hostView.keyboardType, .asciiCapable)
         }
 
         func testRemoteTerminalHostViewReplaysSnapshotIntoGhosttySession() throws {
@@ -53,7 +65,11 @@
             hostView.frame = viewController.view.bounds
             viewController.view.layoutIfNeeded()
 
-            hostView.update(snapshot: sampleSnapshot(), fallbackText: "Waiting for terminal state…")
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…"
+            )
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -61,6 +77,36 @@
             XCTAssertGreaterThanOrEqual(replayed.columns, 4)
             XCTAssertGreaterThanOrEqual(replayed.rows, 2)
             XCTAssertEqual(replayed.cells.first?.codepoint, UInt32(Character("h").unicodeScalars.first?.value ?? 0))
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewPublishesRenderedTextUpdates() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            let renderedExpectation = expectation(description: "rendered text published")
+            var renderedText = ""
+            hostView.onRenderedTextChanged = { text in
+                renderedText = text
+                if text.localizedStandardContains("hi") { renderedExpectation.fulfill() }
+            }
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            wait(for: [renderedExpectation], timeout: 2)
+            XCTAssertTrue(renderedText.localizedStandardContains("hi"))
 
             window.isHidden = true
         }

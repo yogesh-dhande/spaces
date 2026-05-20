@@ -10,12 +10,13 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     public let workingDirectory: String
     public let snapshot: GhosttyTerminalSnapshot?
     public let snapshotText: String?
+    public let transcriptTail: String?
     public let outputByteCount: Int?
 
     public init(
         sessionID: String, reason: String, emittedAt: String, runtimeState: TerminalSessionRuntimeState?,
         attachmentSnapshot: TerminalSessionAttachmentSnapshot?, title: String, workingDirectory: String, snapshot: GhosttyTerminalSnapshot?,
-        snapshotText: String?, outputByteCount: Int?
+        snapshotText: String?, transcriptTail: String?, outputByteCount: Int?
     ) {
         self.sessionID = sessionID
         self.reason = reason
@@ -26,7 +27,17 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
         self.workingDirectory = workingDirectory
         self.snapshot = snapshot
         self.snapshotText = snapshotText
+        self.transcriptTail = transcriptTail
         self.outputByteCount = outputByteCount
+    }
+
+    public func merged(with update: Self) -> Self {
+        precondition(sessionID == update.sessionID, "Cannot merge terminal state from a different session.")
+        return .init(
+            sessionID: update.sessionID, reason: update.reason, emittedAt: update.emittedAt, runtimeState: update.runtimeState ?? runtimeState,
+            attachmentSnapshot: update.attachmentSnapshot ?? attachmentSnapshot, title: update.title, workingDirectory: update.workingDirectory,
+            snapshot: update.snapshot ?? snapshot, snapshotText: update.snapshotText ?? (update.snapshot != nil ? nil : snapshotText),
+            transcriptTail: update.transcriptTail ?? transcriptTail, outputByteCount: update.outputByteCount)
     }
 }
 

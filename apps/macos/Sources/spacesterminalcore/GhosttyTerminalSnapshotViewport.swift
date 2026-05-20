@@ -1,6 +1,11 @@
 import Foundation
 
 public enum GhosttyTerminalSnapshotViewport {
+    public enum HorizontalAlignment: Sendable, Equatable {
+        case leading
+        case followCursor
+    }
+
     public struct Window: Sendable, Equatable {
         public let columnOffset: Int
         public let rowOffset: Int
@@ -15,8 +20,10 @@ public enum GhosttyTerminalSnapshotViewport {
         }
     }
 
-    public static func crop(_ snapshot: GhosttyTerminalSnapshot, columns: Int, rows: Int) -> GhosttyTerminalSnapshot {
-        let window = window(for: snapshot, columns: columns, rows: rows)
+    public static func crop(_ snapshot: GhosttyTerminalSnapshot, columns: Int, rows: Int, horizontalAlignment: HorizontalAlignment = .followCursor)
+        -> GhosttyTerminalSnapshot
+    {
+        let window = window(for: snapshot, columns: columns, rows: rows, horizontalAlignment: horizontalAlignment)
         guard window.columns != snapshot.columns || window.rows != snapshot.rows || window.columnOffset != 0 || window.rowOffset != 0 else {
             return snapshot
         }
@@ -41,13 +48,22 @@ public enum GhosttyTerminalSnapshotViewport {
             defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: cells)
     }
 
-    public static func window(for snapshot: GhosttyTerminalSnapshot, columns: Int, rows: Int) -> Window {
+    public static func window(
+        for snapshot: GhosttyTerminalSnapshot, columns: Int, rows: Int, horizontalAlignment: HorizontalAlignment = .followCursor
+    ) -> Window {
         let resolvedColumns = min(max(columns, 1), max(snapshot.columns, 1))
         let resolvedRows = min(max(rows, 1), max(snapshot.rows, 1))
 
+        let columnOffset: Int
+        switch horizontalAlignment {
+        case .leading: columnOffset = 0
+        case .followCursor:
+            columnOffset = viewportOffset(
+                cursor: snapshot.cursorColumn, viewport: resolvedColumns, content: snapshot.columns, trailingContext: max(2, resolvedColumns / 5))
+        }
+
         return Window(
-            columnOffset: viewportOffset(
-                cursor: snapshot.cursorColumn, viewport: resolvedColumns, content: snapshot.columns, trailingContext: max(2, resolvedColumns / 5)),
+            columnOffset: columnOffset,
             rowOffset: viewportOffset(
                 cursor: snapshot.cursorRow, viewport: resolvedRows, content: snapshot.rows, trailingContext: min(max(1, resolvedRows / 8), 2)),
             columns: resolvedColumns, rows: resolvedRows)

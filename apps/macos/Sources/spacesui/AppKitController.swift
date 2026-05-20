@@ -242,6 +242,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var openTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var focusTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var closeTerminalSessionWindowIPCObserver: NSObjectProtocol?
+    private var dumpTerminalSessionWindowStateIPCObserver: NSObjectProtocol?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
@@ -295,6 +296,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let index: Int
         let startedAt: Date
         var routeCompletedAt: Date?
+    }
+
+    private struct TerminalSessionWindowStateDump: Codable {
+        let sessionID: String
+        let requestedMode: String
+        let found: Bool
+        let windowTitle: String?
+        let rendererSummary: String?
+        let renderedOutput: String?
+        let summary: String?
+        let state: String?
+        let showsTerminalSurface: Bool?
+        let showsOutputFallback: Bool?
+        let didClose: Bool?
     }
 
     enum WindowFocusRequest: Sendable {
@@ -383,6 +398,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupOpenTerminalSessionWindowIPCObserver()
         setupFocusTerminalSessionWindowIPCObserver()
         setupCloseTerminalSessionWindowIPCObserver()
+        setupDumpTerminalSessionWindowStateIPCObserver()
         setupAppActivationObservers()
         setupTerminalAttachmentStateObserver()
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(Self.launchLocalBuiltInTerminalSession)
@@ -496,6 +512,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let closeTerminalSessionWindowIPCObserver {
             DistributedNotificationCenter.default().removeObserver(closeTerminalSessionWindowIPCObserver)
             self.closeTerminalSessionWindowIPCObserver = nil
+        }
+        if let dumpTerminalSessionWindowStateIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(dumpTerminalSessionWindowStateIPCObserver)
+            self.dumpTerminalSessionWindowStateIPCObserver = nil
         }
         if let appDidBecomeActiveObserver {
             NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
@@ -719,6 +739,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func setupDumpTerminalSessionWindowStateIPCObserver() {
+        dumpTerminalSessionWindowStateIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.dumpTerminalSessionWindowState, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+            guard let outputPath = notification.userInfo?[IPCNotification.outputPathUserInfoKey] as? String else { return }
+            let modeRawValue = notification.userInfo?[IPCNotification.terminalAttachmentModeUserInfoKey] as? String
+            let mode = modeRawValue.flatMap(TerminalAttachmentMode.init(rawValue:))
+            Task { @MainActor [weak self, sessionID, outputPath, mode] in
+                guard let self else { return }
+                self.dumpTerminalSessionWindowState(sessionID: sessionID, mode: mode, outputPath: outputPath)
+            }
+        }
+    }
+
     private func setupFocusTerminalSessionWindowIPCObserver() {
         focusTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
             forName: IPCNotification.focusTerminalSessionWindow, object: nil, queue: .main
@@ -730,6 +765,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 self.focusTerminalSessionWindow(sessionID: sessionID, requestID: requestID)
             }
         }
+    }
+
+    private func dumpTerminalSessionWindowState(sessionID: String, mode: TerminalAttachmentMode?, outputPath: String) {
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+        let requestedMode = mode?.rawValue ?? "any"
+        let controller = terminalSessionWindowControllers[sessionID]?.first { !$0.didClose && (mode == nil || $0.attachmentMode == mode) }
+        if let controller { controller.debugRefreshStateForTesting(skipOwnerAttach: mode == .viewer) }
+        let debugState = controller?.debugStateDump()
+        let payload = TerminalSessionWindowStateDump(
+            sessionID: sessionID, requestedMode: requestedMode, found: controller != nil, windowTitle: debugState?.windowTitle,
+            rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput, summary: debugState?.summary,
+            state: debugState?.state, showsTerminalSurface: debugState?.showsTerminalSurface, showsOutputFallback: debugState?.showsOutputFallback,
+            didClose: debugState?.didCloseWindow)
+        writeTerminalSessionWindowStateDump(payload, to: outputPath)
+    }
+
+    private func writeTerminalSessionWindowStateDump(_ payload: TerminalSessionWindowStateDump, to outputPath: String) {
+        let url = URL(fileURLWithPath: outputPath)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(payload)
+            try data.write(to: url, options: [.atomic])
+        } catch {}
     }
 
     private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) {
@@ -775,6 +835,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     let created = TerminalSessionWindowController(
                         sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false,
                         attachClientAction: attachClientAction, detachClientAction: detachClientAction,
+                        detachClientSynchronouslyOnClose: !useControlSocketClientActions,
                         onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
                         onWindowClose: { [weak self] sessionID, clientID in
                             if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }

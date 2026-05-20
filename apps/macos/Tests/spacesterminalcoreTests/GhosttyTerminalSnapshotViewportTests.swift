@@ -27,6 +27,18 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: cropped), "EFGH\nMNOP")
     }
 
+    func testLeadingAlignmentPreservesLeftmostColumnsEvenWhenCursorIsNearTrailingEdge() {
+        let snapshot = makeSnapshot(columns: 8, rows: 2, cursorColumn: 6, cursorRow: 1, glyphs: ["ABCDEFGH", "IJKLMNOP"])
+
+        let cropped = GhosttyTerminalSnapshotViewport.crop(snapshot, columns: 4, rows: 2, horizontalAlignment: .leading)
+
+        XCTAssertEqual(cropped.columns, 4)
+        XCTAssertEqual(cropped.rows, 2)
+        XCTAssertEqual(cropped.cursorColumn, 3)
+        XCTAssertEqual(cropped.cursorRow, 1)
+        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: cropped), "ABCD\nIJKL")
+    }
+
     private func makeSnapshot(columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int, glyphs: [String]) -> GhosttyTerminalSnapshot {
         let cells = glyphs.flatMap { row in
             row.unicodeScalars.map { scalar in

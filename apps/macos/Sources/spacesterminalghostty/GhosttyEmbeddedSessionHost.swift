@@ -28,6 +28,7 @@ extension Notification.Name {
     func pasteClipboardContents() -> Bool
     @discardableResult func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool
     var debugSurfaceRefreshRequestCount: Int { get }
+    func debugVisibleSurfaceText() -> String?
 }
 
 @MainActor public protocol TerminalGhosttySessionHosting: TerminalGhosttySessionInfoProviding, TerminalGhosttyRendererHosting {}
@@ -52,7 +53,7 @@ extension Notification.Name {
 
     func foregroundPID() -> Int32? { terminalView.foregroundPID() }
 
-    func surfaceCellSize() -> (columns: Int, rows: Int)? { terminalView.surfaceCellSize() }
+    func surfaceCellSize() -> (columns: Int, rows: Int)? { terminalView.sessionCellSize() }
 
     @discardableResult func resizeCellGrid(columns: Int, rows: Int) -> Bool { terminalView.resizeCellGrid(columns: columns, rows: rows) }
 
@@ -61,7 +62,8 @@ extension Notification.Name {
     func setSurfaceFocused(_ focused: Bool) { terminalView.setFocused(focused) }
 
     public func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
-        guard mode == .owner, let container else { return }
+        guard let container else { return }
+        terminalView.setAttachmentMode(mode)
         if terminalView.superview !== container {
             terminalView.removeFromSuperview()
             terminalView.translatesAutoresizingMaskIntoConstraints = false
@@ -107,9 +109,9 @@ extension Notification.Name {
 
     public var prefersOutputFallbackWhenSurfaceUnavailable: Bool { false }
 
-    public func snapshot() -> GhosttyTerminalSnapshot? { terminalView.snapshot() }
+    public func snapshot() -> GhosttyTerminalSnapshot? { terminalView.sessionSnapshot() }
 
-    public func snapshotText() -> String? { terminalView.snapshotText() }
+    public func snapshotText() -> String? { terminalView.sessionSnapshotText() }
 
     public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
 
@@ -120,6 +122,11 @@ extension Notification.Name {
     }
 
     public var debugSurfaceRefreshRequestCount: Int { terminalView.debugSurfaceRefreshRequestCount }
+
+    public func debugVisibleSurfaceText() -> String? {
+        guard let snapshot = terminalView.snapshot() else { return nil }
+        return GhosttyTerminalSnapshotLayout.plainText(for: snapshot)
+    }
 }
 
 @MainActor public final class GhosttyEmbeddedSessionRegistry {
@@ -159,6 +166,7 @@ extension Notification.Name {
 
 @MainActor public final class GhosttyEmbeddedSessionCore {
     private static let incomingOutputCoalescingInterval: Duration = .milliseconds(16)
+    private static let remoteTranscriptLineCount = 2_000
 
     private final class IncomingOutputBuffer: @unchecked Sendable {
         private let lock = NSLock()
@@ -189,6 +197,7 @@ extension Notification.Name {
     public let paths: TerminalSessionPaths
 
     private let controlQueue: DispatchQueue
+    private let stateStreamQueue: DispatchQueue
     private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
     private let terminalView: GhosttyEmbeddedTerminalView
     private lazy var rendererHostStorage = GhosttyEmbeddedRendererHost(launchConfiguration: launchConfiguration, terminalView: terminalView)
@@ -215,6 +224,7 @@ extension Notification.Name {
         self.launchConfiguration = launchConfiguration
         self.paths = paths
         controlQueue = DispatchQueue(label: "spaces.terminal.session-host.control.\(launchConfiguration.sessionID)")
+        stateStreamQueue = DispatchQueue(label: "spaces.terminal.session-host.state-stream.\(launchConfiguration.sessionID)")
         sessionDriver = GhosttyEmbeddedTerminalSessionDriver(launchConfiguration: launchConfiguration)
         terminalView = GhosttyEmbeddedTerminalView(launchConfiguration: launchConfiguration, sessionDriver: sessionDriver)
         self.requestSurfaceRefreshAction = requestSurfaceRefreshAction ?? { [terminalView] in terminalView.requestSurfaceRefresh() }
@@ -335,7 +345,8 @@ extension Notification.Name {
     }
 
     private func startStateStreamServer() throws {
-        let stateStreamServer = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: controlQueue) { [weak self] in
+        let stateStreamServer = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: stateStreamQueue) {
+            [weak self] in
             DispatchQueue.main.sync { MainActor.assumeIsolated { self?.currentRemoteSessionState(reason: "initial", outputByteCount: nil) } }
         }
         try stateStreamServer.start()
@@ -726,12 +737,30 @@ extension Notification.Name {
     private func currentRemoteSessionState(reason: String, outputByteCount: Int?) -> GhosttyRemoteSessionStatePayload? {
         let runtimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastPersistedRuntimeState
         let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
-        let snapshot = rendererHostStorage.snapshot()
-        let snapshotText = rendererHostStorage.snapshotText() ?? snapshot.map { GhosttyTerminalSnapshotRenderer.render($0).string }
+        let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason)
+        let includeTranscriptTail = Self.remoteStateShouldIncludeTranscriptTail(reason: reason)
+        let snapshot = includeScreenState ? rendererHostStorage.snapshot() : nil
+        let snapshotText = includeScreenState && snapshot == nil ? rendererHostStorage.snapshotText() : nil
+        let transcriptTail =
+            includeTranscriptTail ? ((try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: Self.remoteTranscriptLineCount)) ?? nil) : nil
         return GhosttyRemoteSessionStatePayload(
             sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()),
             runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, title: effectiveTitle, workingDirectory: effectiveWorkingDirectory,
-            snapshot: snapshot, snapshotText: snapshotText, outputByteCount: outputByteCount)
+            snapshot: snapshot, snapshotText: snapshotText, transcriptTail: transcriptTail, outputByteCount: outputByteCount)
+    }
+
+    private static func remoteStateShouldIncludeScreenState(reason: String) -> Bool {
+        switch reason {
+        case "initial", "output", "resize", "terminated": true
+        default: false
+        }
+    }
+
+    private static func remoteStateShouldIncludeTranscriptTail(reason: String) -> Bool {
+        switch reason {
+        case "initial", "terminated": true
+        default: false
+        }
     }
 
     var debugCurrentTitle: String? { currentTitle }
@@ -815,6 +844,7 @@ extension Notification.Name {
     }
 
     public var debugSurfaceRefreshRequestCount: Int { core.rendererHost.debugSurfaceRefreshRequestCount }
+    public func debugVisibleSurfaceText() -> String? { core.rendererHost.debugVisibleSurfaceText() }
 
     public func terminate() { core.terminate() }
 

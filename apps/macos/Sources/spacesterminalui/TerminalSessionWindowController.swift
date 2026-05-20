@@ -19,6 +19,17 @@ import spacesterminalghostty
     }
 }
 
+public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
+    public let renderedOutput: String
+    public let showsTerminalSurface: Bool
+    public let showsOutputFallback: Bool
+    public let rendererSummary: String
+    public let summary: String
+    public let state: String
+    public let windowTitle: String
+    public let didCloseWindow: Bool
+}
+
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
     private static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
     private static let fallbackRefreshInterval: Duration = .milliseconds(500)
@@ -84,6 +95,7 @@ import spacesterminalghostty
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
     private let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void
     private let detachClientAction: @Sendable (String) throws -> Void
+    private let detachClientSynchronouslyOnClose: Bool
     private let usesCustomAttachClientAction: Bool
     private let copySelectionAction: (@MainActor () -> Bool)?
     private let pasteClipboardAction: (@MainActor () -> Bool)?
@@ -94,6 +106,9 @@ import spacesterminalghostty
     private let loadWindowFrameAction: (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?
     private let saveWindowFrameAction: (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void
     private let sessionHostProvider: @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
+    private var ownerGhosttySessionHost: (any TerminalGhosttySessionHosting)?
+    private var activeGhosttySessionHost: (any TerminalGhosttySessionHosting)?
+    private var viewerGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var refreshTask: Task<Void, Never>?
     private var takeoverTask: Task<Void, Never>?
     private var pendingWindowFramePersistTask: Task<Void, Never>?
@@ -135,9 +150,9 @@ import spacesterminalghostty
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
-        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
-        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
-        onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        detachClientSynchronouslyOnClose: Bool = true, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
+        ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
+        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil,
         loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
         saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil,
         sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
@@ -145,7 +160,8 @@ import spacesterminalghostty
         self.init(
             sessionID: sessionID, paths: paths, preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh,
             sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
-            detachClientAction: detachClientAction, copySelectionAction: copySelectionAction, pasteClipboardAction: pasteClipboardAction,
+            detachClientAction: detachClientAction, copySelectionAction: copySelectionAction,
+            detachClientSynchronouslyOnClose: detachClientSynchronouslyOnClose, pasteClipboardAction: pasteClipboardAction,
             ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowFocus: onWindowFocus,
             onWindowClose: onWindowClose, loadWindowFrameAction: loadWindowFrameAction, saveWindowFrameAction: saveWindowFrameAction,
             sessionHostProvider: sessionHostProvider ?? { launchConfiguration, paths in
@@ -160,9 +176,9 @@ import spacesterminalghostty
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
-        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
-        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
-        onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        detachClientSynchronouslyOnClose: Bool = true, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
+        ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
+        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil,
         loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
         saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil,
         sessionHostProvider: @escaping @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
@@ -205,6 +221,7 @@ import spacesterminalghostty
             detachClientAction ?? { clientID in
                 try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
             }
+        self.detachClientSynchronouslyOnClose = detachClientSynchronouslyOnClose
         self.copySelectionAction = copySelectionAction
         self.pasteClipboardAction = pasteClipboardAction
         self.ownerWindowFocusAction = ownerWindowFocusAction
@@ -309,7 +326,7 @@ import spacesterminalghostty
             syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false)
             if !sessionIsTerminating { ghosttyRendererHost?.parkSurfaceInHiddenHostWindow() }
         }
-        if sessionIsTerminating { isClientAttached = false } else { detachLocalClientIfNeeded() }
+        if sessionIsTerminating { isClientAttached = false } else { detachLocalClientIfNeeded(synchronously: detachClientSynchronouslyOnClose) }
         refreshTask?.cancel()
         refreshTask = nil
         onWindowClose?(sessionID, client.id)
@@ -379,7 +396,12 @@ import spacesterminalghostty
                 NSSound.beep()
                 return
             }
-        case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput, .outputFallback: outputView.copy(sender)
+        case .ghosttyViewerSnapshot:
+            guard ghosttyRendererHost?.copySelectionToPasteboard() ?? false else {
+                outputView.copy(sender)
+                return
+            }
+        case .ghosttyViewerLoading, .ghosttyViewerExitedOutput, .outputFallback: outputView.copy(sender)
         }
     }
 
@@ -657,11 +679,9 @@ import spacesterminalghostty
         do {
             window?.contentView?.layoutSubtreeIfNeeded()
             terminalContainer.layoutSubtreeIfNeeded()
-            let host = sessionHostProvider(launchConfiguration, paths)
-            let resolvedHostComponents = Self.resolveGhosttyHostComponents(host)
-            ghosttyRendererHost = resolvedHostComponents.rendererHost
-            ghosttySessionInfoProvider = resolvedHostComponents.sessionInfoProvider
-            try host.attach(client: client, mode: preferredAttachmentMode, into: preferredAttachmentMode == .owner ? terminalContainer : nil)
+            let host = resolvedGhosttySessionHost(for: launchConfiguration)
+            switchGhosttySessionHostIfNeeded(host)
+            try host.attach(client: client, mode: preferredAttachmentMode, into: terminalContainer)
             isClientAttached = true
             lastObservedAttachmentMode = preferredAttachmentMode
             lastObservedOwnerClientID = host.activeOwnerClientID()
@@ -796,8 +816,9 @@ import spacesterminalghostty
                     if lastObservedAttachmentMode != activeAttachment.mode {
                         beginOwnershipTransition(activeAttachment.mode == .owner ? .owner : .viewer, reason: "attachment_mode_changed")
                         lastObservedAttachmentMode = activeAttachment.mode
-                        if activeAttachment.mode == .owner {
-                            if allowGhosttyOwnerAttach { ensureGhosttyHostAttached(reason: "attachment_mode_changed") }
+                        let shouldAttachGhosttyHost = activeAttachment.mode == .viewer || allowGhosttyOwnerAttach
+                        if shouldAttachGhosttyHost {
+                            ensureGhosttyHostAttached(reason: "attachment_mode_changed")
                         } else {
                             syncGhosttyOwnerFocus(reason: "ownership_demoted", requestWindowFocus: false, focused: false)
                         }
@@ -1034,8 +1055,14 @@ import spacesterminalghostty
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
 
-    private func detachLocalClientIfNeeded() {
+    private func detachLocalClientIfNeeded(synchronously: Bool = true) {
         guard isClientAttached else { return }
+        guard synchronously else {
+            let clientID = client.id
+            isClientAttached = false
+            Task.detached(priority: .utility) { [detachClientAction] in try? detachClientAction(clientID) }
+            return
+        }
         do {
             try detachClientAction(client.id)
             isClientAttached = false
@@ -1150,10 +1177,10 @@ import spacesterminalghostty
 
     private func updateRendererVisibility() {
         switch visibleRenderer {
-        case .ghosttyOwner:
+        case .ghosttyOwner, .ghosttyViewerSnapshot:
             terminalContainer.isHidden = false
             outputScrollView.isHidden = true
-        case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput, .outputFallback:
+        case .ghosttyViewerLoading, .ghosttyViewerExitedOutput, .outputFallback:
             outputScrollView.isHidden = false
             terminalContainer.isHidden = true
         }
@@ -1215,7 +1242,8 @@ import spacesterminalghostty
         guard let window else { return }
         switch visibleRenderer {
         case .ghosttyOwner: break
-        case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput, .outputFallback:
+        case .ghosttyViewerSnapshot: ghosttyRendererHost?.focusWindow(window)
+        case .ghosttyViewerLoading, .ghosttyViewerExitedOutput, .outputFallback:
             if !inputRowStackView.isHidden, inputField.isEnabled {
                 window.makeFirstResponder(inputField)
             } else {
@@ -1385,12 +1413,32 @@ import spacesterminalghostty
 
     private func updateGhosttySessionHostReference(for launchConfiguration: TerminalSessionLaunchConfiguration) {
         guard launchConfiguration.backend == .ghosttyEmbedded else { return }
-        if ghosttyRendererHost == nil || ghosttySessionInfoProvider == nil {
-            let host = sessionHostProvider(launchConfiguration, paths)
-            let resolvedHostComponents = Self.resolveGhosttyHostComponents(host)
-            if ghosttyRendererHost == nil { ghosttyRendererHost = resolvedHostComponents.rendererHost }
-            if ghosttySessionInfoProvider == nil { ghosttySessionInfoProvider = resolvedHostComponents.sessionInfoProvider }
+        let host = resolvedGhosttySessionHost(for: launchConfiguration)
+        switchGhosttySessionHostIfNeeded(host)
+    }
+
+    private func resolvedGhosttySessionHost(for launchConfiguration: TerminalSessionLaunchConfiguration) -> any TerminalGhosttySessionHosting {
+        if preferredAttachmentMode == .owner {
+            if let ownerGhosttySessionHost { return ownerGhosttySessionHost }
+            let created = sessionHostProvider(launchConfiguration, paths)
+            ownerGhosttySessionHost = created
+            return created
         }
+        if let viewerGhosttySessionHost { return viewerGhosttySessionHost }
+        let created = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        viewerGhosttySessionHost = created
+        return created
+    }
+
+    private func switchGhosttySessionHostIfNeeded(_ host: any TerminalGhosttySessionHosting) {
+        let hostObject = host as AnyObject
+        if let activeGhosttySessionHost, activeGhosttySessionHost as AnyObject === hostObject { return }
+        ghosttyRendererHost?.parkSurfaceInHiddenHostWindow()
+        terminalContainer.subviews.forEach { $0.removeFromSuperview() }
+        activeGhosttySessionHost = host
+        let resolvedHostComponents = Self.resolveGhosttyHostComponents(host)
+        ghosttyRendererHost = resolvedHostComponents.rendererHost
+        ghosttySessionInfoProvider = resolvedHostComponents.sessionInfoProvider
     }
 
     private static func resolveGhosttyHostComponents(_ host: any TerminalGhosttySessionHosting) -> (
@@ -1434,7 +1482,26 @@ import spacesterminalghostty
         return "\(cleaned.prefix(72))…\(cleaned.suffix(48))"
     }
 
+    public func debugRefreshStateForTesting(skipOwnerAttach: Bool = false) {
+        if skipOwnerAttach { debugForceRefreshSkippingOwnerAttach() } else { debugForceRefresh() }
+    }
+
+    public func debugStateDump() -> TerminalSessionWindowDebugState {
+        let renderedOutput: String
+        if !terminalContainer.isHidden, let snapshotText = ghosttyRendererHost?.debugVisibleSurfaceText(), !snapshotText.isEmpty {
+            renderedOutput = snapshotText
+        } else {
+            renderedOutput = outputView.string
+        }
+        return .init(
+            renderedOutput: renderedOutput, showsTerminalSurface: !terminalContainer.isHidden, showsOutputFallback: !outputScrollView.isHidden,
+            rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue, state: stateLabel.stringValue,
+            windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow)
+    }
+
     var debugRenderedOutput: String { outputView.string }
+    var debugShowsTerminalSurface: Bool { !terminalContainer.isHidden }
+    var debugShowsOutputFallback: Bool { !outputScrollView.isHidden }
     var debugRendererSummary: String { rendererLabel.stringValue }
     var debugSummary: String { summaryLabel.stringValue }
     var debugState: String { stateLabel.stringValue }

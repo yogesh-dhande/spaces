@@ -17,12 +17,13 @@ struct GhosttyTerminalSnapshotVTEncoderTests {
             ])
 
         let encoded = try #require(String(data: GhosttyTerminalSnapshotVTEncoder.encode(snapshot), encoding: .utf8))
-        #expect(encoded.contains("\u{1B}c"))
+        #expect(encoded.hasPrefix("\u{1B}[?25l\u{1B}[0m\u{1B}[H\u{1B}[2J"))
         #expect(encoded.contains("\u{1B}[1;1H"))
         #expect(encoded.contains("A"))
         #expect(encoded.contains("B"))
         #expect(encoded.contains("\u{1B}[0;1;38;2;255;0;0;48;2;16;16;16mB"))
         #expect(encoded.contains("\u{1B}[0;38;2;255;255;255;48;2;32;32;32m "))
+        #expect(encoded.contains("\u{1B}[K"))
         #expect(encoded.contains("\u{1B}[?25h"))
         #expect(encoded.hasSuffix("\u{1B}[2;2H"))
     }

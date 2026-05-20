@@ -19,7 +19,8 @@ struct MXE2ECommand: ParsableCommand {
             StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
             SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self,
             CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
-            CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, RecordScreenCommand.self,
+            CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self,
+            DumpTerminalSessionWindowStateCommand.self, RecordScreenCommand.self,
         ])
 }
 
@@ -640,6 +641,30 @@ private struct CloseTerminalSessionWindowCommand: ParsableCommand {
             IPCNotification.closeTerminalSessionWindow, object: nil, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID],
             options: [.deliverImmediately])
         try emitJSON(["sessionID": trimmedSessionID])
+    }
+}
+
+private struct DumpTerminalSessionWindowStateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "dump-terminal-session-window-state")
+
+    @Option(name: .long) var sessionID: String
+    @Option(name: .long) var outputPath: String
+    @Flag(name: .long) var viewer = false
+    @Flag(name: .long) var anyMode = false
+
+    func run() throws {
+        let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session id.") }
+        let trimmedOutputPath = outputPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedOutputPath.isEmpty else { throw ValidationError("Missing output path.") }
+        let attachmentMode: TerminalAttachmentMode? = anyMode ? nil : (viewer ? .viewer : .owner)
+        var userInfo: [String: String] = [
+            IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID, IPCNotification.outputPathUserInfoKey: trimmedOutputPath,
+        ]
+        if let attachmentMode { userInfo[IPCNotification.terminalAttachmentModeUserInfoKey] = attachmentMode.rawValue }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.dumpTerminalSessionWindowState, object: nil, userInfo: userInfo, options: [.deliverImmediately])
+        try emitJSON(["sessionID": trimmedSessionID, "mode": attachmentMode?.rawValue ?? "any", "outputPath": trimmedOutputPath])
     }
 }
 

@@ -130,7 +130,30 @@ def connect_stream(payload: dict) -> socket.socket:
     return stream
 
 
-def wait_for_line(stream: socket.socket, predicate, timeout: float = 10) -> tuple[dict, float]:
+def plain_text(payload: dict) -> str:
+    if payload.get("snapshotText"):
+        return payload["snapshotText"]
+
+    snapshot = payload.get("snapshot") or {}
+    columns = int(snapshot.get("columns") or 0)
+    rows = int(snapshot.get("rows") or 0)
+    cells = snapshot.get("cells") or []
+    if columns <= 0 or rows <= 0 or len(cells) < columns * rows:
+        return ""
+
+    lines: list[str] = []
+    for row in range(rows):
+        start = row * columns
+        row_cells = cells[start : start + columns]
+        characters = []
+        for cell in row_cells:
+            codepoint = int(cell.get("codepoint") or 0)
+            characters.append(chr(codepoint) if codepoint > 0 else " ")
+        lines.append("".join(characters).rstrip())
+    return "\n".join(lines)
+
+
+def wait_for_line(stream: socket.socket, predicate, timeout: float = 10) -> tuple[dict, float, int]:
     deadline = time.perf_counter() + timeout
     started = time.perf_counter()
     buffer = bytearray()
@@ -146,7 +169,7 @@ def wait_for_line(stream: socket.socket, predicate, timeout: float = 10) -> tupl
                 continue
             payload = json.loads(line.decode("utf-8"))
             if predicate(payload):
-                return payload, (time.perf_counter() - started) * 1000
+                return payload, (time.perf_counter() - started) * 1000, len(line)
     raise RuntimeError("Timed out waiting for streamed terminal state.")
 
 
@@ -221,8 +244,8 @@ stream = connect_stream({
     "sessionID": SESSION_ID,
     "clientID": mobile_client_id,
 })
-initial_state, initial_state_ms = wait_for_line(stream, lambda payload: payload.get("sessionID") == SESSION_ID)
-assert initial_state.get("snapshotText") is not None, initial_state
+initial_state, initial_state_ms, initial_state_bytes = wait_for_line(stream, lambda payload: payload.get("sessionID") == SESSION_ID)
+assert plain_text(initial_state), initial_state
 
 takeover, ios_takeover_rpc_ms = request({
     "command": "takeover",
@@ -244,7 +267,7 @@ def owner_is(client_id: str):
     return predicate
 
 
-_, ios_takeover_visible_ms = wait_for_line(stream, owner_is(mobile_client_id))
+_, ios_takeover_visible_ms, ios_takeover_visible_bytes = wait_for_line(stream, owner_is(mobile_client_id))
 
 send, ios_send_rpc_ms = request({
     "command": "send",
@@ -264,7 +287,7 @@ enter, ios_enter_rpc_ms = request({
     "key": "enter",
 })
 assert enter["ok"], enter
-_, ios_input_visible_ms = wait_for_line(stream, lambda payload: "ios-ownership" in (payload.get("snapshotText") or ""))
+_, ios_input_visible_ms, ios_input_visible_bytes = wait_for_line(stream, lambda payload: "ios-ownership" in plain_text(payload))
 
 desktop_takeover, mac_takeover_rpc_ms = request({
     "command": "takeover",
@@ -274,7 +297,7 @@ desktop_takeover, mac_takeover_rpc_ms = request({
     "clientID": desktop_owner_client_id,
 })
 assert desktop_takeover["ok"], desktop_takeover
-_, mac_takeover_visible_ms = wait_for_line(stream, owner_is(desktop_owner_client_id))
+_, mac_takeover_visible_ms, mac_takeover_visible_bytes = wait_for_line(stream, owner_is(desktop_owner_client_id))
 
 desktop_send, mac_send_rpc_ms = request({
     "command": "send",
@@ -294,7 +317,7 @@ desktop_enter, mac_enter_rpc_ms = request({
     "key": "enter",
 })
 assert desktop_enter["ok"], desktop_enter
-_, mac_input_visible_ms = wait_for_line(stream, lambda payload: "desktop-return" in (payload.get("snapshotText") or ""))
+_, mac_input_visible_ms, mac_input_visible_bytes = wait_for_line(stream, lambda payload: "desktop-return" in plain_text(payload))
 
 stream.close()
 
@@ -305,16 +328,21 @@ metrics = {
     "desktop_attach_ms": round(desktop_attach_ms, 1),
     "ios_attach_ms": round(attach_ms, 1),
     "initial_state_ms": round(initial_state_ms, 1),
+    "initial_state_bytes": initial_state_bytes,
     "ios_takeover_rpc_ms": round(ios_takeover_rpc_ms, 1),
     "ios_takeover_visible_ms": round(ios_takeover_visible_ms, 1),
+    "ios_takeover_visible_bytes": ios_takeover_visible_bytes,
     "ios_send_rpc_ms": round(ios_send_rpc_ms, 1),
     "ios_enter_rpc_ms": round(ios_enter_rpc_ms, 1),
     "ios_input_visible_ms": round(ios_input_visible_ms, 1),
+    "ios_input_visible_bytes": ios_input_visible_bytes,
     "mac_takeover_rpc_ms": round(mac_takeover_rpc_ms, 1),
     "mac_takeover_visible_ms": round(mac_takeover_visible_ms, 1),
+    "mac_takeover_visible_bytes": mac_takeover_visible_bytes,
     "mac_send_rpc_ms": round(mac_send_rpc_ms, 1),
     "mac_enter_rpc_ms": round(mac_enter_rpc_ms, 1),
     "mac_input_visible_ms": round(mac_input_visible_ms, 1),
+    "mac_input_visible_bytes": mac_input_visible_bytes,
 }
 print(json.dumps(metrics, indent=2, sort_keys=True))
 PY

@@ -64,11 +64,11 @@ import spacesterminalcore
         var allocatedStrings: [UnsafeMutablePointer<CChar>] = []
         defer { for pointer in allocatedStrings { free(pointer) } }
 
-        if let command = launchConfiguration.command, let wrapped = strdup(Self.loginShellCommand(shell: launchConfiguration.shell, command: command))
-        {
+        if let command = launchConfiguration.command, let wrapped = strdup(Self.launchCommand(shell: launchConfiguration.shell, command: command)) {
             allocatedStrings.append(wrapped)
             sessionConfig.surface.command = UnsafePointer(wrapped)
             sessionConfig.surface.wait_after_command = false
+            sessionConfig.surface.use_login_shell = Self.usesLoginShell(command: command)
         }
 
         let workingDirectory = launchConfiguration.workingDirectory
@@ -116,9 +116,29 @@ import spacesterminalcore
         return ghostty_renderer_attach(renderer, session)
     }
 
+    func attachViewerRenderer(_ renderer: ghostty_renderer_t?) -> Bool {
+        guard let session, let renderer else { return false }
+        return ghostty_renderer_attach_viewer(renderer, session)
+    }
+
+    func rendererIsOwner(_ renderer: ghostty_renderer_t?) -> Bool {
+        guard let renderer else { return false }
+        return ghostty_renderer_is_owner(renderer)
+    }
+
+    func takeRendererOwnership(_ renderer: ghostty_renderer_t?) -> Bool {
+        guard let renderer else { return false }
+        return ghostty_renderer_take_ownership(renderer)
+    }
+
     func detachRenderer(_ renderer: ghostty_renderer_t?) -> Bool {
         guard let renderer else { return true }
         return ghostty_renderer_detach(renderer)
+    }
+
+    func rendererSurface(_ renderer: ghostty_renderer_t?) -> ghostty_surface_t? {
+        guard let renderer else { return nil }
+        return ghostty_renderer_surface(renderer)
     }
 
     func updateRendererHost(_ renderer: ghostty_renderer_t?, host: inout ghostty_surface_host_s) -> Bool {
@@ -136,6 +156,15 @@ import spacesterminalcore
         data.withUnsafeBytes { rawBuffer in
             guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
             ghostty_session_send_input_raw(session, baseAddress, UInt(data.count))
+        }
+        requestSurfaceRefresh()
+    }
+
+    func processOutput(_ data: Data) {
+        guard let session, !data.isEmpty else { return }
+        data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
+            ghostty_session_process_output(session, baseAddress, UInt(data.count))
         }
         requestSurfaceRefresh()
     }
@@ -172,6 +201,7 @@ import spacesterminalcore
         if let displayID { ghostty_session_set_display_id(session, displayID) }
         ghostty_session_set_size(session, width, height)
         lastKnownPixelSize = (width, height)
+        syncHiddenHostWindowSize(width: width, height: height)
         notifySurfaceCellSizeIfChanged()
     }
 
@@ -193,6 +223,7 @@ import spacesterminalcore
             nextHeight = max((nextHeight * heightScale).rounded(), 1)
             ghostty_session_set_size(session, UInt32(nextWidth), UInt32(nextHeight))
             lastKnownPixelSize = (UInt32(nextWidth), UInt32(nextHeight))
+            syncHiddenHostWindowSize(width: UInt32(nextWidth), height: UInt32(nextHeight))
             ghostty_session_refresh(session)
             GhosttyEmbeddedAppService.shared.tick()
         }
@@ -200,6 +231,16 @@ import spacesterminalcore
         notifySurfaceCellSizeIfChanged()
         guard let resolvedSize = surfaceCellSize() else { return false }
         return resolvedSize.columns == targetColumns && resolvedSize.rows == targetRows
+    }
+
+    func preserveCurrentOwnerGeometryForParking() {
+        guard let session else { return }
+        let size = ghostty_session_size(session)
+        let width = size.width_px > 0 ? size.width_px : (lastKnownPixelSize?.width ?? 0)
+        let height = size.height_px > 0 ? size.height_px : (lastKnownPixelSize?.height ?? 0)
+        guard width > 0, height > 0 else { return }
+        lastKnownPixelSize = (width, height)
+        syncHiddenHostWindowSize(width: width, height: height)
     }
 
     func snapshot() -> GhosttyTerminalSnapshot? {
@@ -248,6 +289,17 @@ import spacesterminalcore
         return hostWindow
     }
 
+    private func syncHiddenHostWindowSize(width: UInt32, height: UInt32) {
+        guard width > 0, height > 0 else { return }
+        let hostWindow = ensureHiddenHostWindow()
+        let contentSize = NSSize(width: Int(width), height: Int(height))
+        if hostWindow.contentRect(forFrameRect: hostWindow.frame).size != contentSize { hostWindow.setContentSize(contentSize) }
+        if let hiddenHostView, hiddenHostView.frame.size != contentSize {
+            hiddenHostView.frame = NSRect(origin: .zero, size: contentSize)
+            hiddenHostView.layoutSubtreeIfNeeded()
+        }
+    }
+
     private func notifySurfaceCellSizeIfChanged() {
         guard let size = surfaceCellSize() else { return }
         onSurfaceCellSizeChanged?(size.columns, size.rows)
@@ -282,10 +334,13 @@ import spacesterminalcore
                 workingDirectory: flags.contains(.workingDirectory) ? sessionWorkingDirectory() : nil))
     }
 
-    private static func loginShellCommand(shell: String, command: String) -> String {
+    nonisolated static func launchCommand(shell: String, command: String) -> String {
+        if command.hasPrefix("direct:") || command.hasPrefix("shell:") { return command }
         let escaped = command.replacingOccurrences(of: "'", with: "'\\''")
         return "\(shell) -l -c '\(escaped)'"
     }
+
+    nonisolated static func usesLoginShell(command: String) -> Bool { !command.hasPrefix("direct:") }
 
     private nonisolated static let surfaceDataCallback: ghostty_surface_data_cb = { userdata, bytes, len in
         guard let userdata, let bytes, len > 0 else { return }

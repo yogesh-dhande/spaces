@@ -56,9 +56,10 @@ struct SpacesMobileBridgeClient: Sendable {
         return overview
     }
 
-    func fetchState(sessionID: String) async throws -> GhosttyRemoteSessionStatePayload {
+    func fetchState(sessionID: String, timeout: Duration = .seconds(3)) async throws -> GhosttyRemoteSessionStatePayload {
         let response = try await sendRequest(
-            .init(command: "state", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID)
+            .init(command: "state", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID),
+            timeout: timeout
         )
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
         guard let sessionState = response.sessionState else {
@@ -88,9 +89,10 @@ struct SpacesMobileBridgeClient: Sendable {
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
-    func takeOver(sessionID: String, clientID: String) async throws {
+    func takeOver(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws {
         let response = try await sendRequest(
-            .init(command: "takeover", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID, clientID: clientID)
+            .init(command: "takeover", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID, clientID: clientID),
+            timeout: timeout
         )
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }

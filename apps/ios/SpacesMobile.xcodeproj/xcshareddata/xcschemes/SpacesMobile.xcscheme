@@ -35,6 +35,20 @@
                ReferencedContainer = "container:SpacesMobile.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "208F5D8D223E754EF66F12E0"
+               BuildableName = "SpacesMobileUITests.xctest"
+               BlueprintName = "SpacesMobileUITests"
+               ReferencedContainer = "container:SpacesMobile.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -61,6 +75,17 @@
                BlueprintIdentifier = "A22491DEE0C1C690D99FCFB0"
                BuildableName = "SpacesMobileTests.xctest"
                BlueprintName = "SpacesMobileTests"
+               ReferencedContainer = "container:SpacesMobile.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "208F5D8D223E754EF66F12E0"
+               BuildableName = "SpacesMobileUITests.xctest"
+               BlueprintName = "SpacesMobileUITests"
                ReferencedContainer = "container:SpacesMobile.xcodeproj">
             </BuildableReference>
          </TestableReference>

@@ -45,12 +45,26 @@ targets:
         product: spacesterminalcore
       - package: SpacesPackage
         product: spacesterminalmobileghostty
+  SpacesMobileUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - UITests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: SpacesMobile
+    dependencies:
+      - target: SpacesMobile
 schemes:
   SpacesMobile:
     build:
       targets:
         SpacesMobile: all
         SpacesMobileTests: all
+        SpacesMobileUITests: all
     test:
       targets:
         - SpacesMobileTests
+        - SpacesMobileUITests

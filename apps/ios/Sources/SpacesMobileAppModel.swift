@@ -5,17 +5,134 @@ import spacesmobilecore
 private enum SpacesMobileSettingsStore {
     static let settingsKey = "spaces.mobile.connection-settings"
 
-    static func load() -> SpacesMobileConnectionSettings {
-        guard let data = UserDefaults.standard.data(forKey: settingsKey),
-              let decoded = try? JSONDecoder().decode(SpacesMobileConnectionSettings.self, from: data) else {
-            return SpacesMobileConnectionSettings()
+    static func load(environment: [String: String] = ProcessInfo.processInfo.environment) -> SpacesMobileConnectionSettings {
+        let storedSettings: SpacesMobileConnectionSettings
+        if let data = UserDefaults.standard.data(forKey: settingsKey),
+           let decoded = try? JSONDecoder().decode(SpacesMobileConnectionSettings.self, from: data)
+        {
+            storedSettings = decoded
+        } else {
+            storedSettings = SpacesMobileConnectionSettings()
         }
-        return decoded
+
+        return appliedTestOverrides(to: storedSettings, environment: environment)
     }
 
     static func save(_ settings: SpacesMobileConnectionSettings) {
         guard let data = try? JSONEncoder().encode(settings) else { return }
         UserDefaults.standard.set(data, forKey: settingsKey)
+    }
+
+    private static func appliedTestOverrides(
+        to settings: SpacesMobileConnectionSettings,
+        environment: [String: String]
+    ) -> SpacesMobileConnectionSettings {
+        var resolved = settings
+
+        if let host = trimmed(environment["SPACES_MOBILE_TEST_HOST"]) {
+            resolved.host = host
+        }
+        if let port = trimmed(environment["SPACES_MOBILE_TEST_PORT"]).flatMap(Int.init), (1...65535).contains(port) {
+            resolved.port = port
+        }
+        if let authToken = trimmed(environment["SPACES_MOBILE_TEST_AUTH_TOKEN"]) {
+            resolved.authToken = authToken
+        }
+        if let installationID = trimmed(environment["SPACES_MOBILE_TEST_INSTALLATION_ID"]) {
+            resolved.installationID = installationID
+        }
+
+        return resolved
+    }
+
+    private static func trimmed(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
+    }
+}
+
+struct SpacesMobileE2EConfig {
+    static let shared = Self(environment: ProcessInfo.processInfo.environment)
+
+    let targetSessionID: String?
+    let renderDumpPath: String?
+    let eventLogPath: String?
+
+    init(environment: [String: String]) {
+        targetSessionID = Self.trimmed(environment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"])
+        renderDumpPath = Self.trimmed(environment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"])
+        eventLogPath = Self.trimmed(environment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"])
+    }
+
+    var isEnabled: Bool { targetSessionID != nil || renderDumpPath != nil || eventLogPath != nil }
+
+    func matches(sessionID: String) -> Bool {
+        guard let targetSessionID else { return true }
+        return targetSessionID == sessionID
+    }
+
+    private static func trimmed(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
+    }
+
+}
+
+struct SpacesMobileE2ERenderDump: Codable, Equatable {
+    let sessionID: String
+    let title: String
+    let isOwner: Bool
+    let isConnecting: Bool
+    let isBusy: Bool
+    let isSynchronizingOwnership: Bool
+    let viewportColumns: Int?
+    let viewportRows: Int?
+    let lastSentResizeColumns: Int?
+    let lastSentResizeRows: Int?
+    let runtimeColumns: Int?
+    let runtimeRows: Int?
+    let snapshotColumns: Int?
+    let snapshotRows: Int?
+    let errorMessage: String?
+    let visibleText: String
+    let renderedText: String
+    let replayStateKey: String
+    let emittedAt: String
+}
+
+enum SpacesMobileE2EDumpWriter {
+    static func writeCurrentDump(_ dump: SpacesMobileE2ERenderDump, config: SpacesMobileE2EConfig = .shared) {
+        if let renderDumpPath = config.renderDumpPath { writeJSON(dump, to: renderDumpPath) }
+        if let eventLogPath = config.eventLogPath { appendJSONLine(dump, to: eventLogPath) }
+    }
+
+    private static func writeJSON<T: Encodable>(_ value: T, to path: String) {
+        let url = URL(fileURLWithPath: path)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(value)
+            try data.write(to: url, options: [.atomic])
+        } catch {}
+    }
+
+    private static func appendJSONLine<T: Encodable>(_ value: T, to path: String) {
+        let url = URL(fileURLWithPath: path)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
+            let encoder = JSONEncoder()
+            var data = try encoder.encode(value)
+            data.append(0x0A)
+            if FileManager.default.fileExists(atPath: url.path) {
+                let handle = try FileHandle(forWritingTo: url)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            } else {
+                try data.write(to: url, options: [.atomic])
+            }
+        } catch {}
     }
 }
 
@@ -67,10 +184,6 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
     }
 
     var connectionSummary: String { "\(settings.trimmedHost):\(settings.port)" }
-
-    func session(id: String) -> SpacesMobileTerminalSessionSummary? {
-        overview?.sessions.first(where: { $0.id == id })
-    }
 
     func refresh() async {
         guard !isLoading else { return }

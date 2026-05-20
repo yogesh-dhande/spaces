@@ -122,6 +122,7 @@ struct ContentView: View {
                                     sessionRow(session)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityIdentifier("terminal.row.\(session.id)")
                             }
                         } header: {
                             workspaceHeader(group)

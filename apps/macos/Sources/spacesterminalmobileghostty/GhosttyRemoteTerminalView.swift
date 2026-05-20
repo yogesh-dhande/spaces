@@ -8,22 +8,26 @@ import Foundation
 
     public struct GhosttyRemoteTerminalView: UIViewRepresentable {
         public let snapshot: GhosttyTerminalSnapshot?
+        public let replayStateKey: String
         public let fallbackText: String
         public let acceptsInput: Bool
         public let isBusy: Bool
+        public let onRenderedTextChanged: @MainActor (String) -> Void
         public let onViewportSizeChanged: @MainActor (Int, Int) -> Void
         public let onSendText: @MainActor (String) -> Void
         public let onSendKey: @MainActor (String) -> Void
 
         public init(
-            snapshot: GhosttyTerminalSnapshot?, fallbackText: String, acceptsInput: Bool, isBusy: Bool,
-            onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void, onSendText: @escaping @MainActor (String) -> Void,
-            onSendKey: @escaping @MainActor (String) -> Void
+            snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, fallbackText: String, acceptsInput: Bool, isBusy: Bool,
+            onRenderedTextChanged: @escaping @MainActor (String) -> Void = { _ in }, onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
+            onSendText: @escaping @MainActor (String) -> Void, onSendKey: @escaping @MainActor (String) -> Void
         ) {
             self.snapshot = snapshot
+            self.replayStateKey = replayStateKey
             self.fallbackText = fallbackText
             self.acceptsInput = acceptsInput
             self.isBusy = isBusy
+            self.onRenderedTextChanged = onRenderedTextChanged
             self.onViewportSizeChanged = onViewportSizeChanged
             self.onSendText = onSendText
             self.onSendKey = onSendKey
@@ -36,29 +40,31 @@ import Foundation
             hostView.onViewportSizeChanged = { columns, rows in Task { @MainActor in onViewportSizeChanged(columns, rows) } }
             hostView.onSendText = { text in Task { @MainActor in onSendText(text) } }
             hostView.onSendKey = { key in Task { @MainActor in onSendKey(key) } }
-            hostView.update(snapshot: snapshot, fallbackText: fallbackText)
+            hostView.onRenderedTextChanged = { text in Task { @MainActor in onRenderedTextChanged(text) } }
+            hostView.update(snapshot: snapshot, replayStateKey: replayStateKey, fallbackText: fallbackText)
         }
     }
 
-    @MainActor public final class GhosttyRemoteTerminalHostView: UIView, UIKeyInput {
-        private static let carrierCommand = "while :; do /bin/sleep 3600; done"
+    @MainActor public final class GhosttyRemoteTerminalHostView: UIView, UIKeyInput, UITextInputTraits {
+        private static let carrierCommand = "direct:/bin/cat"
         private static let defaultFontSize: Float = 13
         private static let contentInsets = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         private var session: ghostty_session_t?
         private var lastSnapshot: GhosttyTerminalSnapshot?
         private var lastViewportSnapshot: GhosttyTerminalSnapshot?
         private var lastReplayPixelSize = CGSize.zero
+        private var lastReplayStateKey: String?
         private let fallbackLabel = UILabel()
         private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput))
+        private lazy var scrollPanRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan))
+        private var lastScrollTranslation = CGPoint.zero
+        private var lastEmittedRenderedText: String?
 
         public var acceptsTerminalInput = false
         public var onViewportSizeChanged: ((Int, Int) -> Void)?
         public var onSendText: ((String) -> Void)?
         public var onSendKey: ((String) -> Void)?
-
-        public override var canBecomeFirstResponder: Bool { acceptsTerminalInput }
-
-        public var hasText: Bool { false }
+        public var onRenderedTextChanged: ((String) -> Void)?
         public var autocorrectionType: UITextAutocorrectionType = .no
         public var autocapitalizationType: UITextAutocapitalizationType = .none
         public var spellCheckingType: UITextSpellCheckingType = .no
@@ -66,14 +72,19 @@ import Foundation
         public var smartDashesType: UITextSmartDashesType = .no
         public var smartInsertDeleteType: UITextSmartInsertDeleteType = .no
         public var keyboardType: UIKeyboardType = .asciiCapable
-        public var keyboardAppearance: UIKeyboardAppearance = .default
+        public var keyboardAppearance: UIKeyboardAppearance = .dark
         public var returnKeyType: UIReturnKeyType = .default
         public var enablesReturnKeyAutomatically = false
+        public override var canBecomeFirstResponder: Bool { acceptsTerminalInput }
+        public var hasText: Bool { false }
 
         public override init(frame: CGRect) {
             super.init(frame: frame)
             backgroundColor = UIColor(red: 0.10, green: 0.12, blue: 0.15, alpha: 1)
             isOpaque = true
+            isAccessibilityElement = true
+            accessibilityIdentifier = "terminal.surface"
+            accessibilityLabel = "Terminal surface"
             configureFallbackLabel()
             configureGestures()
         }
@@ -111,19 +122,31 @@ import Foundation
             ]
         }
 
-        public func update(snapshot: GhosttyTerminalSnapshot?, fallbackText: String) {
+        public func update(snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, fallbackText: String) {
             ensureSession()
+            if let lastReplayStateKey, lastReplayStateKey != replayStateKey {
+                lastViewportSnapshot = nil
+                lastReplayPixelSize = .zero
+            }
             fallbackLabel.text = snapshot == nil ? fallbackText : nil
             fallbackLabel.isHidden = snapshot != nil
             syncFirstResponder()
 
-            guard let session, let snapshot else { return }
+            guard let session, let snapshot else {
+                emitRenderedTextIfNeeded()
+                return
+            }
             let viewportSnapshot = viewportSnapshot(for: snapshot, session: session)
-            guard lastViewportSnapshot != viewportSnapshot || lastReplayPixelSize != currentPixelSize else { return }
+            guard lastViewportSnapshot != viewportSnapshot || lastReplayPixelSize != currentPixelSize else {
+                emitRenderedTextIfNeeded()
+                return
+            }
             replay(snapshot: viewportSnapshot, into: session)
             lastSnapshot = snapshot
             lastViewportSnapshot = viewportSnapshot
             lastReplayPixelSize = currentPixelSize
+            lastReplayStateKey = replayStateKey
+            emitRenderedTextIfNeeded()
         }
 
         public func insertText(_ text: String) {
@@ -146,6 +169,22 @@ import Foundation
         @objc private func handleTapToActivateInput() {
             guard acceptsTerminalInput else { return }
             becomeFirstResponder()
+        }
+
+        @objc private func handleScrollPan(_ recognizer: UIPanGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                lastScrollTranslation = recognizer.translation(in: self)
+                if acceptsTerminalInput { becomeFirstResponder() }
+            case .changed:
+                let translation = recognizer.translation(in: self)
+                let deltaX = translation.x - lastScrollTranslation.x
+                let deltaY = translation.y - lastScrollTranslation.y
+                lastScrollTranslation = translation
+                guard abs(deltaX) > 0.5 || abs(deltaY) > 0.5 else { return }
+                _ = sendScroll(horizontal: -deltaX * 2, vertical: -deltaY * 2)
+            default: lastScrollTranslation = .zero
+            }
         }
 
         @objc private func handleEscape() { onSendKey?("esc") }
@@ -172,6 +211,9 @@ import Foundation
         private func configureGestures() {
             activateInputRecognizer.cancelsTouchesInView = false
             addGestureRecognizer(activateInputRecognizer)
+            scrollPanRecognizer.cancelsTouchesInView = false
+            if #available(iOS 13.4, *) { scrollPanRecognizer.allowedScrollTypesMask = [.continuous, .discrete] }
+            addGestureRecognizer(scrollPanRecognizer)
         }
 
         private func ensureSession() {
@@ -193,6 +235,7 @@ import Foundation
             sessionConfig.surface.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(uiview: Unmanaged.passUnretained(self).toOpaque()))
             sessionConfig.surface.scale_factor = scaleFactor
             sessionConfig.surface.font_size = Self.defaultFontSize
+            sessionConfig.surface.use_login_shell = false
             let createdSession = Self.carrierCommand.withCString { commandPointer in
                 sessionConfig.surface.command = commandPointer
                 return ghostty_session_new(app, &sessionConfig)
@@ -208,8 +251,7 @@ import Foundation
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
                 ghostty_session_process_output(session, baseAddress, UInt(vt.count))
             }
-            ghostty_session_refresh(session)
-            GhosttyMobileAppService.shared.tick()
+            requestSurfaceRefresh()
         }
 
         private func syncSessionState() {
@@ -220,8 +262,7 @@ import Foundation
             ghostty_session_set_focus(session, isFirstResponder)
             ghostty_session_set_occlusion(session, window != nil && !isHidden && alpha > 0.001)
             ghostty_session_set_size(session, UInt32(max(pixelSize.width, 1)), UInt32(max(pixelSize.height, 1)))
-            ghostty_session_refresh(session)
-            GhosttyMobileAppService.shared.tick()
+            requestSurfaceRefresh()
             notifyViewportSizeIfChanged()
             if let lastSnapshot, pixelSize.width > 1, pixelSize.height > 1, lastReplayPixelSize != pixelSize {
                 let viewportSnapshot = viewportSnapshot(for: lastSnapshot, session: session)
@@ -230,6 +271,22 @@ import Foundation
                 lastReplayPixelSize = pixelSize
             }
             syncFirstResponder()
+        }
+
+        @discardableResult private func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+            guard let session else { return false }
+            let surface = ghostty_session_surface(session)
+            ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), 0)
+            requestSurfaceRefresh()
+            return true
+        }
+
+        private func requestSurfaceRefresh() {
+            guard let session else { return }
+            ghostty_session_refresh(session)
+            GhosttyMobileAppService.shared.tick()
+            setNeedsDisplay()
+            layer.setNeedsDisplay()
         }
 
         private func syncFirstResponder() {
@@ -242,7 +299,7 @@ import Foundation
             let localColumns = Int(localSize.columns)
             let localRows = Int(localSize.rows)
             guard localColumns > 0, localRows > 0 else { return snapshot }
-            return GhosttyTerminalSnapshotViewport.crop(snapshot, columns: localColumns, rows: localRows)
+            return GhosttyTerminalSnapshotViewport.crop(snapshot, columns: localColumns, rows: localRows, horizontalAlignment: .leading)
         }
 
         private var scaleFactor: Double { Double(window?.screen.scale ?? UIScreen.main.scale) }
@@ -279,6 +336,16 @@ import Foundation
                 columns: Int(snapshot.columns), rows: Int(snapshot.rows), cursorColumn: Int(snapshot.cursor_column),
                 cursorRow: Int(snapshot.cursor_row), cursorVisible: snapshot.cursor_visible, defaultForegroundRGB: snapshot.default_foreground_rgb,
                 defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells)
+        }
+
+        private func emitRenderedTextIfNeeded() {
+            let renderedText =
+                if let snapshot = capturedSnapshotForTesting() { GhosttyTerminalSnapshotLayout.plainText(for: snapshot) } else {
+                    fallbackLabel.text ?? ""
+                }
+            guard renderedText != lastEmittedRenderedText else { return }
+            lastEmittedRenderedText = renderedText
+            onRenderedTextChanged?(renderedText)
         }
     }
 #endif

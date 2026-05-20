@@ -36,7 +36,10 @@ public enum GhosttyTerminalSnapshotVTEncoder {
 
     public static func encode(_ snapshot: GhosttyTerminalSnapshot) -> Data {
         var buffer = Data()
-        append("\u{1B}c", to: &buffer)
+        append("\u{1B}[?25l", to: &buffer)
+        append("\u{1B}[0m", to: &buffer)
+        append("\u{1B}[H", to: &buffer)
+        append("\u{1B}[2J", to: &buffer)
 
         guard snapshot.columns > 0, snapshot.rows > 0 else { return buffer }
 
@@ -59,6 +62,7 @@ public enum GhosttyTerminalSnapshotVTEncoder {
 
                 append(displayString(for: cell), to: &buffer)
             }
+            append("\u{1B}[K", to: &buffer)
         }
 
         append("\u{1B}[0m", to: &buffer)

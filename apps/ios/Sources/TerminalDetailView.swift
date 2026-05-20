@@ -8,7 +8,9 @@ struct TerminalDetailView: View {
     let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
     let onBack: () -> Void
 
+    @State private var renderedText = ""
     @State private var model: TerminalViewerModel
+    private let e2eConfig = SpacesMobileE2EConfig.shared
 
     init(
         session: SpacesMobileTerminalSessionSummary,
@@ -38,9 +40,13 @@ struct TerminalDetailView: View {
 
             GhosttyRemoteTerminalView(
                 snapshot: model.snapshot,
+                replayStateKey: model.replayStateKey,
                 fallbackText: model.visibleText,
-                acceptsInput: model.isOwner,
-                isBusy: model.isBusy,
+                acceptsInput: model.acceptsInput,
+                isBusy: model.isBusy || model.isSynchronizingOwnership,
+                onRenderedTextChanged: { text in
+                    renderedText = text
+                },
                 onViewportSizeChanged: { columns, rows in
                     model.updateViewportSize(columns: columns, rows: rows)
                 },
@@ -60,7 +66,9 @@ struct TerminalDetailView: View {
         .background(Color(red: 0.10, green: 0.12, blue: 0.15).ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .task { model.start() }
+        .task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }
         .onDisappear { model.stop() }
+        .accessibilityIdentifier("terminal.detail.\(session.id)")
     }
 
     private var topOverlay: some View {
@@ -71,6 +79,7 @@ struct TerminalDetailView: View {
                 Image(systemName: "chevron.left")
                     .font(.headline.weight(.semibold))
             }
+            .accessibilityIdentifier("terminal.back")
 
             Spacer(minLength: 0)
 
@@ -78,12 +87,14 @@ struct TerminalDetailView: View {
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
+                .accessibilityIdentifier("terminal.title")
 
             Spacer(minLength: 0)
 
             Group {
                 if model.isOwner {
                     chromeBadge("Owner")
+                        .accessibilityIdentifier("terminal.ownerBadge")
                 } else {
                     chromeButton {
                         Task { await model.takeOver() }
@@ -92,6 +103,7 @@ struct TerminalDetailView: View {
                             .font(.headline.weight(.semibold))
                     }
                     .disabled(model.isBusy)
+                    .accessibilityIdentifier("terminal.takeover")
                 }
             }
         }
@@ -139,5 +151,47 @@ struct TerminalDetailView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .background(Color(uiColor: .secondarySystemBackground))
+            .accessibilityIdentifier("terminal.errorBanner")
+    }
+
+    private var e2eDumpStateKey: String {
+        [
+            model.title,
+            model.replayStateKey,
+            model.isOwner ? "owner" : "viewer",
+            model.isConnecting ? "connecting" : "steady",
+            model.isBusy ? "busy" : "idle",
+            model.isSynchronizingOwnership ? "syncing" : "synced",
+            model.errorMessage ?? "",
+            renderedText,
+        ].joined(separator: "|")
+    }
+
+    private func writeE2EDumpIfNeeded() {
+        guard e2eConfig.isEnabled, e2eConfig.matches(sessionID: session.id) else { return }
+        SpacesMobileE2EDumpWriter.writeCurrentDump(
+            .init(
+                sessionID: session.id,
+                title: model.title,
+                isOwner: model.isOwner,
+                isConnecting: model.isConnecting,
+                isBusy: model.isBusy,
+                isSynchronizingOwnership: model.isSynchronizingOwnership,
+                viewportColumns: model.viewportColumns,
+                viewportRows: model.viewportRows,
+                lastSentResizeColumns: model.lastSentResizeColumns,
+                lastSentResizeRows: model.lastSentResizeRows,
+                runtimeColumns: model.runtimeColumns,
+                runtimeRows: model.runtimeRows,
+                snapshotColumns: model.snapshotColumns,
+                snapshotRows: model.snapshotRows,
+                errorMessage: model.errorMessage,
+                visibleText: model.visibleText,
+                renderedText: renderedText,
+                replayStateKey: model.replayStateKey,
+                emittedAt: model.latestState?.emittedAt ?? ISO8601DateFormatter().string(from: Date())
+            ),
+            config: e2eConfig
+        )
     }
 }

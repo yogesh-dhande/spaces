@@ -23,6 +23,7 @@ import spacesterminalcore
     private let launchConfiguration: TerminalSessionLaunchConfiguration
     private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
     private var renderer: ghostty_renderer_t?
+    private var desiredAttachmentMode: TerminalAttachmentMode = .owner
     private var pendingSurfaceCreation = false
     private nonisolated(unsafe) var screenChangeObserver: NSObjectProtocol?
     private nonisolated(unsafe) var occlusionObserver: NSObjectProtocol?
@@ -44,7 +45,7 @@ import spacesterminalcore
     private var debugSurfaceRefreshRequestCountValue = 0
     private var debugSurfaceRefreshPerformedCountValue = 0
 
-    public var surface: ghostty_surface_t? { sessionDriver.surface }
+    public var surface: ghostty_surface_t? { sessionDriver.rendererSurface(renderer) ?? sessionDriver.surface }
 
     public convenience init(launchConfiguration: TerminalSessionLaunchConfiguration) {
         self.init(
@@ -314,14 +315,37 @@ import spacesterminalcore
 
     public func foregroundPID() -> Int32? { sessionDriver.foregroundPID() }
 
-    public func surfaceCellSize() -> (columns: Int, rows: Int)? { sessionDriver.surfaceCellSize() }
+    public func surfaceCellSize() -> (columns: Int, rows: Int)? {
+        guard let surface else { return sessionDriver.surfaceCellSize() }
+        let size = ghostty_surface_size(surface)
+        guard size.columns > 0, size.rows > 0 else { return sessionDriver.surfaceCellSize() }
+        return (Int(size.columns), Int(size.rows))
+    }
+
+    public func sessionCellSize() -> (columns: Int, rows: Int)? { sessionDriver.surfaceCellSize() }
 
     @discardableResult public func resizeCellGrid(columns: Int, rows: Int) -> Bool { sessionDriver.resizeCellGrid(columns: columns, rows: rows) }
 
     public func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { sessionDriver.setOutputHandler(handler) }
     public func setFocused(_ focused: Bool) { setSurfaceFocus(focused) }
-    public func snapshot() -> GhosttyTerminalSnapshot? { sessionDriver.snapshot() }
-    public func snapshotText() -> String? { sessionDriver.snapshotText() }
+    public func snapshot() -> GhosttyTerminalSnapshot? { GhosttyTerminalSnapshotCapture.captureFromSurface(surface) }
+    public func snapshotText() -> String? { GhosttyTerminalSnapshotCapture.captureText(from: surface) }
+    public func sessionSnapshot() -> GhosttyTerminalSnapshot? { sessionDriver.snapshot() }
+    public func sessionSnapshotText() -> String? {
+        guard let snapshot = sessionDriver.snapshot() else { return nil }
+        return GhosttyTerminalSnapshotLayout.plainText(for: snapshot)
+    }
+
+    public func setAttachmentMode(_ mode: TerminalAttachmentMode) {
+        guard desiredAttachmentMode != mode else { return }
+        if desiredAttachmentMode == .owner, mode == .viewer { sessionDriver.preserveCurrentOwnerGeometryForParking() }
+        desiredAttachmentMode = mode
+        guard renderer != nil else {
+            createSurfaceIfNeeded()
+            return
+        }
+        createSurfaceIfNeeded()
+    }
 
     private func installSurfaceHostView(_ hostView: GhosttyEmbeddedSurfaceHostView) {
         hostView.translatesAutoresizingMaskIntoConstraints = false
@@ -433,8 +457,14 @@ import spacesterminalcore
                 var initialHost = makeSurfaceHost(for: surfaceHostView)
                 renderer = ghostty_renderer_new(&initialHost)
             }
-            guard renderer != nil, sessionDriver.attachRenderer(renderer) else {
-                throw GhosttyEmbeddedAppServiceError.configuration("ghostty_renderer_attach failed")
+            let attachSucceeded: Bool
+            switch desiredAttachmentMode {
+            case .owner: attachSucceeded = sessionDriver.attachRenderer(renderer)
+            case .viewer: attachSucceeded = sessionDriver.attachViewerRenderer(renderer)
+            }
+            guard renderer != nil, attachSucceeded else {
+                throw GhosttyEmbeddedAppServiceError.configuration(
+                    desiredAttachmentMode == .owner ? "ghostty_renderer_attach failed" : "ghostty_renderer_attach_viewer failed")
             }
 
             boundSurfaceWindowNumber = window?.windowNumber
@@ -448,7 +478,7 @@ import spacesterminalcore
             updateSurfaceGeometry()
             updateWindowVisibility()
             setSurfaceFocus(window?.isKeyWindow == true && window?.firstResponder === self)
-            sessionDriver.requestSurfaceRefresh()
+            if let surface { ghostty_surface_refresh(surface) }
             TerminalPerformance.logMetric(
                 "terminal_surface_create", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
@@ -505,7 +535,13 @@ import spacesterminalcore
         let geometry = SurfaceGeometry(width: backingSize.width, height: backingSize.height, scale: scale, displayID: displayID)
         guard geometry != lastGeometry else { return }
         layer?.contentsScale = window.backingScaleFactor
-        sessionDriver.updateGeometry(width: geometry.width, height: geometry.height, scale: scale, displayID: displayID)
+        if desiredAttachmentMode == .owner {
+            sessionDriver.updateGeometry(width: geometry.width, height: geometry.height, scale: scale, displayID: displayID)
+        } else if sessionDriver.rendererIsOwner(renderer) == false, let viewerSurface = sessionDriver.rendererSurface(renderer) {
+            ghostty_surface_set_content_scale(viewerSurface, scale, scale)
+            if let displayID { ghostty_surface_set_display_id(viewerSurface, displayID) }
+            ghostty_surface_set_size(viewerSurface, geometry.width, geometry.height)
+        }
         lastGeometry = geometry
     }
 
@@ -726,17 +762,17 @@ import spacesterminalcore
     }
 
     private func setSurfaceFocus(_ focused: Bool) {
-        guard surface != nil else { return }
+        guard let surface else { return }
         guard lastFocused != focused else { return }
         lastFocused = focused
-        sessionDriver.setFocused(focused)
+        ghostty_surface_set_focus(surface, focused)
     }
 
     private func setSurfaceOcclusion(_ occluded: Bool) {
-        guard surface != nil else { return }
+        guard let surface else { return }
         guard lastOccluded != occluded else { return }
         lastOccluded = occluded
-        sessionDriver.setOccluded(occluded)
+        ghostty_surface_set_occlusion(surface, occluded)
     }
 
     private func performSurfaceRefresh() {
@@ -748,7 +784,7 @@ import spacesterminalcore
         surfaceHostView.layoutSubtreeIfNeeded()
         window?.contentView?.layoutSubtreeIfNeeded()
         GhosttyEmbeddedAppService.shared.tick()
-        sessionDriver.requestSurfaceRefresh()
+        if let surface { ghostty_surface_refresh(surface) }
         surfaceHostView.needsDisplay = true
         surfaceHostView.layer?.setNeedsDisplay()
         needsDisplay = true

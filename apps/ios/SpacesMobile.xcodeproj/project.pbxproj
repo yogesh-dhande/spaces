@@ -12,6 +12,7 @@
 		246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */; };
 		317C6199E7E4075EFA52B4F7 /* SpacesMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A8A24AA9252CFEE41B435E /* SpacesMobileApp.swift */; };
 		33641B9B5F7C4A0AE09EEA5D /* ConnectionSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEBBC1D6B0751E287CF24826 /* ConnectionSettingsView.swift */; };
+		3A856B3C563D5D2DEB3746F0 /* SpacesMobileUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 160A1AE591A4376DA6C06AE7 /* SpacesMobileUITests.swift */; };
 		3E6556FA28213E142655B870 /* SpacesMobileBridgeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAC519ED5515A6509CAD7C1F /* SpacesMobileBridgeClient.swift */; };
 		4073E59B929A6A3937DC57A8 /* GhosttyMobileAppServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */; };
 		63CAF57DC64D2ABDDFFD193A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9747BD35A2E71FC54E592EEA /* ContentView.swift */; };
@@ -23,10 +24,22 @@
 		F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		94ED4BD14F2CA26295F56C83 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 40FC7BE745B5FC2BE6F64E8A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 4949E5F0DB06D967871C1581;
+			remoteInfo = SpacesMobile;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		160A1AE591A4376DA6C06AE7 /* SpacesMobileUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileUITests.swift; sourceTree = "<group>"; };
 		2A942269988694E66C1CA6F4 /* SpacesMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SpacesMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModel.swift; sourceTree = "<group>"; };
 		41C157DD37A42EDAF1DC5407 /* macos */ = {isa = PBXFileReference; lastKnownFileType = folder; name = macos; path = ../macos; sourceTree = SOURCE_ROOT; };
+		5B16B0331923D686A4D0AEE5 /* SpacesMobileUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalDetailView.swift; sourceTree = "<group>"; };
 		89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyMobileAppServiceTests.swift; sourceTree = "<group>"; };
 		963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileConnectionSettings.swift; sourceTree = "<group>"; };
@@ -89,6 +102,7 @@
 			children = (
 				2A942269988694E66C1CA6F4 /* SpacesMobile.app */,
 				E27B3DF6C14953F91F1A311D /* SpacesMobileTests.xctest */,
+				5B16B0331923D686A4D0AEE5 /* SpacesMobileUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -99,6 +113,7 @@
 				CB2D338B9B55AD82C84E6311 /* Packages */,
 				503B7623EC298940F0110912 /* Sources */,
 				504A7EEA4BE7AE55C6855384 /* Tests */,
+				E5AB46FF545C04AB6319A6DB /* UITests */,
 				80C53D729D7E7F3AB9BBDC82 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -111,9 +126,35 @@
 			name = Packages;
 			sourceTree = "<group>";
 		};
+		E5AB46FF545C04AB6319A6DB /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				160A1AE591A4376DA6C06AE7 /* SpacesMobileUITests.swift */,
+			);
+			path = UITests;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		208F5D8D223E754EF66F12E0 /* SpacesMobileUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8AE2A712028AC613F5CB8728 /* Build configuration list for PBXNativeTarget "SpacesMobileUITests" */;
+			buildPhases = (
+				F98C80571E50298C7333EAE0 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E45C753C89796A5F0734DC9F /* PBXTargetDependency */,
+			);
+			name = SpacesMobileUITests;
+			packageProductDependencies = (
+			);
+			productName = SpacesMobileUITests;
+			productReference = 5B16B0331923D686A4D0AEE5 /* SpacesMobileUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		4949E5F0DB06D967871C1581 /* SpacesMobile */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = F08D22918FFEF938C30D1670 /* Build configuration list for PBXNativeTarget "SpacesMobile" */;
@@ -164,6 +205,9 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					208F5D8D223E754EF66F12E0 = {
+						TestTargetID = 4949E5F0DB06D967871C1581;
+					};
 				};
 			};
 			buildConfigurationList = 74BB21C3A542A232791869C7 /* Build configuration list for PBXProject "SpacesMobile" */;
@@ -185,6 +229,7 @@
 			targets = (
 				4949E5F0DB06D967871C1581 /* SpacesMobile */,
 				A22491DEE0C1C690D99FCFB0 /* SpacesMobileTests */,
+				208F5D8D223E754EF66F12E0 /* SpacesMobileUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -213,9 +258,42 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F98C80571E50298C7333EAE0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3A856B3C563D5D2DEB3746F0 /* SpacesMobileUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		E45C753C89796A5F0734DC9F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 4949E5F0DB06D967871C1581 /* SpacesMobile */;
+			targetProxy = 94ED4BD14F2CA26295F56C83 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		04AEF474E3DCD45090DBB997 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = SpacesMobile;
+			};
+			name = Release;
+		};
 		32CCF7925A66533B41036DDA /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -413,6 +491,23 @@
 			};
 			name = Debug;
 		};
+		FD8D832BA71CD4EC5080BAAF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = SpacesMobile;
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -421,6 +516,15 @@
 			buildConfigurations = (
 				32CCF7925A66533B41036DDA /* Debug */,
 				985CD486AA72A37850F6CB23 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8AE2A712028AC613F5CB8728 /* Build configuration list for PBXNativeTarget "SpacesMobileUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FD8D832BA71CD4EC5080BAAF /* Debug */,
+				04AEF474E3DCD45090DBB997 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
