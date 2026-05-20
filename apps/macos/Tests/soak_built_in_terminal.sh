@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 source "$SCRIPT_DIR/terminal_harness_lock.sh"
+source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
@@ -13,6 +14,7 @@ FIXTURE_SCRIPT="$SCRIPT_DIR/terminal_stress_fixture.py"
 
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-terminal-soak.XXXXXX")}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
+RUNTIME_DIR="${SPACES_RUNTIME_DIR:-$WORK_ROOT/runtime}"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 SAMPLES_PATH="$WORK_ROOT/samples.tsv"
 SUMMARY_PATH="$WORK_ROOT/summary.txt"
@@ -97,9 +99,8 @@ cd "$REPO_ROOT"
 acquire_terminal_harness_lock
 "$SETUP_GHOSTTYKIT"
 
-pkill -x SpacesApp >/dev/null 2>&1 || true
-pkill -f "$SPACES_APP" >/dev/null 2>&1 || true
-env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
+SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI"
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
 sleep 3
 
@@ -111,16 +112,16 @@ if [[ "$SOAK_MODE" == "repaint_viewer" ]]; then
   fixture_mode="repaint"
   session_title="soak-repaint-viewer"
 fi
-command_output="$(env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "python3 '$FIXTURE_SCRIPT' --mode $fixture_mode --frames $frames --rows $ROWS --width 72 --sleep-ms $sleep_ms" --title "$session_title")"
+command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "python3 '$FIXTURE_SCRIPT' --mode $fixture_mode --frames $frames --rows $ROWS --width 72 --sleep-ms $sleep_ms" --title "$session_title")"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse soak session ID" >&2; exit 1; }
 wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=owner"
 if [[ "$SOAK_MODE" == "repaint_viewer" ]]; then
-  env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal show "$session_id" --viewer >/dev/null
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal show "$session_id" --viewer >/dev/null
   wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=viewer"
 fi
 
-session_dir="$(dirname "$DB_PATH")/terminal/sessions/$session_id"
+session_dir="$RUNTIME_DIR/terminal/sessions/$session_id"
 output_log="$session_dir/output.log"
 
 echo -e "elapsed_s\trss_kb\tcpu_percent\ttail_ms\toutput_bytes\tviewer_present_count" >"$SAMPLES_PATH"
@@ -133,7 +134,7 @@ while true; do
   fi
   read -r rss_kb cpu_percent <<<"$(ps -o rss=,%cpu= -p "$APP_PID" | awk '{print $1, $2}')"
   tail_started="$(python_ms_now)"
-  tail_output="$(env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal tail "$session_id" --lines 120)"
+  tail_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal tail "$session_id" --lines 120)"
   tail_finished="$(python_ms_now)"
   tail_ms=$((tail_finished - tail_started))
   output_bytes="$(wc -c <"$output_log" | tr -d ' ')"

@@ -1,4 +1,5 @@
 import Foundation
+import spacesterminalcore
 
 public enum IPCNotification {
     public static let agentEventFired = Notification.Name("spaces.ipc.agent-event-fired")
@@ -25,4 +26,6 @@ public enum IPCNotification {
     public static let terminalAttachmentModeUserInfoKey = "terminal_attachment_mode"
     public static let focusRequestIDUserInfoKey = "focus_request_id"
     public static let outputPathUserInfoKey = "output_path"
+
+    public static func currentObject() throws -> String { try SpacesProfile.current().ipcNotificationObject }
 }

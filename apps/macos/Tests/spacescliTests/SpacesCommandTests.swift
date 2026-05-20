@@ -202,7 +202,62 @@ final class MXCommandTests: XCTestCase {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
         XCTAssertEqual(
             subcommands,
-            ["ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "SignalCommand", "TerminalCommand", "MobileCommand"])
+            [
+                "ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "SignalCommand", "TerminalCommand",
+                "MobileCommand", "ProfileCommand",
+            ])
+    }
+
+    func testProfileShowShellOutputIncludesDatabaseAndRuntimeExports() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let databasePath = root.appendingPathComponent("spaces.db").path
+        let runtimePath = root.appendingPathComponent("runtime").path
+        let originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let originalRuntimePath = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
+        setenv("SPACES_DB_PATH", databasePath, 1)
+        setenv("SPACES_RUNTIME_DIR", runtimePath, 1)
+        defer {
+            if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+            if let originalRuntimePath { setenv("SPACES_RUNTIME_DIR", originalRuntimePath, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let output = try captureStandardOutput {
+            let command = try ProfileShowCommand.parse(["--shell"])
+            try command.run()
+        }
+
+        XCTAssertTrue(output.contains("export SPACES_DB_PATH='\(databasePath)'"))
+        XCTAssertTrue(output.contains("export SPACES_RUNTIME_DIR='\(runtimePath)'"))
+    }
+
+    func testDeliverDesktopControlBusyNotificationUsesAppleScriptDisplayNotification() throws {
+        let captureURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let originalCapture = ProcessInfo.processInfo.environment["SPACES_OSASCRIPT_CAPTURE"]
+        setenv("SPACES_OSASCRIPT_CAPTURE", captureURL.path, 1)
+        defer {
+            if let originalCapture { setenv("SPACES_OSASCRIPT_CAPTURE", originalCapture, 1) } else { unsetenv("SPACES_OSASCRIPT_CAPTURE") }
+            try? FileManager.default.removeItem(at: captureURL)
+        }
+
+        let osascriptMock = """
+            #!/bin/sh
+            printf '%s' "$2" > "$SPACES_OSASCRIPT_CAPTURE"
+            """
+
+        let owner = SpacesProcessLeaseOwner(
+            pid: 4321, executablePath: "/tmp/SpacesApp", profileRoot: "/tmp/.spaces-dev/profiles/spaces/parallel-f46abb6175b3", token: "owner-token",
+            acquiredAt: "2026-05-17T00:00:00Z")
+
+        try withMockCommands(["osascript": osascriptMock]) { deliverDesktopControlBusyNotification(owner: owner) }
+
+        let script = try String(contentsOf: captureURL, encoding: .utf8)
+        XCTAssertTrue(script.contains("display notification"))
+        XCTAssertTrue(script.contains("Close Spaces When You're Done"))
+        XCTAssertTrue(script.contains("A real-system Spaces workflow is waiting"))
+        XCTAssertTrue(script.contains("pid 4321"))
+        XCTAssertTrue(script.contains("parallel-f46abb6175b3"))
     }
 
     private func captureStandardOutput(_ body: () throws -> Void) throws -> String {

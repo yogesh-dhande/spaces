@@ -1262,15 +1262,11 @@ final class OrchestratorTests: XCTestCase {
             }
         }
 
-        var zombiePIDText: String?
-        let deadline = Date().addingTimeInterval(2)
-        while Date() < deadline {
-            zombiePIDText = try? String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-            if zombiePIDText?.isEmpty == false { break }
-            usleep(50_000)
-        }
-        let zombiePID = try XCTUnwrap(zombiePIDText.flatMap(Int.init))
-        usleep(200_000)
+        let deadline = Date().addingTimeInterval(5)
+        while !FileManager.default.fileExists(atPath: pidFile.path), Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pidFile.path))
+        let zombiePID = try XCTUnwrap(Int(String(contentsOf: pidFile).trimmingCharacters(in: .whitespacesAndNewlines)))
+        Thread.sleep(forTimeInterval: 0.2)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -7138,11 +7134,32 @@ final class OrchestratorTests: XCTestCase {
     }
 
     private func makeLsRemoteFailingGitClient() throws -> GitClient {
-        let root = try makeTempDirectory()
-        let script = root.appendingPathComponent("git")
+        let toolsRoot = try makeExecutableTestToolsDirectory()
+        let script = toolsRoot.appendingPathComponent("git")
         let contents = """
             #!/bin/sh
-            if [ "${3:-}" = "ls-remote" ]; then
+            subcommand=""
+            expect_value=0
+            for arg in "$@"; do
+              if [ "$expect_value" -eq 1 ]; then
+                expect_value=0
+                continue
+              fi
+              case "$arg" in
+                -C|--git-dir|--work-tree)
+                  expect_value=1
+                  continue
+                  ;;
+                -*)
+                  continue
+                  ;;
+                *)
+                  subcommand="$arg"
+                  break
+                  ;;
+              esac
+            done
+            if [ "$subcommand" = "ls-remote" ]; then
               echo "remote lookup failed" >&2
               exit 128
             fi
@@ -7151,5 +7168,13 @@ final class OrchestratorTests: XCTestCase {
         try contents.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
         return GitClient(gitExecutable: script.path)
+    }
+
+    private func makeExecutableTestToolsDirectory() throws -> URL {
+        let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let directory = packageRoot.appendingPathComponent(".build/test-tools/\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        return directory
     }
 }

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../../.. && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/terminal_harness_lock.sh"
 spaces_app="${SPACES_APP:-$repo_root/apps/macos/.build/debug/SpacesApp}"
 spaces_cli="${SPACES_CLI:-$repo_root/apps/macos/.build/debug/spaces}"
 spacese2e="${SPACES_E2E:-$repo_root/apps/macos/.build/debug/spacese2e}"
@@ -33,6 +35,7 @@ ipad_screenshot=""
 iphone_screenshot=""
 
 cleanup() {
+  release_terminal_harness_lock
   if [[ -n "$bridge_pid" ]]; then
     kill "$bridge_pid" >/dev/null 2>&1 || true
     wait "$bridge_pid" >/dev/null 2>&1 || true
@@ -59,6 +62,8 @@ handle_interrupt() {
 
 trap cleanup EXIT
 trap handle_interrupt INT TERM
+
+acquire_terminal_harness_lock
 
 fail_if_existing_spaces_app() {
   local existing

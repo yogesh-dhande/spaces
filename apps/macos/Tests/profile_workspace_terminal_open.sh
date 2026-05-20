@@ -5,14 +5,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 source "$SCRIPT_DIR/terminal_harness_lock.sh"
+source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
+SPACES_CLI="$BUILD_DIR/spaces"
 MX_E2E_BIN="$BUILD_DIR/spacese2e"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 
 ITERATIONS="${ITERATIONS:-3}"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-workspace-terminal-open.XXXXXX")}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
+RUNTIME_DIR="${SPACES_RUNTIME_DIR:-$WORK_ROOT/runtime}"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 WORKSPACE_INFO_JSON="$WORK_ROOT/workspace.json"
 SUMMARY_PATH="$WORK_ROOT/summary.txt"
@@ -85,6 +88,7 @@ PY
 }
 
 require_binary "$SPACES_APP"
+require_binary "$SPACES_CLI"
 require_binary "$MX_E2E_BIN"
 
 mkdir -p "$(dirname "$DB_PATH")"
@@ -106,19 +110,18 @@ mkdir -p "$PROJECT_DIR"
   git commit -q -m init
 )
 
-env SPACES_DB_PATH="$DB_PATH" "$MX_E2E_BIN" seed-fixture \
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$MX_E2E_BIN" seed-fixture \
   --project-dir "$PROJECT_DIR" \
   --workspace-title "workspace-terminal-open-profile" \
   --docs-url 'http://localhost:$APP_PORT/docs/' \
   --admin-url 'http://localhost:$APP_PORT/admin/' >/dev/null
-env SPACES_DB_PATH="$DB_PATH" "$MX_E2E_BIN" lookup-workspace --project-dir "$PROJECT_DIR" --title "workspace-terminal-open-profile" >"$WORKSPACE_INFO_JSON"
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$MX_E2E_BIN" lookup-workspace --project-dir "$PROJECT_DIR" --title "workspace-terminal-open-profile" >"$WORKSPACE_INFO_JSON"
 
 WORKSPACE_DIR="$(json_get "$WORKSPACE_INFO_JSON" "dir")"
 WORKSPACE_ID="$(json_get "$WORKSPACE_INFO_JSON" "id")"
 
-pkill -x SpacesApp >/dev/null 2>&1 || true
-pkill -f "$SPACES_APP" >/dev/null 2>&1 || true
-env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
+SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI"
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
 sleep 3
 
@@ -135,7 +138,7 @@ import time
 print(time.time())
 PY
 )"
-  env SPACES_DB_PATH="$DB_PATH" "$MX_E2E_BIN" open-workspace-terminal --workspace-dir "$WORKSPACE_DIR" >/dev/null
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$MX_E2E_BIN" open-workspace-terminal --workspace-dir "$WORKSPACE_DIR" >/dev/null
   wait_for_log_pattern_count_greater_than "$ui_pattern" "$ui_baseline" 30
   wait_for_log_pattern_count_greater_than "$wait_pattern" "$wait_baseline" 30
   wait_for_log_pattern_count_greater_than "$summon_pattern" "$summon_baseline" 30

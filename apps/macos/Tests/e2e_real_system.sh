@@ -6,6 +6,7 @@ set -Eeuo pipefail
 # the built-in Spaces terminal runtime, Chrome, and yabai on an interactive desktop session.
 
 ROOT_DIR="$(cd "$(dirname "$0")/../../.." && pwd -P)"
+source "$ROOT_DIR/scripts/spaces-profile-helpers.sh"
 MACOS_DIR="$ROOT_DIR/apps/macos"
 # scripts/swiftpm.sh already changes into apps/macos internally, so the default
 # build command must not add a second package-path override.
@@ -128,7 +129,7 @@ cleanup() {
     kill "${SPACES_PID}" >/dev/null 2>&1 || true
     wait "${SPACES_PID}" >/dev/null 2>&1 || true
   fi
-  pkill -x SpacesApp >/dev/null 2>&1 || true
+  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_stop_running_app "$MX_BIN" "$ACTION_TIMEOUT_SECONDS" || true
   print_run_summary "$exit_code"
   open_final_recording
 }
@@ -400,16 +401,12 @@ reset_fixture_runtime() {
 }
 
 close_existing_spaces_instances() {
-  log_step "closing existing Spaces instances"
-  pkill -x SpacesApp >/dev/null 2>&1 || true
-  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
-  while (( SECONDS < deadline )); do
-    if [[ "$(spaces_instance_count)" == "0" ]]; then
-      return 0
-    fi
-    sleep 0.2
-  done
-  fail "timed out waiting for existing Spaces instances to exit"
+  log_step "stopping any existing Spaces instance for this profile"
+  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_stop_running_app "$MX_BIN" "$ACTION_TIMEOUT_SECONDS" \
+    || fail "timed out waiting for the prior profile-owned Spaces instance to exit"
+  log_step "waiting for desktop control availability"
+  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_wait_for_desktop_control "$MX_BIN" \
+    || fail "desktop control remained busy; retry when the current owner exits"
 }
 
 hide_all_visible_windows() {
@@ -577,27 +574,13 @@ print_recording_summary() {
   fi
 }
 
-spaces_instance_count() {
-  (pgrep -x SpacesApp || true) | wc -l | tr -d ' '
+ensure_profile_spaces_owner() {
+  local expected_pid="$1"
+  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_wait_for_owner_pid "$MX_BIN" "$expected_pid" \
+    "$ACTION_TIMEOUT_SECONDS" || fail "expected Spaces profile owner pid $expected_pid"
 }
 
-ensure_single_spaces_instance() {
-  local expected_pid="${1:-}"
-  local count
-  count="$(spaces_instance_count)"
-  if [[ -n "$expected_pid" ]]; then
-    local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
-    while (( SECONDS < deadline )); do
-      count="$(spaces_instance_count)"
-      if [[ "$count" == "1" ]] && pgrep -x SpacesApp | grep -qx "$expected_pid"; then
-        return 0
-      fi
-      sleep 0.2
-    done
-    fail "expected exactly one Spaces instance with pid $expected_pid, found count=$count"
-  fi
-  [[ "$count" == "1" ]] || fail "expected exactly one Spaces instance, found count=$count"
-}
+ensure_single_spaces_instance() { ensure_profile_spaces_owner "$1" }
 
 launch_spaces() {
   log_step "launching Spaces with isolated HOME=$TMP_HOME"
@@ -605,7 +588,7 @@ launch_spaces() {
   APP_LOG_SEARCH_FROM_LINE=1
   env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" SPACES_E2E_EVENTS_LOG="$EVENT_LOG" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
   SPACES_PID=$!
-  ensure_single_spaces_instance "$SPACES_PID"
+  ensure_profile_spaces_owner "$SPACES_PID"
   wait_for_spaces_launch_ready
   transition_pause "Spaces launch"
 }

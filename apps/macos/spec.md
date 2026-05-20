@@ -84,6 +84,8 @@ Spaces focuses those windows; it does not decide their geometry.
 ## Onboarding
 - On launch, the main window should immediately show a neutral loading state while Spaces checks prerequisites and loads workspace data, so startup never presents a blank window.
 - On launch, Spaces blocks only on the cheap prerequisite checks needed for its default runtime path: yabai installed.
+- Installed builds should default to one shared profile rooted at `~/.spaces/`, while repo-local development builds should default to one profile per git worktree under `~/.spaces-dev/profiles/spaces/`.
+- `SPACES_DB_PATH` should override the default database path for the current process, and `SPACES_RUNTIME_DIR` should override the default runtime root for that same resolved profile.
 - Startup prerequisite checks may enrich command lookup from the user's login-shell PATH, but that lookup must stay bounded and fall back automatically to the inherited PATH plus standard package-manager locations so shell startup files cannot stall app launch indefinitely.
 - When command lookup is enriched from the login-shell PATH, the app's inherited `PATH` remains authoritative. Login-shell entries should only fill gaps that are missing from the launch environment, and built-in package-manager fallbacks should remain last.
 - During first-run setup, Spaces should treat its built-in terminal as the only supported terminal path and should not require any external terminal app.
@@ -93,6 +95,8 @@ Spaces focuses those windows; it does not decide their geometry.
 - If a blocking launch prerequisite fails, the main window shows a guided setup flow starting at the first failing step.
 - The setup flow should poll and recover automatically once the missing prerequisite is fixed.
 - If all prerequisites pass, the main UI should load without an extra setup window.
+- Launching a second app instance for the same profile should fail immediately and identify the existing owner process.
+- Launching a different profile while another Spaces instance already owns desktop-global control should still load profile data and windows, but it should start in passive mode with local in-app shortcuts only and a compact status that global shortcuts are unavailable.
 
 ## Projects
 - Users can add a project from a local directory or a git URL.

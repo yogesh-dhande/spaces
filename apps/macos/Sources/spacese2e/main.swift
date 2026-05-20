@@ -29,7 +29,7 @@ private struct ShowMainWindowCommand: ParsableCommand {
 
     func run() throws {
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.showMainWindow, object: nil, userInfo: nil, options: [.deliverImmediately])
+            IPCNotification.showMainWindow, object: try IPCNotification.currentObject(), userInfo: nil, options: [.deliverImmediately])
         try emitJSON(["success": true])
     }
 }
@@ -39,7 +39,7 @@ private struct HideMainWindowCommand: ParsableCommand {
 
     func run() throws {
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.hideMainWindow, object: nil, userInfo: nil, options: [.deliverImmediately])
+            IPCNotification.hideMainWindow, object: try IPCNotification.currentObject(), userInfo: nil, options: [.deliverImmediately])
         try emitJSON(["success": true])
     }
 }
@@ -52,7 +52,7 @@ private struct ShowWindowIssueModalCommand: ParsableCommand {
 
     func run() throws {
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.showWindowIssueModal, object: nil,
+            IPCNotification.showWindowIssueModal, object: try IPCNotification.currentObject(),
             userInfo: [IPCNotification.titleUserInfoKey: title, IPCNotification.detailUserInfoKey: detail], options: [.deliverImmediately])
         try emitJSON(["success": true])
     }
@@ -73,8 +73,8 @@ private struct SelectWorkspaceDetailCommand: ParsableCommand {
             throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
         }
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.selectWorkspaceDetail, object: nil, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id],
-            options: [.deliverImmediately])
+            IPCNotification.selectWorkspaceDetail, object: try IPCNotification.currentObject(),
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id], options: [.deliverImmediately])
         try emitJSON(
             WorkspaceSummaryPayload(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
@@ -98,8 +98,8 @@ private struct OpenWorkspaceTerminalCommand: ParsableCommand {
             throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
         }
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.openWorkspaceTerminal, object: nil, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id],
-            options: [.deliverImmediately])
+            IPCNotification.openWorkspaceTerminal, object: try IPCNotification.currentObject(),
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id], options: [.deliverImmediately])
         try emitJSON(
             WorkspaceSummaryPayload(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
@@ -576,7 +576,7 @@ private struct CycleWorkspaceWindowCommand: ParsableCommand {
         case "next", "previous":
             let requestID = UUID().uuidString
             DistributedNotificationCenter.default().postNotificationName(
-                IPCNotification.cycleWorkspaceWindow, object: nil,
+                IPCNotification.cycleWorkspaceWindow, object: try IPCNotification.currentObject(),
                 userInfo: [
                     IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.cycleDirectionUserInfoKey: direction,
                     IPCNotification.focusRequestIDUserInfoKey: requestID,
@@ -623,8 +623,8 @@ private struct CloseWorkspaceProcessWindowCommand: ParsableCommand {
             throw ValidationError("Running process has no built-in terminal session: \(processName)")
         }
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.closeTerminalSessionWindow, object: nil, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID],
-            options: [.deliverImmediately])
+            IPCNotification.closeTerminalSessionWindow, object: try IPCNotification.currentObject(),
+            userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID], options: [.deliverImmediately])
         try emitJSON(["workspaceID": workspace.id, "processName": processName, "sessionID": sessionID])
     }
 }
@@ -638,8 +638,8 @@ private struct CloseTerminalSessionWindowCommand: ParsableCommand {
         let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session id.") }
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.closeTerminalSessionWindow, object: nil, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID],
-            options: [.deliverImmediately])
+            IPCNotification.closeTerminalSessionWindow, object: try IPCNotification.currentObject(),
+            userInfo: [IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID], options: [.deliverImmediately])
         try emitJSON(["sessionID": trimmedSessionID])
     }
 }

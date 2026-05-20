@@ -249,8 +249,9 @@ public final class WorkspaceOrchestrator {
         self.notificationDeliverer = notificationDeliverer ?? Self.deliverUserNotification
         self.builtInTerminalWindowOpener =
             builtInTerminalWindowOpener ?? { sessionID, mode in
+                guard let object = try? IPCNotification.currentObject() else { return }
                 DistributedNotificationCenter.default().postNotificationName(
-                    IPCNotification.openTerminalSessionWindow, object: nil,
+                    IPCNotification.openTerminalSessionWindow, object: object,
                     userInfo: [
                         IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalAttachmentModeUserInfoKey: mode.rawValue,
                     ], options: [.deliverImmediately])
@@ -262,13 +263,15 @@ public final class WorkspaceOrchestrator {
                     IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
                 ]
                 if let requestID, !requestID.isEmpty { userInfo[IPCNotification.focusRequestIDUserInfoKey] = requestID }
+                guard let object = try? IPCNotification.currentObject() else { return }
                 DistributedNotificationCenter.default().postNotificationName(
-                    IPCNotification.openTerminalSessionWindow, object: nil, userInfo: userInfo, options: [.deliverImmediately])
+                    IPCNotification.openTerminalSessionWindow, object: object, userInfo: userInfo, options: [.deliverImmediately])
             }
         self.builtInTerminalWindowCloser =
             builtInTerminalWindowCloser ?? { sessionID in
+                guard let object = try? IPCNotification.currentObject() else { return }
                 DistributedNotificationCenter.default().postNotificationName(
-                    IPCNotification.closeTerminalSessionWindow, object: nil, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID],
+                    IPCNotification.closeTerminalSessionWindow, object: object, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID],
                     options: [.deliverImmediately])
             }
         self.builtInTerminalSessionTerminator =
@@ -4813,17 +4816,7 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func runtimeDirectory() throws -> String {
-        let dir: URL
-        if let override = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"], !override.isEmpty {
-            dir = URL(fileURLWithPath: override, isDirectory: true)
-        } else {
-            let home = FileManager.default.homeDirectoryForCurrentUser
-            dir = home.appendingPathComponent(".spaces", isDirectory: true).appendingPathComponent("runtime", isDirectory: true)
-        }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.path
-    }
+    private func runtimeDirectory() throws -> String { try SpacesProfile.current().runtimeDirectory }
 
     func applyEnvVars(_ input: String, env: [String: String]) -> String {
         var output = input

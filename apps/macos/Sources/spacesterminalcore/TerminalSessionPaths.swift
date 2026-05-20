@@ -32,20 +32,21 @@ public struct TerminalSessionPaths: Sendable, Equatable {
     }
 
     public static func forSession(id: String) throws -> TerminalSessionPaths {
-        let spacesDirectory = try spacesHomeDirectory()
-        let root = spacesDirectory.appendingPathComponent("terminal", isDirectory: true).appendingPathComponent("sessions", isDirectory: true)
+        let runtimeDirectory = try spacesRuntimeDirectory()
+        let profileRootDirectory = try spacesProfileRootDirectory()
+        let root = runtimeDirectory.appendingPathComponent("terminal", isDirectory: true).appendingPathComponent("sessions", isDirectory: true)
             .appendingPathComponent(id, isDirectory: true)
         let socketRoot = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent("spaces-terminal-sockets", isDirectory: true)
         try FileManager.default.createDirectory(at: socketRoot, withIntermediateDirectories: true)
-        let socketNamePrefix = socketPathComponent(for: spacesDirectory.path, sessionID: id)
+        let socketNamePrefix = socketPathComponent(for: profileRootDirectory.path, sessionID: id)
         let controlSocketPath = socketRoot.appendingPathComponent("\(socketNamePrefix).sock").path
         let subscriptionSocketPath = socketRoot.appendingPathComponent("\(socketNamePrefix)-subscription.sock").path
         return TerminalSessionPaths(rootDirectory: root.path, controlSocketPath: controlSocketPath, subscriptionSocketPath: subscriptionSocketPath)
     }
 
     public static func sessionsRootDirectory(fileManager: FileManager = .default) throws -> String {
-        let spacesDirectory = try spacesHomeDirectory(fileManager: fileManager)
-        let root = spacesDirectory.appendingPathComponent("terminal", isDirectory: true).appendingPathComponent("sessions", isDirectory: true)
+        let runtimeDirectory = try spacesRuntimeDirectory(fileManager: fileManager)
+        let root = runtimeDirectory.appendingPathComponent("terminal", isDirectory: true).appendingPathComponent("sessions", isDirectory: true)
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         return root.path
     }
@@ -54,18 +55,12 @@ public struct TerminalSessionPaths: Sendable, Equatable {
         try fileManager.createDirectory(atPath: rootDirectory, withIntermediateDirectories: true)
     }
 
-    private static func spacesHomeDirectory(fileManager: FileManager = .default) throws -> URL {
-        let envVar = "SPACES_DB_PATH"
-        if let overridePath = ProcessInfo.processInfo.environment[envVar]?.trimmingCharacters(in: .whitespacesAndNewlines), !overridePath.isEmpty {
-            let url = URL(fileURLWithPath: overridePath)
-            let directoryURL = url.deletingLastPathComponent()
-            try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-            return directoryURL
-        }
+    private static func spacesRuntimeDirectory(fileManager: FileManager = .default) throws -> URL {
+        URL(fileURLWithPath: try SpacesProfile.current().runtimeDirectory, isDirectory: true)
+    }
 
-        let root = try TerminalPlatformDirectories.defaultSpacesDirectory(fileManager: fileManager)
-        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
-        return root
+    private static func spacesProfileRootDirectory(fileManager: FileManager = .default) throws -> URL {
+        URL(fileURLWithPath: try SpacesProfile.current().rootDirectory, isDirectory: true)
     }
 
     private static func socketPathComponent(for spacesRoot: String, sessionID: String) -> String {

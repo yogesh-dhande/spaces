@@ -118,7 +118,7 @@ let package = Package(
         .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore"]),
         .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
         .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
-        .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "systembridge"]),
+        .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "systembridge", "spacesterminalcore"]),
         .testTarget(name: "spacesuiTests", dependencies: ["spacesui"]),
         .testTarget(
             name: "spacescliTests",

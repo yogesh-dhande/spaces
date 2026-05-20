@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 source "$SCRIPT_DIR/terminal_harness_lock.sh"
+source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
@@ -13,7 +14,7 @@ SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 ITERATIONS="${ITERATIONS:-3}"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-terminal-profile.XXXXXX")}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
-RUNTIME_DIR="$WORK_ROOT/runtime"
+RUNTIME_DIR="${SPACES_RUNTIME_DIR:-$WORK_ROOT/runtime}"
 PERF_LOG="$RUNTIME_DIR/perf.log"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 SESSION_SUMMARY="$WORK_ROOT/summary.txt"
@@ -66,6 +67,26 @@ print(max(int((time.time() - started) * 1000), 0))
 PY
 }
 
+active_attachment_client_id() {
+  local session_id="$1"
+  local mode="$2"
+  local attachments_path
+  attachments_path="$RUNTIME_DIR/terminal/sessions/$session_id/attachments.json"
+  python3 - "$attachments_path" "$mode" <<'PY'
+import json, sys
+path = sys.argv[1]
+mode = sys.argv[2]
+with open(path, "r", encoding="utf-8") as handle:
+    attachments = json.load(handle)
+for attachment in attachments:
+    if attachment.get("mode") == mode and attachment.get("detachedAt") is None:
+        print(attachment["clientID"])
+        break
+else:
+    raise SystemExit(f"no active {mode} attachment found")
+PY
+}
+
 require_binary() {
   local path="$1"
   [[ -x "$path" ]] || { echo "Missing binary: $path" >&2; exit 1; }
@@ -84,11 +105,11 @@ cd "$REPO_ROOT"
 acquire_terminal_harness_lock
 "$SETUP_GHOSTTYKIT"
 
-pkill -x SpacesApp >/dev/null 2>&1 || true
-pkill -f "$SPACES_APP" >/dev/null 2>&1 || true
+SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI"
 
 echo "Using work root: $WORK_ROOT"
 echo "Using DB path:  $DB_PATH"
+echo "Using runtime:  $RUNTIME_DIR"
 
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
@@ -125,7 +146,7 @@ PY
     0 \
     30
 
-  tail_output="$(env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal tail "$session_id" --lines 10)"
+  tail_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal tail "$session_id" --lines 10)"
   printf '%s\n' "$tail_output" | grep -q "$payload"
 
   viewer_show_started_at="$(python3 - <<'PY'
@@ -164,6 +185,33 @@ PY
     30
   viewer_update_wall_ms="$(ms_since "$viewer_update_started_at")"
   printf '%s\t%s\n' "$session_id" "$viewer_update_wall_ms" >>"$VIEWER_UPDATE_WALL_SAMPLES"
+
+  viewer_client_id="$(active_attachment_client_id "$session_id" viewer)"
+  owner_client_id="$(active_attachment_client_id "$session_id" owner)"
+
+  viewer_takeover_baseline="$(
+    grep -Ec \
+      "spaces: perf metric=terminal_control_takeover target=session=${session_id} client=${viewer_client_id} success=1" \
+      "$PERF_LOG" || true
+  )"
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal takeover "$session_id" "$viewer_client_id" >/dev/null
+  wait_for_log_pattern_count_greater_than \
+    "$PERF_LOG" \
+    "spaces: perf metric=terminal_control_takeover target=session=${session_id} client=${viewer_client_id} success=1" \
+    "$viewer_takeover_baseline" \
+    30
+
+  owner_takeover_baseline="$(
+    grep -Ec \
+      "spaces: perf metric=terminal_control_takeover target=session=${session_id} client=${owner_client_id} success=1" \
+      "$PERF_LOG" || true
+  )"
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal takeover "$session_id" "$owner_client_id" >/dev/null
+  wait_for_log_pattern_count_greater_than \
+    "$PERF_LOG" \
+    "spaces: perf metric=terminal_control_takeover target=session=${session_id} client=${owner_client_id} success=1" \
+    "$owner_takeover_baseline" \
+    30
 done
 
 python3 - "$PERF_LOG" "$ITERATIONS" "$COMMAND_WALL_SAMPLES" "$VIEWER_SHOW_WALL_SAMPLES" "$VIEWER_UPDATE_WALL_SAMPLES" "$SESSION_METRICS_JSON" <<'PY' >"$SESSION_SUMMARY"

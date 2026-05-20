@@ -12,10 +12,57 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 
 def iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def acquire_terminal_harness_lock() -> Callable[[], None]:
+    if os.environ.get("SPACES_TERMINAL_HARNESS_LOCK_HELD") == "1":
+        return lambda: None
+
+    lock_root = Path(
+        os.environ.get(
+            "SPACES_TERMINAL_HARNESS_LOCK_DIR",
+            str(Path(tempfile.gettempdir()) / "spaces-terminal-harness.lock"),
+        )
+    )
+    waited = 0
+    while True:
+        try:
+            lock_root.mkdir()
+            break
+        except FileExistsError:
+            owner_pid_path = lock_root / "pid"
+            if owner_pid_path.exists():
+                owner_pid_text = owner_pid_path.read_text(encoding="utf-8").strip()
+                if owner_pid_text:
+                    try:
+                        os.kill(int(owner_pid_text), 0)
+                    except (ValueError, ProcessLookupError):
+                        shutil.rmtree(lock_root, ignore_errors=True)
+                        continue
+                    except PermissionError:
+                        pass
+            time.sleep(0.2)
+            waited += 1
+            if waited == 50:
+                print(f"Waiting for terminal harness lock at {lock_root}", file=sys.stderr)
+
+    (lock_root / "pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if released:
+            return
+        shutil.rmtree(lock_root, ignore_errors=True)
+        released = True
+
+    return release
 
 
 def send_tcp_control_request(host: str, port: int, request: dict) -> dict:
@@ -169,11 +216,21 @@ def wait_for_new_session_id(spaces_root: Path, existing_ids: set[str], timeout: 
     raise RuntimeError(f"Timed out waiting for a new session id. Existing ids: {sorted(existing_ids)} current ids: {discover_session_ids(spaces_root)}")
 
 
-def socket_path(spaces_root: Path, session_id: str) -> Path:
-    hash_value = 5381
-    for byte in f"{spaces_root}|{session_id}".encode("utf-8"):
-        hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
-    return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
+def socket_path(profile_root: Path, session_id: str, runtime_root: Path | None = None) -> Path:
+    def hashed_socket(root: Path) -> Path:
+        hash_value = 5381
+        for byte in f"{root}|{session_id}".encode("utf-8"):
+            hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
+        return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
+
+    profile_socket = hashed_socket(profile_root)
+    if profile_socket.exists():
+        return profile_socket
+    if runtime_root is not None:
+        runtime_socket = hashed_socket(runtime_root)
+        if runtime_socket.exists():
+            return runtime_socket
+    return profile_socket
 
 
 def send_unix_control_request(control_socket: Path, request: dict) -> dict:
@@ -517,6 +574,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--start-app", action="store_true", help="Launch an isolated SpacesApp instance for the POC.")
     args = parser.parse_args()
+    release_harness_lock = acquire_terminal_harness_lock()
 
     repo_root = Path(__file__).resolve().parents[3]
     spaces_cli = resolve_built_binary(repo_root, "SPACES_CLI", "spaces")
@@ -579,7 +637,7 @@ def main() -> int:
             raise RuntimeError(f"Unable to parse session id from:\n{result.stdout}")
         session_id = match.group(1)
         service_pid = read_service_pid(temp_root, session_id)
-        control_socket = socket_path(temp_root, session_id)
+        control_socket = socket_path(temp_root, session_id, runtime_dir)
 
         pairing_code = "246810"
         bridge_process = subprocess.Popen(
@@ -774,7 +832,7 @@ def main() -> int:
                 timeout=45,
             )
             render_owner_client_id = wait_for_active_owner(temp_root, render_session_id, timeout=10)
-            render_control_socket = socket_path(temp_root, render_session_id)
+            render_control_socket = socket_path(temp_root, render_session_id, runtime_dir)
 
             ipad_udid = resolve_simulator_udid(os.environ.get("SPACES_MOBILE_E2E_IPAD_NAME", "iPad Pro 13-inch (M5)"))
             subprocess.run(["open", "-a", "Simulator"], capture_output=True, text=True)
@@ -1094,6 +1152,7 @@ def main() -> int:
         print(f"Preserving failure artifacts in {temp_root}", file=sys.stderr)
         raise
     finally:
+        release_harness_lock()
         if stream is not None:
             try:
                 stream.close()
