@@ -12,6 +12,7 @@ import Foundation
         public let fallbackText: String
         public let acceptsInput: Bool
         public let isBusy: Bool
+        public let onInputReadinessChanged: @MainActor (Bool) -> Void
         public let onRenderedTextChanged: @MainActor (String) -> Void
         public let onViewportSizeChanged: @MainActor (Int, Int) -> Void
         public let onSendText: @MainActor (String) -> Void
@@ -19,6 +20,7 @@ import Foundation
 
         public init(
             snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, fallbackText: String, acceptsInput: Bool, isBusy: Bool,
+            onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
             onRenderedTextChanged: @escaping @MainActor (String) -> Void = { _ in }, onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
             onSendText: @escaping @MainActor (String) -> Void, onSendKey: @escaping @MainActor (String) -> Void
         ) {
@@ -27,6 +29,7 @@ import Foundation
             self.fallbackText = fallbackText
             self.acceptsInput = acceptsInput
             self.isBusy = isBusy
+            self.onInputReadinessChanged = onInputReadinessChanged
             self.onRenderedTextChanged = onRenderedTextChanged
             self.onViewportSizeChanged = onViewportSizeChanged
             self.onSendText = onSendText
@@ -37,6 +40,7 @@ import Foundation
 
         public func updateUIView(_ hostView: GhosttyRemoteTerminalHostView, context: Context) {
             hostView.acceptsTerminalInput = acceptsInput && !isBusy
+            hostView.onInputReadinessChanged = { ready in Task { @MainActor in onInputReadinessChanged(ready) } }
             hostView.onViewportSizeChanged = { columns, rows in Task { @MainActor in onViewportSizeChanged(columns, rows) } }
             hostView.onSendText = { text in Task { @MainActor in onSendText(text) } }
             hostView.onSendKey = { key in Task { @MainActor in onSendKey(key) } }
@@ -59,8 +63,10 @@ import Foundation
         private lazy var scrollPanRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan))
         private var lastScrollTranslation = CGPoint.zero
         private var lastEmittedRenderedText: String?
+        private var lastReportedInputReadiness = false
 
         public var acceptsTerminalInput = false
+        public var onInputReadinessChanged: ((Bool) -> Void)?
         public var onViewportSizeChanged: ((Int, Int) -> Void)?
         public var onSendText: ((String) -> Void)?
         public var onSendKey: ((String) -> Void)?
@@ -97,6 +103,7 @@ import Foundation
             super.didMoveToWindow()
             ensureSession()
             syncSessionState()
+            reportInputReadinessIfNeeded()
         }
 
         public override func layoutSubviews() {
@@ -134,11 +141,13 @@ import Foundation
 
             guard let session, let snapshot else {
                 emitRenderedTextIfNeeded()
+                reportInputReadinessIfNeeded()
                 return
             }
             let viewportSnapshot = viewportSnapshot(for: snapshot, session: session)
             guard lastViewportSnapshot != viewportSnapshot || lastReplayPixelSize != currentPixelSize else {
                 emitRenderedTextIfNeeded()
+                reportInputReadinessIfNeeded()
                 return
             }
             replay(snapshot: viewportSnapshot, into: session)
@@ -147,6 +156,7 @@ import Foundation
             lastReplayPixelSize = currentPixelSize
             lastReplayStateKey = replayStateKey
             emitRenderedTextIfNeeded()
+            reportInputReadinessIfNeeded()
         }
 
         public func insertText(_ text: String) {
@@ -164,6 +174,18 @@ import Foundation
             guard acceptsTerminalInput else { return }
             guard let pasted = UIPasteboard.general.string, !pasted.isEmpty else { return }
             onSendText?(pasted)
+        }
+
+        @discardableResult public override func becomeFirstResponder() -> Bool {
+            let becameFirstResponder = super.becomeFirstResponder()
+            reportInputReadinessIfNeeded()
+            return becameFirstResponder
+        }
+
+        @discardableResult public override func resignFirstResponder() -> Bool {
+            let resignedFirstResponder = super.resignFirstResponder()
+            reportInputReadinessIfNeeded()
+            return resignedFirstResponder
         }
 
         @objc private func handleTapToActivateInput() {
@@ -271,6 +293,7 @@ import Foundation
                 lastReplayPixelSize = pixelSize
             }
             syncFirstResponder()
+            reportInputReadinessIfNeeded()
         }
 
         @discardableResult private func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
@@ -292,6 +315,15 @@ import Foundation
         private func syncFirstResponder() {
             guard window != nil else { return }
             if acceptsTerminalInput { if !isFirstResponder { becomeFirstResponder() } } else if isFirstResponder { resignFirstResponder() }
+        }
+
+        private var isInputSurfaceReady: Bool { acceptsTerminalInput && isFirstResponder && window != nil }
+
+        private func reportInputReadinessIfNeeded() {
+            let isReady = isInputSurfaceReady
+            guard lastReportedInputReadiness != isReady else { return }
+            lastReportedInputReadiness = isReady
+            onInputReadinessChanged?(isReady)
         }
 
         private func viewportSnapshot(for snapshot: GhosttyTerminalSnapshot, session: ghostty_session_t) -> GhosttyTerminalSnapshot {

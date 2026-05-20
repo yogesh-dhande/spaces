@@ -44,6 +44,9 @@ struct TerminalDetailView: View {
                 fallbackText: model.visibleText,
                 acceptsInput: model.acceptsInput,
                 isBusy: model.isBusy || model.isSynchronizingOwnership,
+                onInputReadinessChanged: { ready in
+                    model.setInputSurfaceReady(ready)
+                },
                 onRenderedTextChanged: { text in
                     renderedText = text
                 },
@@ -93,8 +96,13 @@ struct TerminalDetailView: View {
 
             Group {
                 if model.isOwner {
-                    chromeBadge("Owner")
-                        .accessibilityIdentifier("terminal.ownerBadge")
+                    if model.isPreparingInput {
+                        chromeProgressBadge("Preparing input…")
+                            .accessibilityIdentifier("terminal.ownerPreparing")
+                    } else {
+                        chromeBadge("Owner")
+                            .accessibilityIdentifier("terminal.ownerBadge")
+                    }
                 } else {
                     chromeButton {
                         Task { await model.takeOver() }
@@ -143,6 +151,24 @@ struct TerminalDetailView: View {
             )
     }
 
+    private func chromeProgressBadge(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(.white.opacity(0.9))
+            Text(text)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.9))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(
+            Capsule()
+                .fill(.black.opacity(0.18))
+                .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 1))
+        )
+    }
+
     private func errorBanner(_ message: String) -> some View {
         Text(message)
             .font(.footnote)
@@ -162,6 +188,7 @@ struct TerminalDetailView: View {
             model.isConnecting ? "connecting" : "steady",
             model.isBusy ? "busy" : "idle",
             model.isSynchronizingOwnership ? "syncing" : "synced",
+            model.isInputSurfaceReady ? "inputReady" : "inputPending",
             model.errorMessage ?? "",
             renderedText,
         ].joined(separator: "|")
@@ -177,6 +204,7 @@ struct TerminalDetailView: View {
                 isConnecting: model.isConnecting,
                 isBusy: model.isBusy,
                 isSynchronizingOwnership: model.isSynchronizingOwnership,
+                isInputSurfaceReady: model.isInputSurfaceReady,
                 viewportColumns: model.viewportColumns,
                 viewportRows: model.viewportRows,
                 lastSentResizeColumns: model.lastSentResizeColumns,

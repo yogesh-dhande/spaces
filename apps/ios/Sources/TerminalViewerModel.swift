@@ -14,6 +14,7 @@ import spacesterminalcore
     var isBusy = false
     var isSessionUnavailable = false
     var isSynchronizingOwnership = false
+    var isInputSurfaceReady = false
     var errorMessage: String?
 
     private let bridgeClient: SpacesMobileBridgeClient
@@ -92,6 +93,7 @@ import spacesterminalcore
         optimisticOwner || attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID == remoteClient.id
     }
     var acceptsInput: Bool { isOwner && !isBusy && !isConnecting && !isSynchronizingOwnership && !isSessionUnavailable }
+    var isPreparingInput: Bool { acceptsInput && !isInputSurfaceReady }
     var viewportColumns: Int? { viewportSize?.columns }
     var viewportRows: Int? { viewportSize?.rows }
     var lastSentResizeColumns: Int? { lastSentResize?.columns }
@@ -112,6 +114,7 @@ import spacesterminalcore
         isStopping = true
         optimisticOwner = false
         hasAttachedToSession = false
+        isInputSurfaceReady = false
         reconnectTask?.cancel()
         reconnectTask = nil
         bufferedInputFlushTask?.cancel()
@@ -139,6 +142,7 @@ import spacesterminalcore
         do {
             try await bridgeClient.takeOver(sessionID: session.id, clientID: remoteClient.id, timeout: Self.inputRequestTimeout)
             optimisticOwner = true
+            isInputSurfaceReady = false
             beginOwnerRecoveryGracePeriod()
             errorMessage = nil
             await performOwnershipSynchronization()
@@ -278,6 +282,7 @@ import spacesterminalcore
                     hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
                 }
                 let isOwnerAfterMerge = isOwner
+                if !isOwnerAfterMerge { isInputSurfaceReady = false }
                 isSessionUnavailable = false
                 errorMessage = nil
                 isConnecting = false
@@ -325,6 +330,7 @@ import spacesterminalcore
         streamHandle = nil
         isConnecting = false
         optimisticOwner = false
+        isInputSurfaceReady = false
         if isStopping { return }
         if let error {
             if handleAuthenticationFailure(error) { return }
@@ -393,6 +399,7 @@ import spacesterminalcore
     private func runOwnershipSynchronization() async {
         guard isOwner else { return }
         isSynchronizingOwnership = true
+        isInputSurfaceReady = false
         defer {
             isSynchronizingOwnership = false
             ownershipSynchronizationTask = nil
@@ -443,6 +450,7 @@ import spacesterminalcore
         pendingResizeTask = nil
         bufferedInputText = ""
         hasAttachedToSession = false
+        isInputSurfaceReady = false
         streamHandle?.cancel()
         streamHandle = nil
         errorMessage = nil
@@ -573,6 +581,14 @@ import spacesterminalcore
         guard let snapshot else { return false }
         return snapshot.attachments.contains { attachment in
             attachment.clientID == remoteClient.id && attachment.detachedAt == nil
+        }
+    }
+
+    func setInputSurfaceReady(_ ready: Bool) {
+        if ready {
+            isInputSurfaceReady = acceptsInput
+        } else {
+            isInputSurfaceReady = false
         }
     }
 }

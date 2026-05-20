@@ -892,8 +892,15 @@ def main() -> int:
                 lambda payload: payload.get("sessionID") == render_session_id and payload.get("isOwner") is True,
                 timeout=40,
             )
+            ipad_ready_payload = wait_for_render_dump(
+                ipad_render_dump,
+                lambda payload: payload.get("sessionID") == render_session_id
+                and payload.get("isOwner") is True
+                and payload.get("isInputSurfaceReady") is True,
+                timeout=20,
+            )
             time.sleep(0.5)
-            ipad_payload = read_json_file(ipad_render_dump) or ipad_payload
+            ipad_payload = read_json_file(ipad_render_dump) or ipad_ready_payload or ipad_payload
             mac_viewer_payload = wait_for_terminal_window_dump(
                 spacese2e,
                 env,
@@ -915,6 +922,8 @@ def main() -> int:
             assert_exact_terminal_text("iPad", ipad_payload.get("renderedText", ""), expected_render_text)
             if ipad_payload.get("errorMessage"):
                 raise RuntimeError(f"iPad render reported an error after takeover:\n{json.dumps(ipad_payload, indent=2)}")
+            if ipad_payload.get("isInputSurfaceReady") is not True:
+                raise RuntimeError(f"iPad owner surface never became input-ready:\n{json.dumps(ipad_payload, indent=2)}")
             if (
                 initial_runtime_columns is not None
                 and initial_runtime_rows is not None
