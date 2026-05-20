@@ -9,6 +9,8 @@ import Foundation
     public struct GhosttyRemoteTerminalView: UIViewRepresentable {
         public let snapshot: GhosttyTerminalSnapshot?
         public let replayStateKey: String
+        public let outputData: Data?
+        public let outputEventToken: String?
         public let fallbackText: String
         public let acceptsInput: Bool
         public let isBusy: Bool
@@ -19,13 +21,15 @@ import Foundation
         public let onSendKey: @MainActor (String) -> Void
 
         public init(
-            snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, fallbackText: String, acceptsInput: Bool, isBusy: Bool,
-            onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
+            snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, outputData: Data? = nil, outputEventToken: String? = nil,
+            fallbackText: String, acceptsInput: Bool, isBusy: Bool, onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
             onRenderedTextChanged: @escaping @MainActor (String) -> Void = { _ in }, onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
             onSendText: @escaping @MainActor (String) -> Void, onSendKey: @escaping @MainActor (String) -> Void
         ) {
             self.snapshot = snapshot
             self.replayStateKey = replayStateKey
+            self.outputData = outputData
+            self.outputEventToken = outputEventToken
             self.fallbackText = fallbackText
             self.acceptsInput = acceptsInput
             self.isBusy = isBusy
@@ -45,7 +49,9 @@ import Foundation
             hostView.onSendText = { text in Task { @MainActor in onSendText(text) } }
             hostView.onSendKey = { key in Task { @MainActor in onSendKey(key) } }
             hostView.onRenderedTextChanged = { text in Task { @MainActor in onRenderedTextChanged(text) } }
-            hostView.update(snapshot: snapshot, replayStateKey: replayStateKey, fallbackText: fallbackText)
+            hostView.update(
+                snapshot: snapshot, replayStateKey: replayStateKey, outputData: outputData, outputEventToken: outputEventToken,
+                fallbackText: fallbackText)
         }
     }
 
@@ -58,12 +64,14 @@ import Foundation
         private var lastViewportSnapshot: GhosttyTerminalSnapshot?
         private var lastReplayPixelSize = CGSize.zero
         private var lastReplayStateKey: String?
+        private var lastAppliedOutputEventToken: String?
         private let fallbackLabel = UILabel()
         private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput))
         private lazy var scrollPanRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan))
         private var lastScrollTranslation = CGPoint.zero
         private var lastEmittedRenderedText: String?
         private var lastReportedInputReadiness = false
+        private var postRefreshEmissionScheduled = false
 
         public var acceptsTerminalInput = false
         public var onInputReadinessChanged: ((Bool) -> Void)?
@@ -129,17 +137,33 @@ import Foundation
             ]
         }
 
-        public func update(snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, fallbackText: String) {
+        public func update(
+            snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, outputData: Data?, outputEventToken: String?, fallbackText: String
+        ) {
             ensureSession()
-            if let lastReplayStateKey, lastReplayStateKey != replayStateKey {
+            let shouldApplyIncrementalOutput = canApplyIncrementalOutput(outputData: outputData, outputEventToken: outputEventToken)
+            if let lastReplayStateKey, lastReplayStateKey != replayStateKey, !shouldApplyIncrementalOutput {
                 lastViewportSnapshot = nil
                 lastReplayPixelSize = .zero
+                lastAppliedOutputEventToken = nil
             }
+            if let snapshot { lastSnapshot = snapshot }
             fallbackLabel.text = snapshot == nil ? fallbackText : nil
             fallbackLabel.isHidden = snapshot != nil
             syncFirstResponder()
 
-            guard let session, let snapshot else {
+            guard let session else {
+                emitRenderedTextIfNeeded()
+                reportInputReadinessIfNeeded()
+                return
+            }
+            if shouldApplyIncrementalOutput, let outputData {
+                applyIncrementalOutput(outputData, into: session, outputEventToken: outputEventToken)
+                emitRenderedTextIfNeeded()
+                reportInputReadinessIfNeeded()
+                return
+            }
+            guard let snapshot else {
                 emitRenderedTextIfNeeded()
                 reportInputReadinessIfNeeded()
                 return
@@ -151,7 +175,6 @@ import Foundation
                 return
             }
             replay(snapshot: viewportSnapshot, into: session)
-            lastSnapshot = snapshot
             lastViewportSnapshot = viewportSnapshot
             lastReplayPixelSize = currentPixelSize
             lastReplayStateKey = replayStateKey
@@ -276,6 +299,24 @@ import Foundation
             requestSurfaceRefresh()
         }
 
+        private func canApplyIncrementalOutput(outputData: Data?, outputEventToken: String?) -> Bool {
+            guard let outputData, !outputData.isEmpty else { return false }
+            guard session != nil else { return false }
+            guard let outputEventToken, !outputEventToken.isEmpty else { return false }
+            guard lastAppliedOutputEventToken != outputEventToken else { return false }
+            return true
+        }
+
+        private func applyIncrementalOutput(_ outputData: Data, into session: ghostty_session_t, outputEventToken: String?) {
+            outputData.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
+                ghostty_session_process_output(session, baseAddress, UInt(outputData.count))
+            }
+            lastSnapshot = nil
+            lastAppliedOutputEventToken = outputEventToken
+            requestSurfaceRefresh()
+        }
+
         private func syncSessionState() {
             guard let session else { return }
             let scale = scaleFactor
@@ -310,6 +351,21 @@ import Foundation
             GhosttyMobileAppService.shared.tick()
             setNeedsDisplay()
             layer.setNeedsDisplay()
+            schedulePostRefreshEmission()
+        }
+
+        private func schedulePostRefreshEmission() {
+            guard !postRefreshEmissionScheduled else { return }
+            postRefreshEmissionScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.postRefreshEmissionScheduled = false
+                    GhosttyMobileAppService.shared.tick()
+                    self.emitRenderedTextIfNeeded()
+                    self.reportInputReadinessIfNeeded()
+                }
+            }
         }
 
         private func syncFirstResponder() {

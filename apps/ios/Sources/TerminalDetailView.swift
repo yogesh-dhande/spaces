@@ -10,7 +10,6 @@ struct TerminalDetailView: View {
 
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
-    @State private var hasExecutedE2ECommand = false
     private let e2eConfig = SpacesMobileE2EConfig.shared
 
     init(
@@ -42,6 +41,8 @@ struct TerminalDetailView: View {
             GhosttyRemoteTerminalView(
                 snapshot: model.snapshot,
                 replayStateKey: model.replayStateKey,
+                outputData: model.outputData,
+                outputEventToken: model.outputData == nil ? nil : model.latestState?.emittedAt,
                 fallbackText: model.visibleText,
                 acceptsInput: model.acceptsInput,
                 isBusy: model.isBusy || model.isSynchronizingOwnership,
@@ -74,7 +75,6 @@ struct TerminalDetailView: View {
         .toolbar(.hidden, for: .navigationBar)
         .task { model.start() }
         .task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }
-        .task(id: e2eCommandTaskKey) { await runE2ECommandIfRequested() }
         .onDisappear { model.stop() }
         .accessibilityIdentifier("terminal.detail.\(session.id)")
     }
@@ -199,16 +199,6 @@ struct TerminalDetailView: View {
         ].joined(separator: "|")
     }
 
-    private var e2eCommandTaskKey: String {
-        [
-            session.id,
-            e2eConfig.commandMarkerPath ?? "",
-            e2eConfig.commandText ?? "",
-            model.isOwner ? "owner" : "viewer",
-            hasExecutedE2ECommand ? "done" : "waiting",
-        ].joined(separator: "|")
-    }
-
     private func writeE2EDumpIfNeeded() {
         guard e2eConfig.isEnabled, e2eConfig.matches(sessionID: session.id) else { return }
         SpacesMobileE2EDumpWriter.writeCurrentDump(
@@ -249,23 +239,5 @@ struct TerminalDetailView: View {
             ),
             config: e2eConfig
         )
-    }
-
-    private func runE2ECommandIfRequested() async {
-        guard e2eConfig.isEnabled, e2eConfig.matches(sessionID: session.id) else { return }
-        guard !hasExecutedE2ECommand else { return }
-        guard let markerPath = e2eConfig.commandMarkerPath, let commandText = e2eConfig.commandText else { return }
-        guard model.isOwner else { return }
-
-        let markerURL = URL(fileURLWithPath: markerPath)
-        while !Task.isCancelled {
-            if FileManager.default.fileExists(atPath: markerURL.path) {
-                writeE2EEventIfNeeded(kind: "e2e_command_triggered", detail: commandText)
-                hasExecutedE2ECommand = true
-                await model.sendText(commandText, appendNewline: true)
-                return
-            }
-            try? await Task.sleep(for: .milliseconds(200))
-        }
     }
 }

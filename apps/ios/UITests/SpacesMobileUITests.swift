@@ -20,10 +20,6 @@ final class SpacesMobileUITests: XCTestCase {
         if let eventLogPath = configuration.eventLogPath {
             app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
         }
-        if let commandMarkerPath = configuration.proceedCommandPath {
-            app.launchEnvironment["SPACES_MOBILE_E2E_COMMAND_MARKER_PATH"] = commandMarkerPath
-        }
-        app.launchEnvironment["SPACES_MOBILE_E2E_COMMAND_TEXT"] = configuration.commandText
         app.launch()
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(1))
@@ -53,6 +49,9 @@ final class SpacesMobileUITests: XCTestCase {
 
         if let proceedCommandPath = configuration.proceedCommandPath {
             waitForMarkerIfNeeded(proceedCommandPath, timeout: 20)
+            focusTerminalSurface(in: app)
+            app.typeText(configuration.commandText)
+            app.typeText("\n")
             RunLoop.current.run(until: Date().addingTimeInterval(1))
             captureScreenshot(app, name: "post-ios-command-immediate", filePath: configuration.postCommandScreenshotPath)
         }

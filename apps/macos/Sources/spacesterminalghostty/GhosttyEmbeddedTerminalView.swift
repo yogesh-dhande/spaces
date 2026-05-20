@@ -19,6 +19,7 @@ import spacesterminalcore
     public var onSurfaceReady: SurfaceReadyHandler?
     public var onActionEvent: (@MainActor (GhosttyActionEvent) -> Void)?
     public var onSurfaceCellSizeChanged: (@MainActor (Int, Int) -> Void)?
+    public var onInputActivity: (@MainActor () -> Void)?
 
     private let launchConfiguration: TerminalSessionLaunchConfiguration
     private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
@@ -243,6 +244,7 @@ import spacesterminalcore
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         if sendGhosttyKey(event: event, action: event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS) {
+            onInputActivity?()
             requestSurfaceRefresh()
             return
         }
@@ -284,6 +286,7 @@ import spacesterminalcore
         input.text = nil
         guard ghostty_surface_key_is_binding(surface, input, nil) else { return false }
         _ = ghostty_surface_key(surface, input)
+        onInputActivity?()
         requestSurfaceRefresh()
         return true
     }
@@ -311,7 +314,11 @@ import spacesterminalcore
         return true
     }
 
-    public func sendRawBytes(_ data: Data) { sessionDriver.sendRawBytes(data) }
+    public func sendRawBytes(_ data: Data) {
+        guard !data.isEmpty else { return }
+        sessionDriver.sendRawBytes(data)
+        onInputActivity?()
+    }
 
     public func foregroundPID() -> Int32? { sessionDriver.foregroundPID() }
 

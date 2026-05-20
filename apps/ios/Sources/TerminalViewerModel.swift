@@ -26,10 +26,8 @@ import spacesterminalcore
     private var bufferedInputText = ""
     private var bufferedInputFlushTask: Task<Void, Never>?
     private var pendingInputSendTask: Task<Void, Never>?
-    private var pendingResizeTask: Task<Void, Never>?
     private var ownershipSynchronizationTask: Task<Void, Never>?
     private var viewportSize: (columns: Int, rows: Int)?
-    private var lastSentResize: (columns: Int, rows: Int)?
     private var optimisticOwner = false
     private var isStopping = false
     private var hasAttachedToSession = false
@@ -37,11 +35,7 @@ import spacesterminalcore
 
     private static let inputBatchDelay: Duration = .milliseconds(35)
     private static let inputRequestTimeout: Duration = .seconds(6)
-    private static let resizeDebounceDelay: Duration = .milliseconds(120)
     private static let ownerRecoveryGraceInterval: TimeInterval = 2
-    private static let ownershipSynchronizationAttempts = 4
-    private static let ownershipSynchronizationDelay: Duration = .milliseconds(180)
-    private static let automaticResizeEnabled = false
     private static let silentReconnectDelay: Duration = .milliseconds(150)
 
     init(
@@ -68,6 +62,8 @@ import spacesterminalcore
 
     var title: String { latestState?.title ?? session.title }
     var snapshot: GhosttyTerminalSnapshot? { latestState?.snapshot }
+    var outputData: Data? { latestState?.outputData }
+    var latestScreenStateRevision: UInt64? { latestState?.screenStateRevision }
     var transcriptTail: String? { latestState?.transcriptTail }
     var replayStateKey: String {
         let snapshotColumns = latestState?.snapshot?.columns ?? 0
@@ -100,8 +96,8 @@ import spacesterminalcore
     var isPreparingInput: Bool { acceptsInput && !isInputSurfaceReady }
     var viewportColumns: Int? { viewportSize?.columns }
     var viewportRows: Int? { viewportSize?.rows }
-    var lastSentResizeColumns: Int? { lastSentResize?.columns }
-    var lastSentResizeRows: Int? { lastSentResize?.rows }
+    var lastSentResizeColumns: Int? { nil }
+    var lastSentResizeRows: Int? { nil }
     var runtimeColumns: Int? { latestState?.runtimeState?.columns }
     var runtimeRows: Int? { latestState?.runtimeState?.rows }
     var snapshotColumns: Int? { latestState?.snapshot?.columns }
@@ -125,13 +121,10 @@ import spacesterminalcore
         bufferedInputFlushTask = nil
         pendingInputSendTask?.cancel()
         pendingInputSendTask = nil
-        pendingResizeTask?.cancel()
-        pendingResizeTask = nil
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = nil
         bufferedInputText = ""
         viewportSize = nil
-        lastSentResize = nil
         ownerRecoveryGraceDeadline = nil
         isSynchronizingOwnership = false
         streamHandle?.cancel()
@@ -174,7 +167,6 @@ import spacesterminalcore
         let resolved = (columns: max(columns, 1), rows: max(rows, 1))
         guard viewportSize?.columns != resolved.columns || viewportSize?.rows != resolved.rows else { return }
         viewportSize = resolved
-        scheduleResizeIfNeeded(force: false)
     }
 
     func sendText(_ text: String, appendNewline: Bool = false) async {
@@ -327,7 +319,6 @@ import spacesterminalcore
                     beginOwnerRecoveryGracePeriod()
                     scheduleOwnershipSynchronization()
                 }
-                scheduleResizeIfNeeded(force: false)
             } onDisconnect: { [weak self] error in
                 Task { @MainActor [weak self] in
                     await self?.handleDisconnect(error)
@@ -448,25 +439,7 @@ import spacesterminalcore
             isSynchronizingOwnership = false
             ownershipSynchronizationTask = nil
         }
-
-        guard Self.automaticResizeEnabled else {
-            errorMessage = nil
-            return
-        }
-
-        for attempt in 0..<Self.ownershipSynchronizationAttempts {
-            guard !Task.isCancelled else { return }
-            errorMessage = nil
-            await sendResizeIfNeeded(force: true)
-            await refreshLatestState(timeout: .seconds(2), ignoreTransientTimeout: true)
-            if viewportMatchesLatestRuntimeState {
-                errorMessage = nil
-                return
-            }
-            if attempt + 1 < Self.ownershipSynchronizationAttempts {
-                try? await Task.sleep(for: Self.ownershipSynchronizationDelay)
-            }
-        }
+        errorMessage = nil
     }
 
     private func unavailableMessage(for error: Error) -> String? {
@@ -490,8 +463,6 @@ import spacesterminalcore
         bufferedInputFlushTask = nil
         pendingInputSendTask?.cancel()
         pendingInputSendTask = nil
-        pendingResizeTask?.cancel()
-        pendingResizeTask = nil
         bufferedInputText = ""
         hasAttachedToSession = false
         isInputSurfaceReady = false
@@ -500,54 +471,6 @@ import spacesterminalcore
         errorMessage = nil
         onAuthenticationRequired(recoveryMessage)
         return true
-    }
-
-    private func scheduleResizeIfNeeded(force: Bool) {
-        guard Self.automaticResizeEnabled else { return }
-        guard isOwner else { return }
-        guard let viewportSize else { return }
-        if !force, lastSentResize?.columns == viewportSize.columns, lastSentResize?.rows == viewportSize.rows { return }
-        pendingResizeTask?.cancel()
-        pendingResizeTask = Task { [weak self] in
-            try? await Task.sleep(for: Self.resizeDebounceDelay)
-            guard !Task.isCancelled else { return }
-            await self?.sendResizeIfNeeded(force: force)
-        }
-    }
-
-    private func sendResizeIfNeeded(force: Bool) async {
-        guard Self.automaticResizeEnabled else { return }
-        guard isOwner else { return }
-        guard let viewportSize else { return }
-        if !force, lastSentResize?.columns == viewportSize.columns, lastSentResize?.rows == viewportSize.rows { return }
-        let bridgeClient = bridgeClient
-        let commandChannel = commandChannel
-        let sessionID = session.id
-        let clientID = remoteClient.id
-        let columns = viewportSize.columns
-        let rows = viewportSize.rows
-        do {
-            try await Self.performInputRequest {
-                try await bridgeClient.resize(
-                    sessionID: sessionID,
-                    clientID: clientID,
-                    columns: columns,
-                    rows: rows,
-                    timeout: Self.inputRequestTimeout,
-                    commandChannel: commandChannel
-                )
-            }
-            lastSentResize = viewportSize
-        } catch {
-            handleInputSendError(error)
-        }
-    }
-
-    private var viewportMatchesLatestRuntimeState: Bool {
-        guard Self.automaticResizeEnabled else { return true }
-        guard let viewportSize else { return false }
-        guard let runtimeColumns = latestState?.runtimeState?.columns, let runtimeRows = latestState?.runtimeState?.rows else { return false }
-        return runtimeColumns == viewportSize.columns && runtimeRows == viewportSize.rows
     }
 
     private static func performInputRequest(_ request: @escaping @Sendable () async throws -> Void) async throws {

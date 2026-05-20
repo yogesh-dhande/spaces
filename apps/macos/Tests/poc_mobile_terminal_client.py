@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -336,11 +337,17 @@ def state_plain_text(state: dict) -> str:
         return state["snapshotText"]
     if state.get("transcriptTail"):
         return state["transcriptTail"]
+    output_data = state.get("outputData")
+    if output_data:
+        try:
+            return base64.b64decode(output_data).decode("utf-8", errors="replace")
+        except Exception:
+            return ""
     return ""
 
 
 def snapshot_contains(needle: str):
-    return lambda payload: needle in plain_text(payload)
+    return lambda payload: needle in state_plain_text(payload)
 
 
 def resolve_ios_app_path() -> Path:

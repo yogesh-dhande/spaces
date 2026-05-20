@@ -57,15 +57,11 @@ struct SpacesMobileE2EConfig {
     let targetSessionID: String?
     let renderDumpPath: String?
     let eventLogPath: String?
-    let commandMarkerPath: String?
-    let commandText: String?
 
     init(environment: [String: String]) {
         targetSessionID = Self.trimmed(environment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"])
         renderDumpPath = Self.trimmed(environment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"])
         eventLogPath = Self.trimmed(environment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"])
-        commandMarkerPath = Self.trimmed(environment["SPACES_MOBILE_E2E_COMMAND_MARKER_PATH"])
-        commandText = Self.trimmed(environment["SPACES_MOBILE_E2E_COMMAND_TEXT"])
     }
 
     var isEnabled: Bool { targetSessionID != nil || renderDumpPath != nil || eventLogPath != nil }

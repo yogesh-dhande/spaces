@@ -45,6 +45,8 @@ extension Notification.Name {
 
     func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { terminalView.setOutputHandler(handler) }
 
+    func setInputActivityHandler(_ handler: (@MainActor () -> Void)?) { terminalView.onInputActivity = handler }
+
     func ensureHostingWindowForSurface() { terminalView.ensureHostingWindowForSurface() }
 
     func requestSurfaceRefresh() { terminalView.requestSurfaceRefresh() }
@@ -219,6 +221,10 @@ extension Notification.Name {
     private var sessionStartedAt: Date?
     private var didLogFirstOutput = false
     private let incomingOutputBuffer = IncomingOutputBuffer()
+    private var inputStateBroadcastScheduled = false
+    private var pendingInputOutputResync = false
+    private var inputOutputResyncWorkItem: DispatchWorkItem?
+    private var preferOutputResyncForNextInputActivity = false
 
     public init(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
@@ -239,6 +245,7 @@ extension Notification.Name {
             self.refreshRuntimeState(force: true)
         }
         rendererHostStorage.setOwnerClientResolver { [weak self] clientID in self?.isOwner(clientID: clientID) ?? false }
+        rendererHostStorage.setInputActivityHandler { [weak self] in self?.handleOwnerInputActivity() }
     }
 
     public func startIfNeeded() throws {
@@ -249,6 +256,7 @@ extension Notification.Name {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             try ensureOutputHandle()
             rendererHostStorage.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
+            rendererHostStorage.setInputActivityHandler { [weak self] in self?.handleOwnerInputActivity() }
             rendererHostStorage.ensureHostingWindowForSurface()
             try startControlServer()
             try startStateStreamServer()
@@ -310,6 +318,8 @@ extension Notification.Name {
         let childPID = observedChildPID()
         runtimeStateTimer?.invalidate()
         runtimeStateTimer = nil
+        inputOutputResyncWorkItem?.cancel()
+        inputOutputResyncWorkItem = nil
         controlServer?.stop()
         controlServer = nil
         started = false
@@ -479,6 +489,7 @@ extension Notification.Name {
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
             return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
         }
+        if key == "enter" { preferOutputResyncForNextInputActivity = true }
         rendererHostStorage.sendRawBytes(Data(bytes))
         TerminalPerformance.logMetric(
             "terminal_control_key", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
@@ -581,7 +592,7 @@ extension Notification.Name {
         do {
             let outputHandle = try ensureOutputHandle()
             try outputHandle.write(contentsOf: data)
-            postOutputDidChange(byteCount: data.count)
+            postOutputDidChange(data: data)
             TerminalPerformance.logMetric(
                 "terminal_output_write", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(data.count)")
@@ -684,10 +695,58 @@ extension Notification.Name {
         broadcastCurrentState(reason: "runtime_state")
     }
 
-    private func postOutputDidChange(byteCount: Int) {
+    private func postOutputDidChange(data: Data) {
         NotificationCenter.default.post(
-            name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID, "byteCount": byteCount])
-        broadcastCurrentState(reason: "output", outputByteCount: byteCount)
+            name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID, "byteCount": data.count])
+        if pendingInputOutputResync || inputOutputResyncWorkItem != nil {
+            pendingInputOutputResync = false
+            scheduleInputOutputResync()
+            return
+        }
+        broadcastCurrentState(reason: "output", outputByteCount: data.count, outputData: data)
+    }
+
+    private func handleOwnerInputActivity() {
+        if preferOutputResyncForNextInputActivity {
+            preferOutputResyncForNextInputActivity = false
+            pendingInputOutputResync = true
+            return
+        }
+        guard let ownerClient = activeOwnerClient() else { return }
+        if ownerClient.kind == .localWindow {
+            pendingInputOutputResync = true
+            return
+        }
+        scheduleInputStateBroadcast()
+    }
+
+    private func scheduleInputStateBroadcast() {
+        guard !inputStateBroadcastScheduled else { return }
+        inputStateBroadcastScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.inputStateBroadcastScheduled = false
+                self.requestSurfaceRefreshAction()
+                GhosttyEmbeddedAppService.shared.tick()
+                self.broadcastCurrentState(reason: "input")
+            }
+        }
+    }
+
+    private func scheduleInputOutputResync() {
+        inputOutputResyncWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.inputOutputResyncWorkItem = nil
+                self.requestSurfaceRefreshAction()
+                GhosttyEmbeddedAppService.shared.tick()
+                self.broadcastCurrentState(reason: "input_output")
+            }
+        }
+        inputOutputResyncWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02, execute: workItem)
     }
 
     private func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
@@ -701,6 +760,13 @@ extension Notification.Name {
     private static func clientForAttachLease(_ client: TerminalClient, attachedAt: String) -> TerminalClient {
         guard client.kind != .localWindow else { return client }
         return TerminalClient(id: client.id, kind: client.kind, identity: client.identity, connectedAt: attachedAt, disconnectedAt: nil)
+    }
+
+    private func activeOwnerClient() -> TerminalClient? {
+        guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths),
+            let attachment = snapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })
+        else { return nil }
+        return snapshot.clients.first(where: { $0.id == attachment.clientID })
     }
 
     nonisolated static func shouldClearFocusAfterDetachingClient(detachedClientWasOwner: Bool, remainingOwnerClientID: String?) -> Bool {
@@ -731,19 +797,20 @@ extension Notification.Name {
         }
     }
 
-    private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil) {
+    private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputData: Data? = nil) {
         let startedAt = Date()
-        guard let stateStreamServer, let payload = currentRemoteSessionState(reason: reason, outputByteCount: outputByteCount) else { return }
+        guard let stateStreamServer, let payload = currentRemoteSessionState(reason: reason, outputByteCount: outputByteCount, outputData: outputData)
+        else { return }
         stateStreamServer.broadcast(payload)
         TerminalPerformance.logMetric(
             "terminal_remote_state_publish", target: "session=\(launchConfiguration.sessionID)",
             elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
             detail:
-                "reason=\(reason) snapshot=\(payload.snapshot == nil ? 0 : 1) snapshot_text=\(payload.snapshotText == nil ? 0 : 1) bytes=\(outputByteCount ?? 0)"
+                "reason=\(reason) snapshot=\(payload.snapshot == nil ? 0 : 1) snapshot_text=\(payload.snapshotText == nil ? 0 : 1) bytes=\(outputByteCount ?? 0) streamed=\(payload.outputData?.count ?? 0)"
         )
     }
 
-    private func currentRemoteSessionState(reason: String, outputByteCount: Int?) -> GhosttyRemoteSessionStatePayload? {
+    private func currentRemoteSessionState(reason: String, outputByteCount: Int?, outputData: Data? = nil) -> GhosttyRemoteSessionStatePayload? {
         let runtimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastPersistedRuntimeState
         let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
         let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason)
@@ -757,12 +824,12 @@ extension Notification.Name {
             sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
             screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, title: effectiveTitle,
             workingDirectory: effectiveWorkingDirectory, snapshot: snapshot, snapshotText: snapshotText, transcriptTail: transcriptTail,
-            outputByteCount: outputByteCount)
+            outputByteCount: outputByteCount, outputData: outputData)
     }
 
     private static func remoteStateShouldIncludeScreenState(reason: String) -> Bool {
         switch reason {
-        case "initial", "output", "resize", "terminated": true
+        case "initial", "input", "input_output", "resize", "terminated": true
         default: false
         }
     }

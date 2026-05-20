@@ -45,6 +45,7 @@ import spacesterminalcore
     private var lastViewportSnapshot: GhosttyTerminalSnapshot?
     private var lastReplayPixelSize: PixelSize?
     private var lastReplayStateKey: String?
+    private var lastAppliedOutputEventToken: String?
     private var lastRenderedText: String?
 
     var acceptsTerminalInput = false
@@ -260,15 +261,21 @@ import spacesterminalcore
         super.keyDown(with: event)
     }
 
-    func update(snapshot: GhosttyTerminalSnapshot?, replayStateKey: String) {
+    func update(snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, outputData: Data?, outputEventToken: String?) {
         createSurfaceIfNeeded()
-        if let lastReplayStateKey, lastReplayStateKey != replayStateKey {
+        let shouldApplyIncrementalOutput = canApplyIncrementalOutput(outputData: outputData, outputEventToken: outputEventToken)
+        if let lastReplayStateKey, lastReplayStateKey != replayStateKey, !shouldApplyIncrementalOutput {
             lastViewportSnapshot = nil
             lastReplayPixelSize = nil
+            lastAppliedOutputEventToken = nil
         }
         lastSnapshot = snapshot
         lastReplayStateKey = replayStateKey
         guard surface != nil else { return }
+        if shouldApplyIncrementalOutput, let outputData {
+            applyIncrementalOutput(outputData, outputEventToken: outputEventToken)
+            return
+        }
         guard let snapshot else { return }
         let viewportSnapshot = viewportSnapshot(for: snapshot)
         let pixelSize = currentPixelSize()
@@ -283,6 +290,8 @@ import spacesterminalcore
     func snapshotText() -> String? { lastRenderedText ?? GhosttyTerminalSnapshotCapture.captureText(from: surface) }
 
     func replayedText() -> String? { lastRenderedText }
+
+    var hasReplaySurfaceContent: Bool { lastViewportSnapshot != nil || lastAppliedOutputEventToken != nil }
 
     func copySelectionToPasteboard() -> Bool { GhosttyClipboardBridge.copySelection(from: surface) }
 
@@ -439,6 +448,22 @@ import spacesterminalcore
         let vt = GhosttyTerminalSnapshotVTEncoder.encode(snapshot)
         lastRenderedText = GhosttyTerminalSnapshotLayout.plainText(for: snapshot)
         sessionDriver.processOutput(vt)
+        requestSurfaceRefresh()
+    }
+
+    private func canApplyIncrementalOutput(outputData: Data?, outputEventToken: String?) -> Bool {
+        guard let outputData, !outputData.isEmpty else { return false }
+        guard surface != nil else { return false }
+        guard let outputEventToken, !outputEventToken.isEmpty else { return false }
+        guard lastAppliedOutputEventToken != outputEventToken else { return false }
+        return true
+    }
+
+    private func applyIncrementalOutput(_ outputData: Data, outputEventToken: String?) {
+        sessionDriver.processOutput(outputData)
+        lastSnapshot = nil
+        lastRenderedText = nil
+        lastAppliedOutputEventToken = outputEventToken
         requestSurfaceRefresh()
     }
 

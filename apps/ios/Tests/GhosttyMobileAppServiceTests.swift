@@ -30,7 +30,13 @@
             hostView.frame = viewController.view.bounds
             viewController.view.layoutIfNeeded()
 
-            hostView.update(snapshot: nil, replayStateKey: "viewer|runtime=0x0|snapshot=0x0|interactive=0", fallbackText: "Waiting for terminal state…")
+            hostView.update(
+                snapshot: nil,
+                replayStateKey: "viewer|runtime=0x0|snapshot=0x0|interactive=0",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -68,6 +74,8 @@
             hostView.update(
                 snapshot: sampleSnapshot(),
                 replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                outputData: nil,
+                outputEventToken: nil,
                 fallbackText: "Waiting for terminal state…"
             )
 
@@ -102,6 +110,8 @@
             hostView.update(
                 snapshot: sampleSnapshot(),
                 replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                outputData: nil,
+                outputEventToken: nil,
                 fallbackText: "Waiting for terminal state…"
             )
 
