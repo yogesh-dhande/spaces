@@ -144,9 +144,19 @@ def wait_for_stream_condition(stream: socket.socket, predicate, timeout: float =
     raise RuntimeError(f"Timed out waiting for streamed terminal state. {detail}")
 
 
-def wait_for_active_owner(paths_root: Path, session_id: str, excluded_client_ids: set[str] | None = None, timeout: float = 10) -> str:
+def terminal_sessions_root(profile_root: Path, runtime_root: Path | None = None) -> Path:
+    runtime_sessions_root = runtime_root / "terminal" / "sessions" if runtime_root is not None else None
+    profile_sessions_root = profile_root / "terminal" / "sessions"
+    if runtime_sessions_root is not None and runtime_sessions_root.exists():
+        return runtime_sessions_root
+    return profile_sessions_root
+
+
+def wait_for_active_owner(
+    profile_root: Path, session_id: str, excluded_client_ids: set[str] | None = None, timeout: float = 10, runtime_root: Path | None = None
+) -> str:
     excluded_client_ids = excluded_client_ids or set()
-    attachments_path = paths_root / "terminal" / "sessions" / session_id / "attachments.json"
+    attachments_path = terminal_sessions_root(profile_root, runtime_root) / session_id / "attachments.json"
     deadline = time.time() + timeout
     last_snapshot = ""
     while time.time() < deadline:
@@ -162,8 +172,8 @@ def wait_for_active_owner(paths_root: Path, session_id: str, excluded_client_ids
     raise RuntimeError(f"Timed out waiting for active owner attachment. Last snapshot:\n{last_snapshot}")
 
 
-def read_service_pid(paths_root: Path, session_id: str) -> int | None:
-    state_path = paths_root / "terminal" / "sessions" / session_id / "state.json"
+def read_service_pid(profile_root: Path, session_id: str, runtime_root: Path | None = None) -> int | None:
+    state_path = terminal_sessions_root(profile_root, runtime_root) / session_id / "state.json"
     if not state_path.exists():
         return None
     payload = json.loads(state_path.read_text())
@@ -198,22 +208,24 @@ def resolve_built_binary(repo_root: Path, env_name: str, default_name: str) -> P
     return direct
 
 
-def discover_session_ids(spaces_root: Path) -> list[str]:
-    sessions_root = spaces_root / "terminal" / "sessions"
+def discover_session_ids(profile_root: Path, runtime_root: Path | None = None) -> list[str]:
+    sessions_root = terminal_sessions_root(profile_root, runtime_root)
     if not sessions_root.exists():
         return []
     return sorted(path.name for path in sessions_root.iterdir() if path.is_dir())
 
 
-def wait_for_new_session_id(spaces_root: Path, existing_ids: set[str], timeout: float = 20) -> str:
+def wait_for_new_session_id(profile_root: Path, existing_ids: set[str], timeout: float = 20, runtime_root: Path | None = None) -> str:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        current_ids = discover_session_ids(spaces_root)
+        current_ids = discover_session_ids(profile_root, runtime_root)
         new_ids = [session_id for session_id in current_ids if session_id not in existing_ids]
         if new_ids:
             return new_ids[-1]
         time.sleep(0.25)
-    raise RuntimeError(f"Timed out waiting for a new session id. Existing ids: {sorted(existing_ids)} current ids: {discover_session_ids(spaces_root)}")
+    raise RuntimeError(
+        f"Timed out waiting for a new session id. Existing ids: {sorted(existing_ids)} current ids: {discover_session_ids(profile_root, runtime_root)}"
+    )
 
 
 def socket_path(profile_root: Path, session_id: str, runtime_root: Path | None = None) -> Path:
@@ -636,7 +648,7 @@ def main() -> int:
         if not match:
             raise RuntimeError(f"Unable to parse session id from:\n{result.stdout}")
         session_id = match.group(1)
-        service_pid = read_service_pid(temp_root, session_id)
+        service_pid = read_service_pid(temp_root, session_id, runtime_dir)
         control_socket = socket_path(temp_root, session_id, runtime_dir)
 
         pairing_code = "246810"
@@ -712,7 +724,9 @@ def main() -> int:
             {"authToken": auth_token, "clientApp": client_app, "command": "subscribe", "sessionID": session_id, "clientID": mobile_client["id"]},
         )
         wait_for_stream_condition(stream, snapshot_contains("ready"))
-        initial_owner_client_id = wait_for_active_owner(temp_root, session_id, excluded_client_ids={mobile_client["id"]})
+        initial_owner_client_id = wait_for_active_owner(
+            temp_root, session_id, excluded_client_ids={mobile_client["id"]}, runtime_root=runtime_dir
+        )
 
         blocked = send_request(
             {"command": "send", "sessionID": session_id, "text": "blocked", "appendNewline": True, "clientID": mobile_client["id"]}
@@ -753,7 +767,7 @@ def main() -> int:
             raise RuntimeError(f"Owner window reopen did not report success:\n{show_result.stdout}\n{show_result.stderr}")
 
         reopened_owner_client_id = wait_for_active_owner(
-            temp_root, session_id, excluded_client_ids={mobile_client["id"], initial_owner_client_id}
+            temp_root, session_id, excluded_client_ids={mobile_client["id"], initial_owner_client_id}, runtime_root=runtime_dir
         )
         wait_for_stream_condition(stream, active_owner_is(reopened_owner_client_id))
 
@@ -812,7 +826,7 @@ def main() -> int:
                 env=env | {"SPACES_PROJECT_DIR": str(repo_root)},
                 check=True,
             )
-            existing_render_session_ids = set(discover_session_ids(temp_root))
+            existing_render_session_ids = set(discover_session_ids(temp_root, runtime_dir))
             subprocess.run(
                 [str(spacese2e), "open-workspace-terminal", "--workspace-dir", str(render_project)],
                 capture_output=True,
@@ -820,7 +834,7 @@ def main() -> int:
                 env=env,
                 check=True,
             )
-            render_session_id = wait_for_new_session_id(temp_root, existing_render_session_ids, timeout=30)
+            render_session_id = wait_for_new_session_id(temp_root, existing_render_session_ids, timeout=30, runtime_root=runtime_dir)
 
             wait_for_terminal_window_dump(
                 spacese2e,
@@ -831,7 +845,7 @@ def main() -> int:
                 predicate=lambda payload: payload.get("found") is True and payload.get("showsTerminalSurface") is True,
                 timeout=45,
             )
-            render_owner_client_id = wait_for_active_owner(temp_root, render_session_id, timeout=10)
+            render_owner_client_id = wait_for_active_owner(temp_root, render_session_id, timeout=10, runtime_root=runtime_dir)
             render_control_socket = socket_path(temp_root, render_session_id, runtime_dir)
 
             ipad_udid = resolve_simulator_udid(os.environ.get("SPACES_MOBILE_E2E_IPAD_NAME", "iPad Pro 13-inch (M5)"))
@@ -1049,7 +1063,7 @@ def main() -> int:
             )
             wait_for_file(ipad_post_command_screenshot, timeout=20)
 
-            ipad_owner_client_id = wait_for_active_owner(temp_root, render_session_id, timeout=10)
+            ipad_owner_client_id = wait_for_active_owner(temp_root, render_session_id, timeout=10, runtime_root=runtime_dir)
             show_result = subprocess.run(
                 [str(spaces_cli), "terminal", "show", render_session_id],
                 capture_output=True,
@@ -1061,7 +1075,7 @@ def main() -> int:
                 raise RuntimeError(f"Mac retakeover did not report success:\n{show_result.stdout}\n{show_result.stderr}")
 
             reclaimed_owner_client_id = wait_for_active_owner(
-                temp_root, render_session_id, excluded_client_ids={ipad_owner_client_id}, timeout=20
+                temp_root, render_session_id, excluded_client_ids={ipad_owner_client_id}, timeout=20, runtime_root=runtime_dir
             )
             if reclaimed_owner_client_id == ipad_owner_client_id:
                 raise RuntimeError("Mac retakeover did not transfer ownership away from iPad.")

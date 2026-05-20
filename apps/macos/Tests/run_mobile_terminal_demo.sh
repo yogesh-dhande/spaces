@@ -197,11 +197,15 @@ PY
 }
 
 discover_session_id() {
-  python3 - "$temp_root" <<'PY'
+  python3 - "$spaces_runtime_dir" "$temp_root" <<'PY'
 import pathlib
 import sys
 
-sessions_root = pathlib.Path(sys.argv[1]) / "terminal" / "sessions"
+runtime_root = pathlib.Path(sys.argv[1])
+legacy_root = pathlib.Path(sys.argv[2])
+sessions_root = runtime_root / "terminal" / "sessions"
+if not sessions_root.exists():
+    sessions_root = legacy_root / "terminal" / "sessions"
 if not sessions_root.exists():
     print("")
     raise SystemExit(0)

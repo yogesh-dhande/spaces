@@ -15,7 +15,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let queue = DispatchQueue(label: "spaces.remote-host.stream-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-live", reason: "initial", emittedAt: "2026-05-18T00:00:00Z",
+            sessionID: "remote-live", reason: "initial", emittedAt: "2026-05-18T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
+            screenStateRevision: 1,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-live", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-18T00:00:00Z",
                 title: "live", workingDirectory: "/tmp/live", columns: 5, rows: 1), attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
@@ -36,7 +37,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: "remote-live", reason: "output", emittedAt: "2026-05-18T00:00:01Z",
+                sessionID: "remote-live", reason: "output", emittedAt: "2026-05-18T00:00:01Z", sessionStateRevision: 2, sessionStateFlags: 1,
+                screenStateRevision: 2,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "remote-live", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                     updatedAt: "2026-05-18T00:00:01Z", title: "live", workingDirectory: "/tmp/live", columns: 4, rows: 2),
@@ -53,9 +55,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             attachments: [TerminalAttachment(sessionID: "remote-live", clientID: ownerClient.id, mode: .owner, attachedAt: "2026-05-18T00:00:02Z")])
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: "remote-live", reason: "attachment_state", emittedAt: "2026-05-18T00:00:02Z", runtimeState: nil,
-                attachmentSnapshot: attachmentSnapshot, title: "live", workingDirectory: "/tmp/live", snapshot: nil, snapshotText: nil,
-                transcriptTail: nil, outputByteCount: nil))
+                sessionID: "remote-live", reason: "attachment_state", emittedAt: "2026-05-18T00:00:02Z", sessionStateRevision: 2,
+                sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "live",
+                workingDirectory: "/tmp/live", snapshot: nil, snapshotText: nil, transcriptTail: nil, outputByteCount: nil))
 
         waitForCondition("owner update without snapshot") { host.activeOwnerClientID() == ownerClient.id }
         XCTAssertEqual(host.snapshotText(), "beta\ngamm")
@@ -128,7 +130,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let queue = DispatchQueue(label: "spaces.remote-host.renderable-viewer-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-renderable", reason: "initial", emittedAt: "2026-05-19T00:00:00Z",
+            sessionID: "remote-renderable", reason: "initial", emittedAt: "2026-05-19T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
+            screenStateRevision: 1,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-renderable", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-19T00:00:00Z", title: "renderable", workingDirectory: "/tmp/live", columns: 8, rows: 2),
@@ -170,7 +173,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let queue = DispatchQueue(label: "spaces.remote-host.attachment-state-render-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
-            sessionID: "remote-attachment-state", reason: "initial", emittedAt: "2026-05-20T00:00:00Z",
+            sessionID: "remote-attachment-state", reason: "initial", emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
+            screenStateRevision: 1,
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-attachment-state", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-20T00:00:00Z", title: "renderable", workingDirectory: "/tmp/live", columns: 8, rows: 2),
@@ -208,9 +212,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             ])
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
-                sessionID: "remote-attachment-state", reason: "attachment_state", emittedAt: "2026-05-20T00:00:01Z", runtimeState: nil,
-                attachmentSnapshot: attachmentSnapshot, title: "renderable", workingDirectory: "/tmp/live", snapshot: nil, snapshotText: nil,
-                transcriptTail: nil, outputByteCount: nil))
+                sessionID: "remote-attachment-state", reason: "attachment_state", emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 1,
+                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "renderable",
+                workingDirectory: "/tmp/live", snapshot: nil, snapshotText: nil, transcriptTail: nil, outputByteCount: nil))
 
         waitForCondition("attachment state owner update") { host.activeOwnerClientID() == ownerClient.id }
         waitForCondition("viewer retains rendered text after attachment state") {

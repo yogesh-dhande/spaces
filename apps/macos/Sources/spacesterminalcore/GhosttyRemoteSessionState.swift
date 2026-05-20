@@ -4,6 +4,9 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     public let sessionID: String
     public let reason: String
     public let emittedAt: String
+    public let sessionStateRevision: UInt64?
+    public let sessionStateFlags: UInt32?
+    public let screenStateRevision: UInt64?
     public let runtimeState: TerminalSessionRuntimeState?
     public let attachmentSnapshot: TerminalSessionAttachmentSnapshot?
     public let title: String
@@ -14,13 +17,16 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     public let outputByteCount: Int?
 
     public init(
-        sessionID: String, reason: String, emittedAt: String, runtimeState: TerminalSessionRuntimeState?,
-        attachmentSnapshot: TerminalSessionAttachmentSnapshot?, title: String, workingDirectory: String, snapshot: GhosttyTerminalSnapshot?,
-        snapshotText: String?, transcriptTail: String?, outputByteCount: Int?
+        sessionID: String, reason: String, emittedAt: String, sessionStateRevision: UInt64?, sessionStateFlags: UInt32?, screenStateRevision: UInt64?,
+        runtimeState: TerminalSessionRuntimeState?, attachmentSnapshot: TerminalSessionAttachmentSnapshot?, title: String, workingDirectory: String,
+        snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, transcriptTail: String?, outputByteCount: Int?
     ) {
         self.sessionID = sessionID
         self.reason = reason
         self.emittedAt = emittedAt
+        self.sessionStateRevision = sessionStateRevision
+        self.sessionStateFlags = sessionStateFlags
+        self.screenStateRevision = screenStateRevision
         self.runtimeState = runtimeState
         self.attachmentSnapshot = attachmentSnapshot
         self.title = title
@@ -34,9 +40,12 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     public func merged(with update: Self) -> Self {
         precondition(sessionID == update.sessionID, "Cannot merge terminal state from a different session.")
         return .init(
-            sessionID: update.sessionID, reason: update.reason, emittedAt: update.emittedAt, runtimeState: update.runtimeState ?? runtimeState,
-            attachmentSnapshot: update.attachmentSnapshot ?? attachmentSnapshot, title: update.title, workingDirectory: update.workingDirectory,
-            snapshot: update.snapshot ?? snapshot, snapshotText: update.snapshotText ?? (update.snapshot != nil ? nil : snapshotText),
+            sessionID: update.sessionID, reason: update.reason, emittedAt: update.emittedAt,
+            sessionStateRevision: update.sessionStateRevision ?? sessionStateRevision,
+            sessionStateFlags: update.sessionStateFlags ?? sessionStateFlags, screenStateRevision: update.screenStateRevision ?? screenStateRevision,
+            runtimeState: update.runtimeState ?? runtimeState, attachmentSnapshot: update.attachmentSnapshot ?? attachmentSnapshot,
+            title: update.title, workingDirectory: update.workingDirectory, snapshot: update.snapshot ?? snapshot,
+            snapshotText: update.snapshotText ?? (update.snapshot != nil ? nil : snapshotText),
             transcriptTail: update.transcriptTail ?? transcriptTail, outputByteCount: update.outputByteCount)
     }
 }

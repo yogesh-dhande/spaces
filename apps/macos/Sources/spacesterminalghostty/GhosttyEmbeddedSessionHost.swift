@@ -211,6 +211,9 @@ extension Notification.Name {
     private var currentWorkingDirectory: String?
     private var lastKnownChildPID: Int32?
     private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
+    private var lastSessionStateRevision: UInt64?
+    private var lastSessionStateFlags: GhosttyEmbeddedSessionStateChange.Flags?
+    private var lastScreenStateRevision: UInt64?
     private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
     private var lastRuntimeStateWriteAt: Date?
     private var sessionStartedAt: Date?
@@ -615,6 +618,9 @@ extension Notification.Name {
     }
 
     func applySessionStateChange(_ change: GhosttyEmbeddedSessionStateChange) {
+        lastSessionStateRevision = change.revision
+        lastSessionStateFlags = change.flags
+        if change.flags.contains(.screen) { lastScreenStateRevision = change.revision }
         var metadataChanged = false
 
         if change.flags.contains(.title) {
@@ -745,8 +751,10 @@ extension Notification.Name {
             includeTranscriptTail ? ((try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: Self.remoteTranscriptLineCount)) ?? nil) : nil
         return GhosttyRemoteSessionStatePayload(
             sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()),
-            runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, title: effectiveTitle, workingDirectory: effectiveWorkingDirectory,
-            snapshot: snapshot, snapshotText: snapshotText, transcriptTail: transcriptTail, outputByteCount: outputByteCount)
+            sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
+            screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, title: effectiveTitle,
+            workingDirectory: effectiveWorkingDirectory, snapshot: snapshot, snapshotText: snapshotText, transcriptTail: transcriptTail,
+            outputByteCount: outputByteCount)
     }
 
     private static func remoteStateShouldIncludeScreenState(reason: String) -> Bool {

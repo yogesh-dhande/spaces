@@ -202,6 +202,7 @@ import spacesterminalcore
 
     private func screenStateRevision() -> String {
         guard let latestState else { return "none" }
+        if let screenStateRevision = latestState.screenStateRevision { return "rev:\(screenStateRevision)" }
         switch latestState.reason {
         case "initial", "output", "resize", "terminated": return latestState.emittedAt
         default: return "stable"
