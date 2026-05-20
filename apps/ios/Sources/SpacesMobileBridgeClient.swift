@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Network
 import UIKit
@@ -38,9 +39,17 @@ final class SpacesMobileBridgeStreamHandle: @unchecked Sendable {
 struct SpacesMobileBridgeClient: Sendable {
     let settings: SpacesMobileConnectionSettings
 
-    func pair(pairingCode: String) async throws -> String {
+    func makeCommandChannel() -> SpacesMobileBridgeCommandChannel {
+        SpacesMobileBridgeCommandChannel(settings: settings, clientApp: clientAppIdentity)
+    }
+
+    func pair(
+        pairingCode: String,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> String {
         let response = try await sendRequest(
-            .init(command: "pair", pairingCode: pairingCode, clientApp: clientAppIdentity)
+            .init(command: "pair", pairingCode: pairingCode, clientApp: clientAppIdentity),
+            commandChannel: commandChannel
         )
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
         guard let issuedAuthToken = response.issuedAuthToken else {
@@ -49,18 +58,28 @@ struct SpacesMobileBridgeClient: Sendable {
         return issuedAuthToken
     }
 
-    func fetchOverview() async throws -> SpacesMobileOverviewPayload {
-        let response = try await sendRequest(.init(command: "overview", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity))
+    func fetchOverview(commandChannel: SpacesMobileBridgeCommandChannel? = nil) async throws -> SpacesMobileOverviewPayload {
+        let response = try await sendRequest(
+            .init(command: "overview", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel
+        )
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
         guard let overview = response.overview else { throw SpacesMobileBridgeClientError.missingOverview }
         return overview
     }
 
-    func fetchState(sessionID: String, timeout: Duration = .seconds(3)) async throws -> GhosttyRemoteSessionStatePayload {
-        let response = try await sendRequest(
-            .init(command: "state", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID),
-            timeout: timeout
+    func fetchState(
+        sessionID: String,
+        timeout: Duration = .seconds(3),
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> GhosttyRemoteSessionStatePayload {
+        let request = SpacesMobileBridgeRequest(
+            command: "state",
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity,
+            sessionID: sessionID
         )
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
         guard let sessionState = response.sessionState else {
             throw SpacesMobileBridgeClientError.requestFailed("The mobile bridge did not return terminal state.")
@@ -68,32 +87,54 @@ struct SpacesMobileBridgeClient: Sendable {
         return sessionState
     }
 
-    func attach(sessionID: String, client: TerminalClient, mode: TerminalAttachmentMode) async throws {
-        let response = try await sendRequest(
-            .init(
-                command: "attach",
-                authToken: settings.trimmedAuthToken,
-                clientApp: clientAppIdentity,
-                sessionID: sessionID,
-                client: client,
-                attachmentMode: mode
-            )
+    func attach(
+        sessionID: String,
+        client: TerminalClient,
+        mode: TerminalAttachmentMode,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws {
+        let request = SpacesMobileBridgeRequest(
+            command: "attach",
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity,
+            sessionID: sessionID,
+            client: client,
+            attachmentMode: mode
         )
+        let response = try await sendRequest(request, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
-    func detach(sessionID: String, clientID: String) async throws {
-        let response = try await sendRequest(
-            .init(command: "detach", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID, clientID: clientID)
+    func detach(
+        sessionID: String,
+        clientID: String,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws {
+        let request = SpacesMobileBridgeRequest(
+            command: "detach",
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity,
+            sessionID: sessionID,
+            clientID: clientID
         )
+        let response = try await sendRequest(request, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
-    func takeOver(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws {
-        let response = try await sendRequest(
-            .init(command: "takeover", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID, clientID: clientID),
-            timeout: timeout
+    func takeOver(
+        sessionID: String,
+        clientID: String,
+        timeout: Duration = .seconds(3),
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws {
+        let request = SpacesMobileBridgeRequest(
+            command: "takeover",
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity,
+            sessionID: sessionID,
+            clientID: clientID
         )
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
@@ -102,44 +143,59 @@ struct SpacesMobileBridgeClient: Sendable {
         clientID: String,
         text: String,
         appendNewline: Bool = false,
-        timeout: Duration = .seconds(3)
+        timeout: Duration = .seconds(3),
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
     ) async throws {
-        let response = try await sendRequest(
-            .init(
-                command: "send",
-                authToken: settings.trimmedAuthToken,
-                clientApp: clientAppIdentity,
-                sessionID: sessionID,
-                clientID: clientID,
-                text: text,
-                appendNewline: appendNewline
-            ),
-            timeout: timeout
+        let request = SpacesMobileBridgeRequest(
+            command: "send",
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity,
+            sessionID: sessionID,
+            clientID: clientID,
+            text: text,
+            appendNewline: appendNewline
         )
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
-    func sendKey(sessionID: String, clientID: String, key: String, timeout: Duration = .seconds(3)) async throws {
-        let response = try await sendRequest(
-            .init(command: "key", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID, clientID: clientID, key: key),
-            timeout: timeout
+    func sendKey(
+        sessionID: String,
+        clientID: String,
+        key: String,
+        timeout: Duration = .seconds(3),
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws {
+        let request = SpacesMobileBridgeRequest(
+            command: "key",
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity,
+            sessionID: sessionID,
+            clientID: clientID,
+            key: key
         )
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
-    func resize(sessionID: String, clientID: String, columns: Int, rows: Int, timeout: Duration = .seconds(3)) async throws {
-        let response = try await sendRequest(
-            .init(
-                command: "resize",
-                authToken: settings.trimmedAuthToken,
-                clientApp: clientAppIdentity,
-                sessionID: sessionID,
-                clientID: clientID,
-                columns: columns,
-                rows: rows
-            ),
-            timeout: timeout
+    func resize(
+        sessionID: String,
+        clientID: String,
+        columns: Int,
+        rows: Int,
+        timeout: Duration = .seconds(3),
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws {
+        let request = SpacesMobileBridgeRequest(
+            command: "resize",
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity,
+            sessionID: sessionID,
+            clientID: clientID,
+            columns: columns,
+            rows: rows
         )
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
@@ -159,10 +215,25 @@ struct SpacesMobileBridgeClient: Sendable {
     }
 
     private func sendRequest(_ request: SpacesMobileBridgeRequest, timeout: Duration = .seconds(3)) async throws -> SpacesMobileBridgeResponse {
-        let connection = try makeConnection()
-        let queue = DispatchQueue(label: "spaces.mobile.bridge.request.\(UUID().uuidString)")
-        return try await withCheckedThrowingContinuation { continuation in
-            RequestExchange(connection: connection, request: request, timeout: timeout, continuation: continuation).start(on: queue)
+        try await sendRequest(request, timeout: timeout, commandChannel: nil)
+    }
+
+    private func sendRequest(
+        _ request: SpacesMobileBridgeRequest,
+        timeout: Duration = .seconds(3),
+        commandChannel: SpacesMobileBridgeCommandChannel?
+    ) async throws -> SpacesMobileBridgeResponse {
+        if let commandChannel {
+            return try await commandChannel.send(request: request, timeout: timeout)
+        }
+        let temporaryCommandChannel = makeCommandChannel()
+        do {
+            let response = try await temporaryCommandChannel.send(request: request, timeout: timeout)
+            await temporaryCommandChannel.close()
+            return response
+        } catch {
+            await temporaryCommandChannel.close()
+            throw error
         }
     }
 
@@ -185,33 +256,164 @@ struct SpacesMobileBridgeClient: Sendable {
 
 }
 
-private final class RequestResolver<Response: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var completed = false
-    private let connection: NWConnection
-    private let continuation: CheckedContinuation<Response, Error>
+actor SpacesMobileBridgeCommandChannel {
+    private let host: String
+    private let port: Int
+    private let clientApp: SpacesMobileClientApp
+    private let authToken: String?
+    private var socketFD: Int32 = -1
 
-    init(connection: NWConnection, continuation: CheckedContinuation<Response, Error>) {
-        self.connection = connection
-        self.continuation = continuation
+    init(settings: SpacesMobileConnectionSettings, clientApp: SpacesMobileClientApp) {
+        host = settings.trimmedHost
+        port = settings.port
+        authToken = settings.trimmedAuthToken
+        self.clientApp = clientApp
     }
 
-    func succeed(_ response: Response) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !completed else { return }
-        completed = true
-        connection.cancel()
-        continuation.resume(returning: response)
+    func close() {
+        guard socketFD >= 0 else { return }
+        shutdown(socketFD, SHUT_RDWR)
+        Darwin.close(socketFD)
+        socketFD = -1
     }
 
-    func fail(_ error: Error) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !completed else { return }
-        completed = true
-        connection.cancel()
-        continuation.resume(throwing: error)
+    func send(request: SpacesMobileBridgeRequest, timeout: Duration) async throws -> SpacesMobileBridgeResponse {
+        guard !host.isEmpty, port > 0 else { throw SpacesMobileBridgeClientError.invalidEndpoint }
+        var request = request
+        if request.authToken == nil {
+            request = SpacesMobileBridgeRequest(
+                command: request.command,
+                authToken: authToken,
+                pairingCode: request.pairingCode,
+                clientApp: request.clientApp ?? clientApp,
+                sessionID: request.sessionID,
+                clientID: request.clientID,
+                client: request.client,
+                attachmentMode: request.attachmentMode,
+                text: request.text,
+                key: request.key,
+                columns: request.columns,
+                rows: request.rows,
+                appendNewline: request.appendNewline
+            )
+        }
+        let socketFD = try connectIfNeeded(timeout: timeout)
+        do {
+            try Self.writeAll(data: encodeBridgeRequestLine(request), to: socketFD)
+            let responseData = try Self.readLine(from: socketFD)
+            return try SpacesMobileBridgeCodec.decodeResponse(responseData)
+        } catch {
+            close()
+            throw error
+        }
+    }
+
+    private func connectIfNeeded(timeout: Duration) throws -> Int32 {
+        if socketFD >= 0 {
+            try Self.applySocketTimeouts(socketFD, timeout: timeout)
+            return socketFD
+        }
+
+        var hints = addrinfo(
+            ai_flags: AI_NUMERICSERV,
+            ai_family: AF_UNSPEC,
+            ai_socktype: SOCK_STREAM,
+            ai_protocol: IPPROTO_TCP,
+            ai_addrlen: 0,
+            ai_canonname: nil,
+            ai_addr: nil,
+            ai_next: nil
+        )
+        let portString = String(port)
+        var addressInfo: UnsafeMutablePointer<addrinfo>?
+        let result = getaddrinfo(host, portString, &hints, &addressInfo)
+        guard result == 0, let firstAddress = addressInfo else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { freeaddrinfo(firstAddress) }
+
+        var currentAddress: UnsafeMutablePointer<addrinfo>? = firstAddress
+        var lastError: Error = POSIXError(.ECONNREFUSED)
+        while let address = currentAddress {
+            let candidateFD = socket(address.pointee.ai_family, address.pointee.ai_socktype, address.pointee.ai_protocol)
+            if candidateFD >= 0 {
+                do {
+                    try Self.setNoSIGPIPE(candidateFD)
+                    try Self.applySocketTimeouts(candidateFD, timeout: timeout)
+                    let connectResult = Darwin.connect(candidateFD, address.pointee.ai_addr, address.pointee.ai_addrlen)
+                    if connectResult == 0 {
+                        socketFD = candidateFD
+                        return candidateFD
+                    }
+                    lastError = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                } catch {
+                    lastError = error
+                }
+                Darwin.close(candidateFD)
+            } else {
+                lastError = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            currentAddress = address.pointee.ai_next
+        }
+        throw lastError
+    }
+
+    private static func applySocketTimeouts(_ socketFD: Int32, timeout: Duration) throws {
+        var timeValue = timeout.timeval
+        guard setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeValue, socklen_t(MemoryLayout<timeval>.size)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        timeValue = timeout.timeval
+        guard setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, &timeValue, socklen_t(MemoryLayout<timeval>.size)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    private static func setNoSIGPIPE(_ socketFD: Int32) throws {
+        var yes: Int32 = 1
+        guard setsockopt(socketFD, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    private static func writeAll(data: Data, to socketFD: Int32) throws {
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var bytesRemaining = rawBuffer.count
+            var offset = 0
+            while bytesRemaining > 0 {
+                let written = Darwin.write(socketFD, baseAddress.advanced(by: offset), bytesRemaining)
+                if written < 0 {
+                    if errno == EINTR { continue }
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                bytesRemaining -= written
+                offset += written
+            }
+        }
+    }
+
+    private static func readLine(from socketFD: Int32) throws -> Data {
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            if let newlineIndex = data.firstIndex(of: 0x0A) {
+                let line = data.prefix(upTo: newlineIndex)
+                return Data(line)
+            }
+            let count = Darwin.read(socketFD, &buffer, buffer.count)
+            if count == 0 {
+                if data.isEmpty {
+                    throw SpacesMobileBridgeClientError.requestFailed("The mobile bridge connection was cancelled.")
+                }
+                return data
+            }
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            data.append(buffer, count: count)
+        }
     }
 }
 
@@ -338,84 +540,15 @@ private final class StreamSubscription: @unchecked Sendable {
     }
 }
 
-private final class RequestExchange: @unchecked Sendable {
-    private let connection: NWConnection
-    private let request: SpacesMobileBridgeRequest
-    private let timeout: Duration
-    private let resolver: RequestResolver<SpacesMobileBridgeResponse>
-    private var responseBuffer = Data()
-
-    init(
-        connection: NWConnection,
-        request: SpacesMobileBridgeRequest,
-        timeout: Duration,
-        continuation: CheckedContinuation<SpacesMobileBridgeResponse, Error>
-    ) {
-        self.connection = connection
-        self.request = request
-        self.timeout = timeout
-        resolver = RequestResolver(connection: connection, continuation: continuation)
-    }
-
-    func start(on queue: DispatchQueue) {
-        queue.asyncAfter(deadline: .now() + timeout.timeInterval) { [resolver, connection] in
-            resolver.fail(SpacesMobileBridgeClientError.requestTimedOut)
-            connection.cancel()
-        }
-        connection.stateUpdateHandler = { [self] state in
-            switch state {
-            case .ready:
-                sendInitialRequest()
-            case .failed(let error):
-                resolver.fail(error)
-            case .cancelled:
-                resolver.fail(SpacesMobileBridgeClientError.requestFailed("The mobile bridge connection was cancelled."))
-            default:
-                break
-            }
-        }
-        connection.start(queue: queue)
-    }
-
-    private func sendInitialRequest() {
-        do {
-            let data = try encodeBridgeRequestLine(request)
-            connection.send(content: data, contentContext: .defaultMessage, isComplete: true, completion: .contentProcessed { [self] error in
-                if let error {
-                    resolver.fail(error)
-                    return
-                }
-                receiveNext()
-            })
-        } catch {
-            resolver.fail(error)
-        }
-    }
-
-    private func receiveNext() {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [self] content, _, isComplete, error in
-            if let content, !content.isEmpty { responseBuffer.append(content) }
-            if let error {
-                resolver.fail(error)
-                return
-            }
-            if isComplete {
-                do {
-                    let response = try SpacesMobileBridgeCodec.decodeResponse(responseBuffer)
-                    resolver.succeed(response)
-                } catch {
-                    resolver.fail(error)
-                }
-                return
-            }
-            receiveNext()
-        }
-    }
-}
-
 private extension Duration {
     var timeInterval: TimeInterval {
         TimeInterval(components.seconds) + (TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000)
+    }
+
+    var timeval: timeval {
+        let wholeSeconds = Int(timeInterval.rounded(.down))
+        let microseconds = Int32((timeInterval - TimeInterval(wholeSeconds)) * 1_000_000)
+        return Darwin.timeval(tv_sec: wholeSeconds, tv_usec: microseconds)
     }
 }
 

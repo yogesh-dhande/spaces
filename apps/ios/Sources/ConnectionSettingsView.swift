@@ -103,9 +103,19 @@ struct ConnectionSettingsView: View {
         isPairing = true
         defer { isPairing = false }
         do {
-            let issuedAuthToken = try await SpacesMobileBridgeClient(settings: settings).pair(
-                pairingCode: pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
-            )
+            let bridgeClient = SpacesMobileBridgeClient(settings: settings)
+            let commandChannel = bridgeClient.makeCommandChannel()
+            let issuedAuthToken: String
+            do {
+                issuedAuthToken = try await bridgeClient.pair(
+                    pairingCode: pairingCode.trimmingCharacters(in: .whitespacesAndNewlines),
+                    commandChannel: commandChannel
+                )
+            } catch {
+                await commandChannel.close()
+                throw error
+            }
+            await commandChannel.close()
             settings.authToken = issuedAuthToken
             pairingCode = ""
             errorMessage = nil

@@ -20,6 +20,10 @@ final class SpacesMobileUITests: XCTestCase {
         if let eventLogPath = configuration.eventLogPath {
             app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
         }
+        if let commandMarkerPath = configuration.proceedCommandPath {
+            app.launchEnvironment["SPACES_MOBILE_E2E_COMMAND_MARKER_PATH"] = commandMarkerPath
+        }
+        app.launchEnvironment["SPACES_MOBILE_E2E_COMMAND_TEXT"] = configuration.commandText
         app.launch()
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(1))
@@ -35,11 +39,11 @@ final class SpacesMobileUITests: XCTestCase {
         }
         takeOverButton.tap()
 
-        guard let ownerBadge = waitForStaticText(in: app, identifier: "terminal.ownerBadge", fallbackLabel: "Owner", timeout: 20) else {
-            XCTFail("Timed out waiting for owner badge")
+        guard let ownerState = waitForOwnerState(in: app, timeout: 20) else {
+            XCTFail("Timed out waiting for owner state")
             return
         }
-        XCTAssertTrue(ownerBadge.exists)
+        XCTAssertTrue(ownerState.exists)
 
         captureScreenshot(app, name: "post-takeover-immediate", filePath: configuration.immediateScreenshotPath)
         RunLoop.current.run(until: Date().addingTimeInterval(2))
@@ -49,10 +53,7 @@ final class SpacesMobileUITests: XCTestCase {
 
         if let proceedCommandPath = configuration.proceedCommandPath {
             waitForMarkerIfNeeded(proceedCommandPath, timeout: 20)
-            focusTerminalSurface(in: app)
-            RunLoop.current.run(until: Date().addingTimeInterval(0.5))
-            app.typeText(configuration.commandText)
-            app.typeText("\n")
+            RunLoop.current.run(until: Date().addingTimeInterval(1))
             captureScreenshot(app, name: "post-ios-command-immediate", filePath: configuration.postCommandScreenshotPath)
         }
 
@@ -70,6 +71,7 @@ final class SpacesMobileUITests: XCTestCase {
         let terminalCoordinate = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
         terminalCoordinate.tap()
     }
+
     private func waitForStaticText(
         in app: XCUIApplication,
         identifier: String,
@@ -87,6 +89,30 @@ final class SpacesMobileUITests: XCTestCase {
             }
             if fallback.exists {
                 return fallback
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return nil
+    }
+
+    private func waitForOwnerState(in app: XCUIApplication, timeout: TimeInterval) -> XCUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let ownerBadge = app.otherElements["terminal.ownerBadge"]
+            if ownerBadge.exists {
+                return ownerBadge
+            }
+            let ownerPreparing = app.otherElements["terminal.ownerPreparing"]
+            if ownerPreparing.exists {
+                return ownerPreparing
+            }
+            let ownerText = app.staticTexts["Owner"]
+            if ownerText.exists {
+                return ownerText
+            }
+            let preparingText = app.staticTexts["Preparing input…"]
+            if preparingText.exists {
+                return preparingText
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }

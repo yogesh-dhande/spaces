@@ -256,7 +256,7 @@ struct MobileServeCommand: ParsableCommand {
             "Spaces mobile bridge ready\thost=\(host)\tport=\(server.listeningPort)\tpairing_code=\(resolvedPairingCode)\tbundle=\(SpacesMobileFirstPartyPolicy.allowedBundleID)"
         )
         fflush(stdout)
-        dispatchMain()
+        withExtendedLifetime(server) { dispatchMain() }
     }
 }
 

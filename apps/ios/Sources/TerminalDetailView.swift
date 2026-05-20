@@ -10,6 +10,7 @@ struct TerminalDetailView: View {
 
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
+    @State private var hasExecutedE2ECommand = false
     private let e2eConfig = SpacesMobileE2EConfig.shared
 
     init(
@@ -46,6 +47,7 @@ struct TerminalDetailView: View {
                 isBusy: model.isBusy || model.isSynchronizingOwnership,
                 onInputReadinessChanged: { ready in
                     model.setInputSurfaceReady(ready)
+                    writeE2EEventIfNeeded(kind: "input_readiness", detail: ready ? "ready" : "pending")
                 },
                 onRenderedTextChanged: { text in
                     renderedText = text
@@ -54,9 +56,11 @@ struct TerminalDetailView: View {
                     model.updateViewportSize(columns: columns, rows: rows)
                 },
                 onSendText: { text in
+                    writeE2EEventIfNeeded(kind: "send_text", detail: text)
                     Task { await model.sendText(text) }
                 },
                 onSendKey: { key in
+                    writeE2EEventIfNeeded(kind: "send_key", detail: key)
                     Task { await model.sendKey(key) }
                 }
             )
@@ -70,6 +74,7 @@ struct TerminalDetailView: View {
         .toolbar(.hidden, for: .navigationBar)
         .task { model.start() }
         .task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }
+        .task(id: e2eCommandTaskKey) { await runE2ECommandIfRequested() }
         .onDisappear { model.stop() }
         .accessibilityIdentifier("terminal.detail.\(session.id)")
     }
@@ -194,6 +199,16 @@ struct TerminalDetailView: View {
         ].joined(separator: "|")
     }
 
+    private var e2eCommandTaskKey: String {
+        [
+            session.id,
+            e2eConfig.commandMarkerPath ?? "",
+            e2eConfig.commandText ?? "",
+            model.isOwner ? "owner" : "viewer",
+            hasExecutedE2ECommand ? "done" : "waiting",
+        ].joined(separator: "|")
+    }
+
     private func writeE2EDumpIfNeeded() {
         guard e2eConfig.isEnabled, e2eConfig.matches(sessionID: session.id) else { return }
         SpacesMobileE2EDumpWriter.writeCurrentDump(
@@ -221,5 +236,36 @@ struct TerminalDetailView: View {
             ),
             config: e2eConfig
         )
+    }
+
+    private func writeE2EEventIfNeeded(kind: String, detail: String?) {
+        guard e2eConfig.isEnabled, e2eConfig.matches(sessionID: session.id) else { return }
+        SpacesMobileE2EDumpWriter.appendEvent(
+            .init(
+                sessionID: session.id,
+                kind: kind,
+                detail: detail,
+                emittedAt: ISO8601DateFormatter().string(from: Date())
+            ),
+            config: e2eConfig
+        )
+    }
+
+    private func runE2ECommandIfRequested() async {
+        guard e2eConfig.isEnabled, e2eConfig.matches(sessionID: session.id) else { return }
+        guard !hasExecutedE2ECommand else { return }
+        guard let markerPath = e2eConfig.commandMarkerPath, let commandText = e2eConfig.commandText else { return }
+        guard model.isOwner else { return }
+
+        let markerURL = URL(fileURLWithPath: markerPath)
+        while !Task.isCancelled {
+            if FileManager.default.fileExists(atPath: markerURL.path) {
+                writeE2EEventIfNeeded(kind: "e2e_command_triggered", detail: commandText)
+                hasExecutedE2ECommand = true
+                await model.sendText(commandText, appendNewline: true)
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
     }
 }

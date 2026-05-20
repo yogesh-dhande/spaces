@@ -239,6 +239,42 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         wait(for: [expectation], timeout: 1)
     }
 
+    @MainActor func testViewerUsesEmbeddedHostProviderForLocalSessionCore() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-local-viewer"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, title: "local-viewer", workingDirectory: "/tmp/local-viewer", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: sessionID, servicePID: 1, childPID: nil, state: .running, updatedAt: "2026-05-20T00:00:00Z",
+                title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory, columns: 80, rows: 24), paths: paths)
+
+        _ = GhosttyEmbeddedSessionRegistry.shared.core(for: launchConfiguration, paths: paths)
+        defer { GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID) }
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "local viewer")
+        var providerCallCount = 0
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, preferredAttachmentMode: .viewer, host: host, performInitialRefresh: false,
+            sessionHostProvider: { _, _ in
+                providerCallCount += 1
+                return host
+            })
+
+        controller.show()
+
+        XCTAssertEqual(providerCallCount, 1)
+        XCTAssertEqual(host.attachCount, 1)
+        XCTAssertEqual(host.attachedModes, [.viewer])
+    }
+
     @MainActor func testShowRestoresPersistedWindowFrameForAttachmentMode() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

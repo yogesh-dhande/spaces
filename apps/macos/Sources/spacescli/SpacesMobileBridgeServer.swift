@@ -13,11 +13,80 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
         let heartbeatTimer: DispatchSourceTimer?
     }
 
+    private final class RequestConnection: @unchecked Sendable {
+        private let clientFD: Int32
+        private let server: SpacesMobileBridgeServer
+        private var buffer = Data()
+        private var shouldCloseClient = true
+
+        init(clientFD: Int32, server: SpacesMobileBridgeServer) {
+            self.clientFD = clientFD
+            self.server = server
+        }
+
+        func run() {
+            defer {
+                server.trace("request_connection_close client_fd=\(clientFD) should_close=\(shouldCloseClient)")
+                if shouldCloseClient {
+                    shutdown(clientFD, SHUT_RDWR)
+                    close(clientFD)
+                }
+            }
+
+            do {
+                while let requestData = try readNextRequest() {
+                    let request = try SpacesMobileBridgeCodec.decodeRequest(requestData)
+                    server.trace(
+                        "request_received client_fd=\(clientFD) command=\(request.command) session=\(request.sessionID ?? "-") client=\(request.clientID ?? request.client?.id ?? "-")"
+                    )
+                    try server.authorize(request)
+                    guard request.command != "subscribe" else {
+                        server.trace("request_subscribe client_fd=\(clientFD) session=\(request.sessionID ?? "-")")
+                        try server.queue.sync { try server.handleSubscribeRequest(request, clientFD: clientFD) }
+                        shouldCloseClient = false
+                        return
+                    }
+                    let response = try server.handleRequest(request)
+                    server.trace(
+                        "request_response client_fd=\(clientFD) command=\(request.command) ok=\(response.ok) message=\(response.message.replacingOccurrences(of: "\n", with: "\\n"))"
+                    )
+                    try server.writeResponse(response, to: clientFD)
+                }
+            } catch {
+                server.trace("request_error client_fd=\(clientFD) error=\(String(describing: error).replacingOccurrences(of: "\n", with: "\\n"))")
+                let response = SpacesMobileBridgeResponse(ok: false, message: String(describing: error))
+                try? server.writeResponse(response, to: clientFD)
+            }
+        }
+
+        private func readNextRequest() throws -> Data? {
+            while true {
+                if let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                    let line = buffer.prefix(upTo: newlineIndex)
+                    buffer.removeSubrange(...newlineIndex)
+                    if line.isEmpty { continue }
+                    return Data(line)
+                }
+
+                var readBuffer = [UInt8](repeating: 0, count: 4096)
+                let count = read(clientFD, &readBuffer, readBuffer.count)
+                if count == 0 {
+                    if buffer.isEmpty { return nil }
+                    defer { buffer.removeAll(keepingCapacity: false) }
+                    return Data(buffer)
+                }
+                if count < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                buffer.append(readBuffer, count: count)
+            }
+        }
+    }
+
     private let host: String
     private let port: Int
     private let pairingCode: String
     private let pairingStore: SpacesMobilePairingStore
     private let queue: DispatchQueue
+    private let traceEnabled = ProcessInfo.processInfo.environment["SPACES_MOBILE_BRIDGE_TRACE"] == "1"
 
     private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
@@ -63,7 +132,7 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
             throw POSIXError(code)
         }
 
-        guard listen(socketFD, 16) == 0 else {
+        guard listen(socketFD, 64) == 0 else {
             let code = POSIXErrorCode(rawValue: errno) ?? .EIO
             close(socketFD)
             throw POSIXError(code)
@@ -99,23 +168,27 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
                 return
             }
             do {
+                trace("request_connection_accept client_fd=\(clientFD)")
                 try setNoSIGPIPE(clientFD)
                 try setBlocking(clientFD)
-                let requestData = try readRequest(from: clientFD)
-                let request = try SpacesMobileBridgeCodec.decodeRequest(requestData)
-                try authorize(request)
-                if request.command == "subscribe" {
-                    try handleSubscribeRequest(request, clientFD: clientFD)
-                    continue
+                let requestQueue = DispatchQueue(label: "spaces.mobile.bridge.request.\(clientFD)")
+                requestQueue.async { [weak self] in
+                    guard let self else {
+                        shutdown(clientFD, SHUT_RDWR)
+                        close(clientFD)
+                        return
+                    }
+                    RequestConnection(clientFD: clientFD, server: self).run()
                 }
-                let response = try handleRequest(request)
-                try writeResponse(response, to: clientFD)
             } catch {
+                trace(
+                    "request_connection_accept_error client_fd=\(clientFD) error=\(String(describing: error).replacingOccurrences(of: "\n", with: "\\n"))"
+                )
                 let response = SpacesMobileBridgeResponse(ok: false, message: String(describing: error))
                 try? writeResponse(response, to: clientFD)
+                shutdown(clientFD, SHUT_RDWR)
+                close(clientFD)
             }
-            shutdown(clientFD, SHUT_RDWR)
-            close(clientFD)
         }
     }
 
@@ -260,6 +333,7 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
 
     private func closeStreamRelay(clientFD: Int32) {
         guard let relay = streamRelays.removeValue(forKey: clientFD) else { return }
+        trace("stream_relay_close client_fd=\(clientFD)")
         relay.heartbeatTimer?.cancel()
         relay.relaySource.cancel()
         shutdown(relay.relaySocketFD, SHUT_RDWR)
@@ -336,7 +410,8 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
     }
 
     private func writeResponse(_ response: SpacesMobileBridgeResponse, to fileDescriptor: Int32) throws {
-        let data = try SpacesMobileBridgeCodec.encodeResponse(response)
+        var data = try SpacesMobileBridgeCodec.encodeResponse(response)
+        data.append(0x0A)
         try writeAll(data: data, to: fileDescriptor)
     }
 
@@ -406,19 +481,10 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
         } catch { return false }
     }
 
-    private func readRequest(from fileDescriptor: Int32) throws -> Data {
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let count = read(fileDescriptor, &buffer, buffer.count)
-            if count == 0 { break }
-            if count < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-            data.append(buffer, count: count)
-            if let newlineIndex = data.firstIndex(of: 0x0A) {
-                data.removeSubrange(newlineIndex..<data.endIndex)
-                break
-            }
-        }
-        return data
+    private func trace(_ message: String) {
+        guard traceEnabled else { return }
+        fputs("spaces-mobile-bridge-trace \(message)\n", stdout)
+        fflush(stdout)
     }
+
 }

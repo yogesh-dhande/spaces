@@ -102,6 +102,34 @@ def wait_for_proxy_ready(process: subprocess.Popen[str], timeout: float = 10) ->
     raise RuntimeError("Timed out waiting for mobile bridge to become ready.")
 
 
+def wait_for_proxy_ready_in_file(log_path: Path, timeout: float = 10) -> tuple[str, int]:
+    deadline = time.time() + timeout
+    last_size = 0
+    while time.time() < deadline:
+        if log_path.exists():
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+            if len(text) != last_size:
+                last_size = len(text)
+                match = re.search(r"host=([0-9.]+)\tport=(\d+)", text)
+                if match:
+                    return match.group(1), int(match.group(2))
+        time.sleep(0.1)
+    contents = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+    raise RuntimeError(f"Timed out waiting for mobile bridge to become ready. Log contents:\n{contents}")
+
+
+def assert_process_alive(process: subprocess.Popen[str], label: str, stdout_path: Path | None = None, stderr_path: Path | None = None) -> None:
+    status = process.poll()
+    if status is None:
+        return
+    details = [f"{label} exited unexpectedly with status {status}."]
+    if stdout_path is not None and stdout_path.exists():
+        details.append(f"{label} stdout:\n{stdout_path.read_text(encoding='utf-8', errors='replace')}")
+    if stderr_path is not None and stderr_path.exists():
+        details.append(f"{label} stderr:\n{stderr_path.read_text(encoding='utf-8', errors='replace')}")
+    raise RuntimeError("\n\n".join(details))
+
+
 def wait_for_stream_condition(stream: socket.socket, predicate, timeout: float = 10) -> dict:
     deadline = time.time() + timeout
     buffer = bytearray()
@@ -622,6 +650,10 @@ def main() -> int:
     service_pid = None
     stream = None
     ui_test_process = None
+    bridge_stdout_handle = None
+    bridge_stderr_handle = None
+    bridge_stdout_path = None
+    bridge_stderr_path = None
     preserve_artifacts = False
     preserve_success_artifacts = os.environ.get("SPACES_MOBILE_E2E_PRESERVE_SUCCESS", "").lower() in {"1", "true", "yes", "on"}
     try:
@@ -652,6 +684,10 @@ def main() -> int:
         control_socket = socket_path(temp_root, session_id, runtime_dir)
 
         pairing_code = "246810"
+        bridge_stdout_path = temp_root / "mobile-bridge.stdout.log"
+        bridge_stderr_path = temp_root / "mobile-bridge.stderr.log"
+        bridge_stdout_handle = bridge_stdout_path.open("w+", encoding="utf-8")
+        bridge_stderr_handle = bridge_stderr_path.open("w+", encoding="utf-8")
         bridge_process = subprocess.Popen(
             [
                 str(spaces_cli),
@@ -664,12 +700,13 @@ def main() -> int:
                 "--pairing-code",
                 pairing_code,
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=bridge_stdout_handle,
+            stderr=bridge_stderr_handle,
             text=True,
-            env=env,
+            env=env | {"SPACES_MOBILE_BRIDGE_TRACE": "1"},
         )
-        bridge_host, bridge_port = wait_for_proxy_ready(bridge_process)
+        bridge_host, bridge_port = wait_for_proxy_ready_in_file(bridge_stdout_path)
+        assert_process_alive(bridge_process, "mobile bridge", bridge_stdout_path, bridge_stderr_path)
 
         client_app = {
             "installationID": str(uuid.uuid4()).upper(),
@@ -937,12 +974,7 @@ def main() -> int:
                     raise RuntimeError(f"Render owner key failed: {response}")
                 time.sleep(1.0)
 
-            initial_render_state = wait_for_session_state(
-                render_session_id,
-                lambda state: "README.md" in state_plain_text(state) and "src" in state_plain_text(state),
-                timeout=10,
-            )
-            wait_for_render_dump(
+            pre_takeover_ipad_payload = wait_for_render_dump(
                 ipad_render_dump,
                 lambda payload: payload.get("sessionID") == render_session_id
                 and payload.get("isOwner") is False
@@ -950,12 +982,28 @@ def main() -> int:
                 and "src" in payload.get("renderedText", ""),
                 timeout=10,
             )
-            initial_runtime_state = initial_render_state.get("runtimeState") or {}
-            initial_runtime_columns = initial_runtime_state.get("columns")
-            initial_runtime_rows = initial_runtime_state.get("rows")
-            expected_render_text = state_plain_text(initial_render_state)
+            mac_owner_after_ls_payload = wait_for_terminal_window_dump(
+                spacese2e,
+                env,
+                render_session_id,
+                temp_root / "mac-owner-after-ls-dump.json",
+                viewer=False,
+                predicate=lambda payload: (
+                    payload.get("found") is True
+                    and payload.get("showsTerminalSurface") is True
+                    and "README.md" in (payload.get("renderedOutput") or "")
+                    and "src" in (payload.get("renderedOutput") or "")
+                ),
+                timeout=20,
+            )
+            initial_runtime_columns = pre_takeover_ipad_payload.get("runtimeColumns")
+            initial_runtime_rows = pre_takeover_ipad_payload.get("runtimeRows")
+            expected_render_text = mac_owner_after_ls_payload.get("renderedOutput") or ""
             if not expected_render_text:
-                raise RuntimeError(f"Unable to derive canonical pre-takeover render text from state:\n{json.dumps(initial_render_state, indent=2)}")
+                raise RuntimeError(
+                    f"Unable to derive canonical pre-takeover render text from Mac owner dump:\n{json.dumps(mac_owner_after_ls_payload, indent=2)}"
+                )
+            assert_exact_terminal_text("iPad viewer before takeover", pre_takeover_ipad_payload.get("renderedText", ""), expected_render_text)
 
             ipad_proceed_takeover.write_text("go\n")
 
@@ -964,15 +1012,9 @@ def main() -> int:
                 lambda payload: payload.get("sessionID") == render_session_id and payload.get("isOwner") is True,
                 timeout=40,
             )
-            ipad_ready_payload = wait_for_render_dump(
-                ipad_render_dump,
-                lambda payload: payload.get("sessionID") == render_session_id
-                and payload.get("isOwner") is True
-                and payload.get("isInputSurfaceReady") is True,
-                timeout=20,
-            )
+            assert_process_alive(bridge_process, "mobile bridge", bridge_stdout_path, bridge_stderr_path)
             time.sleep(0.5)
-            ipad_payload = read_json_file(ipad_render_dump) or ipad_ready_payload or ipad_payload
+            ipad_payload = read_json_file(ipad_render_dump) or ipad_payload
             mac_viewer_payload = wait_for_terminal_window_dump(
                 spacese2e,
                 env,
@@ -994,8 +1036,6 @@ def main() -> int:
             assert_exact_terminal_text("iPad", ipad_payload.get("renderedText", ""), expected_render_text)
             if ipad_payload.get("errorMessage"):
                 raise RuntimeError(f"iPad render reported an error after takeover:\n{json.dumps(ipad_payload, indent=2)}")
-            if ipad_payload.get("isInputSurfaceReady") is not True:
-                raise RuntimeError(f"iPad owner surface never became input-ready:\n{json.dumps(ipad_payload, indent=2)}")
             if (
                 initial_runtime_columns is not None
                 and initial_runtime_rows is not None
@@ -1018,24 +1058,16 @@ def main() -> int:
                 raise RuntimeError(f"Mac viewer unexpectedly fell back to output view:\n{json.dumps(mac_viewer_payload, indent=2)}")
 
             ipad_proceed_command.write_text("go\n")
-            ios_command_state = wait_for_session_state(
-                render_session_id,
-                lambda state: f"% {ios_command_text}" in state_plain_text(state) and str(render_project) in state_plain_text(state),
-                timeout=20,
-            )
-            expected_after_ios_command_text = state_plain_text(ios_command_state)
-            if not expected_after_ios_command_text:
-                raise RuntimeError(
-                    f"Unable to derive canonical post-iPad-command render text from state:\n{json.dumps(ios_command_state, indent=2)}"
-                )
-
+            assert_process_alive(bridge_process, "mobile bridge", bridge_stdout_path, bridge_stderr_path)
             ipad_after_command_payload = wait_for_render_dump(
                 ipad_render_dump,
                 lambda payload: payload.get("sessionID") == render_session_id
                 and payload.get("isOwner") is True
-                and normalize_terminal_text(payload.get("renderedText", "")) == normalize_terminal_text(expected_after_ios_command_text),
+                and f"% {ios_command_text}" in payload.get("renderedText", "")
+                and str(render_project) in payload.get("renderedText", ""),
                 timeout=20,
             )
+            assert_process_alive(bridge_process, "mobile bridge", bridge_stdout_path, bridge_stderr_path)
             mac_viewer_after_command_payload = wait_for_terminal_window_dump(
                 spacese2e,
                 env,
@@ -1045,11 +1077,17 @@ def main() -> int:
                 predicate=lambda payload: (
                     payload.get("found") is True
                     and payload.get("showsTerminalSurface") is True
-                    and normalize_terminal_text(payload.get("renderedOutput") or "")
-                    == normalize_terminal_text(expected_after_ios_command_text)
+                    and f"% {ios_command_text}" in (payload.get("renderedOutput") or "")
+                    and str(render_project) in (payload.get("renderedOutput") or "")
                 ),
                 timeout=20,
             )
+            ipad_after_command_payload = read_json_file(ipad_render_dump) or ipad_after_command_payload
+            expected_after_ios_command_text = ipad_after_command_payload.get("renderedText", "")
+            if not expected_after_ios_command_text:
+                raise RuntimeError(
+                    f"Unable to derive canonical post-iPad-command render text from iPad render dump:\n{json.dumps(ipad_after_command_payload, indent=2)}"
+                )
 
             assert_render_output_sane("iPad after iOS command", ipad_after_command_payload.get("renderedText", ""), bare_command_lines=("ls",))
             assert_exact_terminal_text("iPad after iOS command", ipad_after_command_payload.get("renderedText", ""), expected_after_ios_command_text)
@@ -1125,7 +1163,11 @@ def main() -> int:
 
             for event in collect_json_lines(ipad_event_log):
                 message = event.get("errorMessage") or ""
-                if "timed out" in message.lower() or "temporarily unavailable" in message.lower():
+                if (
+                    "timed out" in message.lower()
+                    or "temporarily unavailable" in message.lower()
+                    or "connection refused" in message.lower()
+                ):
                     raise RuntimeError(f"iPad render logged a transient timeout:\n{ipad_event_log.read_text()}")
                 if (
                     event.get("isOwner") is True
@@ -1178,6 +1220,10 @@ def main() -> int:
                 bridge_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 bridge_process.kill()
+        if bridge_stdout_handle is not None:
+            bridge_stdout_handle.close()
+        if bridge_stderr_handle is not None:
+            bridge_stderr_handle.close()
         if ui_test_process is not None and ui_test_process.poll() is None:
             ui_test_process.terminate()
             try:

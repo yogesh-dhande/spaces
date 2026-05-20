@@ -18,7 +18,9 @@ import spacesterminalcore
     var errorMessage: String?
 
     private let bridgeClient: SpacesMobileBridgeClient
+    private var commandChannel: SpacesMobileBridgeCommandChannel
     private let remoteClient: TerminalClient
+    private let e2eConfig = SpacesMobileE2EConfig.shared
     private var streamHandle: SpacesMobileBridgeStreamHandle?
     private var reconnectTask: Task<Void, Never>?
     private var bufferedInputText = ""
@@ -40,6 +42,7 @@ import spacesterminalcore
     private static let ownershipSynchronizationAttempts = 4
     private static let ownershipSynchronizationDelay: Duration = .milliseconds(180)
     private static let automaticResizeEnabled = false
+    private static let silentReconnectDelay: Duration = .milliseconds(150)
 
     init(
         session: SpacesMobileTerminalSessionSummary,
@@ -50,6 +53,7 @@ import spacesterminalcore
         self.settings = settings
         self.onAuthenticationRequired = onAuthenticationRequired
         bridgeClient = SpacesMobileBridgeClient(settings: settings)
+        commandChannel = bridgeClient.makeCommandChannel()
         remoteClient = TerminalClient(
             kind: .remoteViewer,
             identity: TerminalClientIdentity(
@@ -132,7 +136,10 @@ import spacesterminalcore
         isSynchronizingOwnership = false
         streamHandle?.cancel()
         streamHandle = nil
-        Task { try? await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id) }
+        Task {
+            try? await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id, commandChannel: commandChannel)
+            await commandChannel.close()
+        }
     }
 
     func takeOver() async {
@@ -140,7 +147,13 @@ import spacesterminalcore
         isBusy = true
         defer { isBusy = false }
         do {
-            try await bridgeClient.takeOver(sessionID: session.id, clientID: remoteClient.id, timeout: Self.inputRequestTimeout)
+            try await bridgeClient.takeOver(
+                sessionID: session.id,
+                clientID: remoteClient.id,
+                timeout: Self.inputRequestTimeout,
+                commandChannel: commandChannel
+            )
+            await resetCommandChannel()
             optimisticOwner = true
             isInputSurfaceReady = false
             beginOwnerRecoveryGracePeriod()
@@ -179,12 +192,13 @@ import spacesterminalcore
     func sendKey(_ key: String) async {
         guard isOwner else { return }
         flushBufferedInputText()
-        enqueueInputSend { [bridgeClient, sessionID = session.id, clientID = remoteClient.id] in
+        enqueueInputSend(kind: "send_key", detail: key) { [bridgeClient, commandChannel, sessionID = session.id, clientID = remoteClient.id] in
             try await bridgeClient.sendKey(
                 sessionID: sessionID,
                 clientID: clientID,
                 key: key,
-                timeout: Self.inputRequestTimeout
+                timeout: Self.inputRequestTimeout,
+                commandChannel: commandChannel
             )
         }
     }
@@ -212,26 +226,38 @@ import spacesterminalcore
         let text = bufferedInputText
         bufferedInputText.removeAll(keepingCapacity: true)
         guard !text.isEmpty else { return }
-        enqueueInputSend { [bridgeClient, sessionID = session.id, clientID = remoteClient.id] in
+        enqueueInputSend(kind: "send_text", detail: text) { [bridgeClient, commandChannel, sessionID = session.id, clientID = remoteClient.id] in
             try await bridgeClient.sendText(
                 sessionID: sessionID,
                 clientID: clientID,
                 text: text,
                 appendNewline: false,
-                timeout: Self.inputRequestTimeout
+                timeout: Self.inputRequestTimeout,
+                commandChannel: commandChannel
             )
         }
     }
 
-    private func enqueueInputSend(_ request: @escaping @Sendable () async throws -> Void) {
+    private func enqueueInputSend(
+        kind: String,
+        detail: String,
+        _ request: @escaping @Sendable () async throws -> Void
+    ) {
         let previousTask = pendingInputSendTask
         pendingInputSendTask = Task { [weak self] in
             _ = await previousTask?.result
             guard let self, !Task.isCancelled else { return }
             do {
+                await MainActor.run {
+                    self.writeE2EEventIfNeeded(kind: "\(kind)_begin", detail: detail)
+                }
                 try await request()
+                await MainActor.run {
+                    self.writeE2EEventIfNeeded(kind: "\(kind)_success", detail: detail)
+                }
             } catch {
                 await MainActor.run {
+                    self.writeE2EEventIfNeeded(kind: "\(kind)_failure", detail: "\(detail) :: \(error.localizedDescription)")
                     self.handleInputSendError(error)
                 }
             }
@@ -242,6 +268,12 @@ import spacesterminalcore
         guard !Self.isTransientInputTransportError(error) else { return }
         if handleAuthenticationFailure(error) { return }
         errorMessage = error.localizedDescription
+    }
+
+    private func resetCommandChannel() async {
+        let previousChannel = commandChannel
+        commandChannel = bridgeClient.makeCommandChannel()
+        await previousChannel.close()
     }
 
     private func scheduleReconnect(after delay: Duration) {
@@ -270,7 +302,12 @@ import spacesterminalcore
         }
         do {
             if shouldAttachBeforeSubscribing {
-                try await bridgeClient.attach(sessionID: session.id, client: remoteClient, mode: .viewer)
+                try await bridgeClient.attach(
+                    sessionID: session.id,
+                    client: remoteClient,
+                    mode: .viewer,
+                    commandChannel: commandChannel
+                )
                 hasAttachedToSession = true
             }
             let handle = try bridgeClient.subscribe(sessionID: session.id, clientID: remoteClient.id) { [weak self] payload in
@@ -308,7 +345,11 @@ import spacesterminalcore
 
     private func refreshLatestState(timeout: Duration = .seconds(3), ignoreTransientTimeout: Bool = false) async {
         do {
-            latestState = try await bridgeClient.fetchState(sessionID: session.id, timeout: timeout)
+            latestState = try await bridgeClient.fetchState(
+                sessionID: session.id,
+                timeout: timeout,
+                commandChannel: commandChannel
+            )
             isSessionUnavailable = false
             errorMessage = nil
         } catch {
@@ -327,10 +368,13 @@ import spacesterminalcore
     }
 
     private func handleDisconnect(_ error: Error?) async {
+        let reconnectSilently = shouldReconnectSilently
         streamHandle = nil
         isConnecting = false
-        optimisticOwner = false
-        isInputSurfaceReady = false
+        if !reconnectSilently {
+            optimisticOwner = false
+            isInputSurfaceReady = false
+        }
         if isStopping { return }
         if let error {
             if handleAuthenticationFailure(error) { return }
@@ -345,7 +389,7 @@ import spacesterminalcore
                 errorMessage = error.localizedDescription
             }
         }
-        scheduleReconnect(after: .seconds(1))
+        scheduleReconnect(after: reconnectSilently ? Self.silentReconnectDelay : .seconds(1))
     }
 
     private func handleConnectError(_ error: Error) {
@@ -360,7 +404,7 @@ import spacesterminalcore
         } else {
             errorMessage = error.localizedDescription
         }
-        scheduleReconnect(after: .seconds(1))
+        scheduleReconnect(after: shouldReconnectSilently ? Self.silentReconnectDelay : .seconds(1))
     }
 
     private var shouldReconnectSilently: Bool {
@@ -477,6 +521,7 @@ import spacesterminalcore
         guard let viewportSize else { return }
         if !force, lastSentResize?.columns == viewportSize.columns, lastSentResize?.rows == viewportSize.rows { return }
         let bridgeClient = bridgeClient
+        let commandChannel = commandChannel
         let sessionID = session.id
         let clientID = remoteClient.id
         let columns = viewportSize.columns
@@ -488,7 +533,8 @@ import spacesterminalcore
                     clientID: clientID,
                     columns: columns,
                     rows: rows,
-                    timeout: Self.inputRequestTimeout
+                    timeout: Self.inputRequestTimeout,
+                    commandChannel: commandChannel
                 )
             }
             lastSentResize = viewportSize
@@ -517,7 +563,7 @@ import spacesterminalcore
     private static func isTransientInputTransportError(_ error: Error) -> Bool {
         if let code = transientPOSIXErrorCode(error),
             code == Int(EAGAIN) || code == Int(EWOULDBLOCK) || code == Int(ETIMEDOUT) || code == Int(ECONNRESET)
-                || code == Int(ECONNABORTED) || code == Int(EPIPE)
+                || code == Int(ECONNABORTED) || code == Int(EPIPE) || code == Int(ECONNREFUSED)
         {
             return true
         }
@@ -537,7 +583,7 @@ import spacesterminalcore
     private static func isTransientReconnectError(_ error: Error) -> Bool {
         if let code = transientPOSIXErrorCode(error),
             code == Int(EAGAIN) || code == Int(EWOULDBLOCK) || code == Int(ETIMEDOUT) || code == Int(ECONNRESET)
-                || code == Int(ECONNABORTED) || code == Int(EPIPE)
+                || code == Int(ECONNABORTED) || code == Int(EPIPE) || code == Int(ECONNREFUSED)
         {
             return true
         }
@@ -590,8 +636,22 @@ import spacesterminalcore
     func setInputSurfaceReady(_ ready: Bool) {
         if ready {
             isInputSurfaceReady = acceptsInput
-        } else {
-            isInputSurfaceReady = false
+            return
         }
+        guard !(shouldReconnectSilently && acceptsInput) else { return }
+        isInputSurfaceReady = false
+    }
+
+    private func writeE2EEventIfNeeded(kind: String, detail: String?) {
+        guard e2eConfig.isEnabled, e2eConfig.matches(sessionID: session.id) else { return }
+        SpacesMobileE2EDumpWriter.appendEvent(
+            .init(
+                sessionID: session.id,
+                kind: kind,
+                detail: detail,
+                emittedAt: ISO8601DateFormatter().string(from: Date())
+            ),
+            config: e2eConfig
+        )
     }
 }

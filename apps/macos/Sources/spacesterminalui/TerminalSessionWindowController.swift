@@ -1432,6 +1432,12 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     }
 
     private func resolvedGhosttySessionHost(for launchConfiguration: TerminalSessionLaunchConfiguration) -> any TerminalGhosttySessionHosting {
+        if GhosttyEmbeddedSessionRegistry.shared.existingCore(sessionID: launchConfiguration.sessionID) != nil {
+            if let ownerGhosttySessionHost { return ownerGhosttySessionHost }
+            let created = sessionHostProvider(launchConfiguration, paths)
+            ownerGhosttySessionHost = created
+            return created
+        }
         if preferredAttachmentMode == .owner {
             if let ownerGhosttySessionHost { return ownerGhosttySessionHost }
             let created = sessionHostProvider(launchConfiguration, paths)

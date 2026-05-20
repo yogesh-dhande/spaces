@@ -494,8 +494,11 @@ extension Notification.Name {
             try TerminalSessionPersistence.transferOwnership(
                 sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths,
                 transferredAt: ISO8601DateFormatter().string(from: Date()))
-            postAttachmentStateDidChange()
-            refreshRuntimeState(force: true)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.postAttachmentStateDidChange()
+                self.refreshRuntimeState(force: true)
+            }
             TerminalPerformance.logMetric(
                 "terminal_control_takeover", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
