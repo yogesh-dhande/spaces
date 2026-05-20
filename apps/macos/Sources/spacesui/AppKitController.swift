@@ -291,7 +291,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var recentCommandPaletteFocusIdentities: [String] = []
-    private var terminalSessionWindowControllers: [String: [TerminalSessionWindowController]] = [:]
+    private var terminalSessionWindowControllers: [String: TerminalSessionWindowController] = [:]
     private var lastFocusedBuiltInTerminalSessionID: String?
     private var appToggleReturnTerminalSessionID: String?
     private var appToggleReturnApplicationProcessID: pid_t?
@@ -799,7 +799,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func dumpTerminalSessionWindowState(sessionID: String, mode: TerminalAttachmentMode?, outputPath: String) {
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
         let requestedMode = mode?.rawValue ?? "any"
-        let controller = terminalSessionWindowControllers[sessionID]?.first { !$0.didClose && (mode == nil || $0.attachmentMode == mode) }
+        let controller = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID])
         if let controller { controller.debugRefreshStateForTesting(skipOwnerAttach: mode == .viewer) }
         let debugState = controller?.debugStateDump()
         let payload = TerminalSessionWindowStateDump(
@@ -827,56 +827,48 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         cancelDeferredExternalWindowHide()
         do {
             pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-            let existingControllers = terminalSessionWindowControllers[sessionID] ?? []
             let controller: TerminalSessionWindowController
             let reusedExistingWindow: Bool
-            if mode == .owner, let existing = Self.inMemoryOwnerTerminalSessionWindowController(existingControllers) {
+            if let existing = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) {
                 controller = existing
                 reusedExistingWindow = true
+                if mode == .owner { controller.requestOwnershipIfNeeded() }
             } else {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
-                if mode == .owner,
-                    let existing = Self.reusableTerminalSessionWindowController(
-                        existingControllers, mode: .owner, activeOwnerClientID: Self.activeOwnerClientID(paths: paths))
-                {
-                    controller = existing
-                    reusedExistingWindow = true
-                } else {
-                    let useControlSocketClientActions = Self.shouldUseTerminalControlSocketClientActions(sessionID: sessionID)
-                    let attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)?
-                    let detachClientAction: (@Sendable (String) throws -> Void)?
-                    if useControlSocketClientActions {
-                        attachClientAction = { client, attachmentMode in
-                            let response = try TerminalControlClient.send(
-                                request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
-                                socketPath: paths.controlSocketPath)
-                            guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-                        }
-                        detachClientAction = { clientID in
-                            let response = try TerminalControlClient.send(
-                                request: TerminalControlRequest(command: "detach", clientID: clientID), socketPath: paths.controlSocketPath)
-                            guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-                        }
-                    } else {
-                        attachClientAction = nil
-                        detachClientAction = nil
+                let useControlSocketClientActions = Self.shouldUseTerminalControlSocketClientActions(sessionID: sessionID)
+                let attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)?
+                let detachClientAction: (@Sendable (String) throws -> Void)?
+                if useControlSocketClientActions {
+                    attachClientAction = { client, attachmentMode in
+                        let response = try TerminalControlClient.send(
+                            request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
+                            socketPath: paths.controlSocketPath)
+                        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
                     }
-                    let created = TerminalSessionWindowController(
-                        sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false,
-                        attachClientAction: attachClientAction, detachClientAction: detachClientAction,
-                        detachClientSynchronouslyOnClose: !useControlSocketClientActions,
-                        onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
-                        onWindowClose: { [weak self] sessionID, clientID in
-                            if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
-                            self?.removeTerminalSessionWindowController(sessionID: sessionID, clientID: clientID)
-                        },
-                        sessionHostProvider: { launchConfiguration, paths in
-                            Self.terminalSessionHost(launchConfiguration: launchConfiguration, paths: paths)
-                        })
-                    terminalSessionWindowControllers[sessionID, default: []].append(created)
-                    controller = created
-                    reusedExistingWindow = false
+                    detachClientAction = { clientID in
+                        let response = try TerminalControlClient.send(
+                            request: TerminalControlRequest(command: "detach", clientID: clientID), socketPath: paths.controlSocketPath)
+                        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                    }
+                } else {
+                    attachClientAction = nil
+                    detachClientAction = nil
                 }
+                let created = TerminalSessionWindowController(
+                    sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false,
+                    attachClientAction: attachClientAction, detachClientAction: detachClientAction,
+                    detachClientSynchronouslyOnClose: !useControlSocketClientActions,
+                    onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
+                    onWindowClose: { [weak self] sessionID, clientID in
+                        if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
+                        self?.removeTerminalSessionWindowController(sessionID: sessionID, clientID: clientID)
+                    },
+                    sessionHostProvider: { launchConfiguration, paths in
+                        Self.terminalSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+                    })
+                terminalSessionWindowControllers[sessionID] = created
+                controller = created
+                reusedExistingWindow = false
             }
             controller.show(requestID: requestID, route: reusedExistingWindow ? "reuse_existing_window" : "create_window")
             logPerfMetric(
@@ -897,21 +889,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func pruneClosedTerminalSessionWindowControllers(sessionID: String) {
-        guard var controllers = terminalSessionWindowControllers[sessionID] else { return }
-        controllers.removeAll(where: \.didClose)
-        if controllers.isEmpty {
-            terminalSessionWindowControllers.removeValue(forKey: sessionID)
-        } else {
-            terminalSessionWindowControllers[sessionID] = controllers
-        }
+        guard let controller = terminalSessionWindowControllers[sessionID] else { return }
+        if controller.didClose { terminalSessionWindowControllers.removeValue(forKey: sessionID) }
     }
 
     private func closeTerminalSessionWindows(sessionID: String, sessionIsTerminating: Bool = false) {
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-        guard let controllers = terminalSessionWindowControllers[sessionID], !controllers.isEmpty else { return }
-        for controller in controllers where !controller.didClose {
-            if sessionIsTerminating { controller.closeForSessionTermination() } else { controller.window?.close() }
-        }
+        guard let controller = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) else { return }
+        if sessionIsTerminating { controller.closeForSessionTermination() } else { controller.window?.close() }
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
     }
 
@@ -922,17 +907,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         logPerfMetric(
             "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: 0, success: true, detail: "stage=start\(requestDetail)")
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-        let existingControllers = terminalSessionWindowControllers[sessionID] ?? []
         let controllerAndRoute: (controller: TerminalSessionWindowController, route: String)?
-        if let resolved = Self.focusableTerminalSessionWindowController(existingControllers, sessionID: sessionID) {
+        if let resolved = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID) {
             controllerAndRoute = resolved
         } else {
             openTerminalSessionWindow(sessionID: sessionID, mode: .owner, requestID: requestID)
             pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-            let refreshedControllers = terminalSessionWindowControllers[sessionID] ?? []
-            controllerAndRoute = Self.focusableTerminalSessionWindowController(refreshedControllers, sessionID: sessionID).map {
-                ($0.controller, "summoned_owner")
-            }
+            controllerAndRoute = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID).map
+            { ($0.controller, "summoned_owner") }
         }
         guard let (controller, route) = controllerAndRoute else {
             logPerfMetric(
@@ -949,30 +931,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             detail: "route=\(route)\(requestDetail)")
     }
 
-    static func inMemoryOwnerTerminalSessionWindowController(_ controllers: [TerminalSessionWindowController]) -> TerminalSessionWindowController? {
-        let liveOwnerControllers = controllers.filter { !$0.didClose && $0.attachmentMode == .owner }
-        guard liveOwnerControllers.count == 1 else { return nil }
-        return liveOwnerControllers[0]
+    static func liveTerminalSessionWindowController(_ controller: TerminalSessionWindowController?) -> TerminalSessionWindowController? {
+        guard let controller, !controller.didClose else { return nil }
+        return controller
     }
 
-    static func reusableTerminalSessionWindowController(
-        _ controllers: [TerminalSessionWindowController], mode: TerminalAttachmentMode, activeOwnerClientID: String?
-    ) -> TerminalSessionWindowController? {
-        guard mode == .owner, let activeOwnerClientID else { return nil }
-        return controllers.first { !$0.didClose && $0.clientID == activeOwnerClientID }
-    }
-
-    static func focusableTerminalSessionWindowController(_ controllers: [TerminalSessionWindowController], sessionID: String) -> (
+    static func focusableTerminalSessionWindowController(_ controller: TerminalSessionWindowController?, sessionID: String) -> (
         controller: TerminalSessionWindowController, route: String
     )? {
-        if let controller = inMemoryOwnerTerminalSessionWindowController(controllers) { return (controller, "in_memory_owner") }
-        guard !controllers.isEmpty else { return nil }
-        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
-        guard
-            let controller = reusableTerminalSessionWindowController(
-                controllers, mode: .owner, activeOwnerClientID: activeOwnerClientID(paths: paths))
-        else { return nil }
-        return (controller, "persisted_owner")
+        guard let controller = liveTerminalSessionWindowController(controller) else { return nil }
+        return (controller, "existing_window")
     }
 
     static func activeOwnerClientID(paths: TerminalSessionPaths) -> String? {
@@ -990,14 +958,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func removeTerminalSessionWindowController(sessionID: String, clientID: String) {
-        guard var controllers = terminalSessionWindowControllers[sessionID] else { return }
-        controllers.removeAll { $0.clientID == clientID }
-        if controllers.isEmpty {
-            terminalSessionWindowControllers.removeValue(forKey: sessionID)
-            terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
-        } else {
-            terminalSessionWindowControllers[sessionID] = controllers
-        }
+        guard let controller = terminalSessionWindowControllers[sessionID] else { return }
+        guard controller.clientID == clientID else { return }
+        terminalSessionWindowControllers.removeValue(forKey: sessionID)
+        terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
     }
 
     private func terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: String, now: Date = Date()) {
@@ -1365,7 +1329,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func rawMainWindowVisibility() -> Bool { window?.isVisible == true && window?.isMiniaturized != true }
 
     private func hasVisibleTerminalSessionWindowsForHotkeyState() -> Bool {
-        terminalSessionWindowControllers.values.joined().contains { controller in
+        terminalSessionWindowControllers.values.contains { controller in
             controller.window?.isVisible == true && controller.window?.isMiniaturized != true
         }
     }
@@ -1376,10 +1340,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func focusedTerminalSessionIDForToggle() -> String? {
-        for (sessionID, controllers) in terminalSessionWindowControllers {
-            if controllers.contains(where: { !$0.didClose && ($0.window?.isKeyWindow == true || $0.window?.isMainWindow == true) }) {
-                return sessionID
-            }
+        for (sessionID, controller) in terminalSessionWindowControllers {
+            if !controller.didClose && (controller.window?.isKeyWindow == true || controller.window?.isMainWindow == true) { return sessionID }
         }
         return nil
     }

@@ -86,13 +86,15 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
         detachClientSynchronouslyOnClose: Bool = true, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
         ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
-        onWindowClose: (@MainActor (String, String) -> Void)? = nil
+        onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        sessionHostProvider: (@MainActor @Sendable (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? =
+            nil
     ) -> TerminalSessionWindowController {
         let resolvedHost =
             host
             ?? {
                 let host = FakeGhosttySessionHost()
-                host.snapshotValue = ghosttySnapshot()
+                if preferredAttachmentMode == .owner { host.snapshotValue = ghosttySnapshot() } else { host.hasSurface = false }
                 return host
             }()
         return TerminalSessionWindowController(
@@ -100,7 +102,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             attachClientAction: attachClientAction, detachClientAction: detachClientAction, copySelectionAction: copySelectionAction,
             detachClientSynchronouslyOnClose: detachClientSynchronouslyOnClose, pasteClipboardAction: pasteClipboardAction,
             ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowClose: onWindowClose,
-            sessionHostProvider: { _, _ in resolvedHost })
+            sessionHostProvider: sessionHostProvider ?? { @MainActor @Sendable _, _ in resolvedHost })
     }
 
     @MainActor func testControllerCreatesWindow() throws {
@@ -419,7 +421,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugShowsHeader)
     }
 
-    @MainActor func testGhosttyViewerUsesReplaySurfaceOutputWhenLiveViewerHostIsAvailable() throws {
+    @MainActor func testGhosttyViewerShowsLoadingWhenNoRenderableLocalSurfaceIsAvailable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -483,8 +485,10 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         try TerminalSessionPersistence.attachClient(
             sessionID: "session-viewer-surface", client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-05-19T00:00:01Z")
 
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotValue = ghosttySnapshot(text: "viewer")
         let controller = makeGhosttyController(
-            sessionID: "session-viewer-surface", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in },
+            sessionID: "session-viewer-surface", paths: paths, preferredAttachmentMode: .viewer, host: fakeHost, attachClientAction: { _, _ in },
             detachClientAction: { _ in })
 
         controller.show()
@@ -1417,7 +1421,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugState, "state: running    child: 2222")
     }
 
-    @MainActor func testGhosttyViewerRefreshesRenderedOutputFromOutputNotification() async throws {
+    @MainActor func testGhosttyViewerLoadingStateIgnoresOutputNotificationsWithoutRenderableSurface() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }

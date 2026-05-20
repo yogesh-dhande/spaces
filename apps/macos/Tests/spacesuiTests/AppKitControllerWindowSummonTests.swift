@@ -268,7 +268,7 @@ import spacesterminalghostty
         #expect(!AppKitController.effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: false, commandPaletteMainWindowVisibility: nil))
     }
 
-    @MainActor @Test func ownerWindowReusePrefersActiveOwnerControllerOverViewer() throws {
+    @MainActor @Test func liveWindowReuseReturnsExistingController() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -283,29 +283,15 @@ import spacesterminalghostty
                 sessionID: "session-1", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
 
-        let viewerController = TerminalSessionWindowController(
+        let controller = TerminalSessionWindowController(
             sessionID: "session-1", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in })
-        let ownerController = TerminalSessionWindowController(
-            sessionID: "session-1", paths: paths, preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in })
 
-        let ownerClient = TerminalClient(
-            id: ownerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
-            connectedAt: "2026-05-09T00:00:00Z")
-        let viewerClient = TerminalClient(
-            id: viewerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
-            connectedAt: "2026-05-09T00:00:01Z")
-        try TerminalSessionPersistence.attachClient(
-            sessionID: "session-1", client: viewerClient, mode: .viewer, paths: paths, attachedAt: "2026-05-09T00:00:01Z")
-        try TerminalSessionPersistence.attachClient(
-            sessionID: "session-1", client: ownerClient, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:02Z")
+        let selected = AppKitController.liveTerminalSessionWindowController(controller)
 
-        let selected = AppKitController.reusableTerminalSessionWindowController(
-            [viewerController, ownerController], mode: .owner, activeOwnerClientID: AppKitController.activeOwnerClientID(paths: paths))
-
-        #expect(selected === ownerController)
+        #expect(selected === controller)
     }
 
-    @MainActor @Test func ownerWindowReuseFollowsTransferredOwnerBeforeWindowRefresh() throws {
+    @MainActor @Test func liveWindowReuseReturnsNilWhenControllerClosed() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -320,33 +306,17 @@ import spacesterminalghostty
                 sessionID: "session-2", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
 
-        let ownerController = TerminalSessionWindowController(
-            sessionID: "session-2", paths: paths, preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in })
-        let promotedViewerController = TerminalSessionWindowController(
+        let controller = TerminalSessionWindowController(
             sessionID: "session-2", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+        controller.closeForSessionTermination()
+        controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))
 
-        let ownerClient = TerminalClient(
-            id: ownerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
-            connectedAt: "2026-05-09T00:00:00Z")
-        let viewerClient = TerminalClient(
-            id: promotedViewerController.clientID, kind: .localWindow,
-            identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"), connectedAt: "2026-05-09T00:00:01Z")
-        try TerminalSessionPersistence.attachClient(
-            sessionID: "session-2", client: ownerClient, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
-        try TerminalSessionPersistence.attachClient(
-            sessionID: "session-2", client: viewerClient, mode: .viewer, paths: paths, attachedAt: "2026-05-09T00:00:01Z")
-        try TerminalSessionPersistence.transferOwnership(
-            sessionID: "session-2", newOwnerClientID: promotedViewerController.clientID, paths: paths, transferredAt: "2026-05-09T00:00:02Z")
+        let selected = AppKitController.liveTerminalSessionWindowController(controller)
 
-        #expect(promotedViewerController.attachmentMode == .viewer)
-
-        let selected = AppKitController.reusableTerminalSessionWindowController(
-            [ownerController, promotedViewerController], mode: .owner, activeOwnerClientID: AppKitController.activeOwnerClientID(paths: paths))
-
-        #expect(selected === promotedViewerController)
+        #expect(selected == nil)
     }
 
-    @MainActor @Test func inMemoryOwnerWindowReuseAvoidsAttachmentSnapshotWhenOneLiveOwnerExists() throws {
+    @MainActor @Test func focusableWindowReuseReturnsExistingController() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -361,17 +331,16 @@ import spacesterminalghostty
                 sessionID: "session-3", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
 
-        let ownerController = TerminalSessionWindowController(
-            sessionID: "session-3", paths: paths, preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in })
-        let viewerController = TerminalSessionWindowController(
+        let controller = TerminalSessionWindowController(
             sessionID: "session-3", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in })
 
-        let selected = AppKitController.inMemoryOwnerTerminalSessionWindowController([viewerController, ownerController])
+        let selected = AppKitController.focusableTerminalSessionWindowController(controller, sessionID: "session-3")
 
-        #expect(selected === ownerController)
+        #expect(selected?.controller === controller)
+        #expect(selected?.route == "existing_window")
     }
 
-    @MainActor @Test func inMemoryOwnerWindowReuseReturnsNilWhenOwnerIsAmbiguous() throws {
+    @MainActor @Test func focusableWindowReuseReturnsNilWhenControllerClosed() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -386,12 +355,12 @@ import spacesterminalghostty
                 sessionID: "session-4", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
 
-        let firstOwner = TerminalSessionWindowController(
+        let controller = TerminalSessionWindowController(
             sessionID: "session-4", paths: paths, preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in })
-        let secondOwner = TerminalSessionWindowController(
-            sessionID: "session-4", paths: paths, preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+        controller.closeForSessionTermination()
+        controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))
 
-        let selected = AppKitController.inMemoryOwnerTerminalSessionWindowController([firstOwner, secondOwner])
+        let selected = AppKitController.focusableTerminalSessionWindowController(controller, sessionID: "session-4")
 
         #expect(selected == nil)
     }
@@ -401,12 +370,12 @@ import spacesterminalghostty
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let selected = AppKitController.focusableTerminalSessionWindowController([], sessionID: "missing-session")
+        let selected = AppKitController.focusableTerminalSessionWindowController(nil, sessionID: "missing-session")
 
         #expect(selected == nil)
     }
 
-    @MainActor @Test func focusableOwnerWindowReuseLabelsInMemoryOwnerRoute() throws {
+    @MainActor @Test func focusableWindowReuseLabelsExistingWindowRoute() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -421,13 +390,13 @@ import spacesterminalghostty
                 sessionID: "session-5", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
 
-        let ownerController = TerminalSessionWindowController(
+        let controller = TerminalSessionWindowController(
             sessionID: "session-5", paths: paths, preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in })
 
-        let selected = AppKitController.focusableTerminalSessionWindowController([ownerController], sessionID: "session-5")
+        let selected = AppKitController.focusableTerminalSessionWindowController(controller, sessionID: "session-5")
 
-        #expect(selected?.controller === ownerController)
-        #expect(selected?.route == "in_memory_owner")
+        #expect(selected?.controller === controller)
+        #expect(selected?.route == "existing_window")
     }
 
     @MainActor @Test func adHocTerminationWaitsForAllPersistedAttachmentsToDetach() throws {

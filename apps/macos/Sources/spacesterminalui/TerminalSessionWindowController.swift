@@ -311,6 +311,20 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         logFocusMetric("terminal_window_focus", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "focus")")
     }
 
+    public func requestOwnershipIfNeeded() {
+        guard backend == .ghosttyEmbedded else { return }
+        preferredAttachmentMode = .owner
+        if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
+        refreshNow(allowGhosttyOwnerAttach: false)
+        let hasDifferentActiveOwner = lastObservedOwnerClientID != nil && lastObservedOwnerClientID != client.id
+        if hasDifferentActiveOwner && isInteractiveRuntimeState(lastObservedRuntimeState) {
+            takeOverOwnership()
+            return
+        }
+        ensureGhosttyHostAttached(reason: "request_owner_mode")
+        refreshNow()
+    }
+
     public func closeForSessionTermination() {
         closesForSessionTermination = true
         window?.close()
