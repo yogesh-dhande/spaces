@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+    import Darwin
     import UIKit
     import XCTest
     import spacesterminalcore
@@ -16,6 +17,70 @@
             XCTAssertNotNil(runtimeConfig.write_clipboard_cb)
             XCTAssertNotNil(runtimeConfig.close_surface_cb)
             XCTAssertFalse(runtimeConfig.supports_selection_clipboard)
+        }
+
+        func testRepairStandardFileDescriptorsReusesOpenedStandardDescriptor() throws {
+            var validDescriptors: Set<Int32> = [STDERR_FILENO]
+            var duplicateCalls: [(source: Int32, target: Int32)] = []
+            var closeCalls: [Int32] = []
+
+            try GhosttyMobileAppService.repairStandardFileDescriptors(
+                isDescriptorValid: { validDescriptors.contains($0) },
+                openReadWriteNull: {
+                    validDescriptors.insert(STDIN_FILENO)
+                    return STDIN_FILENO
+                },
+                duplicateDescriptor: { source, target in
+                    duplicateCalls.append((source, target))
+                    validDescriptors.insert(target)
+                    return target
+                },
+                closeDescriptor: { descriptor in
+                    closeCalls.append(descriptor)
+                    validDescriptors.remove(descriptor)
+                    return 0
+                }
+            )
+
+            XCTAssertEqual(duplicateCalls.count, 1)
+            XCTAssertEqual(duplicateCalls.first?.source, STDIN_FILENO)
+            XCTAssertEqual(duplicateCalls.first?.target, STDOUT_FILENO)
+            XCTAssertTrue(closeCalls.isEmpty)
+            XCTAssertTrue(validDescriptors.contains(STDIN_FILENO))
+            XCTAssertTrue(validDescriptors.contains(STDOUT_FILENO))
+            XCTAssertTrue(validDescriptors.contains(STDERR_FILENO))
+        }
+
+        func testRepairStandardFileDescriptorsClosesTemporaryNullDescriptor() throws {
+            var validDescriptors: Set<Int32> = [STDIN_FILENO]
+            var duplicateCalls: [(source: Int32, target: Int32)] = []
+            var closeCalls: [Int32] = []
+
+            try GhosttyMobileAppService.repairStandardFileDescriptors(
+                isDescriptorValid: { validDescriptors.contains($0) },
+                openReadWriteNull: {
+                    validDescriptors.insert(7)
+                    return 7
+                },
+                duplicateDescriptor: { source, target in
+                    duplicateCalls.append((source, target))
+                    validDescriptors.insert(target)
+                    return target
+                },
+                closeDescriptor: { descriptor in
+                    closeCalls.append(descriptor)
+                    validDescriptors.remove(descriptor)
+                    return 0
+                }
+            )
+
+            XCTAssertEqual(duplicateCalls.map(\.source), [7, 7])
+            XCTAssertEqual(Set(duplicateCalls.map(\.target)), [STDOUT_FILENO, STDERR_FILENO])
+            XCTAssertEqual(closeCalls, [7])
+            XCTAssertTrue(validDescriptors.contains(STDIN_FILENO))
+            XCTAssertTrue(validDescriptors.contains(STDOUT_FILENO))
+            XCTAssertTrue(validDescriptors.contains(STDERR_FILENO))
+            XCTAssertFalse(validDescriptors.contains(7))
         }
 
         func testRemoteTerminalHostViewCanMountInWindow() throws {

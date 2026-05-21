@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 #if canImport(UIKit)
@@ -19,7 +20,7 @@ import Foundation
 
             let resourcesPath = try resolveResourcesPath()
             setenv("GHOSTTY_RESOURCES_DIR", resourcesPath, 1)
-            configureProcessEnvironment()
+            try configureProcessEnvironment()
 
             if !initialized {
                 let result = ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv)
@@ -93,10 +94,41 @@ import Foundation
             UIScreen.main.traitCollection.userInterfaceStyle == .dark ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT
         }
 
-        private func configureProcessEnvironment() {
+        nonisolated static func repairStandardFileDescriptors(
+            isDescriptorValid: (Int32) -> Bool = GhosttyMobileAppService.isDescriptorValid(_:),
+            openReadWriteNull: () -> Int32 = { open("/dev/null", O_RDWR) }, duplicateDescriptor: (Int32, Int32) -> Int32 = { dup2($0, $1) },
+            closeDescriptor: (Int32) -> Int32 = { close($0) }
+        ) throws {
+            let requiredDescriptors = [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO]
+            let missingDescriptors = requiredDescriptors.filter { !isDescriptorValid($0) }
+            guard !missingDescriptors.isEmpty else { return }
+
+            let nullDescriptor = openReadWriteNull()
+            guard nullDescriptor >= 0 else {
+                let failureCode = errno
+                throw GhosttyMobileAppServiceError.configuration("Unable to open /dev/null while preparing Ghostty stdio (\(failureCode)).")
+            }
+            defer { if nullDescriptor > STDERR_FILENO { _ = closeDescriptor(nullDescriptor) } }
+
+            for descriptor in missingDescriptors where descriptor != nullDescriptor {
+                guard duplicateDescriptor(nullDescriptor, descriptor) != -1 else {
+                    let failureCode = errno
+                    throw GhosttyMobileAppServiceError.configuration("Unable to repair Ghostty stdio descriptor \(descriptor) (\(failureCode)).")
+                }
+            }
+        }
+
+        nonisolated private static func isDescriptorValid(_ descriptor: Int32) -> Bool {
+            if fcntl(descriptor, F_GETFD) != -1 { return true }
+            return errno != EBADF
+        }
+
+        private func configureProcessEnvironment() throws {
             let environment = ProcessInfo.processInfo.environment
             if environment["HOME"]?.isEmpty != false { setenv("HOME", NSHomeDirectory(), 0) }
             if environment["SHELL"]?.isEmpty != false { setenv("SHELL", "/bin/sh", 0) }
+            // Simulator launches may not provide stdio; Ghostty's carrier subprocess assumes these exist.
+            try Self.repairStandardFileDescriptors()
         }
     }
 

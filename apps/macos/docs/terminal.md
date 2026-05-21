@@ -81,6 +81,7 @@ Each live session also participates in a service-level control path:
 - Remote attachments are lease-based. Host time stamps the lease, and only client-identified activity refreshes that specific remote lease.
 - The mobile bridge is an internal first-party transport seam, not a stable third-party public API.
 - Simulator-based manual verification should use `127.0.0.1` as the bridge host. A real device still needs a reachable Mac network address instead of simulator loopback.
+- `GhosttyMobileAppService` repairs missing stdio descriptors before it boots the local iOS Ghostty runtime so manual simulator launches through `simctl launch` can still create the Ghostty carrier subprocess safely.
 
 ## Ghostty Compatibility Boundary
 - The current Ghostty fork still couples PTY ownership to a renderer instance.
