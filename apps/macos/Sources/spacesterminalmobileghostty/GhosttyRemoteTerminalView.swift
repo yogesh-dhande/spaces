@@ -17,37 +17,91 @@ import Foundation
 
     private func ghosttyRemoteTerminalTraceSeconds() -> String { String(format: "%.3f", Date().timeIntervalSince1970) }
 
+    public struct GhosttyRemoteTerminalScrollCommand: Equatable {
+        public let id: String
+        public let horizontal: CGFloat
+        public let vertical: CGFloat
+        public let repetitions: Int
+
+        public init(id: String, horizontal: CGFloat = 0, vertical: CGFloat, repetitions: Int = 1) {
+            self.id = id
+            self.horizontal = horizontal
+            self.vertical = vertical
+            self.repetitions = max(repetitions, 1)
+        }
+    }
+
+    public struct GhosttyRemoteTerminalOutputBatch: Equatable {
+        public let id: String
+        public let data: Data
+
+        public init(id: String, data: Data) {
+            self.id = id
+            self.data = data
+        }
+    }
+
+    public struct GhosttyRemoteTerminalOwnerEpoch: Equatable {
+        public let id: String
+        public let bootstrapSnapshot: GhosttyTerminalSnapshot?
+        public let bootstrapOutputData: Data?
+        public let pendingOutput: GhosttyRemoteTerminalOutputBatch?
+
+        public init(
+            id: String, bootstrapSnapshot: GhosttyTerminalSnapshot?, bootstrapOutputData: Data?,
+            pendingOutput: GhosttyRemoteTerminalOutputBatch? = nil
+        ) {
+            self.id = id
+            self.bootstrapSnapshot = bootstrapSnapshot
+            self.bootstrapOutputData = bootstrapOutputData
+            self.pendingOutput = pendingOutput
+        }
+    }
+
+    public struct GhosttyRemoteTerminalEndedRender: Equatable {
+        public let id: String
+        public let snapshot: GhosttyTerminalSnapshot
+
+        public init(id: String, snapshot: GhosttyTerminalSnapshot) {
+            self.id = id
+            self.snapshot = snapshot
+        }
+    }
+
     public struct GhosttyRemoteTerminalView: UIViewRepresentable {
-        public let snapshot: GhosttyTerminalSnapshot?
-        public let replayStateKey: String
-        public let outputData: Data?
-        public let outputEventToken: String?
+        public let ownerEpoch: GhosttyRemoteTerminalOwnerEpoch?
+        public let endedRender: GhosttyRemoteTerminalEndedRender?
+        public let scrollCommand: GhosttyRemoteTerminalScrollCommand?
         public let fallbackText: String
         public let isVisible: Bool
         public let acceptsInput: Bool
         public let isBusy: Bool
         public let onInputReadinessChanged: @MainActor (Bool) -> Void
+        public let onOutputBatchApplied: (@MainActor (String) -> Void)?
+        public let onScrollCommandApplied: (@MainActor (GhosttyRemoteTerminalScrollCommand) -> Void)?
         public let onRenderedTextChanged: (@MainActor (String) -> Void)?
         public let onViewportSizeChanged: @MainActor (Int, Int) -> Void
         public let onSendText: @MainActor (String) -> Void
         public let onSendKey: @MainActor (String) -> Void
 
         public init(
-            snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, outputData: Data? = nil, outputEventToken: String? = nil,
-            fallbackText: String, isVisible: Bool, acceptsInput: Bool, isBusy: Bool,
-            onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in }, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
-            onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void, onSendText: @escaping @MainActor (String) -> Void,
-            onSendKey: @escaping @MainActor (String) -> Void
+            ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil,
+            scrollCommand: GhosttyRemoteTerminalScrollCommand? = nil, fallbackText: String, isVisible: Bool, acceptsInput: Bool, isBusy: Bool,
+            onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in }, onOutputBatchApplied: (@MainActor (String) -> Void)? = nil,
+            onScrollCommandApplied: (@MainActor (GhosttyRemoteTerminalScrollCommand) -> Void)? = nil,
+            onRenderedTextChanged: (@MainActor (String) -> Void)? = nil, onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
+            onSendText: @escaping @MainActor (String) -> Void, onSendKey: @escaping @MainActor (String) -> Void
         ) {
-            self.snapshot = snapshot
-            self.replayStateKey = replayStateKey
-            self.outputData = outputData
-            self.outputEventToken = outputEventToken
+            self.ownerEpoch = ownerEpoch
+            self.endedRender = endedRender
+            self.scrollCommand = scrollCommand
             self.fallbackText = fallbackText
             self.isVisible = isVisible
             self.acceptsInput = acceptsInput
             self.isBusy = isBusy
             self.onInputReadinessChanged = onInputReadinessChanged
+            self.onOutputBatchApplied = onOutputBatchApplied
+            self.onScrollCommandApplied = onScrollCommandApplied
             self.onRenderedTextChanged = onRenderedTextChanged
             self.onViewportSizeChanged = onViewportSizeChanged
             self.onSendText = onSendText
@@ -58,6 +112,16 @@ import Foundation
 
         public func updateUIView(_ hostView: GhosttyRemoteTerminalHostView, context: Context) {
             hostView.onInputReadinessChanged = { ready in Task { @MainActor in onInputReadinessChanged(ready) } }
+            if let onOutputBatchApplied {
+                hostView.onOutputBatchApplied = { batchID in Task { @MainActor in onOutputBatchApplied(batchID) } }
+            } else {
+                hostView.onOutputBatchApplied = nil
+            }
+            if let onScrollCommandApplied {
+                hostView.onScrollCommandApplied = { command in Task { @MainActor in onScrollCommandApplied(command) } }
+            } else {
+                hostView.onScrollCommandApplied = nil
+            }
             hostView.onViewportSizeChanged = { columns, rows in Task { @MainActor in onViewportSizeChanged(columns, rows) } }
             hostView.onSendText = { text in Task { @MainActor in onSendText(text) } }
             hostView.onSendKey = { key in Task { @MainActor in onSendKey(key) } }
@@ -68,9 +132,8 @@ import Foundation
             }
             hostView.setTerminalVisible(isVisible)
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
-            hostView.update(
-                snapshot: snapshot, replayStateKey: replayStateKey, outputData: outputData, outputEventToken: outputEventToken,
-                fallbackText: fallbackText)
+            hostView.update(ownerEpoch: ownerEpoch, endedRender: endedRender, fallbackText: fallbackText)
+            hostView.applyScrollCommandIfNeeded(scrollCommand)
         }
 
         public static func dismantleUIView(_ hostView: GhosttyRemoteTerminalHostView, coordinator: ()) { hostView.prepareForDismantle() }
@@ -80,12 +143,14 @@ import Foundation
         private static let carrierCommand = "direct:/bin/cat"
         private static let defaultFontSize: Float = 13
         private static let contentInsets = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        private static let sessionResetSequence = Data("\u{001B}c".utf8)
         private var session: ghostty_session_t?
-        private var lastSnapshot: GhosttyTerminalSnapshot?
-        private var lastViewportSnapshot: GhosttyTerminalSnapshot?
-        private var lastReplayPixelSize = CGSize.zero
-        private var lastReplayStateKey: String?
-        private var lastAppliedOutputEventToken: String?
+        private var activeOwnerEpoch: GhosttyRemoteTerminalOwnerEpoch?
+        private var activeEndedRender: GhosttyRemoteTerminalEndedRender?
+        private var lastAppliedOwnerEpochID: String?
+        private var lastAppliedOutputBatchID: String?
+        private var lastAppliedEndedRenderID: String?
+        private var lastStaticRenderPixelSize = CGSize.zero
         private let fallbackLabel = UILabel()
         private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput))
         private lazy var scrollPanRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan))
@@ -95,9 +160,12 @@ import Foundation
         private var lastReportedInputReadiness = false
         private var postRefreshEmissionScheduled = false
         private var isTerminalVisible = true
+        private var lastAppliedScrollCommandID: String?
 
         public private(set) var acceptsTerminalInput = false
         public var onInputReadinessChanged: ((Bool) -> Void)? { didSet { publishCurrentInputReadiness() } }
+        public var onOutputBatchApplied: ((String) -> Void)?
+        public var onScrollCommandApplied: ((GhosttyRemoteTerminalScrollCommand) -> Void)?
         public var onViewportSizeChanged: ((Int, Int) -> Void)?
         public var onSendText: ((String) -> Void)?
         public var onSendKey: ((String) -> Void)?
@@ -168,52 +236,46 @@ import Foundation
                 UIKeyCommand(input: UIKeyCommand.inputLeftArrow, modifierFlags: [], action: #selector(handleLeftArrow)),
                 UIKeyCommand(input: UIKeyCommand.inputRightArrow, modifierFlags: [], action: #selector(handleRightArrow)),
                 UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(handleTab)),
+                UIKeyCommand(input: "\t", modifierFlags: .shift, action: #selector(handleBackTab)),
+                UIKeyCommand(input: UIKeyCommand.inputPageUp, modifierFlags: [], action: #selector(handlePageUp)),
+                UIKeyCommand(input: UIKeyCommand.inputPageDown, modifierFlags: [], action: #selector(handlePageDown)),
+                UIKeyCommand(input: UIKeyCommand.inputHome, modifierFlags: [], action: #selector(handleHome)),
+                UIKeyCommand(input: UIKeyCommand.inputEnd, modifierFlags: [], action: #selector(handleEnd)),
             ]
         }
 
-        public func update(
-            snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, outputData: Data?, outputEventToken: String?, fallbackText: String
-        ) {
+        public func update(ownerEpoch: GhosttyRemoteTerminalOwnerEpoch?, endedRender: GhosttyRemoteTerminalEndedRender?, fallbackText: String) {
             if window != nil { ensureSession() }
-            let shouldApplyIncrementalOutput = canApplyIncrementalOutput(
-                outputData: outputData, outputEventToken: outputEventToken, replayStateKey: replayStateKey)
-            if let lastReplayStateKey, lastReplayStateKey != replayStateKey, !shouldApplyIncrementalOutput {
-                lastViewportSnapshot = nil
-                lastReplayPixelSize = .zero
-                lastAppliedOutputEventToken = nil
-            }
-            if let snapshot { lastSnapshot = snapshot }
-            fallbackLabel.text = snapshot == nil ? fallbackText : nil
-            fallbackLabel.isHidden = snapshot != nil
-            updateRenderedTextSource(snapshot: snapshot, fallbackText: fallbackText, session: session)
+            ghosttyRemoteTerminalTrace(
+                "update owner_epoch=\(ownerEpoch?.id ?? "nil") ended=\(endedRender?.id ?? "nil") pending_output=\(ownerEpoch?.pendingOutput?.id ?? "nil")"
+            )
+            fallbackLabel.text = ownerEpoch == nil && endedRender == nil ? fallbackText : nil
+            fallbackLabel.isHidden = ownerEpoch != nil || endedRender != nil
             syncFirstResponder()
 
             guard let session else {
+                updateRenderedTextSource(ownerEpoch: ownerEpoch, endedRender: endedRender, fallbackText: fallbackText, session: nil)
                 emitRenderedTextIfNeeded()
                 reportInputReadinessIfNeeded()
                 return
             }
-            if shouldApplyIncrementalOutput, let outputData {
-                applyIncrementalOutput(outputData, into: session, outputEventToken: outputEventToken)
+            if let ownerEpoch {
+                applyOwnerEpoch(ownerEpoch, into: session)
+                refreshRenderedTextFromLiveSession()
                 emitRenderedTextIfNeeded()
                 reportInputReadinessIfNeeded()
                 return
             }
-            guard let snapshot else {
+            if let endedRender {
+                applyEndedRender(endedRender, into: session)
+                refreshRenderedTextFromLiveSession()
                 emitRenderedTextIfNeeded()
                 reportInputReadinessIfNeeded()
                 return
             }
-            let viewportSnapshot = viewportSnapshot(for: snapshot, session: session)
-            guard lastViewportSnapshot != viewportSnapshot || lastReplayPixelSize != currentPixelSize else {
-                emitRenderedTextIfNeeded()
-                reportInputReadinessIfNeeded()
-                return
-            }
-            replay(snapshot: viewportSnapshot, into: session)
-            lastViewportSnapshot = viewportSnapshot
-            lastReplayPixelSize = currentPixelSize
-            lastReplayStateKey = replayStateKey
+            activeOwnerEpoch = nil
+            activeEndedRender = nil
+            updateRenderedTextSource(ownerEpoch: nil, endedRender: nil, fallbackText: fallbackText, session: session)
             emitRenderedTextIfNeeded()
             reportInputReadinessIfNeeded()
         }
@@ -268,6 +330,7 @@ import Foundation
             switch recognizer.state {
             case .began:
                 lastScrollTranslation = recognizer.translation(in: self)
+                _ = sendMousePosition(at: recognizer.location(in: self))
                 if acceptsTerminalInput { becomeFirstResponder() }
             case .changed:
                 let translation = recognizer.translation(in: self)
@@ -275,7 +338,10 @@ import Foundation
                 let deltaY = translation.y - lastScrollTranslation.y
                 lastScrollTranslation = translation
                 guard abs(deltaX) > 0.5 || abs(deltaY) > 0.5 else { return }
-                _ = sendScroll(horizontal: -deltaX * 2, vertical: -deltaY * 2)
+                _ = sendMousePosition(at: recognizer.location(in: self))
+                _ = sendScroll(
+                    horizontal: -deltaX * 2, vertical: -deltaY * 2, mods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: recognizer.state)
+                )
             default: lastScrollTranslation = .zero
             }
         }
@@ -287,6 +353,11 @@ import Foundation
         @objc private func handleLeftArrow() { if canProcessKeyboardInput { onSendKey?("left") } }
         @objc private func handleRightArrow() { if canProcessKeyboardInput { onSendKey?("right") } }
         @objc private func handleTab() { if canProcessKeyboardInput { onSendKey?("tab") } }
+        @objc private func handleBackTab() { if canProcessKeyboardInput { onSendKey?("backtab") } }
+        @objc private func handlePageUp() { if canProcessKeyboardInput { onSendKey?("pageup") } }
+        @objc private func handlePageDown() { if canProcessKeyboardInput { onSendKey?("pagedown") } }
+        @objc private func handleHome() { if canProcessKeyboardInput { onSendKey?("home") } }
+        @objc private func handleEnd() { if canProcessKeyboardInput { onSendKey?("end") } }
 
         private func configureFallbackLabel() {
             fallbackLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -322,9 +393,6 @@ import Foundation
             isTerminalVisible = visible
             ghosttyRemoteTerminalTrace("set_visible visible=\(visible ? 1 : 0)")
             if visible {
-                lastViewportSnapshot = nil
-                lastReplayPixelSize = .zero
-                lastAppliedOutputEventToken = nil
                 lastEmittedRenderedText = nil
                 currentRenderedText = ""
             } else {
@@ -362,10 +430,12 @@ import Foundation
             if isFirstResponder { resignFirstResponder() }
             ghostty_session_free(session)
             self.session = nil
-            lastViewportSnapshot = nil
-            lastReplayPixelSize = .zero
-            lastReplayStateKey = nil
-            lastAppliedOutputEventToken = nil
+            activeOwnerEpoch = nil
+            activeEndedRender = nil
+            lastAppliedOwnerEpochID = nil
+            lastAppliedOutputBatchID = nil
+            lastAppliedEndedRenderID = nil
+            lastStaticRenderPixelSize = .zero
             currentRenderedText = ""
             lastReportedInputReadiness = false
         }
@@ -395,23 +465,11 @@ import Foundation
             requestSurfaceRefresh()
         }
 
-        private func canApplyIncrementalOutput(outputData: Data?, outputEventToken: String?, replayStateKey: String) -> Bool {
-            guard let outputData, !outputData.isEmpty else { return false }
-            guard session != nil else { return false }
-            guard let outputEventToken, !outputEventToken.isEmpty else { return false }
-            guard lastAppliedOutputEventToken != outputEventToken else { return false }
-            guard lastReplayStateKey == replayStateKey else { return false }
-            guard lastViewportSnapshot != nil || lastAppliedOutputEventToken != nil else { return false }
-            return true
-        }
-
-        private func applyIncrementalOutput(_ outputData: Data, into session: ghostty_session_t, outputEventToken: String?) {
+        private func applyOutput(_ outputData: Data, into session: ghostty_session_t) {
             outputData.withUnsafeBytes { rawBuffer in
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
                 ghostty_session_process_output(session, baseAddress, UInt(outputData.count))
             }
-            lastSnapshot = nil
-            lastAppliedOutputEventToken = outputEventToken
             requestSurfaceRefresh()
         }
 
@@ -423,30 +481,58 @@ import Foundation
             ghostty_session_set_focus(session, isFirstResponder)
             ghostty_session_set_occlusion(session, window != nil && isTerminalVisible && alpha > 0.001)
             ghostty_session_set_size(session, UInt32(max(pixelSize.width, 1)), UInt32(max(pixelSize.height, 1)))
-            let shouldReplayLatestSnapshot = pixelSize.width > 1 && pixelSize.height > 1 && lastReplayPixelSize != pixelSize
             ghosttyRemoteTerminalTrace(
-                "sync_state visible=\(isTerminalVisible ? 1 : 0) accepts_input=\(acceptsTerminalInput ? 1 : 0) first_responder=\(isFirstResponder ? 1 : 0) pixel=\(Int(pixelSize.width))x\(Int(pixelSize.height)) replay=\(shouldReplayLatestSnapshot ? 1 : 0)"
+                "sync_state visible=\(isTerminalVisible ? 1 : 0) accepts_input=\(acceptsTerminalInput ? 1 : 0) first_responder=\(isFirstResponder ? 1 : 0) pixel=\(Int(pixelSize.width))x\(Int(pixelSize.height)) owner_epoch=\(activeOwnerEpoch?.id ?? "nil") ended=\(activeEndedRender?.id ?? "nil")"
             )
-            if let lastSnapshot, shouldReplayLatestSnapshot {
-                let viewportSnapshot = viewportSnapshot(for: lastSnapshot, session: session)
-                replay(snapshot: viewportSnapshot, into: session)
-                lastViewportSnapshot = viewportSnapshot
-                lastReplayPixelSize = pixelSize
-                updateRenderedTextSource(viewportSnapshot: viewportSnapshot, snapshot: lastSnapshot, fallbackText: fallbackLabel.text ?? "")
-            } else {
-                requestSurfaceRefresh()
+            if let endedRender = activeEndedRender, pixelSize.width > 1, pixelSize.height > 1,
+                lastAppliedEndedRenderID == endedRender.id && lastStaticRenderPixelSize != pixelSize
+            {
+                replay(snapshot: viewportSnapshot(for: endedRender.snapshot, session: session), into: session)
+                lastStaticRenderPixelSize = pixelSize
             }
+            requestSurfaceRefresh()
             notifyViewportSizeIfChanged()
             syncFirstResponder()
             reportInputReadinessIfNeeded()
         }
 
-        @discardableResult private func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+        @discardableResult private func sendScroll(horizontal: CGFloat, vertical: CGFloat, mods: ghostty_input_scroll_mods_t = 0) -> Bool {
             guard let session else { return false }
             let surface = ghostty_session_surface(session)
-            ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), 0)
+            ghosttyRemoteTerminalTrace(
+                "scroll horizontal=\(String(format: "%.1f", horizontal)) vertical=\(String(format: "%.1f", vertical)) mods=\(mods)")
+            ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), mods)
             requestSurfaceRefresh()
             return true
+        }
+
+        @discardableResult func debugSendScrollForTesting(
+            horizontal: CGFloat, vertical: CGFloat, location: CGPoint? = nil, hasPreciseDeltas: Bool = true,
+            momentumState: UIGestureRecognizer.State = .changed
+        ) -> Bool {
+            if let location { _ = sendMousePosition(at: location) }
+            return sendScroll(
+                horizontal: horizontal, vertical: vertical,
+                mods: Self.makeScrollMods(hasPreciseDeltas: hasPreciseDeltas, momentumState: momentumState))
+        }
+
+        func applyScrollCommandIfNeeded(_ command: GhosttyRemoteTerminalScrollCommand?) {
+            guard let command else { return }
+            guard lastAppliedScrollCommandID != command.id else { return }
+            guard isTerminalVisible else { return }
+            guard session != nil else { return }
+            let commandLocation = CGPoint(x: bounds.midX, y: bounds.midY)
+            let stepHorizontal = command.horizontal / CGFloat(command.repetitions)
+            let stepVertical = command.vertical / CGFloat(command.repetitions)
+            _ = sendMousePosition(at: commandLocation)
+            _ = debugSendScrollForTesting(horizontal: 0, vertical: 0, location: commandLocation, hasPreciseDeltas: true, momentumState: .began)
+            for _ in 0..<command.repetitions {
+                _ = debugSendScrollForTesting(
+                    horizontal: stepHorizontal, vertical: stepVertical, location: commandLocation, hasPreciseDeltas: true, momentumState: .changed)
+            }
+            _ = debugSendScrollForTesting(horizontal: 0, vertical: 0, location: commandLocation, hasPreciseDeltas: true, momentumState: .ended)
+            lastAppliedScrollCommandID = command.id
+            onScrollCommandApplied?(command)
         }
 
         private func requestSurfaceRefresh() {
@@ -466,6 +552,7 @@ import Foundation
                     guard let self else { return }
                     self.postRefreshEmissionScheduled = false
                     GhosttyMobileAppService.shared.tick()
+                    self.refreshRenderedTextFromLiveSession()
                     self.emitRenderedTextIfNeeded()
                     self.reportInputReadinessIfNeeded()
                 }
@@ -479,6 +566,15 @@ import Foundation
 
         private var isInputSurfaceReady: Bool { acceptsTerminalInput && isFirstResponder && window != nil }
         private var canProcessKeyboardInput: Bool { isInputSurfaceReady }
+
+        private func sendMousePosition(at point: CGPoint, mods: ghostty_input_mods_e = GHOSTTY_MODS_NONE) -> Bool {
+            guard let session else { return false }
+            let surface = ghostty_session_surface(session)
+            let x = max(0, min(point.x, bounds.width))
+            let y = max(0, min(Self.ghosttyMouseY(point.y, boundsHeight: bounds.height), bounds.height))
+            ghostty_surface_mouse_pos(surface, Double(x), Double(y), mods)
+            return true
+        }
 
         private func reportInputReadinessIfNeeded() {
             let isReady = isInputSurfaceReady
@@ -503,6 +599,25 @@ import Foundation
             return GhosttyTerminalSnapshotViewport.crop(snapshot, columns: localColumns, rows: localRows, horizontalAlignment: .leading)
         }
 
+        static func makeScrollMods(hasPreciseDeltas: Bool, momentumState: UIGestureRecognizer.State) -> ghostty_input_scroll_mods_t {
+            var mods: Int32 = hasPreciseDeltas ? 0b0000_0001 : 0
+            mods |= Int32(momentumRawValue(for: momentumState)) << 1
+            return ghostty_input_scroll_mods_t(mods)
+        }
+
+        private static func momentumRawValue(for state: UIGestureRecognizer.State) -> UInt8 {
+            switch state {
+            case .began: UInt8(GHOSTTY_MOUSE_MOMENTUM_BEGAN.rawValue)
+            case .changed: UInt8(GHOSTTY_MOUSE_MOMENTUM_CHANGED.rawValue)
+            case .ended: UInt8(GHOSTTY_MOUSE_MOMENTUM_ENDED.rawValue)
+            case .cancelled, .failed: UInt8(GHOSTTY_MOUSE_MOMENTUM_CANCELLED.rawValue)
+            case .possible: UInt8(GHOSTTY_MOUSE_MOMENTUM_MAY_BEGIN.rawValue)
+            @unknown default: UInt8(GHOSTTY_MOUSE_MOMENTUM_NONE.rawValue)
+            }
+        }
+
+        private static func ghosttyMouseY(_ localY: CGFloat, boundsHeight: CGFloat) -> CGFloat { boundsHeight - localY }
+
         private var scaleFactor: Double { Double(window?.screen.scale ?? UIScreen.main.scale) }
         private var currentPixelSize: CGSize {
             let insetBounds = bounds.inset(by: Self.contentInsets)
@@ -519,6 +634,16 @@ import Foundation
 
         func capturedSnapshotForTesting() -> GhosttyTerminalSnapshot? {
             guard let session else { return nil }
+            return exportedSnapshot(from: session)
+        }
+
+        private func refreshRenderedTextFromLiveSession() {
+            guard let session, onRenderedTextChanged != nil, isTerminalVisible else { return }
+            guard let snapshot = exportedSnapshot(from: session) else { return }
+            currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(for: snapshot)
+        }
+
+        private func exportedSnapshot(from session: ghostty_session_t) -> GhosttyTerminalSnapshot? {
             var snapshot = ghostty_terminal_snapshot_s()
             guard ghostty_session_export_snapshot(session, &snapshot) else { return nil }
             defer { ghostty_terminal_snapshot_free(&snapshot) }
@@ -540,13 +665,10 @@ import Foundation
                 defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells)
         }
 
-        private func updateRenderedTextSource(snapshot: GhosttyTerminalSnapshot?, fallbackText: String, session: ghostty_session_t?) {
-            let viewportSnapshot: GhosttyTerminalSnapshot? =
-                if let session, let snapshot { viewportSnapshot(for: snapshot, session: session) } else { nil }
-            updateRenderedTextSource(viewportSnapshot: viewportSnapshot, snapshot: snapshot, fallbackText: fallbackText)
-        }
-
-        private func updateRenderedTextSource(viewportSnapshot: GhosttyTerminalSnapshot?, snapshot: GhosttyTerminalSnapshot?, fallbackText: String) {
+        private func updateRenderedTextSource(
+            ownerEpoch: GhosttyRemoteTerminalOwnerEpoch?, endedRender: GhosttyRemoteTerminalEndedRender?, fallbackText: String,
+            session: ghostty_session_t?
+        ) {
             guard onRenderedTextChanged != nil else {
                 currentRenderedText = ""
                 return
@@ -555,19 +677,71 @@ import Foundation
                 currentRenderedText = ""
                 return
             }
-            if let viewportSnapshot {
-                currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(for: viewportSnapshot)
+            if let session, let liveSnapshot = exportedSnapshot(from: session) {
+                currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(for: liveSnapshot)
                 return
             }
-            if let lastViewportSnapshot {
-                currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(for: lastViewportSnapshot)
+            if let endedRender {
+                currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(
+                    for: session.map { viewportSnapshot(for: endedRender.snapshot, session: $0) } ?? endedRender.snapshot)
                 return
             }
-            if let snapshot {
-                currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(for: snapshot)
+            if let ownerEpoch, let bootstrapSnapshot = ownerEpoch.bootstrapSnapshot {
+                currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(
+                    for: session.map { viewportSnapshot(for: bootstrapSnapshot, session: $0) } ?? bootstrapSnapshot)
                 return
             }
             currentRenderedText = fallbackText
+        }
+
+        private func applyOwnerEpoch(_ ownerEpoch: GhosttyRemoteTerminalOwnerEpoch, into session: ghostty_session_t) {
+            activeOwnerEpoch = ownerEpoch
+            activeEndedRender = nil
+            if lastAppliedOwnerEpochID != ownerEpoch.id {
+                resetSessionForFreshRender(into: session)
+                lastAppliedOwnerEpochID = ownerEpoch.id
+                lastAppliedOutputBatchID = nil
+                lastAppliedEndedRenderID = nil
+                if let bootstrapOutputData = ownerEpoch.bootstrapOutputData, !bootstrapOutputData.isEmpty {
+                    applyOutput(bootstrapOutputData, into: session)
+                } else if let bootstrapSnapshot = ownerEpoch.bootstrapSnapshot {
+                    replay(snapshot: viewportSnapshot(for: bootstrapSnapshot, session: session), into: session)
+                    lastStaticRenderPixelSize = currentPixelSize
+                }
+            }
+            if let pendingOutput = ownerEpoch.pendingOutput, lastAppliedOutputBatchID != pendingOutput.id {
+                applyOutput(pendingOutput.data, into: session)
+                lastAppliedOutputBatchID = pendingOutput.id
+                onOutputBatchApplied?(pendingOutput.id)
+            }
+            updateRenderedTextSource(ownerEpoch: ownerEpoch, endedRender: nil, fallbackText: fallbackLabel.text ?? "", session: session)
+        }
+
+        private func applyEndedRender(_ endedRender: GhosttyRemoteTerminalEndedRender, into session: ghostty_session_t) {
+            activeOwnerEpoch = nil
+            activeEndedRender = endedRender
+            let pixelSize = currentPixelSize
+            if lastAppliedEndedRenderID != endedRender.id || lastStaticRenderPixelSize != pixelSize {
+                resetSessionForFreshRender(into: session)
+                replay(snapshot: viewportSnapshot(for: endedRender.snapshot, session: session), into: session)
+                lastAppliedEndedRenderID = endedRender.id
+                lastAppliedOwnerEpochID = nil
+                lastAppliedOutputBatchID = nil
+                lastStaticRenderPixelSize = pixelSize
+            }
+            updateRenderedTextSource(ownerEpoch: nil, endedRender: endedRender, fallbackText: fallbackLabel.text ?? "", session: session)
+        }
+
+        private func resetSessionForFreshRender(into session: ghostty_session_t) {
+            ghosttyRemoteTerminalTrace("reset_session_for_fresh_render")
+            Self.sessionResetSequence.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
+                ghostty_session_process_output(session, baseAddress, UInt(Self.sessionResetSequence.count))
+            }
+            currentRenderedText = ""
+            lastEmittedRenderedText = nil
+            lastStaticRenderPixelSize = .zero
+            requestSurfaceRefresh()
         }
 
         private func emitRenderedTextIfNeeded() {

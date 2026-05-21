@@ -1,5 +1,6 @@
 #if canImport(UIKit)
     import Darwin
+    import Foundation
     import UIKit
     import XCTest
     import spacesterminalcore
@@ -206,6 +207,7 @@
                 replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
                 outputData: Data("WRONG".utf8),
                 outputEventToken: "event-1",
+                outputRepresentsFullHistory: false,
                 fallbackText: "Waiting for terminal state…"
             )
 
@@ -546,6 +548,284 @@
             window.isHidden = true
         }
 
+        func testRemoteTerminalHostViewEncodesPreciseScrollMods() {
+            XCTAssertEqual(
+                Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed)),
+                Int32(0b0000_0101)
+            )
+            XCTAssertEqual(
+                Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: false, momentumState: .ended)),
+                Int32(0b0000_1000)
+            )
+            XCTAssertEqual(
+                Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: false, momentumState: .possible)),
+                Int32(0b0000_1010)
+            )
+        }
+
+        func testRemoteTerminalHostViewCanScrollBackThroughIncrementalOutputHistory() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                outputData: scrollbackFixtureOutput(lineCount: 220),
+                outputEventToken: "event-scrollback",
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+
+            let bottomSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let bottomText = GhosttyTerminalSnapshotLayout.plainText(for: bottomSnapshot)
+            XCTAssertTrue(bottomText.localizedStandardContains("SEQ 000219"), bottomText)
+
+            let didScroll = hostView.debugSendScrollForTesting(
+                horizontal: 0,
+                vertical: -2400,
+                location: CGPoint(x: hostView.bounds.midX, y: hostView.bounds.midY)
+            )
+            XCTAssertTrue(didScroll)
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+
+            let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
+            XCTAssertNotEqual(scrolledText, bottomText)
+            XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
+            XCTAssertTrue(scrolledText.localizedStandardContains("SEQ 0001"), scrolledText)
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewPreservesIncrementalScrollbackAfterSnapshotAndResizeChurn() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                outputData: scrollbackFixtureOutput(lineCount: 220),
+                outputEventToken: "event-scrollback",
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=6x4|snapshot=4x2|interactive=0",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            hostView.frame = CGRect(x: 0, y: 0, width: 700, height: 420)
+            viewController.view.layoutIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            let didScroll = hostView.debugSendScrollForTesting(
+                horizontal: 0,
+                vertical: -2400,
+                location: CGPoint(x: hostView.bounds.midX, y: hostView.bounds.midY)
+            )
+            XCTAssertTrue(didScroll)
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+
+            let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
+            XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
+            XCTAssertTrue(scrolledText.localizedStandardContains("SEQ 0001"), scrolledText)
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewBootstrapsScrollbackAfterSnapshotOnlyRender() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                outputData: scrollbackFixtureOutput(lineCount: 220),
+                outputEventToken: "event-bootstrap",
+                outputRepresentsFullHistory: true,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+
+            let bottomSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let bottomText = GhosttyTerminalSnapshotLayout.plainText(for: bottomSnapshot)
+            XCTAssertTrue(bottomText.localizedStandardContains("SEQ 000219"), bottomText)
+
+            let didScroll = hostView.debugSendScrollForTesting(
+                horizontal: 0,
+                vertical: -2400,
+                location: CGPoint(x: hostView.bounds.midX, y: hostView.bounds.midY)
+            )
+            XCTAssertTrue(didScroll)
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+
+            let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
+            XCTAssertNotEqual(scrolledText, bottomText)
+            XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
+            XCTAssertTrue(scrolledText.localizedStandardContains("SEQ 0001"), scrolledText)
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewClearsStaleReplayBaseBeforeBootstrappingFullHistory() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            hostView.update(
+                snapshot: promptSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                outputData: promptFixtureOutput(),
+                outputEventToken: "event-history-bootstrap",
+                outputRepresentsFullHistory: true,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+
+            let replayed = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let replayedText = GhosttyTerminalSnapshotLayout.plainText(for: replayed)
+            XCTAssertFalse(replayedText.localizedStandardContains("hi"), replayedText)
+            XCTAssertTrue(replayedText.localizedStandardContains("shell %"), replayedText)
+            XCTAssertEqual(replayedText.components(separatedBy: "shell %").count - 1, 1, replayedText)
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewAppliesMultiStepScrollCommand() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                outputData: scrollbackFixtureOutput(lineCount: 220),
+                outputEventToken: "event-command-scroll",
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+
+            let bottomSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let bottomText = GhosttyTerminalSnapshotLayout.plainText(for: bottomSnapshot)
+            XCTAssertTrue(bottomText.localizedStandardContains("SEQ 000219"), bottomText)
+
+            hostView.applyScrollCommandIfNeeded(
+                GhosttyRemoteTerminalScrollCommand(id: "multi-step-scroll", vertical: -2400, repetitions: 24)
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+
+            let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
+            XCTAssertNotEqual(scrolledText, bottomText)
+            XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
+            XCTAssertTrue(scrolledText.localizedStandardContains("SEQ 0001"), scrolledText)
+
+            window.isHidden = true
+        }
+
         private func terminalSurfaceLayer(in hostView: GhosttyRemoteTerminalHostView) -> CALayer? {
             hostView.layer.sublayers?.first(where: { layer in
                 abs(layer.frame.width - hostView.bounds.width) < 0.5
@@ -603,6 +883,97 @@
                 defaultBackgroundRGB: 0x1A1E26,
                 cells: cells
             )
+        }
+
+        private func promptSnapshot() -> GhosttyTerminalSnapshot {
+            snapshot(
+                columns: 8,
+                rows: 2,
+                text: "shell % "
+            )
+        }
+
+        private func scrollbackFixtureOutput(lineCount: Int) -> Data {
+            let lines = (0..<lineCount).map { index in "SEQ \(String(format: "%06d", index)) scrollback-line-\(index)" }
+            return Data((lines.joined(separator: "\n") + "\n").utf8)
+        }
+
+        private func promptFixtureOutput() -> Data { Data("hello\r\nshell % ".utf8) }
+
+        private func snapshotSignature(_ snapshot: GhosttyTerminalSnapshot?) -> String {
+            guard let snapshot else { return "nil" }
+            let sampleCells = snapshot.cells.prefix(12).map { "\($0.codepoint):\($0.flags)" }.joined(separator: ",")
+            return "\(snapshot.columns)x\(snapshot.rows)|cursor=\(snapshot.cursorColumn),\(snapshot.cursorRow)|cells=\(sampleCells)"
+        }
+
+        private func snapshot(columns: Int, rows: Int, text: String) -> GhosttyTerminalSnapshot {
+            let blank = GhosttyTerminalSnapshot.Cell(codepoint: 0, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0)
+            let scalars = Array(text.unicodeScalars)
+            let cellCount = max(columns * rows, scalars.count)
+            let cells = (0..<cellCount).map { index in
+                guard index < scalars.count else { return blank }
+                return GhosttyTerminalSnapshot.Cell(
+                    codepoint: scalars[index].value,
+                    foregroundRGB: 0xF2F2F2,
+                    backgroundRGB: 0x1A1E26,
+                    flags: 0
+                )
+            }
+
+            return GhosttyTerminalSnapshot(
+                columns: columns,
+                rows: rows,
+                cursorColumn: min(scalars.count, columns),
+                cursorRow: min(max((max(scalars.count, 1) - 1) / max(columns, 1), 0), max(rows - 1, 0)),
+                cursorVisible: true,
+                defaultForegroundRGB: 0xF2F2F2,
+                defaultBackgroundRGB: 0x1A1E26,
+                cells: cells
+            )
+        }
+    }
+
+    private extension GhosttyRemoteTerminalHostView {
+        func update(
+            snapshot: GhosttyTerminalSnapshot?,
+            replayStateKey: String,
+            outputData: Data?,
+            outputEventToken: String?,
+            outputRepresentsFullHistory: Bool = false,
+            fallbackText: String
+        ) {
+            let ownerEpoch: GhosttyRemoteTerminalOwnerEpoch?
+            if snapshot != nil || outputData != nil {
+                let epochID =
+                    if outputRepresentsFullHistory {
+                        "history|\(outputEventToken ?? replayStateKey)"
+                    } else if outputData == nil {
+                        "snapshot|\(snapshotSignature(snapshot))"
+                    } else {
+                        "owner|\(snapshotSignature(snapshot))"
+                    }
+                let pendingOutput: GhosttyRemoteTerminalOutputBatch?
+                if outputRepresentsFullHistory || outputData?.isEmpty != false {
+                    pendingOutput = nil
+                } else {
+                    pendingOutput = GhosttyRemoteTerminalOutputBatch(id: outputEventToken ?? replayStateKey, data: outputData ?? Data())
+                }
+                ownerEpoch = GhosttyRemoteTerminalOwnerEpoch(
+                    id: epochID,
+                    bootstrapSnapshot: snapshot,
+                    bootstrapOutputData: outputRepresentsFullHistory ? outputData : nil,
+                    pendingOutput: pendingOutput
+                )
+            } else {
+                ownerEpoch = nil
+            }
+            update(ownerEpoch: ownerEpoch, endedRender: nil, fallbackText: fallbackText)
+        }
+
+        private func snapshotSignature(_ snapshot: GhosttyTerminalSnapshot?) -> String {
+            guard let snapshot else { return "nil" }
+            let sampleCells = snapshot.cells.prefix(12).map { "\($0.codepoint):\($0.flags)" }.joined(separator: ",")
+            return "\(snapshot.columns)x\(snapshot.rows)|cursor=\(snapshot.cursorColumn),\(snapshot.cursorRow)|cells=\(sampleCells)"
         }
     }
 #endif

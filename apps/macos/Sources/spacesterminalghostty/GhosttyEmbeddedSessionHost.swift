@@ -35,6 +35,8 @@ extension Notification.Name {
     var prefersOutputFallbackWhenSurfaceUnavailable: Bool { get }
     func snapshot() -> GhosttyTerminalSnapshot?
     func snapshotText() -> String?
+    func sessionSnapshot() -> GhosttyTerminalSnapshot?
+    func sessionSnapshotText() -> String?
     func copySelectionToPasteboard() -> Bool
     func pasteClipboardContents() -> Bool
     @discardableResult func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool
@@ -125,6 +127,10 @@ extension Notification.Name {
     public func snapshot() -> GhosttyTerminalSnapshot? { terminalView.snapshot() }
 
     public func snapshotText() -> String? { terminalView.snapshotText() }
+
+    public func sessionSnapshot() -> GhosttyTerminalSnapshot? { terminalView.sessionSnapshot() }
+
+    public func sessionSnapshotText() -> String? { terminalView.sessionSnapshotText() }
 
     public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
 
@@ -838,6 +844,7 @@ extension Notification.Name {
         let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
         let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason)
         let includeTranscriptTail = Self.remoteStateShouldIncludeTranscriptTail(reason: reason)
+        let bootstrapOutputData = outputData ?? initialRemoteOutputData(reason: reason)
         if includeScreenState {
             trace(
                 "snapshot_export_begin reason=\(reason) runtime=\(traceSize(columns: runtimeState?.columns, rows: runtimeState?.rows)) owner=\(attachmentSnapshot?.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID ?? "nil")"
@@ -859,16 +866,23 @@ extension Notification.Name {
             sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
             screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, title: effectiveTitle,
             workingDirectory: effectiveWorkingDirectory, snapshot: snapshot, snapshotText: snapshotText, transcriptTail: transcriptTail,
-            outputByteCount: outputByteCount, outputData: outputData)
+            outputByteCount: outputByteCount ?? bootstrapOutputData?.count, outputData: bootstrapOutputData)
+    }
+
+    private func initialRemoteOutputData(reason: String) -> Data? {
+        guard reason == "initial" else { return nil }
+        let outputURL = URL(fileURLWithPath: paths.outputPath)
+        guard let outputData = try? Data(contentsOf: outputURL, options: [.mappedIfSafe]), !outputData.isEmpty else { return nil }
+        return outputData
     }
 
     private func resolveRemoteScreenState(runtimeState: TerminalSessionRuntimeState?) -> (
         snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, source: String
     ) {
-        let surfaceSnapshot = rendererHostStorage.snapshot()
-        let surfaceSnapshotText = surfaceSnapshot == nil ? rendererHostStorage.snapshotText() : nil
-        if Self.remoteScreenStateHasVisibleContent(snapshot: surfaceSnapshot, snapshotText: surfaceSnapshotText) {
-            return (snapshot: surfaceSnapshot, snapshotText: surfaceSnapshotText, source: "surface")
+        let sessionSnapshot = rendererHostStorage.sessionSnapshot()
+        let sessionSnapshotText = sessionSnapshot == nil ? rendererHostStorage.sessionSnapshotText() : nil
+        if Self.remoteScreenStateHasVisibleContent(snapshot: sessionSnapshot, snapshotText: sessionSnapshotText) {
+            return (snapshot: sessionSnapshot, snapshotText: sessionSnapshotText, source: "session")
         }
 
         let fallbackSnapshot = remoteSnapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
@@ -878,7 +892,7 @@ extension Notification.Name {
             return (snapshot: fallbackSnapshot, snapshotText: fallbackSnapshotText, source: "vt_stream")
         }
 
-        return (snapshot: surfaceSnapshot, snapshotText: surfaceSnapshotText, source: "surface_empty")
+        return (snapshot: nil, snapshotText: nil, source: "vt_stream_empty")
     }
 
     static func remoteStateShouldIncludeScreenState(reason: String) -> Bool {
@@ -987,6 +1001,10 @@ extension Notification.Name {
     public func snapshot() -> GhosttyTerminalSnapshot? { core.rendererHost.snapshot() }
 
     public func snapshotText() -> String? { core.rendererHost.snapshotText() }
+
+    public func sessionSnapshot() -> GhosttyTerminalSnapshot? { core.rendererHost.sessionSnapshot() }
+
+    public func sessionSnapshotText() -> String? { core.rendererHost.sessionSnapshotText() }
 
     public func copySelectionToPasteboard() -> Bool { core.rendererHost.copySelectionToPasteboard() }
 

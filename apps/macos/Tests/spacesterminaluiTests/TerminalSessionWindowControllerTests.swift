@@ -35,6 +35,8 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         func hasRenderableSurface() -> Bool { hasSurface }
         func snapshot() -> GhosttyTerminalSnapshot? { snapshotValue }
         func snapshotText() -> String? { snapshotTextValue }
+        func sessionSnapshot() -> GhosttyTerminalSnapshot? { snapshotValue }
+        func sessionSnapshotText() -> String? { snapshotTextValue }
         func copySelectionToPasteboard() -> Bool {
             copiedSelection = true
             return true

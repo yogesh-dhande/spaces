@@ -217,6 +217,14 @@ apps/macos/Tests/e2e_terminal_mobile_codex_standalone.sh
 
 That wrapper launches the disposable demo stack, starts real `codex` in the Mac-owned terminal session, accepts the Codex trust prompt when needed, and then attaches the iPad UI test to the already-running standalone simulator app so takeover happens against the same `simctl`-launched runtime as the manual demo. On failure it preserves the demo root and tails the relevant macOS app, bridge, and UI test logs automatically.
 
+For the real standalone Mac/iPad/Mac/iPad/Mac ownership round trip with rendered-content assertions at each handoff, use:
+
+```bash
+apps/macos/Tests/e2e_terminal_mobile_roundtrip_standalone.sh
+```
+
+That wrapper launches the disposable demo stack, seeds terminal output on the Mac-owned session, drives two iPad-owned commands through the mobile app, retakes ownership on Mac, hands it back to iPad twice, and then finishes on Mac again. It preserves the demo root on failure so the render dumps, event log, screenshots, and UI test log stay available for triage.
+
 For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
 
 ```bash

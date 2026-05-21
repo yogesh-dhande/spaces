@@ -52,16 +52,17 @@ private enum SpacesMobileSettingsStore {
 }
 
 struct SpacesMobileE2EConfig {
-    static let shared = Self(environment: ProcessInfo.processInfo.environment)
+    static var shared: Self { Self(environment: ProcessInfo.processInfo.environment) }
 
     let targetSessionID: String?
     let renderDumpPath: String?
     let eventLogPath: String?
 
     init(environment: [String: String]) {
-        targetSessionID = Self.trimmed(environment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"])
-        renderDumpPath = Self.trimmed(environment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"])
-        eventLogPath = Self.trimmed(environment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"])
+        let fileConfig = Self.loadFileConfig(environment: environment)
+        targetSessionID = Self.trimmed(environment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"]) ?? fileConfig?.sessionID
+        renderDumpPath = Self.trimmed(environment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"]) ?? fileConfig?.renderDumpPath
+        eventLogPath = Self.trimmed(environment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"]) ?? fileConfig?.eventLogPath
     }
 
     var isEnabled: Bool { targetSessionID != nil || renderDumpPath != nil || eventLogPath != nil }
@@ -74,6 +75,27 @@ struct SpacesMobileE2EConfig {
     private static func trimmed(_ value: String?) -> String? {
         guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
         return value
+    }
+
+    private static func loadFileConfig(environment: [String: String]) -> FileConfig? {
+        guard let configPath = uiTestConfigPath(environment: environment) else { return nil }
+        let url = URL(fileURLWithPath: configPath)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(FileConfig.self, from: data)
+    }
+
+    private static func uiTestConfigPath(environment: [String: String]) -> String? {
+        if let explicitPath = trimmed(environment["SPACES_MOBILE_UI_TEST_CONFIG_PATH"]) {
+            return explicitPath
+        }
+        let defaultPath = "/tmp/spaces-mobile-ui-test-config.json"
+        return FileManager.default.fileExists(atPath: defaultPath) ? defaultPath : nil
+    }
+
+    private struct FileConfig: Decodable {
+        let sessionID: String?
+        let renderDumpPath: String?
+        let eventLogPath: String?
     }
 
 }
@@ -97,6 +119,8 @@ struct SpacesMobileE2ERenderDump: Codable, Equatable {
     let runtimeRows: Int?
     let snapshotColumns: Int?
     let snapshotRows: Int?
+    let snapshotText: String?
+    let transcriptTail: String?
     let errorMessage: String?
     let visibleText: String
     let renderedText: String

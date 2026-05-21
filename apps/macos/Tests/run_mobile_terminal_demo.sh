@@ -41,6 +41,9 @@ ipad_app_stdout_log=""
 ipad_app_stderr_log=""
 iphone_app_stdout_log=""
 iphone_app_stderr_log=""
+manual_shell_path=""
+ipad_launch_pid=""
+iphone_launch_pid=""
 
 run_demo_env() {
   env \
@@ -75,6 +78,14 @@ cleanup() {
   if [[ -n "$bridge_pid" ]]; then
     kill "$bridge_pid" >/dev/null 2>&1 || true
     wait "$bridge_pid" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$ipad_launch_pid" ]]; then
+    kill "$ipad_launch_pid" >/dev/null 2>&1 || true
+    wait "$ipad_launch_pid" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$iphone_launch_pid" ]]; then
+    kill "$iphone_launch_pid" >/dev/null 2>&1 || true
+    wait "$iphone_launch_pid" >/dev/null 2>&1 || true
   fi
   if [[ -n "$app_pid" ]]; then
     kill "$app_pid" >/dev/null 2>&1 || true
@@ -217,6 +228,17 @@ open_simulator_app() {
   open -a Simulator >/dev/null 2>&1 || true
 }
 
+launch_simulator_app() {
+  local udid="$1"
+  local stdout_log="$2"
+  local stderr_log="$3"
+
+  env SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
+    xcrun simctl launch --console-pty "$udid" "$bundle_id" \
+    >"$stdout_log" 2>"$stderr_log" </dev/null &
+  echo $!
+}
+
 wait_for_pid() {
   local pid="$1"
   local label="$2"
@@ -269,6 +291,40 @@ if not sessions_root.exists():
     raise SystemExit(0)
 ids = sorted([path.name for path in sessions_root.iterdir() if path.is_dir()])
 print(ids[-1] if ids else "")
+PY
+}
+
+discover_workspace_running_state() {
+  local workspace_id="$1"
+  python3 - "$spaces_db_path" "$workspace_id" <<'PY'
+import sqlite3
+import sys
+
+db_path, workspace_id = sys.argv[1:]
+connection = sqlite3.connect(db_path)
+try:
+    row = connection.execute("select is_running from workspaces where id = ?", (workspace_id,)).fetchone()
+finally:
+    connection.close()
+print("" if row is None else row[0])
+PY
+}
+
+open_demo_workspace_terminal() {
+  run_demo_env \
+    HOME="$temp_root/home" \
+    SPACES_DB_PATH="$spaces_db_path" \
+    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+    "$spacese2e" open-workspace-terminal --workspace-dir "$project_dir"
+}
+
+extract_workspace_id() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+print(payload.get("id", ""))
 PY
 }
 
@@ -435,6 +491,64 @@ print(json.dumps(payload, indent=2))
 PY
 }
 
+write_manual_shell_helper() {
+  manual_shell_path="$temp_root/manual-demo-env.sh"
+  cat >"$manual_shell_path" <<EOF
+#!/usr/bin/env bash
+export HOME=$(printf '%q' "$temp_root/home")
+export SPACES_DB_PATH=$(printf '%q' "$spaces_db_path")
+export SPACES_RUNTIME_DIR=$(printf '%q' "$spaces_runtime_dir")
+export SPACES_DEMO_ROOT=$(printf '%q' "$temp_root")
+export SPACES_DEMO_SESSION_ID=$(printf '%q' "$session_id")
+export SPACES_DEMO_PROJECT_DIR=$(printf '%q' "$project_dir")
+export SPACES_DEMO_IPAD_UDID=$(printf '%q' "$ipad_udid")
+export SPACES_DEMO_IPHONE_UDID=$(printf '%q' "$iphone_udid")
+export SPACES_CLI=$(printf '%q' "$spaces_cli")
+export SPACES_E2E=$(printf '%q' "$spacese2e")
+
+spaces_demo_list() {
+  "\$SPACES_CLI" terminal list
+}
+
+spaces_demo_tail() {
+  "\$SPACES_CLI" terminal tail "\$SPACES_DEMO_SESSION_ID"
+}
+
+spaces_demo_send() {
+  "\$SPACES_CLI" terminal send "\$SPACES_DEMO_SESSION_ID" "\$@"
+}
+
+spaces_demo_sendline() {
+  "\$SPACES_CLI" terminal send "\$SPACES_DEMO_SESSION_ID" "\$1" --newline
+}
+
+spaces_demo_enter() {
+  "\$SPACES_CLI" terminal key "\$SPACES_DEMO_SESSION_ID" enter
+}
+
+spaces_demo_mac_takeover() {
+  "\$SPACES_CLI" terminal show "\$SPACES_DEMO_SESSION_ID"
+}
+
+spaces_demo_reopen() {
+  "\$SPACES_E2E" open-workspace-terminal --workspace-dir "\$SPACES_DEMO_PROJECT_DIR"
+}
+
+spaces_demo_tail_mac_log() {
+  tail -f "\$SPACES_DEMO_ROOT/app.log"
+}
+
+spaces_demo_tail_bridge_log() {
+  tail -f "\$SPACES_DEMO_ROOT/bridge.log"
+}
+
+spaces_demo_tail_ipad_stderr() {
+  tail -f "\$SPACES_DEMO_ROOT/ipad-app.stderr.log"
+}
+EOF
+  chmod +x "$manual_shell_path"
+}
+
 require_executable "$spaces_app" "SpacesApp"
 require_executable "$spaces_cli" "spaces CLI"
 require_executable "$spacese2e" "spacese2e"
@@ -509,18 +623,24 @@ run_demo_env \
     --admin-url "http://127.0.0.1:20002" \
     --workspace-title "$workspace_title" >/dev/null
 
-run_demo_env \
-  HOME="$temp_root/home" \
-  SPACES_DB_PATH="$spaces_db_path" \
-  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
-  "$spacese2e" open-workspace-terminal --workspace-dir "$project_dir" >/dev/null
-
-for _ in $(seq 1 60); do
-  session_id="$(discover_session_id)"
-  if [[ -n "$session_id" ]]; then
-    break
+workspace_open_payload="$(open_demo_workspace_terminal)"
+workspace_id="$(extract_workspace_id "$workspace_open_payload")"
+for attempt in $(seq 1 3); do
+  for _ in $(seq 1 20); do
+    session_id="$(discover_session_id)"
+    if [[ -n "$session_id" ]]; then
+      break 2
+    fi
+    if [[ -n "$workspace_id" ]] && [[ "$(discover_workspace_running_state "$workspace_id")" == "1" ]]; then
+      sleep 1
+      continue
+    fi
+    sleep 1
+  done
+  if [[ "$attempt" -lt 3 ]]; then
+    workspace_open_payload="$(open_demo_workspace_terminal)"
+    workspace_id="$(extract_workspace_id "$workspace_open_payload")"
   fi
-  sleep 1
 done
 
 if [[ -z "$session_id" ]]; then
@@ -559,20 +679,34 @@ PY
 write_simulator_settings "$ipad_udid" "$ipad_installation_id" "$ipad_token" "$ios_app_path"
 write_simulator_settings "$iphone_udid" "$iphone_installation_id" "$iphone_token" "$ios_app_path"
 
-env SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
-  xcrun simctl launch --stdout="$ipad_app_stdout_log" --stderr="$ipad_app_stderr_log" "$ipad_udid" "$bundle_id" >/dev/null
-env SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
-  xcrun simctl launch --stdout="$iphone_app_stdout_log" --stderr="$iphone_app_stderr_log" "$iphone_udid" "$bundle_id" >/dev/null
+ipad_launch_pid="$(launch_simulator_app "$ipad_udid" "$ipad_app_stdout_log" "$ipad_app_stderr_log")"
+iphone_launch_pid="$(launch_simulator_app "$iphone_udid" "$iphone_app_stdout_log" "$iphone_app_stderr_log")"
 sleep 4
 xcrun simctl io "$ipad_udid" screenshot "$ipad_screenshot" >/dev/null
 xcrun simctl io "$iphone_udid" screenshot "$iphone_screenshot" >/dev/null
 
+write_manual_shell_helper
 print_summary
 echo
 echo "Demo is live. Press Ctrl+C to stop it."
 echo "Mac app: $spaces_app"
 echo "iPad simulator: $ipad_name"
 echo "iPhone simulator: $iphone_name"
+printf -v demo_env_prefix 'HOME=%q SPACES_DB_PATH=%q SPACES_RUNTIME_DIR=%q' "$temp_root/home" "$spaces_db_path" "$spaces_runtime_dir"
+echo "Manual demo env: $demo_env_prefix"
+echo "Helper shell: source $manual_shell_path"
+printf 'List sessions: %s %q terminal list\n' "$demo_env_prefix" "$spaces_cli"
+printf 'Mac retakeover: %s %q terminal show %q\n' "$demo_env_prefix" "$spaces_cli" "$session_id"
+printf 'Workspace terminal reopen: %s %q open-workspace-terminal --workspace-dir %q\n' "$demo_env_prefix" "$spacese2e" "$project_dir"
+echo "Helper commands after sourcing:"
+echo "  spaces_demo_list"
+echo "  spaces_demo_tail"
+echo "  spaces_demo_sendline 'pwd'"
+echo "  spaces_demo_mac_takeover"
+echo "  spaces_demo_reopen"
+echo "  spaces_demo_tail_mac_log"
+echo "  spaces_demo_tail_bridge_log"
+echo "  spaces_demo_tail_ipad_stderr"
 
 while true; do
   if ! ps -p "$app_pid" >/dev/null 2>&1; then

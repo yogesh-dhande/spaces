@@ -18,6 +18,10 @@ final class SpacesMobileUITests: XCTestCase {
         try runTerminalTakeOverScenario()
     }
 
+    func testTerminalTakeOverRoundTripWithCommands() throws {
+        try runTerminalTakeOverScenario()
+    }
+
     private func runTerminalTakeOverScenario() throws {
         let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
         let app = if configuration.attachToExistingApp {
@@ -60,6 +64,10 @@ final class SpacesMobileUITests: XCTestCase {
         captureScreenshot(app, name: "post-takeover-plus-2s", filePath: configuration.shortDelayScreenshotPath)
         RunLoop.current.run(until: Date().addingTimeInterval(4))
         captureScreenshot(app, name: "post-takeover-plus-6s", filePath: configuration.longDelayScreenshotPath)
+        if configuration.scrollbackSwipeCount > 0 {
+            performScrollback(in: app, configuration: configuration)
+            captureScreenshot(app, name: "post-scrollback", filePath: configuration.finalScreenshotPath)
+        }
 
         if let firstCommandRequestPath = configuration.firstCommandRequestPath {
             waitForMarkerIfNeeded(firstCommandRequestPath, timeout: 20)
@@ -104,6 +112,25 @@ final class SpacesMobileUITests: XCTestCase {
                     "Owner-ready badge did not return promptly after iPad retakeover attempt \(attemptIndex + 1)"
                 )
                 assertOwnerReadyStable(in: app, duration: 1, context: "after iPad retakeover attempt \(attemptIndex + 1)")
+                writeMarkerIfNeeded(configuration.manualRetakeoverObservedPath(for: attemptIndex))
+            }
+            if let finalMacRetakeoverRequestPath = configuration.finalMacRetakeoverRequestPath {
+                waitForMarkerIfNeeded(finalMacRetakeoverRequestPath, timeout: 30)
+                guard waitForButton(
+                    in: app,
+                    identifier: "terminal.takeover",
+                    fallbackLabel: "Take Over",
+                    timeout: 20
+                ) != nil else {
+                    XCTFail("Timed out waiting for Take Over button after the final Mac retakeover")
+                    return
+                }
+                captureScreenshot(
+                    app,
+                    name: "post-final-mac-retakeover",
+                    filePath: configuration.postFinalMacRetakeoverScreenshotPath
+                )
+                writeMarkerIfNeeded(configuration.finalMacRetakeoverObservedPath)
             }
             captureScreenshot(app, name: "post-mac-retakeover", filePath: configuration.finalScreenshotPath)
         }
@@ -114,8 +141,25 @@ final class SpacesMobileUITests: XCTestCase {
     }
 
     private func focusTerminalSurface(in app: XCUIApplication) {
-        let terminalCoordinate = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
-        terminalCoordinate.tap()
+        let terminalSurface = app.otherElements["terminal.surface"]
+        if terminalSurface.waitForExistence(timeout: 2) {
+            terminalSurface.tap()
+        }
+    }
+
+    private func performScrollback(in app: XCUIApplication, configuration: UITestConfiguration) {
+        guard configuration.scrollbackSwipeCount > 0 else { return }
+        focusTerminalSurface(in: app)
+        let e2eScrollRequestPath = configuration.eventLogPath.map { "\($0).scroll-request.json" }
+        let e2eScrollCoordinate = app.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.92))
+        for _ in 0..<configuration.scrollbackSwipeCount {
+            if let e2eScrollRequestPath {
+                writeScrollRequest(path: e2eScrollRequestPath, vertical: -2400, repetitions: 24)
+            } else {
+                e2eScrollCoordinate.tap()
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(1.2))
+        }
     }
 
     private func waitForStaticText(
@@ -248,6 +292,22 @@ final class SpacesMobileUITests: XCTestCase {
             XCTFail("Failed writing marker file at \(path): \(error)")
         }
     }
+
+    private func writeScrollRequest(path: String, vertical: Double, repetitions: Int) {
+        let url = URL(fileURLWithPath: path)
+        let payload: [String: Any] = [
+            "id": UUID().uuidString,
+            "vertical": vertical,
+            "repetitions": repetitions,
+        ]
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+            try data.write(to: url, options: [.atomic])
+        } catch {
+            XCTFail("Failed writing E2E scroll request at \(path): \(error)")
+        }
+    }
 }
 
 private struct UITestConfiguration: Decodable {
@@ -277,9 +337,14 @@ private struct UITestConfiguration: Decodable {
     let firstCommandText: String
     let secondCommandText: String?
     let manualRetakeoverAttempts: Int
+    let manualRetakeoverObservedPrefix: String?
     let postFirstCommandScreenshotPath: String?
     let postSecondCommandScreenshotPath: String?
+    let finalMacRetakeoverRequestPath: String?
+    let finalMacRetakeoverObservedPath: String?
+    let postFinalMacRetakeoverScreenshotPath: String?
     let finalScreenshotPath: String?
+    let scrollbackSwipeCount: Int
     let attachToExistingApp: Bool
     let bundleID: String
 
@@ -307,9 +372,14 @@ private struct UITestConfiguration: Decodable {
         case firstCommandText
         case secondCommandText
         case manualRetakeoverAttempts
+        case manualRetakeoverObservedPrefix
         case postFirstCommandScreenshotPath
         case postSecondCommandScreenshotPath
+        case finalMacRetakeoverRequestPath
+        case finalMacRetakeoverObservedPath
+        case postFinalMacRetakeoverScreenshotPath
         case finalScreenshotPath
+        case scrollbackSwipeCount
         case attachToExistingApp
         case bundleID
     }
@@ -339,11 +409,21 @@ private struct UITestConfiguration: Decodable {
         firstCommandText = try container.decode(String.self, forKey: .firstCommandText)
         secondCommandText = try container.decodeIfPresent(String.self, forKey: .secondCommandText)
         manualRetakeoverAttempts = try container.decode(Int.self, forKey: .manualRetakeoverAttempts)
+        manualRetakeoverObservedPrefix = try container.decodeIfPresent(String.self, forKey: .manualRetakeoverObservedPrefix)
         postFirstCommandScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postFirstCommandScreenshotPath)
         postSecondCommandScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postSecondCommandScreenshotPath)
+        finalMacRetakeoverRequestPath = try container.decodeIfPresent(String.self, forKey: .finalMacRetakeoverRequestPath)
+        finalMacRetakeoverObservedPath = try container.decodeIfPresent(String.self, forKey: .finalMacRetakeoverObservedPath)
+        postFinalMacRetakeoverScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postFinalMacRetakeoverScreenshotPath)
         finalScreenshotPath = try container.decodeIfPresent(String.self, forKey: .finalScreenshotPath)
+        scrollbackSwipeCount = try container.decodeIfPresent(Int.self, forKey: .scrollbackSwipeCount) ?? 0
         attachToExistingApp = try container.decodeIfPresent(Bool.self, forKey: .attachToExistingApp) ?? false
         bundleID = try container.decodeIfPresent(String.self, forKey: .bundleID) ?? Self.defaultBundleID
+    }
+
+    func manualRetakeoverObservedPath(for attemptIndex: Int) -> String? {
+        guard let manualRetakeoverObservedPrefix else { return nil }
+        return "\(manualRetakeoverObservedPrefix)-\(attemptIndex + 1)"
     }
 
     static func load(environment: [String: String]) throws -> Self {

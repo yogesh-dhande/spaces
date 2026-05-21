@@ -9,10 +9,19 @@ struct TerminalDetailView: View {
     let onBack: () -> Void
 
     @State private var hasMountedTerminalSurface = false
+    @State private var e2eScrollCommand: GhosttyRemoteTerminalScrollCommand?
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
-    private let e2eConfig = SpacesMobileE2EConfig.shared
+    private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var shouldCaptureRenderedText: Bool { e2eConfig.isEnabled && e2eConfig.matches(sessionID: session.id) }
+    private var e2eScrollRequestPath: String? {
+        guard e2eConfig.isEnabled, e2eConfig.matches(sessionID: session.id), let eventLogPath = e2eConfig.eventLogPath else { return nil }
+        return "\(eventLogPath).scroll-request.json"
+    }
+    private var e2eCommandRequestPath: String? {
+        guard e2eConfig.isEnabled, e2eConfig.matches(sessionID: session.id), let eventLogPath = e2eConfig.eventLogPath else { return nil }
+        return "\(eventLogPath).command-request.json"
+    }
 
     init(
         session: SpacesMobileTerminalSessionSummary,
@@ -44,17 +53,23 @@ struct TerminalDetailView: View {
                 if hasMountedTerminalSurface || model.showsTerminalSurface {
                     ZStack {
                         GhosttyRemoteTerminalView(
-                            snapshot: model.snapshot,
-                            replayStateKey: model.replayStateKey,
-                            outputData: model.outputData,
-                            outputEventToken: model.outputData == nil ? nil : model.latestState?.emittedAt,
+                            ownerEpoch: model.ownerRenderEpoch,
+                            endedRender: model.endedRender,
+                            scrollCommand: e2eScrollCommand,
                             fallbackText: model.visibleText,
-                            isVisible: model.showsTerminalSurface,
+                            isVisible: model.shouldPresentLiveSurface,
                             acceptsInput: model.acceptsInput,
                             isBusy: model.isBusy || model.isOwnershipSynchronizationPending,
                             onInputReadinessChanged: { ready in
                                 model.setInputSurfaceReady(ready)
                                 writeE2EEventIfNeeded(kind: "input_readiness", detail: ready ? "ready" : "pending")
+                            },
+                            onOutputBatchApplied: { batchID in
+                                model.markOwnerRenderOutputApplied(batchID)
+                            },
+                            onScrollCommandApplied: { command in
+                                let detail = "id=\(command.id) vertical=\(Int(command.vertical)) repetitions=\(command.repetitions)"
+                                writeE2EEventIfNeeded(kind: "e2e_scroll_command_applied", detail: detail)
                             },
                             onRenderedTextChanged: shouldCaptureRenderedText ? { text in
                                 renderedText = text
@@ -71,11 +86,12 @@ struct TerminalDetailView: View {
                                 Task { await model.sendKey(key) }
                             }
                         )
-                        .allowsHitTesting(model.showsTerminalSurface)
-                        .accessibilityHidden(!model.showsTerminalSurface)
+                        .accessibilityIdentifier("terminal.surface")
+                        .allowsHitTesting(model.shouldPresentLiveSurface)
+                        .accessibilityHidden(!model.shouldPresentLiveSurface)
                         .background(Color(red: 0.10, green: 0.12, blue: 0.15))
 
-                        if !model.showsTerminalSurface {
+                        if !model.shouldPresentLiveSurface {
                             statusShell
                                 .onAppear { renderedText = "" }
                         }
@@ -94,9 +110,14 @@ struct TerminalDetailView: View {
         .toolbar(.hidden, for: .navigationBar)
         .task { model.start() }
         .task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }
+        .task(id: e2eScrollRequestPath) { await consumeE2EScrollRequestsIfNeeded() }
+        .task(id: e2eCommandRequestPath) { await consumeE2ECommandRequestsIfNeeded() }
         .onChange(of: model.showsTerminalSurface) { showsTerminalSurface in
             if showsTerminalSurface { hasMountedTerminalSurface = true }
             if !showsTerminalSurface { renderedText = "" }
+        }
+        .onChange(of: model.shouldPresentLiveSurface) { shouldPresentLiveSurface in
+            writeE2EEventIfNeeded(kind: "surface_visibility", detail: shouldPresentLiveSurface ? "visible" : "hidden")
         }
         .onDisappear { model.stop() }
         .accessibilityIdentifier("terminal.detail.\(session.id)")
@@ -158,7 +179,10 @@ struct TerminalDetailView: View {
     private var statusShell: some View {
         VStack(spacing: 18) {
             Spacer(minLength: 0)
-            Image(systemName: model.isTakingOver || model.isConnecting ? "arrow.triangle.2.circlepath.circle.fill" : "lock.desktopcomputer")
+            Image(
+                systemName: model.isOwner && model.isPreparingInput || model.isTakingOver || model.isConnecting
+                    ? "arrow.triangle.2.circlepath.circle.fill" : "lock.desktopcomputer"
+            )
                 .font(.system(size: 34, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.82))
             Text(model.visibleText)
@@ -268,6 +292,8 @@ struct TerminalDetailView: View {
                 runtimeRows: model.runtimeRows,
                 snapshotColumns: model.snapshotColumns,
                 snapshotRows: model.snapshotRows,
+                snapshotText: model.snapshotText,
+                transcriptTail: model.transcriptTail,
                 errorMessage: model.errorMessage,
                 visibleText: model.visibleText,
                 renderedText: renderedText,
@@ -290,4 +316,71 @@ struct TerminalDetailView: View {
             config: e2eConfig
         )
     }
+
+    private func consumeE2EScrollRequestsIfNeeded() async {
+        guard let e2eScrollRequestPath else { return }
+        let requestURL = URL(fileURLWithPath: e2eScrollRequestPath)
+        while !Task.isCancelled {
+            if let data = try? Data(contentsOf: requestURL) {
+                if let request = try? JSONDecoder().decode(E2EScrollRequest.self, from: data) {
+                    let repetitions = max(request.repetitions ?? 1, 1)
+                    let stepHorizontal = CGFloat((request.horizontal ?? 0) / Double(repetitions))
+                    let stepVertical = CGFloat(request.vertical / Double(repetitions))
+                    writeE2EEventIfNeeded(
+                        kind: "e2e_scroll_request_consumed",
+                        detail: "id=\(request.id) vertical=\(Int(request.vertical)) repetitions=\(repetitions)"
+                    )
+                    for stepIndex in 0..<repetitions {
+                        e2eScrollCommand = .init(
+                            id: "\(request.id)-\(stepIndex)",
+                            horizontal: stepHorizontal,
+                            vertical: stepVertical,
+                            repetitions: 1
+                        )
+                        try? await Task.sleep(for: .milliseconds(16))
+                    }
+                } else {
+                    writeE2EEventIfNeeded(kind: "e2e_scroll_request_invalid", detail: requestURL.lastPathComponent)
+                }
+                try? FileManager.default.removeItem(at: requestURL)
+            }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+    }
+
+    private func consumeE2ECommandRequestsIfNeeded() async {
+        guard let e2eCommandRequestPath else { return }
+        let requestURL = URL(fileURLWithPath: e2eCommandRequestPath)
+        while !Task.isCancelled {
+            if let data = try? Data(contentsOf: requestURL) {
+                if let request = try? JSONDecoder().decode(E2ECommandRequest.self, from: data) {
+                    writeE2EEventIfNeeded(
+                        kind: "e2e_command_request_consumed",
+                        detail: "id=\(request.id) sendEnter=\(request.sendEnter ?? true) text=\(request.text)"
+                    )
+                    await model.sendText(request.text)
+                    if request.sendEnter ?? true {
+                        await model.sendKey("enter")
+                    }
+                } else {
+                    writeE2EEventIfNeeded(kind: "e2e_command_request_invalid", detail: requestURL.lastPathComponent)
+                }
+                try? FileManager.default.removeItem(at: requestURL)
+            }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+    }
+}
+
+private struct E2EScrollRequest: Decodable {
+    let id: String
+    let horizontal: Double?
+    let vertical: Double
+    let repetitions: Int?
+}
+
+private struct E2ECommandRequest: Decodable {
+    let id: String
+    let text: String
+    let sendEnter: Bool?
 }

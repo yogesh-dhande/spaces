@@ -20,7 +20,7 @@ struct MXE2ECommand: ParsableCommand {
             SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self,
             CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
             CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self,
-            DumpTerminalSessionWindowStateCommand.self, RecordScreenCommand.self,
+            DumpTerminalSessionWindowStateCommand.self, RecordScreenCommand.self, ScrollApplicationWindowCommand.self,
         ])
 }
 
@@ -41,6 +41,53 @@ private struct HideMainWindowCommand: ParsableCommand {
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.hideMainWindow, object: try IPCNotification.currentObject(), userInfo: nil, options: [.deliverImmediately])
         try emitJSON(["success": true])
+    }
+}
+
+private struct ScrollApplicationWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "scroll-application-window")
+
+    @Option(name: .long) var bundleID: String
+    @Option(name: .long) var windowTitleContains: String?
+    @Option(name: .long) var normalizedX = 0.5
+    @Option(name: .long) var normalizedY = 0.5
+    @Option(name: .long) var deltaY = -120
+    @Option(name: .long) var repetitions = 1
+
+    func run() throws {
+        guard (0...1).contains(normalizedX), (0...1).contains(normalizedY) else {
+            throw ValidationError("Normalized coordinates must be between 0 and 1.")
+        }
+        guard repetitions > 0 else { throw ValidationError("Repetitions must be greater than zero.") }
+        guard let application = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }) else {
+            throw ValidationError("Application not running: \(bundleID)")
+        }
+        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        let titleFilter = windowTitleContains?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let windows = axElementArrayAttribute(appElement, attribute: kAXWindowsAttribute).filter(isVisibleWindow)
+        let window =
+            if let titleFilter, !titleFilter.isEmpty {
+                windows.first {
+                    guard let title = axStringAttribute($0, attribute: kAXTitleAttribute as String) else { return false }
+                    return title.localizedStandardContains(titleFilter)
+                }
+            } else {
+                axElementAttribute(appElement, attribute: kAXFocusedWindowAttribute) ?? axElementAttribute(
+                    appElement, attribute: kAXMainWindowAttribute) ?? windows.first
+            }
+        guard let window else { throw ValidationError("No accessible window found for \(bundleID)") }
+        guard let frame = axWindowFrame(window) else { throw ValidationError("Unable to read application window frame for \(bundleID)") }
+
+        application.activate(options: [.activateIgnoringOtherApps])
+        axPerformAction(window, action: kAXRaiseAction as String)
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let point = CGPoint(x: frame.minX + frame.width * normalizedX, y: frame.minY + frame.height * normalizedY)
+        try postScrollEvent(at: point, deltaY: deltaY, repetitions: repetitions)
+        try emitJSON(
+            ScrollApplicationWindowPayload(
+                bundleID: bundleID, windowTitle: axStringAttribute(window, attribute: kAXTitleAttribute as String), pointX: point.x, pointY: point.y,
+                deltaY: deltaY, repetitions: repetitions, success: true))
     }
 }
 
@@ -963,6 +1010,16 @@ private struct SpacesSurfacePayload: Codable {
     let modalVisible: Bool
 }
 
+private struct ScrollApplicationWindowPayload: Codable {
+    let bundleID: String
+    let windowTitle: String?
+    let pointX: CGFloat
+    let pointY: CGFloat
+    let deltaY: Int
+    let repetitions: Int
+    let success: Bool
+}
+
 /// Looks up one workspace by project directory and title, matching the GUI's
 /// visible naming semantics rather than internal IDs.
 private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: String, title: String) throws -> WorkspaceSummaryPayload? {
@@ -1065,10 +1122,65 @@ private func axElementArrayAttribute(_ element: AXUIElement, attribute: String) 
     (axAttributeValue(element, attribute: attribute) as? [AXUIElement]) ?? []
 }
 
+@discardableResult private func axPerformAction(_ element: AXUIElement, action: String) -> Bool {
+    AXUIElementPerformAction(element, action as CFString) == .success
+}
+
 private func axStringAttribute(_ element: AXUIElement, attribute: String) -> String? { axAttributeValue(element, attribute: attribute) as? String }
 
 private func axBoolAttribute(_ element: AXUIElement, attribute: String) -> Bool? {
     (axAttributeValue(element, attribute: attribute) as? NSNumber)?.boolValue
+}
+
+private func axWindowFrame(_ element: AXUIElement) -> CGRect? {
+    guard let position = axCGPointAttribute(element, attribute: kAXPositionAttribute as String),
+        let size = axCGSizeAttribute(element, attribute: kAXSizeAttribute as String)
+    else { return nil }
+    return CGRect(origin: position, size: size)
+}
+
+private func axCGPointAttribute(_ element: AXUIElement, attribute: String) -> CGPoint? {
+    guard let value = axAttributeValue(element, attribute: attribute) else { return nil }
+    guard CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    let axValue = unsafeBitCast(value, to: AXValue.self)
+    guard AXValueGetType(axValue) == .cgPoint else { return nil }
+    var point = CGPoint.zero
+    guard AXValueGetValue(axValue, .cgPoint, &point) else { return nil }
+    return point
+}
+
+private func axCGSizeAttribute(_ element: AXUIElement, attribute: String) -> CGSize? {
+    guard let value = axAttributeValue(element, attribute: attribute) else { return nil }
+    guard CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    let axValue = unsafeBitCast(value, to: AXValue.self)
+    guard AXValueGetType(axValue) == .cgSize else { return nil }
+    var size = CGSize.zero
+    guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
+    return size
+}
+
+private func postScrollEvent(at point: CGPoint, deltaY: Int, repetitions: Int) throws {
+    guard let moveEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
+        throw ValidationError("Unable to create mouse move event.")
+    }
+    moveEvent.post(tap: .cghidEventTap)
+
+    let phases: [NSEvent.Phase]
+    if repetitions <= 1 { phases = [.began, .ended] } else { phases = [.began] + Array(repeating: .changed, count: repetitions - 1) + [.ended] }
+
+    for phase in phases {
+        let phaseDeltaY = phase == .ended ? 0 : deltaY
+        guard let scrollEvent = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(phaseDeltaY), wheel2: 0, wheel3: 0)
+        else { throw ValidationError("Unable to create scroll event.") }
+        scrollEvent.location = point
+        scrollEvent.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        scrollEvent.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(phase.rawValue))
+        scrollEvent.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 0)
+        scrollEvent.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: Int64(phaseDeltaY))
+        scrollEvent.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: Int64(phaseDeltaY))
+        scrollEvent.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.05)
+    }
 }
 
 MXE2ECommand.main()

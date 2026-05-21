@@ -102,6 +102,10 @@ import spacesterminalcore
         return snapshotStream.snapshotText(columns: runtimeState?.columns, rows: runtimeState?.rows)
     }
 
+    public func sessionSnapshot() -> GhosttyTerminalSnapshot? { snapshot() }
+
+    public func sessionSnapshotText() -> String? { snapshotText() }
+
     public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
 
     public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
