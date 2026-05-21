@@ -87,6 +87,46 @@ else:
 PY
 }
 
+attach_remote_viewer_client() {
+  local session_id="$1"
+  local socket_path="$RUNTIME_DIR/terminal/sessions/$session_id/control.sock"
+  python3 - "$socket_path" <<'PY'
+import json
+import socket
+import sys
+import uuid
+from datetime import datetime, timezone
+
+socket_path = sys.argv[1]
+client_id = str(uuid.uuid4()).upper()
+request = {
+    "command": "attach",
+    "client": {
+        "id": client_id,
+        "kind": "remoteViewer",
+        "identity": {
+            "label": "Terminal Profile Viewer",
+            "deviceName": "Terminal Profile Viewer",
+            "networkAddress": "127.0.0.1",
+        },
+        "connectedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    },
+    "attachmentMode": "viewer",
+}
+
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(5)
+client.connect(socket_path)
+client.sendall(json.dumps(request).encode("utf-8"))
+client.shutdown(socket.SHUT_WR)
+response = json.loads(client.recv(65536).decode("utf-8"))
+client.close()
+if not response.get("ok"):
+    raise SystemExit(response.get("message") or response)
+print(client_id)
+PY
+}
+
 require_binary() {
   local path="$1"
   [[ -x "$path" ]] || { echo "Missing binary: $path" >&2; exit 1; }
@@ -154,39 +194,13 @@ import time
 print(time.time())
 PY
 )"
-  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 \
-    "$SPACES_CLI" terminal show "$session_id" --viewer >/dev/null
+  viewer_client_id="$(attach_remote_viewer_client "$session_id")"
   viewer_show_wall_ms="$(ms_since "$viewer_show_started_at")"
   printf '%s\t%s\n' "$session_id" "$viewer_show_wall_ms" >>"$VIEWER_SHOW_WALL_SAMPLES"
-
-  wait_for_log_pattern_count_greater_than \
-    "$PERF_LOG" \
-    "spaces: perf metric=terminal_window_summon target=session=${session_id} success=1 .*mode=viewer" \
-    0 \
-    30
-
-  viewer_payload="viewer-ping-$iteration"
-  viewer_output_baseline="$(
-    grep -Ec \
-      "spaces: perf metric=terminal_viewer_output_present target=session=${session_id} success=1 .*changed=1" \
-      "$PERF_LOG" || true
-  )"
-  viewer_update_started_at="$(python3 - <<'PY'
-import time
-print(time.time())
-PY
-)"
-  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 \
-    "$SPACES_CLI" terminal send "$session_id" "$viewer_payload" --newline >/dev/null
-  wait_for_log_pattern_count_greater_than \
-    "$PERF_LOG" \
-    "spaces: perf metric=terminal_viewer_output_present target=session=${session_id} success=1 .*changed=1" \
-    "$viewer_output_baseline" \
-    30
-  viewer_update_wall_ms="$(ms_since "$viewer_update_started_at")"
-  printf '%s\t%s\n' "$session_id" "$viewer_update_wall_ms" >>"$VIEWER_UPDATE_WALL_SAMPLES"
-
-  viewer_client_id="$(active_attachment_client_id "$session_id" viewer)"
+  [[ "$(active_attachment_client_id "$session_id" viewer)" == "$viewer_client_id" ]] || {
+    echo "Attached remote viewer did not become the active viewer attachment" >&2
+    exit 1
+  }
   owner_client_id="$(active_attachment_client_id "$session_id" owner)"
 
   viewer_takeover_baseline="$(

@@ -27,10 +27,6 @@ REPAINT_ROWS="${REPAINT_ROWS:-20}"
 MIXED_FRAMES="${MIXED_FRAMES:-180}"
 MIXED_ROWS="${MIXED_ROWS:-18}"
 TAIL_SAMPLES="${TAIL_SAMPLES:-5}"
-VIEWER_REPAINT_FRAMES="${VIEWER_REPAINT_FRAMES:-600}"
-VIEWER_REPAINT_ROWS="${VIEWER_REPAINT_ROWS:-24}"
-VIEWER_REPAINT_SLEEP_MS="${VIEWER_REPAINT_SLEEP_MS:-2}"
-
 cleanup() {
   release_terminal_harness_lock
   if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" >/dev/null 2>&1; then
@@ -234,132 +230,6 @@ print(json.dumps(summary))
 PY
 }
 
-run_viewer_repaint_scenario() {
-  local scenario="repaint_viewer"
-  local tail_timings_path="$WORK_ROOT/${scenario}-tail.tsv"
-  local cli_metrics_path="$WORK_ROOT/${scenario}-cli.log"
-  local command="python3 '$FIXTURE_SCRIPT' --mode repaint --frames $VIEWER_REPAINT_FRAMES --rows $VIEWER_REPAINT_ROWS --width 72 --sleep-ms $VIEWER_REPAINT_SLEEP_MS"
-  local command_output session_id session_dir output_log
-
-  command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "$command" --title "stress-${scenario}")"
-  session_id="$(extract_session_id "$command_output")"
-  [[ -n "$session_id" ]] || { echo "Failed to parse session ID for scenario $scenario" >&2; exit 1; }
-
-  wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=owner"
-  session_dir="$RUNTIME_DIR/terminal/sessions/$session_id"
-  output_log="$session_dir/output.log"
-
-  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal show "$session_id" --viewer >/dev/null
-  wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=viewer"
-
-  run_tail_samples "$session_id" "$scenario" "$tail_timings_path" "$cli_metrics_path"
-
-  local done_pattern="FIXTURE_DONE mode=repaint emitted=$((VIEWER_REPAINT_FRAMES * VIEWER_REPAINT_ROWS))"
-  wait_for_file_pattern "$output_log" "$done_pattern" 180
-  wait_for_log_pattern "spaces: perf metric=terminal_viewer_output_present .*target=session=${session_id} .*success=1" 30
-
-  python3 - "$scenario" "$output_log" "$((VIEWER_REPAINT_FRAMES * VIEWER_REPAINT_ROWS))" "$VIEWER_REPAINT_FRAMES" "$tail_timings_path" "$cli_metrics_path" "$APP_LOG" "$session_id" >"$WORK_ROOT/${scenario}-summary.json" <<'PY'
-import json
-import math
-import re
-import statistics
-import sys
-from pathlib import Path
-
-scenario = sys.argv[1]
-output_log = Path(sys.argv[2])
-expected_lines = int(sys.argv[3])
-expected_frame = int(sys.argv[4])
-tail_timings_path = Path(sys.argv[5])
-cli_metrics_path = Path(sys.argv[6])
-app_log_path = Path(sys.argv[7])
-session_id = sys.argv[8]
-text = output_log.read_text(encoding="utf-8", errors="replace")
-seq_pattern = re.compile(r"SEQ (\d{8})")
-frame_pattern = re.compile(r"FRAME (\d{6})")
-perf_pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<target>.*?) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
-mode_pattern = re.compile(r"mode=(?P<mode>\S+)")
-seqs = [int(match.group(1)) for match in seq_pattern.finditer(text)]
-frames = [int(match.group(1)) for match in frame_pattern.finditer(text)]
-tail_rows = []
-if tail_timings_path.exists():
-    for row in tail_timings_path.read_text(encoding="utf-8").splitlines():
-        if not row:
-            continue
-        _, elapsed_ms, output_bytes = row.split("\t")
-        tail_rows.append((int(elapsed_ms), int(output_bytes)))
-
-cli_metrics = {}
-app_metrics = {}
-mode_counts = {}
-if cli_metrics_path.exists():
-    for raw_line in cli_metrics_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        match = perf_pattern.match(raw_line.strip())
-        if not match or match.group("success") != "1":
-            continue
-        metric = match.group("metric")
-        elapsed_ms = int(match.group("elapsed"))
-        cli_metrics.setdefault(metric, []).append(elapsed_ms)
-        detail = match.group("detail") or ""
-        if metric == "terminal_tail_read":
-            mode_match = mode_pattern.search(detail)
-            if mode_match:
-                mode = mode_match.group("mode")
-                mode_counts[mode] = mode_counts.get(mode, 0) + 1
-if app_log_path.exists():
-    for raw_line in app_log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        match = perf_pattern.match(raw_line.strip())
-        if not match or match.group("success") != "1":
-            continue
-        target = match.group("target")
-        if f"session={session_id}" not in target:
-            continue
-        metric = match.group("metric")
-        elapsed_ms = int(match.group("elapsed"))
-        app_metrics.setdefault(metric, []).append(elapsed_ms)
-
-def summarize(values):
-    values = sorted(values)
-    return {
-        "count": len(values),
-        "min_ms": min(values),
-        "median_ms": round(statistics.median(values), 1),
-        "avg_ms": round(statistics.mean(values), 1),
-        "p95_ms": values[max(math.ceil(len(values) * 0.95) - 1, 0)],
-        "max_ms": max(values),
-    }
-
-summary = {
-    "scenario": scenario,
-    "output_bytes": output_log.stat().st_size,
-    "sequence_count": len(seqs),
-    "sequence_first": seqs[0] if seqs else None,
-    "sequence_last": seqs[-1] if seqs else None,
-    "sequence_complete": bool(seqs) and seqs == list(range(1, len(seqs) + 1)),
-    "expected_lines": expected_lines,
-    "lines_match_expected": len(seqs) == expected_lines,
-    "frame_last": frames[-1] if frames else None,
-    "frame_match_expected": (frames[-1] if frames else None) == expected_frame if expected_frame else True,
-}
-if tail_rows:
-    elapsed = [row[0] for row in tail_rows]
-    summary["tail_samples"] = len(tail_rows)
-    summary["tail_min_ms"] = min(elapsed)
-    summary["tail_median_ms"] = round(statistics.median(elapsed), 1)
-    summary["tail_avg_ms"] = round(statistics.mean(elapsed), 1)
-    summary["tail_p95_ms"] = sorted(elapsed)[max(math.ceil(len(elapsed) * 0.95) - 1, 0)]
-    summary["tail_max_ms"] = max(elapsed)
-    summary["tail_output_bytes_max"] = max(row[1] for row in tail_rows)
-if cli_metrics:
-    summary["cli_metrics"] = {metric: summarize(values) for metric, values in sorted(cli_metrics.items()) if values}
-if app_metrics:
-    summary["app_metrics"] = {metric: summarize(values) for metric, values in sorted(app_metrics.items()) if values}
-if mode_counts:
-    summary["tail_modes"] = mode_counts
-print(json.dumps(summary))
-PY
-}
-
 require_binary "$SPACES_APP"
 require_binary "$SPACES_CLI"
 [[ -x "$FIXTURE_SCRIPT" ]] || chmod +x "$FIXTURE_SCRIPT"
@@ -379,7 +249,6 @@ sleep 3
 run_scenario "lines" "python3 '$FIXTURE_SCRIPT' --mode lines --lines $LINE_LINES --width 80 --flush-every 50" "$LINE_LINES" 0
 run_scenario "repaint" "python3 '$FIXTURE_SCRIPT' --mode repaint --frames $REPAINT_FRAMES --rows $REPAINT_ROWS --width 72" "$((REPAINT_FRAMES * REPAINT_ROWS))" "$REPAINT_FRAMES"
 run_scenario "mixed" "python3 '$FIXTURE_SCRIPT' --mode mixed --frames $MIXED_FRAMES --rows $MIXED_ROWS --width 72" "$((MIXED_FRAMES * MIXED_ROWS))" "$MIXED_FRAMES"
-run_viewer_repaint_scenario
 
 python3 - "$WORK_ROOT" "$APP_LOG" "$SUMMARY_PATH" "$METRICS_PATH" <<'PY'
 import json
@@ -439,13 +308,6 @@ for scenario in scenario_summaries:
     for metric in ("terminal_tail_read", "terminal_tail_command"):
         if metric in cli_metrics:
             summary = cli_metrics[metric]
-            lines.append(
-                f"  {metric}: count={summary['count']} min={summary['min_ms']}ms median={summary['median_ms']}ms "
-                f"avg={summary['avg_ms']}ms p95={summary['p95_ms']}ms max={summary['max_ms']}ms"
-            )
-    for metric in ("terminal_viewer_output_present",):
-        if metric in app_metrics:
-            summary = app_metrics[metric]
             lines.append(
                 f"  {metric}: count={summary['count']} min={summary['min_ms']}ms median={summary['median_ms']}ms "
                 f"avg={summary['avg_ms']}ms p95={summary['p95_ms']}ms max={summary['max_ms']}ms"

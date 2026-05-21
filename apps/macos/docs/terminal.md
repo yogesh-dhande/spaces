@@ -8,6 +8,7 @@ This document describes the built-in terminal runtime in Spaces: what owns a ses
   - `ghostty_surface_set_data_callback(...)`
   - `ghostty_surface_send_input_raw(...)`
   - `ghostty_surface_set_host(...)`
+- Spaces no longer depends on fork-level passive-viewer attachment APIs; live rendering is owner-only on both macOS and iOS.
 - Spaces also builds `libghostty-vt` from the same fork lineage for transcript replay so `spaces terminal tail` and non-surface clients stay aligned with Ghostty terminal behavior.
 - The built-in terminal path does not require tmux.
 
@@ -48,7 +49,7 @@ Each live session also participates in a service-level control path:
 ## First-Party Clients
 - `spaces terminal command` creates sessions through `SpacesTerminalService`.
 - `spaces terminal list` reads live session summaries from the service abstraction.
-- `spaces terminal show` asks `SpacesApp` to open a native owner or viewer window for an existing session ID.
+- `spaces terminal show` asks `SpacesApp` to open a native owner-seeking window for an existing session ID.
 - `spaces terminal send`, `key`, and `takeover` still operate on the per-session control socket that the service owns.
 - `spaces mobile serve` publishes the first-party TCP bridge consumed by the iOS client.
 - `SpacesMobile` consumes that bridge, keeps one selected terminal detail at a time, and renders streamed snapshots through the iOS Ghostty surface adapter when live state is available.
@@ -57,10 +58,10 @@ Each live session also participates in a service-level control path:
 
 ## macOS Window Behavior
 - `SpacesApp` reuses an in-process `GhosttyEmbeddedSessionHost` when the target session already exists in `GhosttyEmbeddedSessionRegistry`.
-- If no in-process host exists for that session ID, `SpacesApp` falls back to `RemoteGhosttySessionHost` and subscribes to the daemon-owned session state stream for live Ghostty snapshots.
-- `TerminalSessionWindowController` attaches a local owner or viewer client record to the daemon-owned session and keeps window reuse keyed by stable session ID.
+- If no in-process host exists for that session ID, `SpacesApp` falls back to `RemoteGhosttySessionHost` and subscribes to the daemon-owned session state stream for owner handoff compatibility, metadata updates, and ended-session final renders.
+- `TerminalSessionWindowController` attaches a local owner or viewer client record to the daemon-owned session, keeps window reuse keyed by stable session ID, mounts a live Ghostty surface only for the active owner, and otherwise shows takeover or terminal-ended status shells.
 - The embedded Ghostty owner view can rebind a live surface to a replacement AppKit host view without restarting the underlying terminal session, which is the current fork-level bridge toward detachable renderers.
-- The current macOS daemon client path uses the service snapshot stream as its primary live renderer feed, with `output.log` replay through `libghostty-vt` retained for transcript history, `spaces terminal tail`, and fallback recovery when the live stream is unavailable.
+- The current macOS daemon client path uses the service snapshot stream for owner rendering compatibility and ended-session final renders, with `output.log` replay through `libghostty-vt` retained for transcript history, `spaces terminal tail`, and fallback recovery when the live stream is unavailable.
 - Title and working-directory updates still follow live session metadata emitted by the service.
 - Owner or viewer attachment state is still authoritative in `attachments.json`.
 - Only the active owner attachment may send input or drive PTY size.
@@ -98,6 +99,6 @@ The terminal slice is considered healthy when these flows work:
 - session creation through `spaces terminal command`
 - `list`, `send`, `key`, `tail`, `show`, and `takeover`
 - app quit followed by app relaunch and reopen of the same live session
-- owner or viewer attachment persistence and lease expiry
+- owner and viewer attachment persistence and lease expiry
 - transcript replay from `output.log` with persisted geometry
-- iOS viewer attach, ownership takeover to the remote client, ownership transfer back to a macOS owner, and streamed render or input freshness on top of the same session boundary
+- iOS attach, auto-takeover to the remote client, ownership transfer back to a macOS owner, and streamed render or input freshness on top of the same session boundary

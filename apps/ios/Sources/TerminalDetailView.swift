@@ -8,6 +8,7 @@ struct TerminalDetailView: View {
     let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
     let onBack: () -> Void
 
+    @State private var hasMountedTerminalSurface = false
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
     private let e2eConfig = SpacesMobileE2EConfig.shared
@@ -38,34 +39,51 @@ struct TerminalDetailView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 10)
 
-            GhosttyRemoteTerminalView(
-                snapshot: model.snapshot,
-                replayStateKey: model.replayStateKey,
-                outputData: model.outputData,
-                outputEventToken: model.outputData == nil ? nil : model.latestState?.emittedAt,
-                fallbackText: model.visibleText,
-                acceptsInput: model.acceptsInput,
-                isBusy: model.isBusy || model.isSynchronizingOwnership,
-                onInputReadinessChanged: { ready in
-                    model.setInputSurfaceReady(ready)
-                    writeE2EEventIfNeeded(kind: "input_readiness", detail: ready ? "ready" : "pending")
-                },
-                onRenderedTextChanged: { text in
-                    renderedText = text
-                },
-                onViewportSizeChanged: { columns, rows in
-                    model.updateViewportSize(columns: columns, rows: rows)
-                },
-                onSendText: { text in
-                    writeE2EEventIfNeeded(kind: "send_text", detail: text)
-                    Task { await model.sendText(text) }
-                },
-                onSendKey: { key in
-                    writeE2EEventIfNeeded(kind: "send_key", detail: key)
-                    Task { await model.sendKey(key) }
+            Group {
+                if hasMountedTerminalSurface || model.showsTerminalSurface {
+                    ZStack {
+                        GhosttyRemoteTerminalView(
+                            snapshot: model.snapshot,
+                            replayStateKey: model.replayStateKey,
+                            outputData: model.outputData,
+                            outputEventToken: model.outputData == nil ? nil : model.latestState?.emittedAt,
+                            fallbackText: model.visibleText,
+                            isVisible: model.showsTerminalSurface,
+                            acceptsInput: model.acceptsInput,
+                            isBusy: model.isBusy || model.isSynchronizingOwnership,
+                            onInputReadinessChanged: { ready in
+                                model.setInputSurfaceReady(ready)
+                                writeE2EEventIfNeeded(kind: "input_readiness", detail: ready ? "ready" : "pending")
+                            },
+                            onRenderedTextChanged: { text in
+                                renderedText = text
+                            },
+                            onViewportSizeChanged: { columns, rows in
+                                model.updateViewportSize(columns: columns, rows: rows)
+                            },
+                            onSendText: { text in
+                                writeE2EEventIfNeeded(kind: "send_text", detail: text)
+                                Task { await model.sendText(text) }
+                            },
+                            onSendKey: { key in
+                                writeE2EEventIfNeeded(kind: "send_key", detail: key)
+                                Task { await model.sendKey(key) }
+                            }
+                        )
+                        .allowsHitTesting(model.showsTerminalSurface)
+                        .accessibilityHidden(!model.showsTerminalSurface)
+                        .background(Color(red: 0.10, green: 0.12, blue: 0.15))
+
+                        if !model.showsTerminalSurface {
+                            statusShell
+                                .onAppear { renderedText = "" }
+                        }
+                    }
+                } else {
+                    statusShell
+                        .onAppear { renderedText = "" }
                 }
-            )
-            .background(Color(red: 0.10, green: 0.12, blue: 0.15))
+            }
 
             if let errorMessage = model.errorMessage {
                 errorBanner(errorMessage)
@@ -75,6 +93,10 @@ struct TerminalDetailView: View {
         .toolbar(.hidden, for: .navigationBar)
         .task { model.start() }
         .task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }
+        .onChange(of: model.showsTerminalSurface) { showsTerminalSurface in
+            if showsTerminalSurface { hasMountedTerminalSurface = true }
+            if !showsTerminalSurface { renderedText = "" }
+        }
         .onDisappear { model.stop() }
         .accessibilityIdentifier("terminal.detail.\(session.id)")
     }
@@ -108,6 +130,9 @@ struct TerminalDetailView: View {
                         chromeBadge("Owner")
                             .accessibilityIdentifier("terminal.ownerBadge")
                     }
+                } else if model.isTakingOver || model.isConnecting {
+                    chromeProgressBadge("Taking over…")
+                        .accessibilityIdentifier("terminal.takingOver")
                 } else {
                     chromeButton {
                         Task { await model.takeOver() }
@@ -127,6 +152,24 @@ struct TerminalDetailView: View {
                     .tint(.white)
             }
         }
+    }
+
+    private var statusShell: some View {
+        VStack(spacing: 18) {
+            Spacer(minLength: 0)
+            Image(systemName: model.isTakingOver || model.isConnecting ? "arrow.triangle.2.circlepath.circle.fill" : "lock.desktopcomputer")
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.82))
+            Text(model.visibleText)
+                .font(.body.monospaced())
+                .foregroundStyle(.white.opacity(0.88))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 28)
+                .accessibilityIdentifier("terminal.statusText")
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(red: 0.10, green: 0.12, blue: 0.15))
     }
 
     private func chromeButton<Label: View>(action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
@@ -190,6 +233,7 @@ struct TerminalDetailView: View {
             model.title,
             model.replayStateKey,
             model.isOwner ? "owner" : "viewer",
+            model.showsTerminalSurface ? "surface" : "status",
             model.isConnecting ? "connecting" : "steady",
             model.isBusy ? "busy" : "idle",
             model.isSynchronizingOwnership ? "syncing" : "synced",
@@ -206,6 +250,7 @@ struct TerminalDetailView: View {
                 sessionID: session.id,
                 title: model.title,
                 isOwner: model.isOwner,
+                showsTerminalSurface: model.showsTerminalSurface,
                 isConnecting: model.isConnecting,
                 isBusy: model.isBusy,
                 isSynchronizingOwnership: model.isSynchronizingOwnership,

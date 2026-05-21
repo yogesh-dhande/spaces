@@ -25,7 +25,7 @@ DURATION_SECONDS="${DURATION_SECONDS:-300}"
 SAMPLE_INTERVAL_SECONDS="${SAMPLE_INTERVAL_SECONDS:-5}"
 FRAMES_PER_SECOND="${FRAMES_PER_SECOND:-8}"
 ROWS="${ROWS:-20}"
-SOAK_MODE="${SOAK_MODE:-repaint_viewer}"
+SOAK_MODE="${SOAK_MODE:-repaint}"
 APP_PID=""
 
 cleanup() {
@@ -108,23 +108,18 @@ frames=$((DURATION_SECONDS * FRAMES_PER_SECOND))
 sleep_ms=$((1000 / FRAMES_PER_SECOND))
 fixture_mode="mixed"
 session_title="soak-mixed"
-if [[ "$SOAK_MODE" == "repaint_viewer" ]]; then
+if [[ "$SOAK_MODE" == "repaint" ]]; then
   fixture_mode="repaint"
-  session_title="soak-repaint-viewer"
+  session_title="soak-repaint"
 fi
 command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "python3 '$FIXTURE_SCRIPT' --mode $fixture_mode --frames $frames --rows $ROWS --width 72 --sleep-ms $sleep_ms" --title "$session_title")"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse soak session ID" >&2; exit 1; }
 wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=owner"
-if [[ "$SOAK_MODE" == "repaint_viewer" ]]; then
-  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal show "$session_id" --viewer >/dev/null
-  wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=viewer"
-fi
-
 session_dir="$RUNTIME_DIR/terminal/sessions/$session_id"
 output_log="$session_dir/output.log"
 
-echo -e "elapsed_s\trss_kb\tcpu_percent\ttail_ms\toutput_bytes\tviewer_present_count" >"$SAMPLES_PATH"
+echo -e "elapsed_s\trss_kb\tcpu_percent\ttail_ms\toutput_bytes" >"$SAMPLES_PATH"
 started_at="$(date +%s)"
 while true; do
   now="$(date +%s)"
@@ -138,8 +133,7 @@ while true; do
   tail_finished="$(python_ms_now)"
   tail_ms=$((tail_finished - tail_started))
   output_bytes="$(wc -c <"$output_log" | tr -d ' ')"
-  viewer_present_count="$(grep -Ec "spaces: perf metric=terminal_viewer_output_present .*target=session=${session_id} .*success=1" "$APP_LOG" || true)"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$elapsed" "${rss_kb:-0}" "${cpu_percent:-0}" "$tail_ms" "$output_bytes" "$viewer_present_count" >>"$SAMPLES_PATH"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$elapsed" "${rss_kb:-0}" "${cpu_percent:-0}" "$tail_ms" "$output_bytes" >>"$SAMPLES_PATH"
   sleep "$SAMPLE_INTERVAL_SECONDS"
 done
 
@@ -166,7 +160,7 @@ perf_pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<targe
 
 rows_out = []
 for row in samples_path.read_text(encoding="utf-8").splitlines()[1:]:
-    elapsed_s, rss_kb, cpu_percent, tail_ms, output_bytes, viewer_present_count = row.split("\t")
+    elapsed_s, rss_kb, cpu_percent, tail_ms, output_bytes = row.split("\t")
     rows_out.append(
         {
             "elapsed_s": int(elapsed_s),
@@ -174,7 +168,6 @@ for row in samples_path.read_text(encoding="utf-8").splitlines()[1:]:
             "cpu_percent": float(cpu_percent),
             "tail_ms": int(tail_ms),
             "output_bytes": int(output_bytes),
-            "viewer_present_count": int(viewer_present_count),
         }
     )
 
@@ -234,7 +227,6 @@ payload = {
     "tail_ms_avg": round(statistics.mean((row["tail_ms"] for row in rows_out)), 1) if rows_out else 0,
     "tail_ms_max": max((row["tail_ms"] for row in rows_out), default=0),
     "output_bytes_final": output_log.stat().st_size,
-    "viewer_present_count_final": rows_out[-1]["viewer_present_count"] if rows_out else 0,
     "sequence_count": len(seqs),
     "sequence_complete": bool(seqs) and seqs == list(range(1, len(seqs) + 1)),
     "frame_last": frames_seen[-1] if frames_seen else None,
@@ -250,11 +242,6 @@ if rows_out:
     }
 if app_metrics:
     payload["app_metrics"] = {metric: summarize(values) for metric, values in sorted(app_metrics.items()) if values}
-    viewer_values = app_metrics.get("terminal_viewer_output_present")
-    if viewer_values:
-        payload["app_metric_phases"] = {
-            "terminal_viewer_output_present": summarize_phases(viewer_values)
-        }
 summary = [
     "Built-in terminal soak profile",
     "",
@@ -262,19 +249,6 @@ summary = [
     f"rss_max={payload['rss_kb_max']}KB cpu_avg={payload['cpu_percent_avg']} tail_avg={payload['tail_ms_avg']}ms tail_max={payload['tail_ms_max']}ms",
     f"output={payload['output_bytes_final']}B seq={payload['sequence_count']} complete={1 if payload['sequence_complete'] else 0} expected={1 if payload['lines_match_expected'] else 0} frame_ok={1 if payload['frame_match_expected'] else 0}",
 ]
-if "app_metrics" in payload and "terminal_viewer_output_present" in payload["app_metrics"]:
-    viewer = payload["app_metrics"]["terminal_viewer_output_present"]
-    summary.append(
-        f"viewer_present: count={viewer['count']} min={viewer['min_ms']}ms median={viewer['median_ms']}ms avg={viewer['avg_ms']}ms p95={viewer['p95_ms']}ms max={viewer['max_ms']}ms"
-    )
-if "app_metric_phases" in payload and "terminal_viewer_output_present" in payload["app_metric_phases"]:
-    phases = payload["app_metric_phases"]["terminal_viewer_output_present"]
-    if phases:
-        early = phases["early"]
-        late = phases["late"]
-        summary.append(
-            f"viewer_present_phases: early_median={early['median_ms']}ms early_p95={early['p95_ms']}ms late_median={late['median_ms']}ms late_p95={late['p95_ms']}ms"
-        )
 if "sample_phases" in payload and payload["sample_phases"].get("tail_ms"):
     tail_phases = payload["sample_phases"]["tail_ms"]
     early = tail_phases["early"]

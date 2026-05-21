@@ -43,10 +43,11 @@ import spacesterminalcore
     private var surfaceCreationRetryWorkItem: DispatchWorkItem?
     private var surfaceHostView = GhosttyEmbeddedSurfaceHostView(frame: .zero)
     private var boundSurfaceWindowNumber: Int?
+    private var isSurfaceAttached = false
     private var debugSurfaceRefreshRequestCountValue = 0
     private var debugSurfaceRefreshPerformedCountValue = 0
 
-    public var surface: ghostty_surface_t? { sessionDriver.rendererSurface(renderer) ?? sessionDriver.surface }
+    public var surface: ghostty_surface_t? { isSurfaceAttached ? sessionDriver.surface : nil }
 
     public convenience init(launchConfiguration: TerminalSessionLaunchConfiguration) {
         self.init(
@@ -347,8 +348,9 @@ import spacesterminalcore
         guard desiredAttachmentMode != mode else { return }
         if desiredAttachmentMode == .owner, mode == .viewer { sessionDriver.preserveCurrentOwnerGeometryForParking() }
         desiredAttachmentMode = mode
-        guard renderer != nil else {
-            createSurfaceIfNeeded()
+        guard desiredAttachmentMode == .owner else {
+            destroySurface()
+            onSurfaceReady?(nil)
             return
         }
         createSurfaceIfNeeded()
@@ -402,7 +404,7 @@ import spacesterminalcore
 
     public func ensureHostingWindowForSurface() {
         if window == nil {
-            try? sessionDriver.startIfNeeded()
+            if desiredAttachmentMode == .owner { try? sessionDriver.startIfNeeded() }
             return
         }
         createSurfaceIfNeeded()
@@ -411,7 +413,7 @@ import spacesterminalcore
     public func parkInHiddenHostWindowIfNeeded() {
         surfaceCreationRetryWorkItem?.cancel()
         surfaceCreationRetryWorkItem = nil
-        _ = sessionDriver.detachRenderer(renderer)
+        destroySurface()
         removeFromSuperview()
         boundSurfaceWindowNumber = nil
         lastGeometry = nil
@@ -422,7 +424,7 @@ import spacesterminalcore
     public func requestSurfaceRefresh() {
         debugSurfaceRefreshRequestCountValue += 1
         guard surface != nil else {
-            createSurfaceIfNeeded()
+            if desiredAttachmentMode == .owner { createSurfaceIfNeeded() }
             return
         }
         guard !refreshScheduled else { return }
@@ -447,6 +449,7 @@ import spacesterminalcore
     }
 
     private func createSurfaceIfNeeded() {
+        guard desiredAttachmentMode == .owner else { return }
         guard window != nil else { return }
         if let nextSurfaceCreationRetryAt, Date() < nextSurfaceCreationRetryAt { return }
         let startedAt = Date()
@@ -464,16 +467,11 @@ import spacesterminalcore
                 var initialHost = makeSurfaceHost(for: surfaceHostView)
                 renderer = ghostty_renderer_new(&initialHost)
             }
-            let attachSucceeded: Bool
-            switch desiredAttachmentMode {
-            case .owner: attachSucceeded = sessionDriver.attachRenderer(renderer)
-            case .viewer: attachSucceeded = sessionDriver.attachViewerRenderer(renderer)
-            }
-            guard renderer != nil, attachSucceeded else {
-                throw GhosttyEmbeddedAppServiceError.configuration(
-                    desiredAttachmentMode == .owner ? "ghostty_renderer_attach failed" : "ghostty_renderer_attach_viewer failed")
+            guard renderer != nil, sessionDriver.attachRenderer(renderer) else {
+                throw GhosttyEmbeddedAppServiceError.configuration("ghostty_renderer_attach failed")
             }
 
+            isSurfaceAttached = true
             boundSurfaceWindowNumber = window?.windowNumber
             surfaceCreationRetryWorkItem?.cancel()
             surfaceCreationRetryWorkItem = nil
@@ -529,6 +527,7 @@ import spacesterminalcore
 
     private func destroySurface() {
         _ = sessionDriver.detachRenderer(renderer)
+        isSurfaceAttached = false
         boundSurfaceWindowNumber = nil
         lastGeometry = nil
         lastFocused = nil
@@ -542,13 +541,7 @@ import spacesterminalcore
         let geometry = SurfaceGeometry(width: backingSize.width, height: backingSize.height, scale: scale, displayID: displayID)
         guard geometry != lastGeometry else { return }
         layer?.contentsScale = window.backingScaleFactor
-        if desiredAttachmentMode == .owner {
-            sessionDriver.updateGeometry(width: geometry.width, height: geometry.height, scale: scale, displayID: displayID)
-        } else if sessionDriver.rendererIsOwner(renderer) == false, let viewerSurface = sessionDriver.rendererSurface(renderer) {
-            ghostty_surface_set_content_scale(viewerSurface, scale, scale)
-            if let displayID { ghostty_surface_set_display_id(viewerSurface, displayID) }
-            ghostty_surface_set_size(viewerSurface, geometry.width, geometry.height)
-        }
+        sessionDriver.updateGeometry(width: geometry.width, height: geometry.height, scale: scale, displayID: displayID)
         lastGeometry = geometry
     }
 

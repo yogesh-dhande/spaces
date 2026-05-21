@@ -82,6 +82,7 @@ struct SpacesMobileE2ERenderDump: Codable, Equatable {
     let sessionID: String
     let title: String
     let isOwner: Bool
+    let showsTerminalSurface: Bool
     let isConnecting: Bool
     let isBusy: Bool
     let isSynchronizingOwnership: Bool

@@ -164,14 +164,6 @@ final class MXCommandTests: XCTestCase {
         let command = try TerminalShowCommand.parse(["session-1"])
 
         XCTAssertEqual(command.sessionID, "session-1")
-        XCTAssertFalse(command.viewer)
-    }
-
-    func testTerminalShowParsesViewerFlag() throws {
-        let command = try TerminalShowCommand.parse(["session-1", "--viewer"])
-
-        XCTAssertEqual(command.sessionID, "session-1")
-        XCTAssertTrue(command.viewer)
     }
 
     func testTerminalTakeoverParsesSessionAndClient() throws {

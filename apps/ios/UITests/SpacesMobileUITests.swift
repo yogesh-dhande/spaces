@@ -7,6 +7,18 @@ final class SpacesMobileUITests: XCTestCase {
     }
 
     func testTerminalTakeOverFromList() throws {
+        try runTerminalTakeOverScenario()
+    }
+
+    func testTerminalTakeOverAfterMacRetakeover() throws {
+        try runTerminalTakeOverScenario()
+    }
+
+    func testTerminalTakeOverAfterTwoMacRetakeovers() throws {
+        try runTerminalTakeOverScenario()
+    }
+
+    private func runTerminalTakeOverScenario() throws {
         let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
         let app = XCUIApplication()
         app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
@@ -29,17 +41,10 @@ final class SpacesMobileUITests: XCTestCase {
         sessionRow.tap()
         waitForMarkerIfNeeded(configuration.proceedTakeOverPath, timeout: 20)
 
-        guard let takeOverButton = waitForButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 10) else {
-            XCTFail("Timed out waiting for takeover button")
-            return
-        }
-        takeOverButton.tap()
-
-        guard let ownerState = waitForOwnerState(in: app, timeout: 20) else {
+        guard waitForOwnerState(in: app, timeout: 20) != nil else {
             XCTFail("Timed out waiting for owner state")
             return
         }
-        XCTAssertTrue(ownerState.exists)
 
         captureScreenshot(app, name: "post-takeover-immediate", filePath: configuration.immediateScreenshotPath)
         RunLoop.current.run(until: Date().addingTimeInterval(2))
@@ -70,6 +75,27 @@ final class SpacesMobileUITests: XCTestCase {
 
         if let proceedFinishPath = configuration.proceedFinishPath {
             waitForMarkerIfNeeded(proceedFinishPath, timeout: 30)
+            for attemptIndex in 0..<configuration.manualRetakeoverAttempts {
+                guard let takeOverButton = waitForButton(
+                    in: app,
+                    identifier: "terminal.takeover",
+                    fallbackLabel: "Take Over",
+                    timeout: 20
+                ) else {
+                    XCTFail("Timed out waiting for Take Over button after Mac retakeover")
+                    return
+                }
+                takeOverButton.tap()
+                guard waitForOwnerState(in: app, timeout: 20) != nil else {
+                    XCTFail("Timed out waiting for owner state after iPad retakeover attempt \(attemptIndex + 1)")
+                    return
+                }
+                XCTAssertTrue(
+                    waitForOwnerReadyState(in: app, timeout: 5),
+                    "Owner-ready badge did not return promptly after iPad retakeover attempt \(attemptIndex + 1)"
+                )
+                assertOwnerReadyStable(in: app, duration: 1, context: "after iPad retakeover attempt \(attemptIndex + 1)")
+            }
             captureScreenshot(app, name: "post-mac-retakeover", filePath: configuration.finalScreenshotPath)
         }
     }
@@ -227,6 +253,7 @@ private struct UITestConfiguration: Decodable {
     let proceedFinishPath: String?
     let firstCommandText: String
     let secondCommandText: String?
+    let manualRetakeoverAttempts: Int
     let postFirstCommandScreenshotPath: String?
     let postSecondCommandScreenshotPath: String?
     let finalScreenshotPath: String?

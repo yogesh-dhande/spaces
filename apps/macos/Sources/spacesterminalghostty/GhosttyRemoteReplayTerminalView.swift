@@ -34,6 +34,7 @@ import spacesterminalcore
     private var lastSurfaceCreationFailureMessage: String?
     private var surfaceHostView = GhosttyRemoteReplaySurfaceHostView(frame: .zero)
     private var boundSurfaceWindowNumber: Int?
+    private var isSurfaceAttached = false
     private var lastGeometry: SurfaceGeometry?
     private var lastFocused: Bool?
     private var lastOccluded: Bool?
@@ -76,7 +77,7 @@ import spacesterminalcore
     override var acceptsFirstResponder: Bool { acceptsTerminalInput }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    var surface: ghostty_surface_t? { sessionDriver.rendererSurface(renderer) ?? sessionDriver.surface }
+    var surface: ghostty_surface_t? { isSurfaceAttached ? sessionDriver.surface : nil }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -390,6 +391,7 @@ import spacesterminalcore
                 throw GhosttyEmbeddedAppServiceError.configuration("ghostty_renderer_attach failed")
             }
 
+            isSurfaceAttached = true
             boundSurfaceWindowNumber = window?.windowNumber
             surfaceCreationRetryWorkItem?.cancel()
             surfaceCreationRetryWorkItem = nil
@@ -430,6 +432,7 @@ import spacesterminalcore
 
     private func destroySurface() {
         _ = sessionDriver.detachRenderer(renderer)
+        isSurfaceAttached = false
         boundSurfaceWindowNumber = nil
         lastGeometry = nil
         lastFocused = nil

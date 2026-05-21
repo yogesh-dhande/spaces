@@ -389,17 +389,19 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         terminalView.parkInHiddenHostWindowIfNeeded()
         try waitUntil { terminalView.window == nil }
         XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), originalPID)
-        XCTAssertEqual(terminalView.surface, originalSurface)
+        XCTAssertNil(terminalView.surface)
 
         terminalView.sendRawBytes(Data("hidden host\n".utf8))
         try waitUntil { transcript.string().contains("hidden host") }
-        XCTAssertEqual(terminalView.surface, originalSurface)
+        XCTAssertNil(terminalView.surface)
 
         attach(terminalView, to: secondWindow)
         secondWindow.makeKeyAndOrderFront(nil)
         try waitUntil { terminalView.window === secondWindow }
         XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), originalPID)
-        XCTAssertEqual(terminalView.surface, originalSurface)
+        try waitUntil { terminalView.surface != nil }
+        let reboundSurface = try XCTUnwrap(terminalView.surface)
+        XCTAssertEqual(reboundSurface, originalSurface)
 
         terminalView.sendRawBytes(Data("second window\n".utf8))
         try waitUntil { transcript.string().contains("second window") }
@@ -409,53 +411,59 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(reboundTranscript.contains("second window"))
     }
 
-    @MainActor func testEmbeddedViewCanMirrorViewerSurfaceAndPromoteToOwnerWithoutRestartingShell() throws {
+    @MainActor func testEmbeddedViewCanReattachOwnerSurfaceAfterParkingWithoutRestartingShell() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
 
         let terminalView = GhosttyEmbeddedTerminalView(
             launchConfiguration: TerminalSessionLaunchConfiguration(
-                sessionID: "viewer-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "viewer",
+                sessionID: "owner-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
                 workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-19T00:00:00Z"))
         defer { terminalView.terminateSession() }
         let transcript = TranscriptBuffer()
         terminalView.setOutputHandler { data in transcript.append(data) }
 
         let hostingWindow = makeHostingWindow()
+        let reboundWindow = makeHostingWindow()
         defer {
             hostingWindow.orderOut(nil)
+            reboundWindow.orderOut(nil)
             hostingWindow.close()
+            reboundWindow.close()
         }
 
-        terminalView.setAttachmentMode(.viewer)
         attach(terminalView, to: hostingWindow)
         hostingWindow.makeKeyAndOrderFront(nil)
 
         try waitUntil { terminalView.surface != nil }
-        let viewerSurface = try XCTUnwrap(terminalView.surface)
+        let initialSurface = try XCTUnwrap(terminalView.surface)
         let childPID = try XCTUnwrap(terminalView.foregroundPID())
 
-        terminalView.sendRawBytes(Data("viewer mode\n".utf8))
-        try waitUntil { transcript.string().contains("viewer mode") }
-        terminalView.requestSurfaceRefresh()
-        try waitUntil {
-            guard let snapshot = terminalView.snapshot() else { return false }
-            return GhosttyTerminalSnapshotRenderer.render(snapshot).string.contains("viewer mode")
-        }
-        XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), childPID)
-
-        terminalView.setAttachmentMode(.owner)
-
-        try waitUntil { terminalView.surface != nil && terminalView.surface != viewerSurface }
-        let ownerSurface = try XCTUnwrap(terminalView.surface)
-        XCTAssertNotEqual(ownerSurface, viewerSurface)
-        XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), childPID)
-
         terminalView.sendRawBytes(Data("owner mode\n".utf8))
+        try waitUntil { transcript.string().contains("owner mode") }
         terminalView.requestSurfaceRefresh()
         try waitUntil {
             guard let snapshot = terminalView.snapshot() else { return false }
             return GhosttyTerminalSnapshotRenderer.render(snapshot).string.contains("owner mode")
+        }
+        XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), childPID)
+
+        terminalView.parkInHiddenHostWindowIfNeeded()
+        try waitUntil { terminalView.window == nil }
+        XCTAssertNil(terminalView.surface)
+
+        attach(terminalView, to: reboundWindow)
+        reboundWindow.makeKeyAndOrderFront(nil)
+        try waitUntil { terminalView.surface != nil }
+        let reboundSurface = try XCTUnwrap(terminalView.surface)
+        XCTAssertEqual(reboundSurface, initialSurface)
+        XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), childPID)
+
+        terminalView.sendRawBytes(Data("rebound owner mode\n".utf8))
+        terminalView.requestSurfaceRefresh()
+        try waitUntil {
+            guard let snapshot = terminalView.snapshot() else { return false }
+            return GhosttyTerminalSnapshotRenderer.render(snapshot).string.contains("rebound owner mode")
         }
     }
 

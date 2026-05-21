@@ -12,6 +12,7 @@ import Foundation
         public let outputData: Data?
         public let outputEventToken: String?
         public let fallbackText: String
+        public let isVisible: Bool
         public let acceptsInput: Bool
         public let isBusy: Bool
         public let onInputReadinessChanged: @MainActor (Bool) -> Void
@@ -22,7 +23,8 @@ import Foundation
 
         public init(
             snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, outputData: Data? = nil, outputEventToken: String? = nil,
-            fallbackText: String, acceptsInput: Bool, isBusy: Bool, onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
+            fallbackText: String, isVisible: Bool, acceptsInput: Bool, isBusy: Bool,
+            onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
             onRenderedTextChanged: @escaping @MainActor (String) -> Void = { _ in }, onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
             onSendText: @escaping @MainActor (String) -> Void, onSendKey: @escaping @MainActor (String) -> Void
         ) {
@@ -31,6 +33,7 @@ import Foundation
             self.outputData = outputData
             self.outputEventToken = outputEventToken
             self.fallbackText = fallbackText
+            self.isVisible = isVisible
             self.acceptsInput = acceptsInput
             self.isBusy = isBusy
             self.onInputReadinessChanged = onInputReadinessChanged
@@ -48,11 +51,14 @@ import Foundation
             hostView.onSendText = { text in Task { @MainActor in onSendText(text) } }
             hostView.onSendKey = { key in Task { @MainActor in onSendKey(key) } }
             hostView.onRenderedTextChanged = { text in Task { @MainActor in onRenderedTextChanged(text) } }
+            hostView.setTerminalVisible(isVisible)
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
             hostView.update(
                 snapshot: snapshot, replayStateKey: replayStateKey, outputData: outputData, outputEventToken: outputEventToken,
                 fallbackText: fallbackText)
         }
+
+        public static func dismantleUIView(_ hostView: GhosttyRemoteTerminalHostView, coordinator: ()) { hostView.prepareForDismantle() }
     }
 
     @MainActor public final class GhosttyRemoteTerminalHostView: UIView, UIKeyInput, UITextInputTraits {
@@ -72,6 +78,7 @@ import Foundation
         private var lastEmittedRenderedText: String?
         private var lastReportedInputReadiness = false
         private var postRefreshEmissionScheduled = false
+        private var isTerminalVisible = true
 
         public private(set) var acceptsTerminalInput = false
         public var onInputReadinessChanged: ((Bool) -> Void)? { didSet { publishCurrentInputReadiness() } }
@@ -105,10 +112,15 @@ import Foundation
 
         @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
-        deinit { MainActor.assumeIsolated { if let session { ghostty_session_free(session) } } }
+        deinit { MainActor.assumeIsolated { teardownSession() } }
 
         public override func didMoveToWindow() {
             super.didMoveToWindow()
+            guard window != nil else {
+                teardownSession()
+                reportInputReadinessIfNeeded()
+                return
+            }
             ensureSession()
             syncSessionState()
             reportInputReadinessIfNeeded()
@@ -140,7 +152,7 @@ import Foundation
         public func update(
             snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, outputData: Data?, outputEventToken: String?, fallbackText: String
         ) {
-            ensureSession()
+            if window != nil { ensureSession() }
             let shouldApplyIncrementalOutput = canApplyIncrementalOutput(outputData: outputData, outputEventToken: outputEventToken)
             if let lastReplayStateKey, lastReplayStateKey != replayStateKey, !shouldApplyIncrementalOutput {
                 lastViewportSnapshot = nil
@@ -280,6 +292,25 @@ import Foundation
             reportInputReadinessIfNeeded()
         }
 
+        func setTerminalVisible(_ visible: Bool) {
+            guard isTerminalVisible != visible else { return }
+            isTerminalVisible = visible
+            if visible {
+                lastViewportSnapshot = nil
+                lastReplayPixelSize = .zero
+                lastAppliedOutputEventToken = nil
+                lastEmittedRenderedText = nil
+            }
+            isHidden = !visible
+            accessibilityElementsHidden = !visible
+            syncSessionState()
+            reportInputReadinessIfNeeded()
+        }
+
+        func prepareForDismantle() { teardownSession() }
+
+        var hasActiveSessionForTesting: Bool { session != nil }
+
         private func ensureSession() {
             guard session == nil else { return }
             do {
@@ -291,6 +322,18 @@ import Foundation
                 fallbackLabel.text = error.localizedDescription
                 fallbackLabel.isHidden = false
             }
+        }
+
+        private func teardownSession() {
+            guard let session else { return }
+            if isFirstResponder { resignFirstResponder() }
+            ghostty_session_free(session)
+            self.session = nil
+            lastViewportSnapshot = nil
+            lastReplayPixelSize = .zero
+            lastReplayStateKey = nil
+            lastAppliedOutputEventToken = nil
+            lastReportedInputReadiness = false
         }
 
         private func createSession(app: ghostty_app_t) -> ghostty_session_t? {
@@ -342,16 +385,18 @@ import Foundation
             let pixelSize = currentPixelSize
             ghostty_session_set_content_scale(session, scale, scale)
             ghostty_session_set_focus(session, isFirstResponder)
-            ghostty_session_set_occlusion(session, window != nil && !isHidden && alpha > 0.001)
+            ghostty_session_set_occlusion(session, window != nil && isTerminalVisible && alpha > 0.001)
             ghostty_session_set_size(session, UInt32(max(pixelSize.width, 1)), UInt32(max(pixelSize.height, 1)))
-            requestSurfaceRefresh()
-            notifyViewportSizeIfChanged()
-            if let lastSnapshot, pixelSize.width > 1, pixelSize.height > 1, lastReplayPixelSize != pixelSize {
+            let shouldReplayLatestSnapshot = pixelSize.width > 1 && pixelSize.height > 1 && lastReplayPixelSize != pixelSize
+            if let lastSnapshot, shouldReplayLatestSnapshot {
                 let viewportSnapshot = viewportSnapshot(for: lastSnapshot, session: session)
                 replay(snapshot: viewportSnapshot, into: session)
                 lastViewportSnapshot = viewportSnapshot
                 lastReplayPixelSize = pixelSize
+            } else {
+                requestSurfaceRefresh()
             }
+            notifyViewportSizeIfChanged()
             syncFirstResponder()
             reportInputReadinessIfNeeded()
         }

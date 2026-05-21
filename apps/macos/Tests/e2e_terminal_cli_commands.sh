@@ -97,6 +97,47 @@ else:
 PY
 }
 
+attach_remote_viewer_client() {
+  local session_id="$1"
+  local socket_path="$RUNTIME_DIR/terminal/sessions/$session_id/control.sock"
+  python3 - "$socket_path" <<'PY'
+import json
+import socket
+import sys
+import uuid
+from datetime import datetime, timezone
+
+socket_path = sys.argv[1]
+client_id = str(uuid.uuid4()).upper()
+request = {
+    "command": "attach",
+    "client": {
+        "id": client_id,
+        "kind": "remoteViewer",
+        "identity": {
+            "label": "CLI E2E Viewer",
+            "deviceName": "CLI E2E Viewer",
+            "networkAddress": "127.0.0.1",
+        },
+        "connectedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    },
+    "attachmentMode": "viewer",
+    "appendNewline": False,
+}
+
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(5)
+client.connect(socket_path)
+client.sendall(json.dumps(request).encode("utf-8"))
+client.shutdown(socket.SHUT_WR)
+response = json.loads(client.recv(65536).decode("utf-8"))
+client.close()
+if not response.get("ok"):
+    raise SystemExit(response.get("message") or response)
+print(client_id)
+PY
+}
+
 require_binary() {
   local path="$1"
   [[ -x "$path" ]] || { echo "Missing binary: $path" >&2; exit 1; }
@@ -141,8 +182,11 @@ printf '%s\n' "$tail_output" | grep -Fq "b'abc"
 printf '%s\n' "$tail_output" | grep -Fq "\\x1b[A"
 printf '%s\n' "$tail_output" | grep -Fq "\\r'"
 
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal show "$session_id" --viewer >/dev/null
-viewer_client_id="$(wait_for_active_attachment_client_id "$session_id" viewer)"
+viewer_client_id="$(attach_remote_viewer_client "$session_id")"
+[[ "$(wait_for_active_attachment_client_id "$session_id" viewer)" == "$viewer_client_id" ]] || {
+  echo "Attached viewer client did not become the active viewer attachment" >&2
+  exit 1
+}
 
 [[ "$viewer_client_id" != "$owner_client_id" ]] || { echo "Viewer and owner client IDs should differ" >&2; exit 1; }
 

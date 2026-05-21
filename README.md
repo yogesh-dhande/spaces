@@ -40,8 +40,7 @@ spaces terminal list                      # inspect live session IDs and working
 spaces terminal send <session> "hello"    # write input to a session
 spaces terminal key <session> ctrl+c      # send a named key or control chord
 spaces terminal tail <session> --lines 20 # read recent output
-spaces terminal show <session>            # open the owner window for a session
-spaces terminal show <session> --viewer   # open a passive viewer window
+spaces terminal show <session>            # open an owner-seeking window for a session
 spaces terminal takeover <session> <id>   # hand input ownership to another client
 spaces mobile serve --host 127.0.0.1 --port 47071 --pairing-code 246810
 ```
@@ -67,7 +66,7 @@ Coding agents emit `spaces signal` events from their terminals so the GUI knows 
 
 - [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
 - Built-in process and ad hoc terminals run inside the Spaces app through the built-in Spaces terminal runtime, so session lifetime, takeover, and `spaces terminal` controls share one session boundary.
-- The first-party iOS client pairs once through `spaces mobile serve`, then browses live Spaces terminal sessions as a viewer or owner over the same session boundary.
+- The first-party iOS client pairs once through `spaces mobile serve`, then browses live Spaces terminal sessions and auto-takes ownership when opening one for live rendering.
 - Browser sessions automate Google Chrome so you can quickly switch to view output without typing the URL or clicking through tabs.
 
 ## Requirements

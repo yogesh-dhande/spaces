@@ -89,6 +89,90 @@
             window.isHidden = true
         }
 
+        func testRemoteTerminalHostViewTearsDownSessionWhenRemovedFromWindow() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            XCTAssertTrue(hostView.hasActiveSessionForTesting)
+
+            hostView.removeFromSuperview()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            XCTAssertFalse(hostView.hasActiveSessionForTesting)
+            XCTAssertNil(hostView.capturedSnapshotForTesting())
+
+            viewController.view.addSubview(hostView)
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=2",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            XCTAssertTrue(hostView.hasActiveSessionForTesting)
+            XCTAssertNotNil(hostView.capturedSnapshotForTesting())
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewCanRecreateSessionsAcrossMultipleMountCycles() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+
+            for cycle in 1...3 {
+                let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+                viewController.view.addSubview(hostView)
+                hostView.frame = viewController.view.bounds
+                viewController.view.layoutIfNeeded()
+
+                hostView.update(
+                    snapshot: sampleSnapshot(),
+                    replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=\(cycle)",
+                    outputData: nil,
+                    outputEventToken: nil,
+                    fallbackText: "Waiting for terminal state…"
+                )
+
+                RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+                XCTAssertTrue(hostView.hasActiveSessionForTesting)
+                XCTAssertNotNil(hostView.capturedSnapshotForTesting())
+
+                hostView.removeFromSuperview()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+                XCTAssertFalse(hostView.hasActiveSessionForTesting)
+            }
+
+            window.isHidden = true
+        }
+
         func testRemoteTerminalHostViewPublishesRenderedTextUpdates() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
@@ -117,6 +201,69 @@
 
             wait(for: [renderedExpectation], timeout: 2)
             XCTAssertTrue(renderedText.localizedStandardContains("hi"))
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewRepublishesRenderedTextAfterVisibilityToggle() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            let initialRenderedExpectation = expectation(description: "initial rendered text published")
+            let replayedRenderedExpectation = expectation(description: "rendered text republished after visibility toggle")
+            replayedRenderedExpectation.expectedFulfillmentCount = 1
+
+            var renderedEvents: [String] = []
+            hostView.onRenderedTextChanged = { text in
+                guard text.localizedStandardContains("hi") else { return }
+                renderedEvents.append(text)
+                if renderedEvents.count == 1 {
+                    initialRenderedExpectation.fulfill()
+                } else if renderedEvents.count == 2 {
+                    replayedRenderedExpectation.fulfill()
+                }
+            }
+
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            wait(for: [initialRenderedExpectation], timeout: 2)
+
+            hostView.setTerminalVisible(false)
+            hostView.update(
+                snapshot: nil,
+                replayStateKey: "status",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Current owner: Mac"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            hostView.setTerminalVisible(true)
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            wait(for: [replayedRenderedExpectation], timeout: 2)
+            XCTAssertEqual(renderedEvents.count, 2)
 
             window.isHidden = true
         }

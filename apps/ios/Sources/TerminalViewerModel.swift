@@ -28,9 +28,10 @@ import spacesterminalcore
     private var pendingInputSendTask: Task<Void, Never>?
     private var ownershipSynchronizationTask: Task<Void, Never>?
     private var viewportSize: (columns: Int, rows: Int)?
-    private var optimisticOwner = false
+    private var isAwaitingTakeoverConfirmation = false
     private var isStopping = false
     private var hasAttachedToSession = false
+    private var hasAttemptedAutomaticTakeover = false
     private var hasConfirmedOwnerInputReadiness = false
     private var ownerRecoveryGraceDeadline: Date?
 
@@ -38,6 +39,8 @@ import spacesterminalcore
     private static let inputRequestTimeout: Duration = .seconds(6)
     private static let ownerRecoveryGraceInterval: TimeInterval = 2
     private static let silentReconnectDelay: Duration = .milliseconds(150)
+    private static let viewportSyncWaitStep: Duration = .milliseconds(50)
+    private static let viewportSyncWaitIterations = 8
 
     init(
         session: SpacesMobileTerminalSessionSummary,
@@ -62,11 +65,12 @@ import spacesterminalcore
     }
 
     var title: String { latestState?.title ?? session.title }
-    var snapshot: GhosttyTerminalSnapshot? { latestState?.snapshot }
-    var outputData: Data? { latestState?.outputData }
+    var snapshot: GhosttyTerminalSnapshot? { showsTerminalSurface ? latestState?.snapshot : nil }
+    var outputData: Data? { showsTerminalSurface ? latestState?.outputData : nil }
     var latestScreenStateRevision: UInt64? { latestState?.screenStateRevision }
     var transcriptTail: String? { latestState?.transcriptTail }
     var replayStateKey: String {
+        guard showsTerminalSurface else { return "status" }
         let snapshotColumns = latestState?.snapshot?.columns ?? 0
         let snapshotRows = latestState?.snapshot?.rows ?? 0
         let runtimeColumns = latestState?.runtimeState?.columns ?? 0
@@ -74,25 +78,35 @@ import spacesterminalcore
         return
             "runtime=\(runtimeColumns)x\(runtimeRows)|snapshot=\(snapshotColumns)x\(snapshotRows)|screen=\(screenStateRevision)"
     }
+    var showsTerminalSurface: Bool { isOwner || shouldRenderEndedTerminalSurface }
     var visibleText: String {
-        if let transcriptTail, !transcriptTail.isEmpty {
+        if shouldRenderEndedTerminalSurface, let transcriptTail, !transcriptTail.isEmpty {
             return transcriptTail
         }
-        if let snapshotText = latestState?.snapshotText {
+        if shouldRenderEndedTerminalSurface, let snapshotText = latestState?.snapshotText {
             return snapshotText
         }
-        if let snapshot = latestState?.snapshot {
+        if showsTerminalSurface, let snapshot = latestState?.snapshot {
             return GhosttyTerminalSnapshotLayout.plainText(for: snapshot)
         }
         if isSessionUnavailable {
             return "This terminal session is no longer available.\nReturn to Terminals to open the current live session."
         }
-        return "Waiting for terminal state…"
+        if isEndedState {
+            return "This terminal session ended before a final render was available."
+        }
+        if isOwner {
+            return "Preparing terminal…"
+        }
+        if isTakingOver {
+            return "Attempting takeover…"
+        }
+        let ownerLabel = activeOwnerDisplayLabel ?? "another client"
+        return "Live terminal rendering is limited to the active owner.\nCurrent owner: \(ownerLabel)"
     }
     var attachmentSnapshot: TerminalSessionAttachmentSnapshot { latestState?.attachmentSnapshot ?? session.attachmentSnapshot }
-    var isOwner: Bool {
-        optimisticOwner || attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID == remoteClient.id
-    }
+    var isOwner: Bool { activeOwnerClientID == remoteClient.id }
+    var isTakingOver: Bool { !isOwner && (isAwaitingTakeoverConfirmation || isBusy || isSynchronizingOwnership) }
     var acceptsInput: Bool { isOwner && !isBusy && !isConnecting && !isSynchronizingOwnership && !isSessionUnavailable }
     var isPreparingInput: Bool { acceptsInput && !isInputSurfaceReady }
     var viewportColumns: Int? { viewportSize?.columns }
@@ -108,13 +122,15 @@ import spacesterminalcore
         guard streamHandle == nil, reconnectTask == nil else { return }
         isStopping = false
         isSessionUnavailable = false
+        hasAttemptedAutomaticTakeover = false
         scheduleReconnect(after: .zero)
     }
 
     func stop() {
         isStopping = true
-        optimisticOwner = false
+        isAwaitingTakeoverConfirmation = false
         hasAttachedToSession = false
+        hasAttemptedAutomaticTakeover = false
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
         reconnectTask?.cancel()
@@ -131,32 +147,31 @@ import spacesterminalcore
         isSynchronizingOwnership = false
         streamHandle?.cancel()
         streamHandle = nil
+        let currentChannel = commandChannel
         Task {
-            try? await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id, commandChannel: commandChannel)
-            await commandChannel.close()
+            try? await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id)
+            await currentChannel.close()
         }
     }
 
     func takeOver() async {
         guard !isBusy else { return }
+        hasAttemptedAutomaticTakeover = true
         isBusy = true
         defer { isBusy = false }
         do {
             try await bridgeClient.takeOver(
                 sessionID: session.id,
                 clientID: remoteClient.id,
-                timeout: Self.inputRequestTimeout,
-                commandChannel: commandChannel
+                timeout: Self.inputRequestTimeout
             )
-            await resetCommandChannel()
-            optimisticOwner = true
+            replaceCommandChannel()
+            isAwaitingTakeoverConfirmation = true
             hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
-            beginOwnerRecoveryGracePeriod()
             errorMessage = nil
-            await performOwnershipSynchronization()
         } catch {
-            optimisticOwner = false
+            isAwaitingTakeoverConfirmation = false
             if Self.isTransientReconnectError(error) {
                 errorMessage = nil
                 return
@@ -170,6 +185,9 @@ import spacesterminalcore
         let resolved = (columns: max(columns, 1), rows: max(rows, 1))
         guard viewportSize?.columns != resolved.columns || viewportSize?.rows != resolved.rows else { return }
         viewportSize = resolved
+        if isOwner && !isBusy && !isSynchronizingOwnership {
+            scheduleOwnershipSynchronization()
+        }
     }
 
     func sendText(_ text: String, appendNewline: Bool = false) async {
@@ -187,14 +205,9 @@ import spacesterminalcore
     func sendKey(_ key: String) async {
         guard isOwner else { return }
         flushBufferedInputText()
-        enqueueInputSend(kind: "send_key", detail: key) { [bridgeClient, commandChannel, sessionID = session.id, clientID = remoteClient.id] in
-            try await bridgeClient.sendKey(
-                sessionID: sessionID,
-                clientID: clientID,
-                key: key,
-                timeout: Self.inputRequestTimeout,
-                commandChannel: commandChannel
-            )
+        enqueueInputSend(kind: "send_key", detail: key) { [weak self, key] in
+            guard let self else { return }
+            try await self.performSendKeyRequest(key)
         }
     }
 
@@ -221,7 +234,14 @@ import spacesterminalcore
         let text = bufferedInputText
         bufferedInputText.removeAll(keepingCapacity: true)
         guard !text.isEmpty else { return }
-        enqueueInputSend(kind: "send_text", detail: text) { [bridgeClient, commandChannel, sessionID = session.id, clientID = remoteClient.id] in
+        enqueueInputSend(kind: "send_text", detail: text) { [weak self, text] in
+            guard let self else { return }
+            try await self.performSendTextRequest(text)
+        }
+    }
+
+    private func performSendTextRequest(_ text: String) async throws {
+        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id] commandChannel in
             try await bridgeClient.sendText(
                 sessionID: sessionID,
                 clientID: clientID,
@@ -230,6 +250,31 @@ import spacesterminalcore
                 timeout: Self.inputRequestTimeout,
                 commandChannel: commandChannel
             )
+        }
+    }
+
+    private func performSendKeyRequest(_ key: String) async throws {
+        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id] commandChannel in
+            try await bridgeClient.sendKey(
+                sessionID: sessionID,
+                clientID: clientID,
+                key: key,
+                timeout: Self.inputRequestTimeout,
+                commandChannel: commandChannel
+            )
+        }
+    }
+
+    private func performRequestUsingInputChannel(
+        _ request: @escaping @Sendable (SpacesMobileBridgeCommandChannel) async throws -> Void
+    ) async throws {
+        do {
+            try await request(commandChannel)
+        } catch {
+            guard Self.isTransientInputTransportError(error) else { throw error }
+            replaceCommandChannel()
+            try await Task.sleep(for: .milliseconds(120))
+            try await request(commandChannel)
         }
     }
 
@@ -269,10 +314,10 @@ import spacesterminalcore
         errorMessage = error.localizedDescription
     }
 
-    private func resetCommandChannel() async {
+    private func replaceCommandChannel() {
         let previousChannel = commandChannel
         commandChannel = bridgeClient.makeCommandChannel()
-        await previousChannel.close()
+        Task { await previousChannel.close() }
     }
 
     private func scheduleReconnect(after delay: Duration) {
@@ -304,31 +349,13 @@ import spacesterminalcore
                 try await bridgeClient.attach(
                     sessionID: session.id,
                     client: remoteClient,
-                    mode: .viewer,
-                    commandChannel: commandChannel
+                    mode: .viewer
                 )
                 hasAttachedToSession = true
             }
             let handle = try bridgeClient.subscribe(sessionID: session.id, clientID: remoteClient.id) { [weak self] payload in
                 guard let self else { return }
-                let wasOwner = isOwner
-                latestState = latestState?.merged(with: payload) ?? payload
-                if payload.attachmentSnapshot != nil {
-                    optimisticOwner = false
-                    hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
-                }
-                let isOwnerAfterMerge = isOwner
-                if !isOwnerAfterMerge {
-                    hasConfirmedOwnerInputReadiness = false
-                    isInputSurfaceReady = false
-                }
-                isSessionUnavailable = false
-                errorMessage = nil
-                isConnecting = false
-                if isOwnerAfterMerge, (!wasOwner || payload.reason == "initial" || payload.reason == "attachment_state") {
-                    beginOwnerRecoveryGracePeriod()
-                    scheduleOwnershipSynchronization()
-                }
+                applyLatestState(payload)
             } onDisconnect: { [weak self] error in
                 Task { @MainActor [weak self] in
                     await self?.handleDisconnect(error)
@@ -346,13 +373,11 @@ import spacesterminalcore
 
     private func refreshLatestState(timeout: Duration = .seconds(3), ignoreTransientTimeout: Bool = false) async {
         do {
-            latestState = try await bridgeClient.fetchState(
+            let fetchedState = try await bridgeClient.fetchState(
                 sessionID: session.id,
-                timeout: timeout,
-                commandChannel: commandChannel
+                timeout: timeout
             )
-            isSessionUnavailable = false
-            errorMessage = nil
+            applyLatestState(fetchedState)
         } catch {
             if ignoreTransientTimeout, Self.isTransientReconnectError(error) {
                 errorMessage = nil
@@ -373,7 +398,7 @@ import spacesterminalcore
         streamHandle = nil
         isConnecting = false
         if !reconnectSilently {
-            optimisticOwner = false
+            isAwaitingTakeoverConfirmation = false
             hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
         }
@@ -410,7 +435,38 @@ import spacesterminalcore
     }
 
     private var shouldReconnectSilently: Bool {
-        latestState != nil && (isWithinOwnerRecoveryGracePeriod || optimisticOwner || isOwner)
+        latestState != nil && (isWithinOwnerRecoveryGracePeriod || isAwaitingTakeoverConfirmation || isOwner)
+    }
+
+    private var isEndedState: Bool {
+        let state = latestState?.runtimeState?.state ?? session.state
+        return state != .running && state != .starting
+    }
+
+    private var shouldRenderEndedTerminalSurface: Bool {
+        guard isOwner == false, isEndedState else { return false }
+        if latestState?.snapshot != nil { return true }
+        if let outputData = latestState?.outputData, !outputData.isEmpty { return true }
+        return false
+    }
+
+    private var activeOwnerDisplayLabel: String? {
+        guard let ownerAttachment = attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil }) else { return nil }
+        return attachmentSnapshot.clients.first(where: { $0.id == ownerAttachment.clientID })?.identity.deviceName
+            ?? attachmentSnapshot.clients.first(where: { $0.id == ownerAttachment.clientID })?.identity.hostName
+            ?? attachmentSnapshot.clients.first(where: { $0.id == ownerAttachment.clientID })?.identity.label
+    }
+
+    private func attemptAutomaticTakeoverIfNeeded() {
+        guard !hasAttemptedAutomaticTakeover else { return }
+        guard !isOwner else { return }
+        guard !isSessionUnavailable else { return }
+        let state = latestState?.runtimeState?.state ?? session.state
+        guard state == .running else { return }
+        hasAttemptedAutomaticTakeover = true
+        Task { [weak self] in
+            await self?.takeOver()
+        }
     }
 
     private var isWithinOwnerRecoveryGracePeriod: Bool {
@@ -424,22 +480,18 @@ import spacesterminalcore
 
     private func scheduleOwnershipSynchronization() {
         guard isOwner else { return }
+        guard !isBusy else { return }
+        guard !isSynchronizingOwnership else { return }
+        startOwnershipSynchronization()
+    }
+
+    private func startOwnershipSynchronization() {
+        guard isOwner else { return }
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = Task { [weak self] in
             guard let self else { return }
             await self.runOwnershipSynchronization()
         }
-    }
-
-    private func performOwnershipSynchronization() async {
-        guard isOwner else { return }
-        ownershipSynchronizationTask?.cancel()
-        let task = Task { [weak self] in
-            guard let self else { return }
-            await self.runOwnershipSynchronization()
-        }
-        ownershipSynchronizationTask = task
-        await task.value
     }
 
     private func runOwnershipSynchronization() async {
@@ -450,15 +502,34 @@ import spacesterminalcore
             ownershipSynchronizationTask = nil
         }
         errorMessage = nil
-        if let viewportSize {
+        let targetViewportSize = await awaitViewportSizeIfNeeded()
+        await synchronizeOwnershipState(targetViewportSize: targetViewportSize)
+        guard isOwner, let targetViewportSize else { return }
+        guard latestState?.runtimeState?.columns != targetViewportSize.columns
+            || latestState?.runtimeState?.rows != targetViewportSize.rows
+        else { return }
+        await synchronizeOwnershipState(targetViewportSize: targetViewportSize)
+    }
+
+    private func awaitViewportSizeIfNeeded() async -> (columns: Int, rows: Int)? {
+        if let viewportSize { return viewportSize }
+        for _ in 0..<Self.viewportSyncWaitIterations {
+            try? await Task.sleep(for: Self.viewportSyncWaitStep)
+            guard isOwner else { return nil }
+            if let viewportSize { return viewportSize }
+        }
+        return viewportSize
+    }
+
+    private func synchronizeOwnershipState(targetViewportSize: (columns: Int, rows: Int)?) async {
+        if let targetViewportSize {
             do {
                 try await bridgeClient.resize(
                     sessionID: session.id,
                     clientID: remoteClient.id,
-                    columns: viewportSize.columns,
-                    rows: viewportSize.rows,
-                    timeout: Self.inputRequestTimeout,
-                    commandChannel: commandChannel
+                    columns: targetViewportSize.columns,
+                    rows: targetViewportSize.rows,
+                    timeout: Self.inputRequestTimeout
                 )
             } catch {
                 if !Self.isTransientReconnectError(error) {
@@ -484,7 +555,7 @@ import spacesterminalcore
     private func handleAuthenticationFailure(_ error: Error) -> Bool {
         guard let recoveryMessage = SpacesMobileBridgeAuthentication.recoveryMessage(for: error) else { return false }
         isStopping = true
-        optimisticOwner = false
+        isAwaitingTakeoverConfirmation = false
         reconnectTask?.cancel()
         reconnectTask = nil
         bufferedInputFlushTask?.cancel()
@@ -502,20 +573,11 @@ import spacesterminalcore
         return true
     }
 
-    private static func performInputRequest(_ request: @escaping @Sendable () async throws -> Void) async throws {
-        do {
-            try await request()
-        } catch {
-            guard isTransientInputTransportError(error) else { throw error }
-            try await Task.sleep(for: .milliseconds(120))
-            try await request()
-        }
-    }
-
     private static func isTransientInputTransportError(_ error: Error) -> Bool {
         if let code = transientPOSIXErrorCode(error),
             code == Int(EAGAIN) || code == Int(EWOULDBLOCK) || code == Int(ETIMEDOUT) || code == Int(ECONNRESET)
-                || code == Int(ECONNABORTED) || code == Int(EPIPE) || code == Int(ECONNREFUSED)
+                || code == Int(ECONNABORTED) || code == Int(EPIPE) || code == Int(ECONNREFUSED) || code == Int(EBADF)
+                || code == Int(ENOTSOCK)
         {
             return true
         }
@@ -527,6 +589,8 @@ import spacesterminalcore
                 || message.localizedStandardContains("timed out")
                 || message.localizedStandardContains("The operation couldn’t be completed. Operation timed out")
                 || message.localizedStandardContains("temporarily unavailable")
+                || message.localizedStandardContains("bad file descriptor")
+                || message.localizedStandardContains("socket operation on non-socket")
         default:
             return false
         }
@@ -578,11 +642,37 @@ import spacesterminalcore
         return !activeAttachmentExists(in: latestState.attachmentSnapshot)
     }
 
+    private var activeOwnerClientID: String? {
+        attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
+    }
+
     private func activeAttachmentExists(in snapshot: TerminalSessionAttachmentSnapshot?) -> Bool {
         guard let snapshot else { return false }
         return snapshot.attachments.contains { attachment in
             attachment.clientID == remoteClient.id && attachment.detachedAt == nil
         }
+    }
+
+    private func applyLatestState(_ payload: GhosttyRemoteSessionStatePayload) {
+        let wasOwner = isOwner
+        latestState = latestState?.merged(with: payload) ?? payload
+        if payload.attachmentSnapshot != nil {
+            isAwaitingTakeoverConfirmation = false
+            hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
+        }
+        let isOwnerAfterMerge = isOwner
+        if !isOwnerAfterMerge {
+            hasConfirmedOwnerInputReadiness = false
+            isInputSurfaceReady = false
+        }
+        isSessionUnavailable = false
+        errorMessage = nil
+        isConnecting = false
+        if isOwnerAfterMerge, (!wasOwner || payload.reason == "initial" || payload.reason == "attachment_state") {
+            beginOwnerRecoveryGracePeriod()
+            scheduleOwnershipSynchronization()
+        }
+        attemptAutomaticTakeoverIfNeeded()
     }
 
     func setInputSurfaceReady(_ ready: Bool) {

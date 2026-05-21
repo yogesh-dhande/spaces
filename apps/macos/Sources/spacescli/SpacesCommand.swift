@@ -163,19 +163,19 @@ struct TerminalShowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "show", abstract: "Open a native Spaces window for a terminal session.")
 
     @Argument(help: "Terminal session ID.") var sessionID: String
-    @Flag(name: .long, help: "Open the window as a passive viewer instead of the active owner.") var viewer = false
 
     func run() throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         guard FileManager.default.fileExists(atPath: paths.metadataPath) else {
             throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' does not exist.")
         }
-        let mode = viewer ? TerminalAttachmentMode.viewer : .owner
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.openTerminalSessionWindow, object: try IPCNotification.currentObject(),
-            userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalAttachmentModeUserInfoKey: mode.rawValue],
-            options: [.deliverImmediately])
-        print("Requested \(mode.rawValue) terminal window for session \(sessionID)")
+            userInfo: [
+                IPCNotification.terminalSessionIDUserInfoKey: sessionID,
+                IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+            ], options: [.deliverImmediately])
+        print("Requested owner terminal window for session \(sessionID)")
     }
 }
 

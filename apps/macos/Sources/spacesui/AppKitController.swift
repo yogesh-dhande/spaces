@@ -832,7 +832,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if let existing = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) {
                 controller = existing
                 reusedExistingWindow = true
-                if mode == .owner { controller.requestOwnershipIfNeeded() }
             } else {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
                 let useControlSocketClientActions = Self.shouldUseTerminalControlSocketClientActions(sessionID: sessionID)
@@ -871,6 +870,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 reusedExistingWindow = false
             }
             controller.show(requestID: requestID, route: reusedExistingWindow ? "reuse_existing_window" : "create_window")
+            if mode == .owner { controller.requestOwnershipIfNeeded() }
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
                 detail: "mode=\(mode.rawValue) reused=\(reusedExistingWindow ? 1 : 0)\(requestDetail)")

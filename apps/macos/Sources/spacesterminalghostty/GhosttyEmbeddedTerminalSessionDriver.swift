@@ -116,29 +116,9 @@ import spacesterminalcore
         return ghostty_renderer_attach(renderer, session)
     }
 
-    func attachViewerRenderer(_ renderer: ghostty_renderer_t?) -> Bool {
-        guard let session, let renderer else { return false }
-        return ghostty_renderer_attach_viewer(renderer, session)
-    }
-
-    func rendererIsOwner(_ renderer: ghostty_renderer_t?) -> Bool {
-        guard let renderer else { return false }
-        return ghostty_renderer_is_owner(renderer)
-    }
-
-    func takeRendererOwnership(_ renderer: ghostty_renderer_t?) -> Bool {
-        guard let renderer else { return false }
-        return ghostty_renderer_take_ownership(renderer)
-    }
-
     func detachRenderer(_ renderer: ghostty_renderer_t?) -> Bool {
         guard let renderer else { return true }
         return ghostty_renderer_detach(renderer)
-    }
-
-    func rendererSurface(_ renderer: ghostty_renderer_t?) -> ghostty_surface_t? {
-        guard let renderer else { return nil }
-        return ghostty_renderer_surface(renderer)
     }
 
     func updateRendererHost(_ renderer: ghostty_renderer_t?, host: inout ghostty_surface_host_s) -> Bool {

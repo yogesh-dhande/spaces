@@ -33,6 +33,9 @@ app_log=""
 bridge_log=""
 ipad_screenshot=""
 iphone_screenshot=""
+ios_app_path=""
+ios_build_log=""
+ios_derived_data=""
 
 cleanup() {
   release_terminal_harness_lock
@@ -103,6 +106,7 @@ require_path() {
 }
 
 resolve_ios_app_path() {
+  local built_app_path="${1:-}"
   if [[ -n "$app_path_override" ]]; then
     if [[ -d "$app_path_override" ]]; then
       printf '%s\n' "$app_path_override"
@@ -112,21 +116,41 @@ resolve_ios_app_path() {
     exit 1
   fi
 
-  python3 - <<'PY'
-import os
-import pathlib
+  if [[ -n "$built_app_path" && -d "$built_app_path" ]]; then
+    printf '%s\n' "$built_app_path"
+    return
+  fi
 
-candidates = sorted(
-    pathlib.Path(os.path.expanduser("~/Library/Developer/Xcode/DerivedData")).glob(
-        "SpacesMobile-*/Build/Products/Debug-iphonesimulator/SpacesMobile.app"
-    ),
-    key=lambda path: path.stat().st_mtime,
-    reverse=True,
-)
-if not candidates:
-    raise SystemExit("SpacesMobile.app not found in DerivedData. Build it with xcodebuild first.")
-print(candidates[0])
-PY
+  if [[ -n "$built_app_path" ]]; then
+    echo "SpacesMobile.app not found at $built_app_path after xcodebuild." >&2
+    exit 1
+  fi
+
+  echo "SpacesMobile.app path was not provided." >&2
+  exit 1
+}
+
+build_ios_app() {
+  local derived_data_path="$1"
+  local build_log_path="$2"
+  local destination_udid="$3"
+
+  if [[ -n "$app_path_override" ]]; then
+    return
+  fi
+
+  if ! xcodebuild \
+    -project "$repo_root/apps/ios/SpacesMobile.xcodeproj" \
+    -scheme SpacesMobile \
+    -configuration Debug \
+    -destination "platform=iOS Simulator,id=$destination_udid" \
+    -derivedDataPath "$derived_data_path" \
+    build >"$build_log_path" 2>&1; then
+    keep_root=1
+    echo "Failed to build SpacesMobile.app for the iPad and iPhone simulators." >&2
+    echo "Build log: $build_log_path" >&2
+    exit 1
+  fi
 }
 
 resolve_device_udid() {
@@ -319,7 +343,7 @@ PY
 }
 
 print_summary() {
-  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_host" "$bridge_port" "$workspace_title" <<'PY'
+  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" <<'PY'
 import json
 import sys
 
@@ -339,8 +363,11 @@ import sys
     bridge_host,
     bridge_port,
     workspace_title,
+    ios_app_path,
+    ios_build_log,
+    ios_derived_data,
 ) = sys.argv[1:]
-print(json.dumps({
+payload = {
     "root": root,
     "appPID": int(app_pid),
     "bridgePID": int(bridge_pid),
@@ -352,11 +379,17 @@ print(json.dumps({
     "projectDir": project_dir,
     "appLog": app_log,
     "bridgeLog": bridge_log,
+    "iosAppPath": ios_app_path,
     "ipadSimulatorUDID": ipad_udid,
     "iphoneSimulatorUDID": iphone_udid,
     "ipadScreenshot": ipad_screenshot,
     "iphoneScreenshot": iphone_screenshot,
-}, indent=2))
+}
+if ios_build_log:
+    payload["iosBuildLog"] = ios_build_log
+if ios_derived_data:
+    payload["iosDerivedDataPath"] = ios_derived_data
+print(json.dumps(payload, indent=2))
 PY
 }
 
@@ -367,9 +400,6 @@ require_path "$ghostty_xcframework" "GhosttyKit.xcframework"
 require_path "$ghostty_resources" "Ghostty resources"
 fail_if_existing_spaces_app
 fail_if_bridge_port_in_use
-
-ios_app_path="$(resolve_ios_app_path)"
-require_path "$ios_app_path" "SpacesMobile.app"
 
 temp_root="$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-demo.XXXXXX")"
 spaces_db_path="$temp_root/spaces.db"
@@ -383,6 +413,18 @@ mkdir -p "$spaces_runtime_dir" "$project_dir" "$temp_root/home"
 
 ipad_udid="$(resolve_device_udid "$ipad_name")"
 iphone_udid="$(resolve_device_udid "$iphone_name")"
+
+if [[ -n "$app_path_override" ]]; then
+  ios_app_path="$(resolve_ios_app_path)"
+else
+  ios_build_log="$temp_root/ios-build.log"
+  ios_derived_data="$temp_root/ios-derived-data"
+  mkdir -p "$ios_derived_data"
+  build_ios_app "$ios_derived_data" "$ios_build_log" "$ipad_udid"
+  ios_app_path="$(resolve_ios_app_path "$ios_derived_data/Build/Products/Debug-iphonesimulator/SpacesMobile.app")"
+fi
+
+require_path "$ios_app_path" "SpacesMobile.app"
 open_simulator_app
 boot_device "$ipad_udid"
 boot_device "$iphone_udid"
