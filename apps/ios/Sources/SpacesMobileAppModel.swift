@@ -85,7 +85,9 @@ struct SpacesMobileE2ERenderDump: Codable, Equatable {
     let showsTerminalSurface: Bool
     let isConnecting: Bool
     let isBusy: Bool
+    let isOwnershipSynchronizationScheduled: Bool
     let isSynchronizingOwnership: Bool
+    let isPreparingInput: Bool
     let isInputSurfaceReady: Bool
     let viewportColumns: Int?
     let viewportRows: Int?

@@ -264,7 +264,8 @@ import spacesterminalcore
 
     func update(snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, outputData: Data?, outputEventToken: String?) {
         createSurfaceIfNeeded()
-        let shouldApplyIncrementalOutput = canApplyIncrementalOutput(outputData: outputData, outputEventToken: outputEventToken)
+        let shouldApplyIncrementalOutput = canApplyIncrementalOutput(
+            outputData: outputData, outputEventToken: outputEventToken, replayStateKey: replayStateKey)
         if let lastReplayStateKey, lastReplayStateKey != replayStateKey, !shouldApplyIncrementalOutput {
             lastViewportSnapshot = nil
             lastReplayPixelSize = nil
@@ -454,11 +455,13 @@ import spacesterminalcore
         requestSurfaceRefresh()
     }
 
-    private func canApplyIncrementalOutput(outputData: Data?, outputEventToken: String?) -> Bool {
+    private func canApplyIncrementalOutput(outputData: Data?, outputEventToken: String?, replayStateKey: String) -> Bool {
         guard let outputData, !outputData.isEmpty else { return false }
         guard surface != nil else { return false }
         guard let outputEventToken, !outputEventToken.isEmpty else { return false }
         guard lastAppliedOutputEventToken != outputEventToken else { return false }
+        guard lastReplayStateKey == replayStateKey else { return false }
+        guard lastViewportSnapshot != nil || lastAppliedOutputEventToken != nil else { return false }
         return true
     }
 

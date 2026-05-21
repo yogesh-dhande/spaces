@@ -20,19 +20,28 @@ final class SpacesMobileUITests: XCTestCase {
 
     private func runTerminalTakeOverScenario() throws {
         let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
-        let app = XCUIApplication()
-        app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
-        app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
-        app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
-        app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
-        app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
-        if let renderDumpPath = configuration.renderDumpPath {
-            app.launchEnvironment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"] = renderDumpPath
+        let app = if configuration.attachToExistingApp {
+            XCUIApplication(bundleIdentifier: configuration.bundleID)
+        } else {
+            XCUIApplication()
         }
-        if let eventLogPath = configuration.eventLogPath {
-            app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
+        if configuration.attachToExistingApp {
+            app.activate()
+            XCTAssertTrue(waitForRunningApp(app, timeout: 20), "Timed out waiting for attached app \(configuration.bundleID) to become active")
+        } else {
+            app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
+            app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
+            app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
+            app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
+            app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
+            if let renderDumpPath = configuration.renderDumpPath {
+                app.launchEnvironment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"] = renderDumpPath
+            }
+            if let eventLogPath = configuration.eventLogPath {
+                app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
+            }
+            app.launch()
         }
-        app.launch()
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(1))
 
@@ -130,6 +139,19 @@ final class SpacesMobileUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         return nil
+    }
+
+    private func waitForRunningApp(_ app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            switch app.state {
+            case .runningForeground:
+                return true
+            default:
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            }
+        }
+        return false
     }
 
     private func waitForOwnerState(in app: XCUIApplication, timeout: TimeInterval) -> XCUIElement? {
@@ -230,6 +252,7 @@ final class SpacesMobileUITests: XCTestCase {
 
 private struct UITestConfiguration: Decodable {
     static let defaultConfigPath = "/tmp/spaces-mobile-ui-test-config.json"
+    static let defaultBundleID = "com.yogeshdhande.spacesmobile"
 
     let sessionID: String
     let host: String
@@ -257,6 +280,71 @@ private struct UITestConfiguration: Decodable {
     let postFirstCommandScreenshotPath: String?
     let postSecondCommandScreenshotPath: String?
     let finalScreenshotPath: String?
+    let attachToExistingApp: Bool
+    let bundleID: String
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID
+        case host
+        case port
+        case authToken
+        case installationID
+        case renderDumpPath
+        case eventLogPath
+        case immediateScreenshotPath
+        case shortDelayScreenshotPath
+        case longDelayScreenshotPath
+        case proceedTakeOverPath
+        case firstCommandRequestPath
+        case firstCommandFocusedPath
+        case firstCommandCompletedPath
+        case firstCommandObservedPath
+        case secondCommandRequestPath
+        case secondCommandFocusedPath
+        case secondCommandCompletedPath
+        case secondCommandObservedPath
+        case proceedFinishPath
+        case firstCommandText
+        case secondCommandText
+        case manualRetakeoverAttempts
+        case postFirstCommandScreenshotPath
+        case postSecondCommandScreenshotPath
+        case finalScreenshotPath
+        case attachToExistingApp
+        case bundleID
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decode(String.self, forKey: .sessionID)
+        host = try container.decode(String.self, forKey: .host)
+        port = try container.decode(Int.self, forKey: .port)
+        authToken = try container.decode(String.self, forKey: .authToken)
+        installationID = try container.decode(String.self, forKey: .installationID)
+        renderDumpPath = try container.decodeIfPresent(String.self, forKey: .renderDumpPath)
+        eventLogPath = try container.decodeIfPresent(String.self, forKey: .eventLogPath)
+        immediateScreenshotPath = try container.decodeIfPresent(String.self, forKey: .immediateScreenshotPath)
+        shortDelayScreenshotPath = try container.decodeIfPresent(String.self, forKey: .shortDelayScreenshotPath)
+        longDelayScreenshotPath = try container.decodeIfPresent(String.self, forKey: .longDelayScreenshotPath)
+        proceedTakeOverPath = try container.decodeIfPresent(String.self, forKey: .proceedTakeOverPath)
+        firstCommandRequestPath = try container.decodeIfPresent(String.self, forKey: .firstCommandRequestPath)
+        firstCommandFocusedPath = try container.decodeIfPresent(String.self, forKey: .firstCommandFocusedPath)
+        firstCommandCompletedPath = try container.decodeIfPresent(String.self, forKey: .firstCommandCompletedPath)
+        firstCommandObservedPath = try container.decodeIfPresent(String.self, forKey: .firstCommandObservedPath)
+        secondCommandRequestPath = try container.decodeIfPresent(String.self, forKey: .secondCommandRequestPath)
+        secondCommandFocusedPath = try container.decodeIfPresent(String.self, forKey: .secondCommandFocusedPath)
+        secondCommandCompletedPath = try container.decodeIfPresent(String.self, forKey: .secondCommandCompletedPath)
+        secondCommandObservedPath = try container.decodeIfPresent(String.self, forKey: .secondCommandObservedPath)
+        proceedFinishPath = try container.decodeIfPresent(String.self, forKey: .proceedFinishPath)
+        firstCommandText = try container.decode(String.self, forKey: .firstCommandText)
+        secondCommandText = try container.decodeIfPresent(String.self, forKey: .secondCommandText)
+        manualRetakeoverAttempts = try container.decode(Int.self, forKey: .manualRetakeoverAttempts)
+        postFirstCommandScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postFirstCommandScreenshotPath)
+        postSecondCommandScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postSecondCommandScreenshotPath)
+        finalScreenshotPath = try container.decodeIfPresent(String.self, forKey: .finalScreenshotPath)
+        attachToExistingApp = try container.decodeIfPresent(Bool.self, forKey: .attachToExistingApp) ?? false
+        bundleID = try container.decodeIfPresent(String.self, forKey: .bundleID) ?? Self.defaultBundleID
+    }
 
     static func load(environment: [String: String]) throws -> Self {
         let configPath = environment["SPACES_MOBILE_UI_TEST_CONFIG_PATH"] ?? defaultConfigPath

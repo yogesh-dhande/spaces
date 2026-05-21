@@ -19,6 +19,7 @@ iphone_name="${SPACES_MOBILE_DEMO_IPHONE_NAME:-iPhone 17 Pro}"
 bundle_id="com.yogeshdhande.spacesmobile"
 keep_root="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
 app_path_override="${SPACES_MOBILE_DEMO_APP_PATH:-}"
+demo_trace="${SPACES_MOBILE_DEMO_TRACE:-1}"
 
 app_pid=""
 bridge_pid=""
@@ -36,9 +37,41 @@ iphone_screenshot=""
 ios_app_path=""
 ios_build_log=""
 ios_derived_data=""
+ipad_app_stdout_log=""
+ipad_app_stderr_log=""
+iphone_app_stdout_log=""
+iphone_app_stderr_log=""
+
+run_demo_env() {
+  env \
+    -u NO_COLOR \
+    -u CLICOLOR \
+    -u CLICOLOR_FORCE \
+    -u CI \
+    -u CODEX_CI \
+    -u CODEX_MANAGED_BY_NPM \
+    -u CODEX_MANAGED_PACKAGE_ROOT \
+    -u CODEX_THREAD_ID \
+    "$@"
+}
+
+stop_demo_workspace() {
+  if [[ -z "$project_dir" || -z "$spaces_db_path" || -z "$spaces_runtime_dir" ]]; then
+    return
+  fi
+  if [[ ! -e "$spaces_db_path" ]]; then
+    return
+  fi
+
+  run_demo_env \
+    HOME="$temp_root/home" \
+    SPACES_DB_PATH="$spaces_db_path" \
+    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+    "$spacese2e" stop-workspace --workspace-dir "$project_dir" >/dev/null 2>&1 || true
+}
 
 cleanup() {
-  release_terminal_harness_lock
+  stop_demo_workspace
   if [[ -n "$bridge_pid" ]]; then
     kill "$bridge_pid" >/dev/null 2>&1 || true
     wait "$bridge_pid" >/dev/null 2>&1 || true
@@ -56,6 +89,7 @@ cleanup() {
   if [[ -n "$temp_root" && -d "$temp_root" && "$keep_root" != "1" ]]; then
     rm -rf "$temp_root"
   fi
+  release_terminal_harness_lock
 }
 
 handle_interrupt() {
@@ -343,7 +377,7 @@ PY
 }
 
 print_summary() {
-  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" <<'PY'
+  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
 import json
 import sys
 
@@ -366,6 +400,10 @@ import sys
     ios_app_path,
     ios_build_log,
     ios_derived_data,
+    ipad_app_stdout_log,
+    ipad_app_stderr_log,
+    iphone_app_stdout_log,
+    iphone_app_stderr_log,
 ) = sys.argv[1:]
 payload = {
     "root": root,
@@ -384,6 +422,10 @@ payload = {
     "iphoneSimulatorUDID": iphone_udid,
     "ipadScreenshot": ipad_screenshot,
     "iphoneScreenshot": iphone_screenshot,
+    "ipadAppStdoutLog": ipad_app_stdout_log,
+    "ipadAppStderrLog": ipad_app_stderr_log,
+    "iphoneAppStdoutLog": iphone_app_stdout_log,
+    "iphoneAppStderrLog": iphone_app_stderr_log,
 }
 if ios_build_log:
     payload["iosBuildLog"] = ios_build_log
@@ -409,6 +451,10 @@ app_log="$temp_root/app.log"
 bridge_log="$temp_root/bridge.log"
 ipad_screenshot="$temp_root/ipad.png"
 iphone_screenshot="$temp_root/iphone.png"
+ipad_app_stdout_log="$temp_root/ipad-app.stdout.log"
+ipad_app_stderr_log="$temp_root/ipad-app.stderr.log"
+iphone_app_stdout_log="$temp_root/iphone-app.stdout.log"
+iphone_app_stderr_log="$temp_root/iphone-app.stderr.log"
 mkdir -p "$spaces_runtime_dir" "$project_dir" "$temp_root/home"
 
 ipad_udid="$(resolve_device_udid "$ipad_name")"
@@ -441,17 +487,18 @@ boot_device "$iphone_udid"
     git commit -q -m 'Initial demo repo'
 )
 
-env \
+run_demo_env \
   HOME="$temp_root/home" \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACES_GHOSTTYKIT_XCFRAMEWORK="$ghostty_xcframework" \
   SPACES_GHOSTTY_RESOURCES_DIR="$ghostty_resources" \
+  SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
   "$spaces_app" >"$app_log" 2>&1 &
 app_pid=$!
 wait_for_pid "$app_pid" "SpacesApp"
 
-env \
+run_demo_env \
   HOME="$temp_root/home" \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
@@ -462,7 +509,7 @@ env \
     --admin-url "http://127.0.0.1:20002" \
     --workspace-title "$workspace_title" >/dev/null
 
-env \
+run_demo_env \
   HOME="$temp_root/home" \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
@@ -481,10 +528,12 @@ if [[ -z "$session_id" ]]; then
   exit 1
 fi
 
-env \
+run_demo_env \
   HOME="$temp_root/home" \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+  SPACES_MOBILE_BRIDGE_TRACE="$demo_trace" \
+  SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
   "$spaces_cli" mobile serve --host "$bridge_host" --port "$bridge_port" --pairing-code "$pairing_code" >"$bridge_log" 2>&1 &
 bridge_pid=$!
 wait_for_bridge_port
@@ -510,8 +559,10 @@ PY
 write_simulator_settings "$ipad_udid" "$ipad_installation_id" "$ipad_token" "$ios_app_path"
 write_simulator_settings "$iphone_udid" "$iphone_installation_id" "$iphone_token" "$ios_app_path"
 
-xcrun simctl launch "$ipad_udid" "$bundle_id" >/dev/null
-xcrun simctl launch "$iphone_udid" "$bundle_id" >/dev/null
+env SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
+  xcrun simctl launch --stdout="$ipad_app_stdout_log" --stderr="$ipad_app_stderr_log" "$ipad_udid" "$bundle_id" >/dev/null
+env SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
+  xcrun simctl launch --stdout="$iphone_app_stdout_log" --stderr="$iphone_app_stderr_log" "$iphone_udid" "$bundle_id" >/dev/null
 sleep 4
 xcrun simctl io "$ipad_udid" screenshot "$ipad_screenshot" >/dev/null
 xcrun simctl io "$iphone_udid" screenshot "$iphone_screenshot" >/dev/null

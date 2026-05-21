@@ -90,6 +90,22 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(GhosttyEmbeddedTerminalSessionDriver.usesLoginShell(command: "shell:printf hello"))
     }
 
+    @MainActor func testResizeRemoteStateSkipsScreenSnapshotExport() {
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial"))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input"))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input_output"))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "terminated"))
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize"))
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "runtime_state"))
+    }
+
+    @MainActor func testRemoteScreenStateVisibleContentIgnoresBlankSnapshotsAndText() {
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: snapshot(text: "   \n  "), snapshotText: nil))
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: nil, snapshotText: " \n\t "))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: snapshot(text: "Codex"), snapshotText: nil))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: nil, snapshotText: "OpenAI Codex"))
+    }
+
     @MainActor func testEmbeddedViewSuppressesFunctionKeyPrivateUseText() {
         let event = try! XCTUnwrap(
             NSEvent.keyEvent(
@@ -467,6 +483,38 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    @MainActor func testHostSnapshotUsesRenderableSurfaceForLiveOwnerState() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "host-snapshot-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
+            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-21T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        let window = makeHostingWindow()
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        let ownerClient = TerminalClient(
+            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-21T00:00:00Z")
+
+        try host.attach(client: ownerClient, mode: .owner, into: try XCTUnwrap(window.contentView))
+        window.makeKeyAndOrderFront(nil)
+        try waitUntil { host.rendererHost.hasRenderableSurface() }
+
+        try waitUntil {
+            host.core.rendererHost.requestSurfaceRefresh()
+            return host.snapshot() != nil
+        }
+    }
+
     @MainActor func testEmbeddedViewMouseDragRequestsSurfaceRefreshForSelectionRendering() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
@@ -630,5 +678,19 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             GhosttyEmbeddedSessionHost.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: false, remainingOwnerClientID: "owner-client"))
         XCTAssertTrue(GhosttyEmbeddedSessionHost.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: true, remainingOwnerClientID: nil))
         XCTAssertTrue(GhosttyEmbeddedSessionHost.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: false, remainingOwnerClientID: nil))
+    }
+
+    private func snapshot(text: String) -> GhosttyTerminalSnapshot {
+        let rows = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let columns = rows.map(\.count).max() ?? 0
+        let paddedRows = rows.map { row in row.padding(toLength: columns, withPad: " ", startingAt: 0) }
+        let cells = paddedRows.flatMap { row in
+            row.unicodeScalars.map { scalar in
+                GhosttyTerminalSnapshot.Cell(codepoint: scalar.value, foregroundRGB: 0xFFFFFF, backgroundRGB: 0x000000, flags: 0)
+            }
+        }
+        return GhosttyTerminalSnapshot(
+            columns: columns, rows: paddedRows.count, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
+            defaultBackgroundRGB: 0x000000, cells: cells)
     }
 }

@@ -81,11 +81,11 @@ Each live session also participates in a service-level control path:
 - Remote attachments are lease-based. Host time stamps the lease, and only client-identified activity refreshes that specific remote lease.
 - The mobile bridge is an internal first-party transport seam, not a stable third-party public API.
 - Simulator-based manual verification should use `127.0.0.1` as the bridge host. A real device still needs a reachable Mac network address instead of simulator loopback.
-- `GhosttyMobileAppService` repairs missing stdio descriptors before it boots the local iOS Ghostty runtime so manual simulator launches through `simctl launch` can still create the Ghostty carrier subprocess safely.
+- `GhosttyMobileAppService` prepares simulator stdio before it boots the local iOS Ghostty runtime: missing stdout or stderr descriptors are repaired, and stdin is rebound to a kept-open pipe so the local Ghostty carrier subprocess does not inherit immediate EOF under manual `simctl launch`.
 
 ## Ghostty Compatibility Boundary
 - The current Ghostty fork still couples PTY ownership to a renderer instance.
-- Because of that, the service keeps the live hidden Ghostty host and exports full Ghostty snapshots over `subscription.sock` to other clients instead of attaching multiple native renderers to the same session. `output.log` remains the transcript and recovery surface, not the primary live-view path.
+- Because of that, the service keeps the live hidden Ghostty host and exports full Ghostty snapshots over `subscription.sock` to other clients instead of attaching multiple native renderers to the same session. Screen state prefers a live Ghostty surface export, but the service falls back to VT reconstruction from `output.log` when that export is momentarily empty so late joiners still receive a non-blank initial frame.
 - The current iOS client uses a compatibility renderer bridge on top of that snapshot stream: it boots a local Ghostty renderer session on iOS, converts each streamed snapshot into VT output, and replays that VT into the local Ghostty surface. This preserves Ghostty rendering characteristics on iOS without requiring the full session-core attach or detach fork boundary yet.
 - The intended fork boundary is a true session core plus attachable renderers:
   - session-owned PTY and terminal state

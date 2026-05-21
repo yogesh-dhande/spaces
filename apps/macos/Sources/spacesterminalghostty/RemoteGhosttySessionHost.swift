@@ -207,16 +207,7 @@ import spacesterminalcore
         let snapshotRows = snapshot?.rows ?? 0
         let runtimeColumns = latestState?.runtimeState?.columns ?? 0
         let runtimeRows = latestState?.runtimeState?.rows ?? 0
-        return "runtime=\(runtimeColumns)x\(runtimeRows)|snapshot=\(snapshotColumns)x\(snapshotRows)|screen=\(screenStateRevision())"
-    }
-
-    private func screenStateRevision() -> String {
-        guard let latestState else { return "none" }
-        if let screenStateRevision = latestState.screenStateRevision { return "rev:\(screenStateRevision)" }
-        switch latestState.reason {
-        case "initial", "output", "resize", "terminated": return latestState.emittedAt
-        default: return "stable"
-        }
+        return "runtime=\(runtimeColumns)x\(runtimeRows)|snapshot=\(snapshotColumns)x\(snapshotRows)"
     }
 
     private func sendRemoteInput(_ text: String) {

@@ -1,4 +1,5 @@
 import Foundation
+import spacesterminalcore
 
 private let sharedPathMutationLock = NSLock()
 private let sharedEnvironmentMutationLock = NSRecursiveLock()
@@ -41,10 +42,12 @@ func withMockCommands(_ commands: [String: String], run: () throws -> Void) thro
     let originalShell = ProcessInfo.processInfo.environment["SHELL"]
     setenv("PATH", originalPath.isEmpty ? directory.path : "\(directory.path):\(originalPath)", 1)
     setenv("SHELL", shellFile.path, 1)
+    let baselineTerminalSessionIDs = trackedTerminalSessionIDs()
     defer {
         setenv("PATH", originalPath, 1)
         if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
     }
+    defer { terminateTrackedTerminalSessions(createdAfter: baselineTerminalSessionIDs) }
 
     try withTestAppleScriptOptIn(enabled: commands.keys.contains("osascript")) { try run() }
 }
@@ -59,4 +62,11 @@ private func withTestAppleScriptOptIn(enabled: Bool, run: () throws -> Void) thr
     setenv(sharedAppleScriptTestOptInEnvVar, "1", 1)
     defer { if let original { setenv(sharedAppleScriptTestOptInEnvVar, original, 1) } else { unsetenv(sharedAppleScriptTestOptInEnvVar) } }
     try run()
+}
+
+private func trackedTerminalSessionIDs() -> Set<String> { Set((try? TerminalSessionPersistence.listKnownSessions().map(\.sessionID)) ?? []) }
+
+private func terminateTrackedTerminalSessions(createdAfter baselineSessionIDs: Set<String>) {
+    let liveSessionIDs = trackedTerminalSessionIDs().subtracting(baselineSessionIDs)
+    for sessionID in liveSessionIDs { try? TerminalService.terminateSession(id: sessionID) }
 }

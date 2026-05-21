@@ -202,12 +202,20 @@ For a disposable one-command demo stack that launches the macOS app, starts `spa
 apps/macos/Tests/run_mobile_terminal_demo.sh
 ```
 
-The launcher expects the debug macOS binaries and the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds a fresh simulator `SpacesMobile.app` into a disposable DerivedData directory under the demo temp root, then installs that same app bundle on both the iPad and iPhone simulators. It refuses to start if another `SpacesApp` instance or bridge listener is already running so the global hotkey and mobile port stay unambiguous. It prints the disposable temp root, PIDs, logs, screenshots, session ID, iOS app path, and iOS build paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
+The launcher expects the debug macOS binaries and the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds a fresh simulator `SpacesMobile.app` into a disposable DerivedData directory under the demo temp root, then installs that same app bundle on both the iPad and iPhone simulators. It refuses to start if another `SpacesApp` instance or bridge listener is already running so the global hotkey and mobile port stay unambiguous. It prints the disposable temp root, PIDs, logs, screenshots, session ID, iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
 
 Useful overrides:
 - `SPACES_MOBILE_DEMO_KEEP_ROOT=1` keeps the temp root after shutdown for log inspection.
 - `SPACES_MOBILE_DEMO_IPAD_NAME=...` and `SPACES_MOBILE_DEMO_IPHONE_NAME=...` target different simulator names when the defaults are unavailable.
 - `SPACES_MOBILE_DEMO_APP_PATH=...` skips the scripted `xcodebuild` and installs an explicit `SpacesMobile.app` bundle.
+
+For the real standalone Codex takeover repro path on iPad, use the dedicated wrapper instead of driving the demo by hand:
+
+```bash
+apps/macos/Tests/e2e_terminal_mobile_codex_standalone.sh
+```
+
+That wrapper launches the disposable demo stack, starts real `codex` in the Mac-owned terminal session, accepts the Codex trust prompt when needed, and then attaches the iPad UI test to the already-running standalone simulator app so takeover happens against the same `simctl`-launched runtime as the manual demo. On failure it preserves the demo root and tails the relevant macOS app, bridge, and UI test logs automatically.
 
 For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
 

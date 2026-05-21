@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -329,6 +330,15 @@ def plain_text(payload: dict) -> str:
     return "\n".join(lines)
 
 
+def sanitized_launch_env(overrides: dict[str, str] | None = None) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("CODEX_")}
+    for key in ("NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "CI"):
+        env.pop(key, None)
+    if overrides:
+        env.update(overrides)
+    return env
+
+
 def state_plain_text(state: dict) -> str:
     snapshot = state.get("snapshot") or {}
     if snapshot:
@@ -420,7 +430,7 @@ def write_simulator_settings(
 
 
 def launch_simulator_app(udid: str, bundle_id: str, child_environment: dict[str, str]) -> None:
-    launch_env = os.environ.copy()
+    launch_env = sanitized_launch_env()
     for key, value in child_environment.items():
         launch_env[f"SIMCTL_CHILD_{key}"] = value
     subprocess.run(["xcrun", "simctl", "launch", udid, bundle_id], check=True, capture_output=True, text=True, env=launch_env)
@@ -452,7 +462,9 @@ def start_ios_ui_test(
     stderr_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_handle = stdout_path.open("w")
     stderr_handle = stderr_path.open("w")
-    process = subprocess.Popen(command, stdout=stdout_handle, stderr=stderr_handle, text=True, env=os.environ | launch_environment)
+    process = subprocess.Popen(
+        command, stdout=stdout_handle, stderr=stderr_handle, text=True, env=sanitized_launch_env(launch_environment)
+    )
     stdout_handle.close()
     stderr_handle.close()
     return process, command
@@ -631,6 +643,41 @@ def assert_exact_terminal_text(label: str, text: str, expected: str) -> None:
         )
 
 
+def codex_render_markers(expected: str) -> tuple[str, ...]:
+    markers = ["OpenAI Codex", "model:", "gpt-"]
+    if "/review" in expected:
+        markers.append("/review")
+    return tuple(markers)
+
+
+def codex_render_matches_expected(text: str, expected: str) -> bool:
+    normalized = normalize_terminal_text(text)
+    return "Do you trust the contents of this directory?" not in normalized and all(
+        marker in normalized for marker in codex_render_markers(expected)
+    )
+
+
+def render_matches_expected(text: str, expected: str, scenario: str) -> bool:
+    if scenario == "real_codex":
+        return codex_render_matches_expected(text, expected)
+    return normalize_terminal_text(text) == normalize_terminal_text(expected)
+
+
+def assert_expected_terminal_text(label: str, text: str, expected: str, scenario: str) -> None:
+    if scenario == "real_codex":
+        normalized = normalize_terminal_text(text)
+        missing_markers = [marker for marker in codex_render_markers(expected) if marker not in normalized]
+        if "Do you trust the contents of this directory?" in normalized or missing_markers:
+            raise RuntimeError(
+                f"{label} render did not match the expected Codex state.\n"
+                f"MISSING MARKERS: {missing_markers}\n\n"
+                f"EXPECTED SAMPLE:\n{normalize_terminal_text(expected)}\n\n"
+                f"ACTUAL:\n{normalized}"
+            )
+        return
+    assert_exact_terminal_text(label, text, expected)
+
+
 def collect_json_lines(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -659,11 +706,14 @@ def main() -> int:
     runtime_dir = temp_root / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     ios_bundle_id = "com.yogeshdhande.spacesmobile"
-    env = os.environ | {
+    env = sanitized_launch_env(
+        {
         "HOME": str(temp_home),
         "SPACES_DB_PATH": str(db_path),
         "SPACES_RUNTIME_DIR": str(runtime_dir),
-    }
+        "SPACES_MOBILE_TERMINAL_TRACE": "1",
+        }
+    )
 
     fixture = (
         "python3 -u -c "
@@ -857,6 +907,10 @@ def main() -> int:
         wait_for_session_state(session_id, lambda state: "line1:desktop-return" in state_plain_text(state))
 
         if args.start_app:
+            scenario = os.environ.get("SPACES_MOBILE_E2E_SCENARIO", "standard")
+            if scenario not in {"standard", "mock_codex_resume", "real_codex"}:
+                raise RuntimeError(f"Unsupported mobile E2E scenario: {scenario}")
+
             render_project = temp_root / "render-project"
             (render_project / "src").mkdir(parents=True, exist_ok=True)
             (render_project / "README.md").write_text("# Mobile Render Fixture\n")
@@ -876,6 +930,53 @@ def main() -> int:
                     "GIT_COMMITTER_EMAIL": "codex@example.com",
                 },
             )
+
+            prepare_commands: tuple[str, ...]
+            render_ready_predicate: Callable[[dict], bool]
+            render_bare_command_lines: tuple[str, ...]
+            should_accept_codex_trust_prompt = False
+            if scenario == "mock_codex_resume":
+                mock_codex_path = repo_root / "apps/macos/Tests/fixtures/mock_codex.py"
+                prepare_commands = (f"python3 {shlex.quote(str(mock_codex_path))} resume mock-thread-1",)
+                render_ready_predicate = lambda payload: (
+                    payload.get("found") is True
+                    and payload.get("showsTerminalSurface") is True
+                    and "Mock Codex Ready" in (payload.get("renderedOutput") or "")
+                )
+                render_bare_command_lines = ()
+            elif scenario == "real_codex":
+                prepare_commands = ("codex",)
+                should_accept_codex_trust_prompt = True
+                render_ready_predicate = lambda payload: (
+                    payload.get("found") is True
+                    and payload.get("showsTerminalSurface") is True
+                    and bool(payload.get("renderedOutput"))
+                    and "Do you trust the contents of this directory?" not in (payload.get("renderedOutput") or "")
+                    and "gpt-" in (payload.get("renderedOutput") or "")
+                )
+                render_bare_command_lines = ()
+            else:
+                prepare_commands = ("ls",)
+                render_ready_predicate = lambda payload: (
+                    payload.get("found") is True
+                    and payload.get("showsTerminalSurface") is True
+                    and "README.md" in (payload.get("renderedOutput") or "")
+                    and "src" in (payload.get("renderedOutput") or "")
+                )
+                render_bare_command_lines = ("ls",)
+            initial_owner_render_predicate: Callable[[dict], bool]
+            if scenario in {"mock_codex_resume", "real_codex"}:
+                initial_owner_render_predicate = lambda payload: (
+                    payload.get("found") is True
+                    and payload.get("showsTerminalSurface") is True
+                    and bool(payload.get("renderedOutput"))
+                )
+            else:
+                initial_owner_render_predicate = lambda payload: (
+                    payload.get("found") is True
+                    and payload.get("showsTerminalSurface") is True
+                    and f"{render_project.name} %" in (payload.get("renderedOutput") or "")
+                )
 
             subprocess.run(
                 [
@@ -911,16 +1012,12 @@ def main() -> int:
                 render_session_id,
                 temp_root / "mac-owner-dump.json",
                 viewer=False,
-                predicate=lambda payload: (
-                    payload.get("found") is True
-                    and payload.get("showsTerminalSurface") is True
-                    and f"{render_project.name} %" in (payload.get("renderedOutput") or "")
-                ),
+                predicate=initial_owner_render_predicate,
                 timeout=45,
             )
             render_owner_client_id = wait_for_active_owner(temp_root, render_session_id, timeout=10, runtime_root=runtime_dir)
             render_control_socket = socket_path(temp_root, render_session_id, runtime_dir)
-            for command_text in ("ls",):
+            for command_text in prepare_commands:
                 response = send_unix_control_request(
                     render_control_socket,
                     {"command": "send", "text": command_text, "clientID": render_owner_client_id},
@@ -935,24 +1032,46 @@ def main() -> int:
                     raise RuntimeError(f"Render owner key failed: {response}")
                 time.sleep(1.0)
 
-            mac_owner_after_ls_payload = wait_for_terminal_window_dump(
+            if should_accept_codex_trust_prompt:
+                codex_launch_payload = wait_for_terminal_window_dump(
+                    spacese2e,
+                    env,
+                    render_session_id,
+                    temp_root / "mac-owner-codex-launch-dump.json",
+                    viewer=False,
+                    predicate=lambda payload: (
+                        payload.get("found") is True
+                        and payload.get("showsTerminalSurface") is True
+                        and bool(payload.get("renderedOutput"))
+                        and (
+                            "Do you trust the contents of this directory?" in (payload.get("renderedOutput") or "")
+                            or "gpt-" in (payload.get("renderedOutput") or "")
+                        )
+                    ),
+                    timeout=45,
+                )
+                if "Do you trust the contents of this directory?" in (codex_launch_payload.get("renderedOutput") or ""):
+                    response = send_unix_control_request(
+                        render_control_socket,
+                        {"command": "key", "key": "enter", "clientID": render_owner_client_id},
+                    )
+                    if not response.get("ok"):
+                        raise RuntimeError(f"Render owner key for Codex trust prompt failed: {response}")
+                    time.sleep(1.0)
+
+            mac_owner_after_prepare_payload = wait_for_terminal_window_dump(
                 spacese2e,
                 env,
                 render_session_id,
-                temp_root / "mac-owner-after-ls-dump.json",
+                temp_root / "mac-owner-after-prepare-dump.json",
                 viewer=False,
-                predicate=lambda payload: (
-                    payload.get("found") is True
-                    and payload.get("showsTerminalSurface") is True
-                    and "README.md" in (payload.get("renderedOutput") or "")
-                    and "src" in (payload.get("renderedOutput") or "")
-                ),
-                timeout=20,
+                predicate=render_ready_predicate,
+                timeout=45,
             )
-            expected_render_text = mac_owner_after_ls_payload.get("renderedOutput") or ""
+            expected_render_text = mac_owner_after_prepare_payload.get("renderedOutput") or ""
             if not expected_render_text:
                 raise RuntimeError(
-                    f"Unable to derive canonical pre-takeover render text from Mac owner dump:\n{json.dumps(mac_owner_after_ls_payload, indent=2)}"
+                    f"Unable to derive canonical pre-takeover render text from Mac owner dump:\n{json.dumps(mac_owner_after_prepare_payload, indent=2)}"
                 )
 
             ipad_udid = resolve_simulator_udid(os.environ.get("SPACES_MOBILE_E2E_IPAD_NAME", "iPad Pro 13-inch (M5)"))
@@ -1006,7 +1125,6 @@ def main() -> int:
                 str(iphone_pair_response["issuedAuthToken"]),
                 ios_app_path,
             )
-            launch_simulator_app(iphone_udid, ios_bundle_id, {})
 
             ipad_render_dump = temp_root / "ipad-render.json"
             ipad_event_log = temp_root / "ipad-events.jsonl"
@@ -1031,6 +1149,12 @@ def main() -> int:
             ui_test_derived_data = temp_root / "SpacesMobileUITestDerivedData"
             ui_test_stdout = temp_root / "ios-ui-test.stdout.log"
             ui_test_stderr = temp_root / "ios-ui-test.stderr.log"
+            attach_to_existing_app = os.environ.get("SPACES_MOBILE_E2E_ATTACH_TO_EXISTING_APP", "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
             ios_ui_test_name = os.environ.get(
                 "SPACES_MOBILE_E2E_UI_TEST_NAME",
                 "SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverFromList",
@@ -1040,7 +1164,7 @@ def main() -> int:
                 manual_ipad_retakeover_attempts = 2
             elif ios_ui_test_name.endswith("testTerminalTakeOverAfterMacRetakeover"):
                 manual_ipad_retakeover_attempts = 1
-            include_ios_input_exercise = manual_ipad_retakeover_attempts == 0
+            include_ios_input_exercise = manual_ipad_retakeover_attempts == 0 and scenario == "standard"
             ios_first_command_text = "which tailscale"
             ios_second_command_text = "echo __spaces_second_command__"
             ui_test_config_path = Path("/tmp/spaces-mobile-ui-test-config.json")
@@ -1073,11 +1197,29 @@ def main() -> int:
                         "postFirstCommandScreenshotPath": str(ipad_post_first_command_screenshot) if include_ios_input_exercise else None,
                         "postSecondCommandScreenshotPath": str(ipad_post_second_command_screenshot) if include_ios_input_exercise else None,
                         "finalScreenshotPath": str(ipad_final_screenshot),
+                        "attachToExistingApp": attach_to_existing_app,
+                        "bundleID": ios_bundle_id,
                     },
                     indent=2,
                     sort_keys=True,
                 )
             )
+            if attach_to_existing_app:
+                launch_simulator_app(
+                    ipad_udid,
+                    ios_bundle_id,
+                    {
+                        "SPACES_MOBILE_TEST_HOST": bridge_host,
+                        "SPACES_MOBILE_TEST_PORT": str(bridge_port),
+                        "SPACES_MOBILE_TEST_AUTH_TOKEN": str(pair_response["issuedAuthToken"]),
+                        "SPACES_MOBILE_TEST_INSTALLATION_ID": ipad_client_app["installationID"],
+                        "SPACES_MOBILE_E2E_TARGET_SESSION_ID": render_session_id,
+                        "SPACES_MOBILE_E2E_RENDER_DUMP_PATH": str(ipad_render_dump),
+                        "SPACES_MOBILE_E2E_EVENT_LOG_PATH": str(ipad_event_log),
+                        "SPACES_MOBILE_TERMINAL_TRACE": "1",
+                    },
+                )
+            launch_simulator_app(iphone_udid, ios_bundle_id, {"SPACES_MOBILE_TERMINAL_TRACE": "1"})
             ui_test_process, ui_test_command = start_ios_ui_test(
                 repo_root,
                 ipad_udid,
@@ -1119,7 +1261,7 @@ def main() -> int:
                     and payload.get("isOwner") is True
                     and payload.get("isBusy") is False
                     and payload.get("isSynchronizingOwnership") is False
-                    and normalize_terminal_text(payload.get("renderedText") or "") == normalize_terminal_text(expected_render_text)
+                    and render_matches_expected(payload.get("renderedText") or "", expected_render_text, scenario)
                 ),
                 timeout=20,
             )
@@ -1141,8 +1283,8 @@ def main() -> int:
             wait_for_file(ipad_short_delay_screenshot, timeout=10)
             wait_for_file(ipad_long_delay_screenshot, timeout=15)
 
-            assert_render_output_sane("iPad", ipad_payload.get("renderedText", ""), bare_command_lines=("ls",))
-            assert_exact_terminal_text("iPad", ipad_payload.get("renderedText", ""), expected_render_text)
+            assert_render_output_sane("iPad", ipad_payload.get("renderedText", ""), bare_command_lines=render_bare_command_lines)
+            assert_expected_terminal_text("iPad", ipad_payload.get("renderedText", ""), expected_render_text, scenario)
             if ipad_payload.get("errorMessage"):
                 raise RuntimeError(f"iPad render reported an error after takeover:\n{json.dumps(ipad_payload, indent=2)}")
             if (
@@ -1302,8 +1444,7 @@ def main() -> int:
                 predicate=lambda payload: (
                     payload.get("found") is True
                     and payload.get("showsTerminalSurface") is True
-                    and normalize_terminal_text(payload.get("renderedOutput") or "")
-                    == normalize_terminal_text(expected_after_ios_command_text)
+                    and render_matches_expected(payload.get("renderedOutput") or "", expected_after_ios_command_text, scenario)
                 ),
                 timeout=20,
             )
@@ -1322,10 +1463,15 @@ def main() -> int:
                     f"{json.dumps(ipad_after_mac_retakeover_payload, indent=2)}"
                 )
             assert_render_output_sane(
-                "Mac owner after retakeover", mac_owner_after_retakeover_payload.get("renderedOutput") or "", bare_command_lines=("ls",)
+                "Mac owner after retakeover",
+                mac_owner_after_retakeover_payload.get("renderedOutput") or "",
+                bare_command_lines=render_bare_command_lines,
             )
-            assert_exact_terminal_text(
-                "Mac owner after retakeover", mac_owner_after_retakeover_payload.get("renderedOutput") or "", expected_after_ios_command_text
+            assert_expected_terminal_text(
+                "Mac owner after retakeover",
+                mac_owner_after_retakeover_payload.get("renderedOutput") or "",
+                expected_after_ios_command_text,
+                scenario,
             )
 
             ipad_proceed_finish.write_text("done\n")
@@ -1343,8 +1489,7 @@ def main() -> int:
                     and payload.get("isOwner") is True
                     and payload.get("isBusy") is False
                     and payload.get("isSynchronizingOwnership") is False
-                    and normalize_terminal_text(payload.get("renderedText") or "")
-                    == normalize_terminal_text(expected_after_ios_command_text),
+                    and render_matches_expected(payload.get("renderedText") or "", expected_after_ios_command_text, scenario),
                     timeout=20,
                 )
                 current_mac_status_payload = wait_for_terminal_window_dump(
@@ -1364,12 +1509,13 @@ def main() -> int:
                 assert_render_output_sane(
                     f"iPad after takeover {takeover_number}",
                     current_ipad_takeover_payload.get("renderedText", ""),
-                    bare_command_lines=("ls",),
+                    bare_command_lines=render_bare_command_lines,
                 )
-                assert_exact_terminal_text(
+                assert_expected_terminal_text(
                     f"iPad after takeover {takeover_number}",
                     current_ipad_takeover_payload.get("renderedText", ""),
                     expected_after_ios_command_text,
+                    scenario,
                 )
                 if current_ipad_takeover_payload.get("errorMessage"):
                     raise RuntimeError(
@@ -1445,8 +1591,7 @@ def main() -> int:
                     predicate=lambda payload: (
                         payload.get("found") is True
                         and payload.get("showsTerminalSurface") is True
-                        and normalize_terminal_text(payload.get("renderedOutput") or "")
-                        == normalize_terminal_text(expected_after_ios_command_text)
+                        and render_matches_expected(payload.get("renderedOutput") or "", expected_after_ios_command_text, scenario)
                     ),
                     timeout=20,
                 )
@@ -1470,12 +1615,13 @@ def main() -> int:
                 assert_render_output_sane(
                     f"Mac owner after retakeover {attempt_index + 2}",
                     current_mac_owner_after_retakeover_payload.get("renderedOutput") or "",
-                    bare_command_lines=("ls",),
+                    bare_command_lines=render_bare_command_lines,
                 )
-                assert_exact_terminal_text(
+                assert_expected_terminal_text(
                     f"Mac owner after retakeover {attempt_index + 2}",
                     current_mac_owner_after_retakeover_payload.get("renderedOutput") or "",
                     expected_after_ios_command_text,
+                    scenario,
                 )
                 ipad_after_mac_retakeover_payloads.append(current_ipad_after_mac_retakeover_payload)
                 mac_owner_after_retakeover_payloads.append(current_mac_owner_after_retakeover_payload)

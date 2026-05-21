@@ -12,6 +12,7 @@ struct TerminalDetailView: View {
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
     private let e2eConfig = SpacesMobileE2EConfig.shared
+    private var shouldCaptureRenderedText: Bool { e2eConfig.isEnabled && e2eConfig.matches(sessionID: session.id) }
 
     init(
         session: SpacesMobileTerminalSessionSummary,
@@ -50,14 +51,14 @@ struct TerminalDetailView: View {
                             fallbackText: model.visibleText,
                             isVisible: model.showsTerminalSurface,
                             acceptsInput: model.acceptsInput,
-                            isBusy: model.isBusy || model.isSynchronizingOwnership,
+                            isBusy: model.isBusy || model.isOwnershipSynchronizationPending,
                             onInputReadinessChanged: { ready in
                                 model.setInputSurfaceReady(ready)
                                 writeE2EEventIfNeeded(kind: "input_readiness", detail: ready ? "ready" : "pending")
                             },
-                            onRenderedTextChanged: { text in
+                            onRenderedTextChanged: shouldCaptureRenderedText ? { text in
                                 renderedText = text
-                            },
+                            } : nil,
                             onViewportSizeChanged: { columns, rows in
                                 model.updateViewportSize(columns: columns, rows: rows)
                             },
@@ -236,10 +237,12 @@ struct TerminalDetailView: View {
             model.showsTerminalSurface ? "surface" : "status",
             model.isConnecting ? "connecting" : "steady",
             model.isBusy ? "busy" : "idle",
+            model.isOwnershipSynchronizationScheduled ? "syncScheduled" : "syncNotScheduled",
             model.isSynchronizingOwnership ? "syncing" : "synced",
+            model.isPreparingInput ? "preparing" : "prepared",
             model.isInputSurfaceReady ? "inputReady" : "inputPending",
             model.errorMessage ?? "",
-            renderedText,
+            shouldCaptureRenderedText ? renderedText : "",
         ].joined(separator: "|")
     }
 
@@ -253,7 +256,9 @@ struct TerminalDetailView: View {
                 showsTerminalSurface: model.showsTerminalSurface,
                 isConnecting: model.isConnecting,
                 isBusy: model.isBusy,
+                isOwnershipSynchronizationScheduled: model.isOwnershipSynchronizationScheduled,
                 isSynchronizingOwnership: model.isSynchronizingOwnership,
+                isPreparingInput: model.isPreparingInput,
                 isInputSurfaceReady: model.isInputSurfaceReady,
                 viewportColumns: model.viewportColumns,
                 viewportRows: model.viewportRows,

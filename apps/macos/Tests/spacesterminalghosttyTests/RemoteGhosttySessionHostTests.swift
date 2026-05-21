@@ -225,6 +225,63 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(normalize(host.debugVisibleSurfaceText()), normalize("alpha\nbeta "))
     }
 
+    @MainActor func testRemoteRenderableViewerPrefersSnapshotWhenFreshUpdateAlsoIncludesIncrementalOutput() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let queue = DispatchQueue(label: "spaces.remote-host.snapshot-precedence-test")
+        let initialPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "remote-snapshot-precedence", reason: "initial", emittedAt: "2026-05-21T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: nil,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: "remote-snapshot-precedence", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-05-21T00:00:00Z", title: "renderable", workingDirectory: "/tmp/live", columns: 8, rows: 2),
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "renderable", workingDirectory: "/tmp/live", snapshot: nil,
+            snapshotText: nil, transcriptTail: nil, outputByteCount: nil)
+        let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: .init(
+                sessionID: "remote-snapshot-precedence", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-21T00:00:00Z"), paths: paths)
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let window = NSWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-21T00:00:00Z"),
+            mode: .viewer, into: container)
+
+        waitForCondition("renderable viewer surface") { host.hasRenderableSurface() }
+
+        server.broadcast(
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "remote-snapshot-precedence", reason: "output", emittedAt: "2026-05-21T00:00:01Z", sessionStateRevision: 2,
+                sessionStateFlags: 1, screenStateRevision: 1,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "remote-snapshot-precedence", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                    updatedAt: "2026-05-21T00:00:01Z", title: "renderable", workingDirectory: "/tmp/live", columns: 8, rows: 2),
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "renderable", workingDirectory: "/tmp/live",
+                snapshot: snapshot(text: "alpha\nbeta "), snapshotText: "alpha\nbeta ", transcriptTail: nil, outputByteCount: 5,
+                outputData: Data("WRONG".utf8)))
+
+        waitForCondition("viewer replays snapshot instead of fresh incremental bytes") {
+            self.normalize(host.debugVisibleSurfaceText()).contains("alpha") && self.normalize(host.debugVisibleSurfaceText()).contains("beta")
+        }
+
+        XCTAssertFalse(normalize(host.debugVisibleSurfaceText()).contains("WRONG"))
+        XCTAssertEqual(normalize(host.debugVisibleSurfaceText()), normalize("alpha\nbeta "))
+    }
+
     @MainActor private func waitForCondition(_ label: String, timeout: TimeInterval = 2, condition: @escaping () -> Bool) {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {

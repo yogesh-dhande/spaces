@@ -12,8 +12,11 @@ import Foundation
 
         private var config: ghostty_config_t?
         private var initialized = false
+        private var retainedStandardInputWriteDescriptor: Int32?
 
         private init() {}
+
+        deinit { if let retainedStandardInputWriteDescriptor { _ = close(retainedStandardInputWriteDescriptor) } }
 
         public func startIfNeeded() throws {
             guard app == nil else { return }
@@ -94,28 +97,57 @@ import Foundation
             UIScreen.main.traitCollection.userInterfaceStyle == .dark ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT
         }
 
+        struct StandardFileDescriptorRepair { let retainedStandardInputWriteDescriptor: Int32? }
+
         nonisolated static func repairStandardFileDescriptors(
             isDescriptorValid: (Int32) -> Bool = GhosttyMobileAppService.isDescriptorValid(_:),
-            openReadWriteNull: () -> Int32 = { open("/dev/null", O_RDWR) }, duplicateDescriptor: (Int32, Int32) -> Int32 = { dup2($0, $1) },
+            createStandardInputPipe: () -> (read: Int32, write: Int32) = {
+                var fileDescriptors: [Int32] = [-1, -1]
+                return pipe(&fileDescriptors) == 0 ? (fileDescriptors[0], fileDescriptors[1]) : (-1, -1)
+            }, openReadWriteNull: () -> Int32 = { open("/dev/null", O_RDWR) }, duplicateDescriptor: (Int32, Int32) -> Int32 = { dup2($0, $1) },
             closeDescriptor: (Int32) -> Int32 = { close($0) }
-        ) throws {
-            let requiredDescriptors = [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO]
-            let missingDescriptors = requiredDescriptors.filter { !isDescriptorValid($0) }
-            guard !missingDescriptors.isEmpty else { return }
-
-            let nullDescriptor = openReadWriteNull()
-            guard nullDescriptor >= 0 else {
-                let failureCode = errno
-                throw GhosttyMobileAppServiceError.configuration("Unable to open /dev/null while preparing Ghostty stdio (\(failureCode)).")
-            }
-            defer { if nullDescriptor > STDERR_FILENO { _ = closeDescriptor(nullDescriptor) } }
-
-            for descriptor in missingDescriptors where descriptor != nullDescriptor {
-                guard duplicateDescriptor(nullDescriptor, descriptor) != -1 else {
+        ) throws -> StandardFileDescriptorRepair {
+            let missingDescriptors = [STDOUT_FILENO, STDERR_FILENO].filter { !isDescriptorValid($0) }
+            if !missingDescriptors.isEmpty {
+                let nullDescriptor = openReadWriteNull()
+                guard nullDescriptor >= 0 else {
                     let failureCode = errno
-                    throw GhosttyMobileAppServiceError.configuration("Unable to repair Ghostty stdio descriptor \(descriptor) (\(failureCode)).")
+                    throw GhosttyMobileAppServiceError.configuration("Unable to open /dev/null while preparing Ghostty stdio (\(failureCode)).")
+                }
+                defer { if nullDescriptor > STDERR_FILENO { _ = closeDescriptor(nullDescriptor) } }
+
+                for descriptor in missingDescriptors where descriptor != nullDescriptor {
+                    guard duplicateDescriptor(nullDescriptor, descriptor) != -1 else {
+                        let failureCode = errno
+                        throw GhosttyMobileAppServiceError.configuration("Unable to repair Ghostty stdio descriptor \(descriptor) (\(failureCode)).")
+                    }
                 }
             }
+
+            if !isDescriptorValid(STDIN_FILENO) {
+                let standardInputPipe = createStandardInputPipe()
+                guard standardInputPipe.read >= 0, standardInputPipe.write >= 0 else {
+                    let failureCode = errno
+                    throw GhosttyMobileAppServiceError.configuration("Unable to create a keepalive pipe for Ghostty stdin (\(failureCode)).")
+                }
+
+                do {
+                    guard duplicateDescriptor(standardInputPipe.read, STDIN_FILENO) != -1 else {
+                        let failureCode = errno
+                        throw GhosttyMobileAppServiceError.configuration("Unable to repair Ghostty stdin descriptor (\(failureCode)).")
+                    }
+                } catch {
+                    _ = closeDescriptor(standardInputPipe.read)
+                    _ = closeDescriptor(standardInputPipe.write)
+                    throw error
+                }
+
+                if standardInputPipe.read != STDIN_FILENO { _ = closeDescriptor(standardInputPipe.read) }
+
+                return StandardFileDescriptorRepair(retainedStandardInputWriteDescriptor: standardInputPipe.write)
+            }
+
+            return StandardFileDescriptorRepair(retainedStandardInputWriteDescriptor: nil)
         }
 
         nonisolated private static func isDescriptorValid(_ descriptor: Int32) -> Bool {
@@ -127,8 +159,14 @@ import Foundation
             let environment = ProcessInfo.processInfo.environment
             if environment["HOME"]?.isEmpty != false { setenv("HOME", NSHomeDirectory(), 0) }
             if environment["SHELL"]?.isEmpty != false { setenv("SHELL", "/bin/sh", 0) }
-            // Simulator launches may not provide stdio; Ghostty's carrier subprocess assumes these exist.
-            try Self.repairStandardFileDescriptors()
+            // Simulator launches may not provide stable stdio; Ghostty's carrier subprocess requires inherited descriptors that stay open.
+            let repairedDescriptors = try Self.repairStandardFileDescriptors()
+            if let previousDescriptor = retainedStandardInputWriteDescriptor,
+                previousDescriptor != repairedDescriptors.retainedStandardInputWriteDescriptor
+            {
+                _ = close(previousDescriptor)
+            }
+            retainedStandardInputWriteDescriptor = repairedDescriptors.retainedStandardInputWriteDescriptor
         }
     }
 
