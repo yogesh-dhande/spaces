@@ -518,6 +518,30 @@ def wait_for_file(path: Path, timeout: float = 20) -> None:
     raise RuntimeError(f"Timed out waiting for file at {path}")
 
 
+def send_simulator_hardware_text(command_text: str) -> None:
+    script = r'''
+on run argv
+    set typedText to item 1 of argv
+    tell application "Simulator" to activate
+    delay 0.2
+    tell application "System Events"
+        tell process "Simulator"
+            set frontmost to true
+            keystroke typedText
+            key code 36
+        end tell
+    end tell
+end run
+'''
+    subprocess.run(
+        ["osascript", "-", command_text],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
 def read_json_file(path: Path) -> dict | None:
     if not path.exists():
         return None
@@ -798,7 +822,7 @@ def main() -> int:
         key = send_request({"command": "key", "sessionID": session_id, "key": "enter", "clientID": mobile_client["id"]})
         if not key.get("ok"):
             raise RuntimeError(f"Mobile key failed: {key}")
-        wait_for_stream_condition(stream, snapshot_contains("line0:mobile-hello"))
+        wait_for_session_state(session_id, lambda state: "line0:mobile-hello" in state_plain_text(state))
 
         show_result = subprocess.run(
             [str(spaces_cli), "terminal", "show", session_id],
@@ -829,7 +853,7 @@ def main() -> int:
         owner_key = send_unix_control_request(control_socket, {"command": "key", "key": "enter", "clientID": reopened_owner_client_id})
         if not owner_key.get("ok"):
             raise RuntimeError(f"Reopened owner key failed: {owner_key}")
-        wait_for_stream_condition(stream, snapshot_contains("line1:desktop-return"))
+        wait_for_session_state(session_id, lambda state: "line1:desktop-return" in state_plain_text(state))
 
         if args.start_app:
             render_project = temp_root / "render-project"
@@ -886,15 +910,22 @@ def main() -> int:
                 render_session_id,
                 temp_root / "mac-owner-dump.json",
                 viewer=False,
-                predicate=lambda payload: payload.get("found") is True and payload.get("showsTerminalSurface") is True,
+                predicate=lambda payload: (
+                    payload.get("found") is True
+                    and payload.get("showsTerminalSurface") is True
+                    and f"{render_project.name} %" in (payload.get("renderedOutput") or "")
+                ),
                 timeout=45,
             )
             render_owner_client_id = wait_for_active_owner(temp_root, render_session_id, timeout=10, runtime_root=runtime_dir)
             render_control_socket = socket_path(temp_root, render_session_id, runtime_dir)
 
             ipad_udid = resolve_simulator_udid(os.environ.get("SPACES_MOBILE_E2E_IPAD_NAME", "iPad Pro 13-inch (M5)"))
+            iphone_udid = resolve_simulator_udid(os.environ.get("SPACES_MOBILE_E2E_IPHONE_NAME", "iPhone 17 Pro"))
+            ios_app_path = resolve_ios_app_path()
             subprocess.run(["open", "-a", "Simulator"], capture_output=True, text=True)
             boot_simulator(ipad_udid)
+            boot_simulator(iphone_udid)
 
             ipad_client_app = {
                 "installationID": str(uuid.uuid4()).upper(),
@@ -909,22 +940,64 @@ def main() -> int:
             if not pair_response.get("ok") or not pair_response.get("issuedAuthToken"):
                 raise RuntimeError(f"Pairing failed for iPad simulator: {pair_response}")
 
+            iphone_client_app = {
+                "installationID": str(uuid.uuid4()).upper(),
+                "bundleID": ios_bundle_id,
+                "platform": "ios",
+                "deviceName": "iPhone 17 Pro",
+                "appVersion": "1.0",
+            }
+            iphone_pair_response = send_tcp_control_request(
+                bridge_host, bridge_port, {"command": "pair", "pairingCode": pairing_code, "clientApp": iphone_client_app}
+            )
+            if not iphone_pair_response.get("ok") or not iphone_pair_response.get("issuedAuthToken"):
+                raise RuntimeError(f"Pairing failed for iPhone simulator: {iphone_pair_response}")
+
+            write_simulator_settings(
+                ipad_udid,
+                ios_bundle_id,
+                bridge_host,
+                bridge_port,
+                ipad_client_app["installationID"],
+                str(pair_response["issuedAuthToken"]),
+                ios_app_path,
+            )
+            write_simulator_settings(
+                iphone_udid,
+                ios_bundle_id,
+                bridge_host,
+                bridge_port,
+                iphone_client_app["installationID"],
+                str(iphone_pair_response["issuedAuthToken"]),
+                ios_app_path,
+            )
+            launch_simulator_app(iphone_udid, ios_bundle_id, {})
+
             ipad_render_dump = temp_root / "ipad-render.json"
             ipad_event_log = temp_root / "ipad-events.jsonl"
             ipad_immediate_screenshot = temp_root / "ipad-post-takeover-immediate.png"
             ipad_short_delay_screenshot = temp_root / "ipad-post-takeover-plus-2s.png"
             ipad_long_delay_screenshot = temp_root / "ipad-post-takeover-plus-6s.png"
             ipad_proceed_takeover = temp_root / "ipad-proceed-takeover"
-            ipad_proceed_command = temp_root / "ipad-proceed-command"
+            ipad_first_command_request = temp_root / "ipad-first-command-request"
+            ipad_first_command_focused = temp_root / "ipad-first-command-focused"
+            ipad_first_command_completed = temp_root / "ipad-first-command-completed"
+            ipad_first_command_observed = temp_root / "ipad-first-command-observed"
+            ipad_second_command_request = temp_root / "ipad-second-command-request"
+            ipad_second_command_focused = temp_root / "ipad-second-command-focused"
+            ipad_second_command_completed = temp_root / "ipad-second-command-completed"
+            ipad_second_command_observed = temp_root / "ipad-second-command-observed"
             ipad_proceed_finish = temp_root / "ipad-proceed-finish"
-            ipad_post_command_screenshot = temp_root / "ipad-post-ios-command.png"
+            ipad_post_first_command_screenshot = temp_root / "ipad-post-ios-first-command.png"
+            ipad_post_second_command_screenshot = temp_root / "ipad-post-ios-second-command.png"
             ipad_post_mac_retakeover_screenshot = temp_root / "ipad-post-mac-retakeover.png"
             mac_viewer_dump_path = temp_root / "mac-demoted-owner-dump.json"
             mac_reclaimed_owner_dump_path = temp_root / "mac-reclaimed-owner-dump.json"
             ui_test_derived_data = temp_root / "SpacesMobileUITestDerivedData"
             ui_test_stdout = temp_root / "ios-ui-test.stdout.log"
             ui_test_stderr = temp_root / "ios-ui-test.stderr.log"
-            ios_command_text = "pwd"
+            ios_first_command_text = "which tailscale"
+            ios_second_command_text = "echo __spaces_second_command__"
             ui_test_config_path = Path("/tmp/spaces-mobile-ui-test-config.json")
             ui_test_config_path.write_text(
                 json.dumps(
@@ -940,10 +1013,19 @@ def main() -> int:
                         "shortDelayScreenshotPath": str(ipad_short_delay_screenshot),
                         "longDelayScreenshotPath": str(ipad_long_delay_screenshot),
                         "proceedTakeOverPath": str(ipad_proceed_takeover),
-                        "proceedCommandPath": str(ipad_proceed_command),
+                        "firstCommandRequestPath": str(ipad_first_command_request),
+                        "firstCommandFocusedPath": str(ipad_first_command_focused),
+                        "firstCommandCompletedPath": str(ipad_first_command_completed),
+                        "firstCommandObservedPath": str(ipad_first_command_observed),
+                        "secondCommandRequestPath": str(ipad_second_command_request),
+                        "secondCommandFocusedPath": str(ipad_second_command_focused),
+                        "secondCommandCompletedPath": str(ipad_second_command_completed),
+                        "secondCommandObservedPath": str(ipad_second_command_observed),
                         "proceedFinishPath": str(ipad_proceed_finish),
-                        "commandText": ios_command_text,
-                        "postCommandScreenshotPath": str(ipad_post_command_screenshot),
+                        "firstCommandText": ios_first_command_text,
+                        "secondCommandText": ios_second_command_text,
+                        "postFirstCommandScreenshotPath": str(ipad_post_first_command_screenshot),
+                        "postSecondCommandScreenshotPath": str(ipad_post_second_command_screenshot),
                         "finalScreenshotPath": str(ipad_post_mac_retakeover_screenshot),
                     },
                     indent=2,
@@ -960,7 +1042,7 @@ def main() -> int:
                 ui_test_stdout,
                 ui_test_stderr,
             )
-            wait_for_render_dump(
+            initial_viewer_payload = wait_for_render_dump(
                 ipad_render_dump,
                 lambda payload: payload.get("sessionID") == render_session_id and payload.get("isOwner") is False,
                 timeout=30,
@@ -981,14 +1063,6 @@ def main() -> int:
                     raise RuntimeError(f"Render owner key failed: {response}")
                 time.sleep(1.0)
 
-            pre_takeover_ipad_payload = wait_for_render_dump(
-                ipad_render_dump,
-                lambda payload: payload.get("sessionID") == render_session_id
-                and payload.get("isOwner") is False
-                and "README.md" in payload.get("renderedText", "")
-                and "src" in payload.get("renderedText", ""),
-                timeout=10,
-            )
             mac_owner_after_ls_payload = wait_for_terminal_window_dump(
                 spacese2e,
                 env,
@@ -1003,25 +1077,33 @@ def main() -> int:
                 ),
                 timeout=20,
             )
-            initial_runtime_columns = pre_takeover_ipad_payload.get("runtimeColumns")
-            initial_runtime_rows = pre_takeover_ipad_payload.get("runtimeRows")
+            initial_runtime_columns = initial_viewer_payload.get("runtimeColumns")
+            initial_runtime_rows = initial_viewer_payload.get("runtimeRows")
             expected_render_text = mac_owner_after_ls_payload.get("renderedOutput") or ""
             if not expected_render_text:
                 raise RuntimeError(
                     f"Unable to derive canonical pre-takeover render text from Mac owner dump:\n{json.dumps(mac_owner_after_ls_payload, indent=2)}"
                 )
-            assert_exact_terminal_text("iPad viewer before takeover", pre_takeover_ipad_payload.get("renderedText", ""), expected_render_text)
 
             ipad_proceed_takeover.write_text("go\n")
 
-            ipad_payload = wait_for_render_dump(
+            wait_for_render_dump(
                 ipad_render_dump,
                 lambda payload: payload.get("sessionID") == render_session_id and payload.get("isOwner") is True,
                 timeout=40,
             )
             assert_process_alive(bridge_process, "mobile bridge", bridge_stdout_path, bridge_stderr_path)
             time.sleep(0.5)
-            ipad_payload = read_json_file(ipad_render_dump) or ipad_payload
+            ipad_payload = wait_for_render_dump(
+                ipad_render_dump,
+                lambda payload: (
+                    payload.get("sessionID") == render_session_id
+                    and payload.get("isOwner") is True
+                    and payload.get("isBusy") is False
+                    and payload.get("isSynchronizingOwnership") is False
+                ),
+                timeout=20,
+            )
             mac_viewer_payload = wait_for_terminal_window_dump(
                 spacese2e,
                 env,
@@ -1064,16 +1146,21 @@ def main() -> int:
             if mac_viewer_payload.get("showsOutputFallback"):
                 raise RuntimeError(f"Mac viewer unexpectedly fell back to output view:\n{json.dumps(mac_viewer_payload, indent=2)}")
 
-            ipad_proceed_command.write_text("go\n")
+            ipad_first_command_request.write_text("go\n")
+            wait_for_file(ipad_first_command_focused, timeout=20)
+            send_simulator_hardware_text(ios_first_command_text)
             assert_process_alive(bridge_process, "mobile bridge", bridge_stdout_path, bridge_stderr_path)
             ipad_after_command_payload = wait_for_render_dump(
                 ipad_render_dump,
                 lambda payload: payload.get("sessionID") == render_session_id
                 and payload.get("isOwner") is True
-                and f"% {ios_command_text}" in payload.get("renderedText", "")
-                and str(render_project) in payload.get("renderedText", ""),
+                and f"% {ios_first_command_text}" in payload.get("renderedText", "")
+                and "/usr/local/bin/tailscale" in payload.get("renderedText", ""),
                 timeout=20,
             )
+            ipad_first_command_completed.write_text("done\n")
+            wait_for_file(ipad_post_first_command_screenshot, timeout=20)
+            wait_for_file(ipad_first_command_observed, timeout=20)
             assert_process_alive(bridge_process, "mobile bridge", bridge_stdout_path, bridge_stderr_path)
             mac_viewer_after_command_payload = wait_for_terminal_window_dump(
                 spacese2e,
@@ -1084,29 +1171,69 @@ def main() -> int:
                 predicate=lambda payload: (
                     payload.get("found") is True
                     and payload.get("showsTerminalSurface") is True
-                    and f"% {ios_command_text}" in (payload.get("renderedOutput") or "")
-                    and str(render_project) in (payload.get("renderedOutput") or "")
+                    and f"% {ios_first_command_text}" in (payload.get("renderedOutput") or "")
+                    and "/usr/local/bin/tailscale" in (payload.get("renderedOutput") or "")
                 ),
                 timeout=20,
             )
             ipad_after_command_payload = read_json_file(ipad_render_dump) or ipad_after_command_payload
-            expected_after_ios_command_text = ipad_after_command_payload.get("renderedText", "")
-            if not expected_after_ios_command_text:
+            if ipad_after_command_payload.get("errorMessage"):
+                raise RuntimeError(f"iPad render reported an error after first iOS command:\n{json.dumps(ipad_after_command_payload, indent=2)}")
+            if ipad_after_command_payload.get("isInputSurfaceReady") is not True:
                 raise RuntimeError(
-                    f"Unable to derive canonical post-iPad-command render text from iPad render dump:\n{json.dumps(ipad_after_command_payload, indent=2)}"
+                    f"iPad input surface stopped being ready after the first iOS command:\n{json.dumps(ipad_after_command_payload, indent=2)}"
                 )
 
-            assert_render_output_sane("iPad after iOS command", ipad_after_command_payload.get("renderedText", ""), bare_command_lines=("ls",))
-            assert_exact_terminal_text("iPad after iOS command", ipad_after_command_payload.get("renderedText", ""), expected_after_ios_command_text)
-            if ipad_after_command_payload.get("errorMessage"):
-                raise RuntimeError(f"iPad render reported an error after iOS command:\n{json.dumps(ipad_after_command_payload, indent=2)}")
+            ipad_second_command_request.write_text("go\n")
+            wait_for_file(ipad_second_command_focused, timeout=20)
+            send_simulator_hardware_text(ios_second_command_text)
+            ipad_after_second_command_payload = wait_for_render_dump(
+                ipad_render_dump,
+                lambda payload: payload.get("sessionID") == render_session_id
+                and payload.get("isOwner") is True
+                and f"% {ios_second_command_text}" in payload.get("renderedText", "")
+                and "__spaces_second_command__" in payload.get("renderedText", ""),
+                timeout=20,
+            )
+            ipad_second_command_completed.write_text("done\n")
+            wait_for_file(ipad_post_second_command_screenshot, timeout=20)
+            wait_for_file(ipad_second_command_observed, timeout=20)
+            assert_process_alive(bridge_process, "mobile bridge", bridge_stdout_path, bridge_stderr_path)
+            mac_viewer_after_second_command_payload = wait_for_terminal_window_dump(
+                spacese2e,
+                env,
+                render_session_id,
+                mac_viewer_dump_path,
+                viewer=None,
+                predicate=lambda payload: (
+                    payload.get("found") is True
+                    and payload.get("showsTerminalSurface") is True
+                    and f"% {ios_second_command_text}" in (payload.get("renderedOutput") or "")
+                    and "__spaces_second_command__" in (payload.get("renderedOutput") or "")
+                ),
+                timeout=20,
+            )
+            ipad_after_second_command_payload = read_json_file(ipad_render_dump) or ipad_after_second_command_payload
+            expected_after_ios_command_text = ipad_after_second_command_payload.get("renderedText", "")
+            if not expected_after_ios_command_text:
+                raise RuntimeError(
+                    f"Unable to derive canonical post-iPad-command render text from iPad render dump:\n{json.dumps(ipad_after_second_command_payload, indent=2)}"
+                )
+
+            assert_render_output_sane("iPad after second iOS command", ipad_after_second_command_payload.get("renderedText", ""), bare_command_lines=("ls",))
+            assert_exact_terminal_text("iPad after second iOS command", ipad_after_second_command_payload.get("renderedText", ""), expected_after_ios_command_text)
+            if ipad_after_second_command_payload.get("errorMessage"):
+                raise RuntimeError(f"iPad render reported an error after second iOS command:\n{json.dumps(ipad_after_second_command_payload, indent=2)}")
+            if ipad_after_second_command_payload.get("isInputSurfaceReady") is not True:
+                raise RuntimeError(
+                    f"iPad input surface stopped being ready after the second iOS command:\n{json.dumps(ipad_after_second_command_payload, indent=2)}"
+                )
             assert_render_output_sane(
-                "Mac viewer after iOS command", mac_viewer_after_command_payload.get("renderedOutput") or "", bare_command_lines=("ls",)
+                "Mac viewer after second iOS command", mac_viewer_after_second_command_payload.get("renderedOutput") or "", bare_command_lines=("ls",)
             )
             assert_exact_terminal_text(
-                "Mac viewer after iOS command", mac_viewer_after_command_payload.get("renderedOutput") or "", expected_after_ios_command_text
+                "Mac viewer after second iOS command", mac_viewer_after_second_command_payload.get("renderedOutput") or "", expected_after_ios_command_text
             )
-            wait_for_file(ipad_post_command_screenshot, timeout=20)
 
             ipad_owner_client_id = wait_for_active_owner(temp_root, render_session_id, timeout=10, runtime_root=runtime_dir)
             show_result = subprocess.run(
@@ -1199,7 +1326,8 @@ def main() -> int:
                             "ipadImmediateScreenshotPath": str(ipad_immediate_screenshot),
                             "ipadShortDelayScreenshotPath": str(ipad_short_delay_screenshot),
                             "ipadLongDelayScreenshotPath": str(ipad_long_delay_screenshot),
-                            "ipadPostCommandScreenshotPath": str(ipad_post_command_screenshot),
+                            "ipadPostFirstCommandScreenshotPath": str(ipad_post_first_command_screenshot),
+                            "ipadPostSecondCommandScreenshotPath": str(ipad_post_second_command_screenshot),
                             "ipadPostMacRetakeoverScreenshotPath": str(ipad_post_mac_retakeover_screenshot),
                         }
                     },

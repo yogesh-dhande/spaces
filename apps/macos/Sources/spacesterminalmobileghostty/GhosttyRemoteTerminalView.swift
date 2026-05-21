@@ -43,12 +43,12 @@ import Foundation
         public func makeUIView(context: Context) -> GhosttyRemoteTerminalHostView { GhosttyRemoteTerminalHostView() }
 
         public func updateUIView(_ hostView: GhosttyRemoteTerminalHostView, context: Context) {
-            hostView.acceptsTerminalInput = acceptsInput && !isBusy
             hostView.onInputReadinessChanged = { ready in Task { @MainActor in onInputReadinessChanged(ready) } }
             hostView.onViewportSizeChanged = { columns, rows in Task { @MainActor in onViewportSizeChanged(columns, rows) } }
             hostView.onSendText = { text in Task { @MainActor in onSendText(text) } }
             hostView.onSendKey = { key in Task { @MainActor in onSendKey(key) } }
             hostView.onRenderedTextChanged = { text in Task { @MainActor in onRenderedTextChanged(text) } }
+            hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
             hostView.update(
                 snapshot: snapshot, replayStateKey: replayStateKey, outputData: outputData, outputEventToken: outputEventToken,
                 fallbackText: fallbackText)
@@ -73,8 +73,8 @@ import Foundation
         private var lastReportedInputReadiness = false
         private var postRefreshEmissionScheduled = false
 
-        public var acceptsTerminalInput = false
-        public var onInputReadinessChanged: ((Bool) -> Void)?
+        public private(set) var acceptsTerminalInput = false
+        public var onInputReadinessChanged: ((Bool) -> Void)? { didSet { publishCurrentInputReadiness() } }
         public var onViewportSizeChanged: ((Int, Int) -> Void)?
         public var onSendText: ((String) -> Void)?
         public var onSendKey: ((String) -> Void)?
@@ -125,7 +125,7 @@ import Foundation
         }
 
         public override var keyCommands: [UIKeyCommand]? {
-            guard acceptsTerminalInput else { return [] }
+            guard canProcessKeyboardInput else { return [] }
             return [
                 UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(handleEscape)),
                 UIKeyCommand(input: "c", modifierFlags: .control, action: #selector(handleControlC)),
@@ -183,18 +183,30 @@ import Foundation
         }
 
         public func insertText(_ text: String) {
-            guard acceptsTerminalInput else { return }
+            guard canProcessKeyboardInput else {
+                syncFirstResponder()
+                reportInputReadinessIfNeeded()
+                return
+            }
             guard !text.isEmpty else { return }
             if text == "\n" { onSendKey?("enter") } else { onSendText?(text) }
         }
 
         public func deleteBackward() {
-            guard acceptsTerminalInput else { return }
+            guard canProcessKeyboardInput else {
+                syncFirstResponder()
+                reportInputReadinessIfNeeded()
+                return
+            }
             onSendKey?("backspace")
         }
 
         public override func paste(_ sender: Any?) {
-            guard acceptsTerminalInput else { return }
+            guard canProcessKeyboardInput else {
+                syncFirstResponder()
+                reportInputReadinessIfNeeded()
+                return
+            }
             guard let pasted = UIPasteboard.general.string, !pasted.isEmpty else { return }
             onSendText?(pasted)
         }
@@ -232,13 +244,13 @@ import Foundation
             }
         }
 
-        @objc private func handleEscape() { onSendKey?("esc") }
-        @objc private func handleControlC() { onSendKey?("ctrl+c") }
-        @objc private func handleUpArrow() { onSendKey?("up") }
-        @objc private func handleDownArrow() { onSendKey?("down") }
-        @objc private func handleLeftArrow() { onSendKey?("left") }
-        @objc private func handleRightArrow() { onSendKey?("right") }
-        @objc private func handleTab() { onSendKey?("tab") }
+        @objc private func handleEscape() { if canProcessKeyboardInput { onSendKey?("esc") } }
+        @objc private func handleControlC() { if canProcessKeyboardInput { onSendKey?("ctrl+c") } }
+        @objc private func handleUpArrow() { if canProcessKeyboardInput { onSendKey?("up") } }
+        @objc private func handleDownArrow() { if canProcessKeyboardInput { onSendKey?("down") } }
+        @objc private func handleLeftArrow() { if canProcessKeyboardInput { onSendKey?("left") } }
+        @objc private func handleRightArrow() { if canProcessKeyboardInput { onSendKey?("right") } }
+        @objc private func handleTab() { if canProcessKeyboardInput { onSendKey?("tab") } }
 
         private func configureFallbackLabel() {
             fallbackLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -259,6 +271,13 @@ import Foundation
             scrollPanRecognizer.cancelsTouchesInView = false
             if #available(iOS 13.4, *) { scrollPanRecognizer.allowedScrollTypesMask = [.continuous, .discrete] }
             addGestureRecognizer(scrollPanRecognizer)
+        }
+
+        func setAcceptsTerminalInput(_ enabled: Bool) {
+            guard acceptsTerminalInput != enabled else { return }
+            acceptsTerminalInput = enabled
+            syncFirstResponder()
+            reportInputReadinessIfNeeded()
         }
 
         private func ensureSession() {
@@ -374,10 +393,17 @@ import Foundation
         }
 
         private var isInputSurfaceReady: Bool { acceptsTerminalInput && isFirstResponder && window != nil }
+        private var canProcessKeyboardInput: Bool { isInputSurfaceReady }
 
         private func reportInputReadinessIfNeeded() {
             let isReady = isInputSurfaceReady
             guard lastReportedInputReadiness != isReady else { return }
+            lastReportedInputReadiness = isReady
+            onInputReadinessChanged?(isReady)
+        }
+
+        private func publishCurrentInputReadiness() {
+            let isReady = isInputSurfaceReady
             lastReportedInputReadiness = isReady
             onInputReadinessChanged?(isReady)
         }

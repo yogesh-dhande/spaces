@@ -47,13 +47,25 @@ final class SpacesMobileUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(4))
         captureScreenshot(app, name: "post-takeover-plus-6s", filePath: configuration.longDelayScreenshotPath)
 
-        if let proceedCommandPath = configuration.proceedCommandPath {
-            waitForMarkerIfNeeded(proceedCommandPath, timeout: 20)
+        if let firstCommandRequestPath = configuration.firstCommandRequestPath {
+            waitForMarkerIfNeeded(firstCommandRequestPath, timeout: 20)
             focusTerminalSurface(in: app)
-            app.typeText(configuration.commandText)
-            app.typeText("\n")
-            RunLoop.current.run(until: Date().addingTimeInterval(1))
-            captureScreenshot(app, name: "post-ios-command-immediate", filePath: configuration.postCommandScreenshotPath)
+            writeMarkerIfNeeded(configuration.firstCommandFocusedPath)
+            waitForMarkerIfNeeded(configuration.firstCommandCompletedPath, timeout: 20)
+            XCTAssertTrue(waitForOwnerReadyState(in: app, timeout: 1), "Owner-ready badge did not return promptly after first iOS command")
+            assertOwnerReadyStable(in: app, duration: 1, context: "after first iOS command")
+            captureScreenshot(app, name: "post-ios-command-immediate", filePath: configuration.postFirstCommandScreenshotPath)
+            writeMarkerIfNeeded(configuration.firstCommandObservedPath)
+            if let secondCommandRequestPath = configuration.secondCommandRequestPath {
+                waitForMarkerIfNeeded(secondCommandRequestPath, timeout: 20)
+                focusTerminalSurface(in: app)
+                writeMarkerIfNeeded(configuration.secondCommandFocusedPath)
+                waitForMarkerIfNeeded(configuration.secondCommandCompletedPath, timeout: 20)
+                XCTAssertTrue(waitForOwnerReadyState(in: app, timeout: 1), "Owner-ready badge did not return promptly after second iOS command")
+                assertOwnerReadyStable(in: app, duration: 1, context: "after second iOS command")
+                captureScreenshot(app, name: "post-ios-second-command", filePath: configuration.postSecondCommandScreenshotPath)
+                writeMarkerIfNeeded(configuration.secondCommandObservedPath)
+            }
         }
 
         if let proceedFinishPath = configuration.proceedFinishPath {
@@ -118,6 +130,37 @@ final class SpacesMobileUITests: XCTestCase {
         return nil
     }
 
+    private func waitForOwnerReadyState(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if isShowingOwnerReadyState(in: app) && !isShowingPreparingInput(in: app) {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return false
+    }
+
+    private func assertOwnerReadyStable(in app: XCUIApplication, duration: TimeInterval, context: String) {
+        let deadline = Date().addingTimeInterval(duration)
+        while Date() < deadline {
+            XCTAssertTrue(isShowingOwnerReadyState(in: app), "Owner-ready badge disappeared \(context)")
+            XCTAssertFalse(isShowingPreparingInput(in: app), "Preparing input remained visible \(context)")
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+    }
+
+    private func isShowingOwnerReadyState(in app: XCUIApplication) -> Bool {
+        app.otherElements["terminal.ownerBadge"].exists || app.staticTexts["Owner"].exists
+    }
+
+    private func isShowingPreparingInput(in app: XCUIApplication) -> Bool {
+        if app.otherElements["terminal.ownerPreparing"].exists {
+            return true
+        }
+        return app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Preparing input")).count > 0
+    }
+
     private func captureScreenshot(_ app: XCUIApplication, name: String, filePath: String?) {
         let screenshot = app.screenshot()
         let attachment = XCTAttachment(screenshot: screenshot)
@@ -146,6 +189,17 @@ final class SpacesMobileUITests: XCTestCase {
         }
         XCTFail("Timed out waiting for marker file at \(path)")
     }
+
+    private func writeMarkerIfNeeded(_ path: String?) {
+        guard let path else { return }
+        let url = URL(fileURLWithPath: path)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try "ready\n".write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            XCTFail("Failed writing marker file at \(path): \(error)")
+        }
+    }
 }
 
 private struct UITestConfiguration: Decodable {
@@ -162,10 +216,19 @@ private struct UITestConfiguration: Decodable {
     let shortDelayScreenshotPath: String?
     let longDelayScreenshotPath: String?
     let proceedTakeOverPath: String?
-    let proceedCommandPath: String?
+    let firstCommandRequestPath: String?
+    let firstCommandFocusedPath: String?
+    let firstCommandCompletedPath: String?
+    let firstCommandObservedPath: String?
+    let secondCommandRequestPath: String?
+    let secondCommandFocusedPath: String?
+    let secondCommandCompletedPath: String?
+    let secondCommandObservedPath: String?
     let proceedFinishPath: String?
-    let commandText: String
-    let postCommandScreenshotPath: String?
+    let firstCommandText: String
+    let secondCommandText: String?
+    let postFirstCommandScreenshotPath: String?
+    let postSecondCommandScreenshotPath: String?
     let finalScreenshotPath: String?
 
     static func load(environment: [String: String]) throws -> Self {

@@ -31,6 +31,7 @@ import spacesterminalcore
     private var optimisticOwner = false
     private var isStopping = false
     private var hasAttachedToSession = false
+    private var hasConfirmedOwnerInputReadiness = false
     private var ownerRecoveryGraceDeadline: Date?
 
     private static let inputBatchDelay: Duration = .milliseconds(35)
@@ -114,6 +115,7 @@ import spacesterminalcore
         isStopping = true
         optimisticOwner = false
         hasAttachedToSession = false
+        hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
         reconnectTask?.cancel()
         reconnectTask = nil
@@ -148,6 +150,7 @@ import spacesterminalcore
             )
             await resetCommandChannel()
             optimisticOwner = true
+            hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
             beginOwnerRecoveryGracePeriod()
             errorMessage = nil
@@ -245,6 +248,10 @@ import spacesterminalcore
                 }
                 try await request()
                 await MainActor.run {
+                    if self.isOwner {
+                        self.hasConfirmedOwnerInputReadiness = true
+                        self.isInputSurfaceReady = true
+                    }
                     self.writeE2EEventIfNeeded(kind: "\(kind)_success", detail: detail)
                 }
             } catch {
@@ -311,7 +318,10 @@ import spacesterminalcore
                     hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
                 }
                 let isOwnerAfterMerge = isOwner
-                if !isOwnerAfterMerge { isInputSurfaceReady = false }
+                if !isOwnerAfterMerge {
+                    hasConfirmedOwnerInputReadiness = false
+                    isInputSurfaceReady = false
+                }
                 isSessionUnavailable = false
                 errorMessage = nil
                 isConnecting = false
@@ -364,6 +374,7 @@ import spacesterminalcore
         isConnecting = false
         if !reconnectSilently {
             optimisticOwner = false
+            hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
         }
         if isStopping { return }
@@ -434,12 +445,29 @@ import spacesterminalcore
     private func runOwnershipSynchronization() async {
         guard isOwner else { return }
         isSynchronizingOwnership = true
-        isInputSurfaceReady = false
         defer {
             isSynchronizingOwnership = false
             ownershipSynchronizationTask = nil
         }
         errorMessage = nil
+        if let viewportSize {
+            do {
+                try await bridgeClient.resize(
+                    sessionID: session.id,
+                    clientID: remoteClient.id,
+                    columns: viewportSize.columns,
+                    rows: viewportSize.rows,
+                    timeout: Self.inputRequestTimeout,
+                    commandChannel: commandChannel
+                )
+            } catch {
+                if !Self.isTransientReconnectError(error) {
+                    if handleAuthenticationFailure(error) { return }
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+        await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true)
     }
 
     private func unavailableMessage(for error: Error) -> String? {
@@ -465,6 +493,7 @@ import spacesterminalcore
         pendingInputSendTask = nil
         bufferedInputText = ""
         hasAttachedToSession = false
+        hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
         streamHandle?.cancel()
         streamHandle = nil
@@ -561,6 +590,7 @@ import spacesterminalcore
             isInputSurfaceReady = acceptsInput
             return
         }
+        guard !(hasConfirmedOwnerInputReadiness && acceptsInput) else { return }
         guard !(shouldReconnectSilently && acceptsInput) else { return }
         isInputSurfaceReady = false
     }
