@@ -97,26 +97,42 @@
             XCTAssertTrue(validDescriptors.contains(4))
         }
 
-        func testRepairStandardFileDescriptorsLeavesValidStandardInputUntouched() throws {
+        func testRepairStandardFileDescriptorsReplacesValidStandardInputWithKeepAlivePipe() throws {
             var validDescriptors: Set<Int32> = [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO]
-            var createPipeCallCount = 0
+            var duplicateCalls: [(source: Int32, target: Int32)] = []
+            var closeCalls: [Int32] = []
             var openNullCallCount = 0
 
             let repair = try GhosttyMobileAppService.repairStandardFileDescriptors(
                 isDescriptorValid: { validDescriptors.contains($0) },
                 createStandardInputPipe: {
-                    createPipeCallCount += 1
-                    return (-1, -1)
+                    validDescriptors.insert(5)
+                    validDescriptors.insert(6)
+                    return (5, 6)
                 },
                 openReadWriteNull: {
                     openNullCallCount += 1
                     return -1
+                },
+                duplicateDescriptor: { source, target in
+                    duplicateCalls.append((source, target))
+                    validDescriptors.insert(target)
+                    return target
+                },
+                closeDescriptor: { descriptor in
+                    closeCalls.append(descriptor)
+                    validDescriptors.remove(descriptor)
+                    return 0
                 }
             )
 
-            XCTAssertEqual(createPipeCallCount, 0)
+            XCTAssertEqual(duplicateCalls.map(\.source), [5])
+            XCTAssertEqual(duplicateCalls.map(\.target), [STDIN_FILENO])
+            XCTAssertEqual(closeCalls, [5])
             XCTAssertEqual(openNullCallCount, 0)
-            XCTAssertNil(repair.retainedStandardInputWriteDescriptor)
+            XCTAssertEqual(repair.retainedStandardInputWriteDescriptor, 6)
+            XCTAssertTrue(validDescriptors.contains(STDIN_FILENO))
+            XCTAssertTrue(validDescriptors.contains(6))
         }
 
         func testRemoteTerminalHostViewCanMountInWindow() throws {

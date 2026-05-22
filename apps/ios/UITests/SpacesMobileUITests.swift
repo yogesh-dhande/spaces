@@ -22,6 +22,10 @@ final class SpacesMobileUITests: XCTestCase {
         try runTerminalTakeOverScenario()
     }
 
+    func testTerminalTakeOverAcrossTwoSessionsFromList() throws {
+        try runTerminalTakeOverScenario()
+    }
+
     private func runTerminalTakeOverScenario() throws {
         let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
         let app = if configuration.attachToExistingApp {
@@ -64,6 +68,10 @@ final class SpacesMobileUITests: XCTestCase {
         captureScreenshot(app, name: "post-takeover-plus-2s", filePath: configuration.shortDelayScreenshotPath)
         RunLoop.current.run(until: Date().addingTimeInterval(4))
         captureScreenshot(app, name: "post-takeover-plus-6s", filePath: configuration.longDelayScreenshotPath)
+        if let secondarySessionID = configuration.secondarySessionID {
+            try takeOverSecondSessionFromList(in: app, configuration: configuration, sessionID: secondarySessionID)
+            return
+        }
         if configuration.scrollbackSwipeCount > 0 {
             performScrollback(in: app, configuration: configuration)
             captureScreenshot(app, name: "post-scrollback", filePath: configuration.finalScreenshotPath)
@@ -145,6 +153,30 @@ final class SpacesMobileUITests: XCTestCase {
         if terminalSurface.waitForExistence(timeout: 2) {
             terminalSurface.tap()
         }
+    }
+
+    private func takeOverSecondSessionFromList(in app: XCUIApplication, configuration: UITestConfiguration, sessionID: String) throws {
+        let backButton = app.buttons["terminal.back"]
+        if backButton.waitForExistence(timeout: 2) {
+            backButton.tap()
+        } else {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.06)).tap()
+        }
+
+        let secondSessionRow = app.buttons["terminal.row.\(sessionID)"]
+        if secondSessionRow.waitForExistence(timeout: 2) {
+            secondSessionRow.tap()
+        } else {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.43)).tap()
+        }
+
+        guard waitForOwnerState(in: app, timeout: 20) != nil else {
+            XCTFail("Timed out waiting for owner state after taking over second session \(sessionID)")
+            return
+        }
+        XCTAssertTrue(waitForOwnerReadyState(in: app, timeout: 5), "Owner-ready badge did not return promptly after second session takeover")
+        assertOwnerReadyStable(in: app, duration: 1, context: "after second session takeover")
+        captureScreenshot(app, name: "post-second-session-takeover", filePath: configuration.finalScreenshotPath)
     }
 
     private func performScrollback(in app: XCUIApplication, configuration: UITestConfiguration) {
@@ -296,6 +328,7 @@ private struct UITestConfiguration: Decodable {
     static let defaultBundleID = "com.yogeshdhande.spacesmobile"
 
     let sessionID: String
+    let secondarySessionID: String?
     let host: String
     let port: Int
     let authToken: String
@@ -331,6 +364,7 @@ private struct UITestConfiguration: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case sessionID
+        case secondarySessionID
         case host
         case port
         case authToken
@@ -368,6 +402,7 @@ private struct UITestConfiguration: Decodable {
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sessionID = try container.decode(String.self, forKey: .sessionID)
+        secondarySessionID = try container.decodeIfPresent(String.self, forKey: .secondarySessionID)
         host = try container.decode(String.self, forKey: .host)
         port = try container.decode(Int.self, forKey: .port)
         authToken = try container.decode(String.self, forKey: .authToken)

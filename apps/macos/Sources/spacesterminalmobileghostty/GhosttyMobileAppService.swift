@@ -124,30 +124,26 @@ import Foundation
                 }
             }
 
-            if !isDescriptorValid(STDIN_FILENO) {
-                let standardInputPipe = createStandardInputPipe()
-                guard standardInputPipe.read >= 0, standardInputPipe.write >= 0 else {
-                    let failureCode = errno
-                    throw GhosttyMobileAppServiceError.configuration("Unable to create a keepalive pipe for Ghostty stdin (\(failureCode)).")
-                }
-
-                do {
-                    guard duplicateDescriptor(standardInputPipe.read, STDIN_FILENO) != -1 else {
-                        let failureCode = errno
-                        throw GhosttyMobileAppServiceError.configuration("Unable to repair Ghostty stdin descriptor (\(failureCode)).")
-                    }
-                } catch {
-                    _ = closeDescriptor(standardInputPipe.read)
-                    _ = closeDescriptor(standardInputPipe.write)
-                    throw error
-                }
-
-                if standardInputPipe.read != STDIN_FILENO { _ = closeDescriptor(standardInputPipe.read) }
-
-                return StandardFileDescriptorRepair(retainedStandardInputWriteDescriptor: standardInputPipe.write)
+            let standardInputPipe = createStandardInputPipe()
+            guard standardInputPipe.read >= 0, standardInputPipe.write >= 0 else {
+                let failureCode = errno
+                throw GhosttyMobileAppServiceError.configuration("Unable to create a keepalive pipe for Ghostty stdin (\(failureCode)).")
             }
 
-            return StandardFileDescriptorRepair(retainedStandardInputWriteDescriptor: nil)
+            do {
+                guard duplicateDescriptor(standardInputPipe.read, STDIN_FILENO) != -1 else {
+                    let failureCode = errno
+                    throw GhosttyMobileAppServiceError.configuration("Unable to repair Ghostty stdin descriptor (\(failureCode)).")
+                }
+            } catch {
+                _ = closeDescriptor(standardInputPipe.read)
+                _ = closeDescriptor(standardInputPipe.write)
+                throw error
+            }
+
+            if standardInputPipe.read != STDIN_FILENO { _ = closeDescriptor(standardInputPipe.read) }
+
+            return StandardFileDescriptorRepair(retainedStandardInputWriteDescriptor: standardInputPipe.write)
         }
 
         nonisolated private static func isDescriptorValid(_ descriptor: Int32) -> Bool {
@@ -159,7 +155,7 @@ import Foundation
             let environment = ProcessInfo.processInfo.environment
             if environment["HOME"]?.isEmpty != false { setenv("HOME", NSHomeDirectory(), 0) }
             if environment["SHELL"]?.isEmpty != false { setenv("SHELL", "/bin/sh", 0) }
-            // Simulator launches may not provide stable stdio; Ghostty's carrier subprocess requires inherited descriptors that stay open.
+            // Simulator stdin can remain guarded even when valid; always swap in a disposable pipe so Ghostty can close and re-open carrier stdio.
             let repairedDescriptors = try Self.repairStandardFileDescriptors()
             if let previousDescriptor = retainedStandardInputWriteDescriptor,
                 previousDescriptor != repairedDescriptors.retainedStandardInputWriteDescriptor
