@@ -352,11 +352,13 @@
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
             XCTAssertTrue(hostView.hasActiveSessionForTesting)
+            XCTAssertTrue(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
 
             hostView.removeFromSuperview()
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
             XCTAssertFalse(hostView.hasActiveSessionForTesting)
+            XCTAssertFalse(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
             XCTAssertNil(hostView.capturedSnapshotForTesting())
 
             viewController.view.addSubview(hostView)
@@ -373,7 +375,102 @@
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
             XCTAssertTrue(hostView.hasActiveSessionForTesting)
+            XCTAssertTrue(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
             XCTAssertNotNil(hostView.capturedSnapshotForTesting())
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewTeardownDoesNotBlockWhileFreeRuns() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=teardown",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            XCTAssertTrue(hostView.hasActiveSessionForTesting)
+
+            let freeCompleted = expectation(description: "background free completed")
+            let originalSessionFreeHandler = GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting
+            GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting = { _ in
+                Thread.sleep(forTimeInterval: 0.5)
+                freeCompleted.fulfill()
+            }
+            defer {
+                GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting = originalSessionFreeHandler
+            }
+
+            let startedAt = Date()
+            hostView.prepareForDismantle()
+            let elapsed = Date().timeIntervalSince(startedAt)
+
+            XCTAssertLessThan(elapsed, 0.2)
+            XCTAssertFalse(hostView.hasActiveSessionForTesting)
+            XCTAssertFalse(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
+
+            wait(for: [freeCompleted], timeout: 5)
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewDoesNotRepublishInputReadinessWhenInstallingCallback() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                outputData: nil,
+                outputEventToken: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            hostView.setAcceptsTerminalInput(true)
+            XCTAssertTrue(hostView.becomeFirstResponder())
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+            let unexpectedInitialPublication = expectation(description: "input readiness should not publish on callback install")
+            unexpectedInitialPublication.isInverted = true
+            hostView.onInputReadinessChanged = { _ in
+                unexpectedInitialPublication.fulfill()
+            }
+            wait(for: [unexpectedInitialPublication], timeout: 0.2)
+
+            let readinessChanged = expectation(description: "input readiness changed after responder update")
+            var reportedReadiness: [Bool] = []
+            hostView.onInputReadinessChanged = { ready in
+                reportedReadiness.append(ready)
+                if ready == false { readinessChanged.fulfill() }
+            }
+
+            XCTAssertTrue(hostView.resignFirstResponder())
+            wait(for: [readinessChanged], timeout: 2)
+            XCTAssertEqual(reportedReadiness.last, false)
 
             window.isHidden = true
         }

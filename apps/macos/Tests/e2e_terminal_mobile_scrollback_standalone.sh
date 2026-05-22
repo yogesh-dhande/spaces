@@ -19,6 +19,7 @@ APP_PID=""
 BRIDGE_PID=""
 DEMO_ROOT=""
 SESSION_ID=""
+SECONDARY_SESSION_ID=""
 BRIDGE_HOST=""
 BRIDGE_PORT=""
 IPAD_UDID=""
@@ -126,6 +127,7 @@ while True:
             "APP_PID": str(payload["appPID"]),
             "BRIDGE_PID": str(payload["bridgePID"]),
             "SESSION_ID": payload["sessionID"],
+            "SECONDARY_SESSION_ID": payload.get("secondarySessionID") or "",
             "BRIDGE_HOST": payload["bridgeHost"],
             "BRIDGE_PORT": str(payload["bridgePort"]),
             "IPAD_UDID": payload["ipadSimulatorUDID"],
@@ -155,8 +157,10 @@ start_demo() {
   SPACES_MOBILE_DEMO_KEEP_ROOT=1 SPACES_MOBILE_DEMO_PORT="$DEMO_PORT" "$DEMO_SCRIPT" >"$DEMO_STDOUT_LOG" 2>&1 &
   DEMO_PID=$!
   wait_for_demo_metadata
+  [[ -n "$SECONDARY_SESSION_ID" ]] || fail "Standalone demo did not provision a secondary terminal session."
   printf 'Demo root: %s\n' "$DEMO_ROOT"
-  printf 'Session: %s\n' "$SESSION_ID"
+  printf 'Primary session: %s\n' "$SESSION_ID"
+  printf 'Secondary session: %s\n' "$SECONDARY_SESSION_ID"
   printf 'Bridge port: %s\n' "$DEMO_PORT"
 }
 

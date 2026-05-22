@@ -164,11 +164,8 @@ final class SpacesMobileUITests: XCTestCase {
         }
 
         let secondSessionRow = app.buttons["terminal.row.\(sessionID)"]
-        if secondSessionRow.waitForExistence(timeout: 2) {
-            secondSessionRow.tap()
-        } else {
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.43)).tap()
-        }
+        XCTAssertTrue(secondSessionRow.waitForExistence(timeout: 10), "Second terminal row \(sessionID) did not reappear after returning to the list")
+        secondSessionRow.tap()
 
         guard waitForOwnerState(in: app, timeout: 20) != nil else {
             XCTFail("Timed out waiting for owner state after taking over second session \(sessionID)")

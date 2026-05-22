@@ -132,6 +132,12 @@ import Foundation
     }
 
     @MainActor public final class GhosttyRemoteTerminalHostView: UIView, UIKeyInput, UITextInputTraits {
+        private struct DetachedGhosttySession: @unchecked Sendable { let rawValue: ghostty_session_t }
+
+        nonisolated(unsafe) static var sessionFreeHandlerForTesting: @Sendable (ghostty_session_t) -> Void = { session in
+            ghostty_session_free(session)
+        }
+
         private static let carrierCommand = "direct:/bin/cat"
         private static let defaultFontSize: Float = 13
         private static let contentInsets = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
@@ -139,6 +145,7 @@ import Foundation
         private static let promptEOLMarkStartSequence = Data("\u{001B}[1m\u{001B}[7m%".utf8)
         private static let promptEOLMarkEndSequence = Data("\r \r\r\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J".utf8)
         private var session: ghostty_session_t?
+        private var retainedSessionStandardInputWriteDescriptor: Int32?
         private var activeOwnerEpoch: GhosttyRemoteTerminalOwnerEpoch?
         private var activeEndedRender: GhosttyRemoteTerminalEndedRender?
         private var lastAppliedOwnerEpochID: String?
@@ -163,7 +170,7 @@ import Foundation
         private var isTerminalVisible = true
 
         public private(set) var acceptsTerminalInput = false
-        public var onInputReadinessChanged: ((Bool) -> Void)? { didSet { publishCurrentInputReadiness() } }
+        public var onInputReadinessChanged: ((Bool) -> Void)?
         public var onOutputBatchApplied: ((String) -> Void)?
         public var onHistorySeedApplied: ((String) -> Void)?
         public var onScrollGestureApplied: (() -> Void)?
@@ -417,6 +424,7 @@ import Foundation
         func prepareForDismantle() { teardownSession() }
 
         var hasActiveSessionForTesting: Bool { session != nil }
+        var hasRetainedSessionStandardInputWriteDescriptorForTesting: Bool { retainedSessionStandardInputWriteDescriptor != nil }
 
         private func ensureSession() {
             guard session == nil else { return }
@@ -438,7 +446,10 @@ import Foundation
             guard let session else { return }
             ghosttyRemoteTerminalTrace("teardown_session")
             if isFirstResponder { resignFirstResponder() }
-            ghostty_session_free(session)
+            if let retainedSessionStandardInputWriteDescriptor {
+                _ = close(retainedSessionStandardInputWriteDescriptor)
+                self.retainedSessionStandardInputWriteDescriptor = nil
+            }
             self.session = nil
             activeOwnerEpoch = nil
             activeEndedRender = nil
@@ -454,9 +465,46 @@ import Foundation
             lastReportedInputReadiness = false
             cancelScrollSettledEmissionTasks()
             didScrollDuringCurrentPan = false
+
+            let detachedSession = DetachedGhosttySession(rawValue: session)
+            ghosttyRemoteTerminalTrace("teardown_session free_scheduled")
+            Task.detached(priority: .utility) {
+                Self.terminateCarrierProcessIfNeeded(for: detachedSession.rawValue)
+                ghosttyRemoteTerminalTrace("teardown_session free_begin")
+                Self.sessionFreeHandlerForTesting(detachedSession.rawValue)
+                ghosttyRemoteTerminalTrace("teardown_session free_end")
+            }
+        }
+
+        private nonisolated static func terminateCarrierProcessIfNeeded(for session: ghostty_session_t) {
+            let foregroundPID = Int32(ghostty_session_foreground_pid(session))
+            guard foregroundPID > 0 else { return }
+
+            let currentProcessGroupID = getpgrp()
+            let foregroundProcessGroupID = getpgid(foregroundPID)
+            if foregroundProcessGroupID > 0, foregroundProcessGroupID != currentProcessGroupID { _ = kill(-foregroundProcessGroupID, SIGHUP) }
+
+            _ = kill(foregroundPID, SIGHUP)
+            usleep(50_000)
+            if kill(foregroundPID, 0) == 0 { _ = kill(foregroundPID, SIGKILL) }
         }
 
         private func createSession(app: ghostty_app_t) -> ghostty_session_t? {
+            let previousStandardInputDescriptor = dup(STDIN_FILENO)
+            let repairedDescriptors: GhosttyMobileAppService.StandardFileDescriptorRepair
+            do { repairedDescriptors = try GhosttyMobileAppService.repairStandardFileDescriptors() } catch {
+                ghosttyRemoteTerminalTrace(
+                    "create_session repair_stdio_failure error=\(error.localizedDescription.replacingOccurrences(of: "\n", with: "\\n"))")
+                return nil
+            }
+            defer {
+                let restoreDescriptor = previousStandardInputDescriptor >= 0 ? previousStandardInputDescriptor : open("/dev/null", O_RDWR)
+                if restoreDescriptor >= 0 {
+                    _ = dup2(restoreDescriptor, STDIN_FILENO)
+                    if restoreDescriptor != STDIN_FILENO { _ = close(restoreDescriptor) }
+                }
+            }
+
             var sessionConfig = ghostty_session_config_new()
             sessionConfig.surface.platform_tag = GHOSTTY_PLATFORM_IOS
             sessionConfig.surface.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(uiview: Unmanaged.passUnretained(self).toOpaque()))
@@ -468,7 +516,14 @@ import Foundation
                 return ghostty_session_new(app, &sessionConfig)
             }
 
-            guard let createdSession else { return nil }
+            guard let createdSession else {
+                if let retainedStandardInputWriteDescriptor = repairedDescriptors.retainedStandardInputWriteDescriptor {
+                    _ = close(retainedStandardInputWriteDescriptor)
+                }
+                return nil
+            }
+            if let previousRetainedDescriptor = retainedSessionStandardInputWriteDescriptor { _ = close(previousRetainedDescriptor) }
+            retainedSessionStandardInputWriteDescriptor = repairedDescriptors.retainedStandardInputWriteDescriptor
             return createdSession
         }
 
@@ -601,13 +656,6 @@ import Foundation
             guard lastReportedInputReadiness != isReady else { return }
             lastReportedInputReadiness = isReady
             ghosttyRemoteTerminalTrace("input_readiness value=\(isReady ? 1 : 0)")
-            onInputReadinessChanged?(isReady)
-        }
-
-        private func publishCurrentInputReadiness() {
-            let isReady = isInputSurfaceReady
-            lastReportedInputReadiness = isReady
-            ghosttyRemoteTerminalTrace("input_readiness_publish value=\(isReady ? 1 : 0)")
             onInputReadinessChanged?(isReady)
         }
 

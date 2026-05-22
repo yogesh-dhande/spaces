@@ -28,6 +28,7 @@ spaces_db_path=""
 spaces_runtime_dir=""
 project_dir=""
 session_id=""
+secondary_session_id=""
 ipad_udid=""
 iphone_udid=""
 app_log=""
@@ -278,7 +279,7 @@ raise SystemExit(f"bridge port not ready: {last_error}")
 PY
 }
 
-discover_session_id() {
+discover_session_ids() {
   python3 - "$spaces_runtime_dir" "$temp_root" <<'PY'
 import pathlib
 import sys
@@ -289,11 +290,20 @@ sessions_root = runtime_root / "terminal" / "sessions"
 if not sessions_root.exists():
     sessions_root = legacy_root / "terminal" / "sessions"
 if not sessions_root.exists():
-    print("")
     raise SystemExit(0)
 ids = sorted([path.name for path in sessions_root.iterdir() if path.is_dir()])
-print(ids[-1] if ids else "")
+for session_id in ids:
+    print(session_id)
 PY
+}
+
+load_discovered_session_ids() {
+  discovered_session_ids=()
+  while IFS= read -r discovered_session_id; do
+    if [[ -n "$discovered_session_id" ]]; then
+      discovered_session_ids+=("$discovered_session_id")
+    fi
+  done < <(discover_session_ids)
 }
 
 discover_workspace_running_state() {
@@ -435,7 +445,7 @@ PY
 }
 
 print_summary() {
-  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$performance_log_path" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
+  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$session_id" "$secondary_session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$performance_log_path" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
 import json
 import sys
 
@@ -444,6 +454,7 @@ import sys
     app_pid,
     bridge_pid,
     session_id,
+    secondary_session_id,
     db_path,
     project_dir,
     app_log,
@@ -471,6 +482,8 @@ payload = {
     "bridgeHost": bridge_host,
     "bridgePort": int(bridge_port),
     "sessionID": session_id,
+    "secondarySessionID": secondary_session_id or None,
+    "sessionIDs": [value for value in (session_id, secondary_session_id) if value],
     "workspaceTitle": workspace_title,
     "dbPath": db_path,
     "projectDir": project_dir,
@@ -504,6 +517,7 @@ export SPACES_DB_PATH=$(printf '%q' "$spaces_db_path")
 export SPACES_RUNTIME_DIR=$(printf '%q' "$spaces_runtime_dir")
 export SPACES_DEMO_ROOT=$(printf '%q' "$temp_root")
 export SPACES_DEMO_SESSION_ID=$(printf '%q' "$session_id")
+export SPACES_DEMO_SECONDARY_SESSION_ID=$(printf '%q' "$secondary_session_id")
 export SPACES_DEMO_PROJECT_DIR=$(printf '%q' "$project_dir")
 export SPACES_DEMO_IPAD_UDID=$(printf '%q' "$ipad_udid")
 export SPACES_DEMO_IPHONE_UDID=$(printf '%q' "$iphone_udid")
@@ -519,12 +533,24 @@ spaces_demo_tail() {
   "\$SPACES_CLI" terminal tail "\$SPACES_DEMO_SESSION_ID"
 }
 
+spaces_demo_tail_secondary() {
+  "\$SPACES_CLI" terminal tail "\$SPACES_DEMO_SECONDARY_SESSION_ID"
+}
+
 spaces_demo_send() {
   "\$SPACES_CLI" terminal send "\$SPACES_DEMO_SESSION_ID" "\$@"
 }
 
+spaces_demo_send_secondary() {
+  "\$SPACES_CLI" terminal send "\$SPACES_DEMO_SECONDARY_SESSION_ID" "\$@"
+}
+
 spaces_demo_sendline() {
   "\$SPACES_CLI" terminal send "\$SPACES_DEMO_SESSION_ID" "\$1" --newline
+}
+
+spaces_demo_sendline_secondary() {
+  "\$SPACES_CLI" terminal send "\$SPACES_DEMO_SECONDARY_SESSION_ID" "\$1" --newline
 }
 
 spaces_demo_enter() {
@@ -632,10 +658,12 @@ run_demo_env \
 
 workspace_open_payload="$(open_demo_workspace_terminal)"
 workspace_id="$(extract_workspace_id "$workspace_open_payload")"
+discovered_session_ids=()
 for attempt in $(seq 1 3); do
   for _ in $(seq 1 20); do
-    session_id="$(discover_session_id)"
-    if [[ -n "$session_id" ]]; then
+    load_discovered_session_ids
+    if [[ ${#discovered_session_ids[@]} -ge 1 ]]; then
+      session_id="${discovered_session_ids[0]}"
       break 2
     fi
     if [[ -n "$workspace_id" ]] && [[ "$(discover_workspace_running_state "$workspace_id")" == "1" ]]; then
@@ -651,7 +679,36 @@ for attempt in $(seq 1 3); do
 done
 
 if [[ -z "$session_id" ]]; then
-  echo "Failed to discover terminal session." >&2
+  echo "Failed to discover the primary terminal session." >&2
+  exit 1
+fi
+
+for attempt in $(seq 1 3); do
+  workspace_open_payload="$(open_demo_workspace_terminal)"
+  workspace_id="$(extract_workspace_id "$workspace_open_payload")"
+  for _ in $(seq 1 20); do
+    load_discovered_session_ids
+    if [[ ${#discovered_session_ids[@]} -ge 2 ]]; then
+      for candidate_session_id in "${discovered_session_ids[@]}"; do
+        if [[ "$candidate_session_id" != "$session_id" ]]; then
+          secondary_session_id="$candidate_session_id"
+          break
+        fi
+      done
+      if [[ -n "$secondary_session_id" ]]; then
+        break 2
+      fi
+    fi
+    if [[ -n "$workspace_id" ]] && [[ "$(discover_workspace_running_state "$workspace_id")" == "1" ]]; then
+      sleep 1
+      continue
+    fi
+    sleep 1
+  done
+done
+
+if [[ -z "$secondary_session_id" ]]; then
+  echo "Failed to discover the secondary terminal session." >&2
   exit 1
 fi
 
@@ -705,11 +762,14 @@ echo "Manual demo env: $demo_env_prefix"
 echo "Helper shell: source $manual_shell_path"
 printf 'List sessions: %s %q terminal list\n' "$demo_env_prefix" "$spaces_cli"
 printf 'Mac retakeover: %s %q terminal show %q\n' "$demo_env_prefix" "$spaces_cli" "$session_id"
+printf 'Secondary session tail: %s %q terminal tail %q\n' "$demo_env_prefix" "$spaces_cli" "$secondary_session_id"
 printf 'Workspace terminal reopen: %s %q open-workspace-terminal --workspace-dir %q\n' "$demo_env_prefix" "$spacese2e" "$project_dir"
 echo "Helper commands after sourcing:"
 echo "  spaces_demo_list"
 echo "  spaces_demo_tail"
+echo "  spaces_demo_tail_secondary"
 echo "  spaces_demo_sendline 'pwd'"
+echo "  spaces_demo_sendline_secondary 'pwd'"
 echo "  spaces_demo_mac_takeover"
 echo "  spaces_demo_reopen"
 echo "  spaces_demo_tail_mac_log"

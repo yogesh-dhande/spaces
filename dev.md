@@ -202,7 +202,7 @@ For a disposable one-command demo stack that launches the macOS app, starts `spa
 apps/macos/Tests/run_mobile_terminal_demo.sh
 ```
 
-The launcher expects the debug macOS binaries and the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds a fresh simulator `SpacesMobile.app` into a disposable DerivedData directory under the demo temp root, then installs that same app bundle on both the iPad and iPhone simulators. It refuses to start if another `SpacesApp` instance or bridge listener is already running so the global hotkey and mobile port stay unambiguous. It prints the disposable temp root, PIDs, logs, screenshots, session ID, iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
+The launcher expects the debug macOS binaries and the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds a fresh simulator `SpacesMobile.app` into a disposable DerivedData directory under the demo temp root, then installs that same app bundle on both the iPad and iPhone simulators. It provisions two live workspace terminal sessions before launching the mobile clients so list-navigation and second-session takeover flows can be reproduced without extra manual setup. It refuses to start if another `SpacesApp` instance or bridge listener is already running so the global hotkey and mobile port stay unambiguous. It prints the disposable temp root, PIDs, logs, screenshots, both terminal session IDs, the iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
 The same demo root also contains `mobile-terminal-performance.jsonl`, and the printed JSON includes its `performanceLogPath`. The standalone takeover wrappers consume that file directly when they assert one bootstrap epoch, first render timing, input-ready timing, and scrollback history seeding behavior.
 
 Useful overrides:
@@ -233,6 +233,14 @@ apps/macos/Tests/e2e_terminal_mobile_scrollback_standalone.sh
 ```
 
 That wrapper launches the same disposable demo stack, fills the Mac-owned terminal with long output, transfers ownership to the standalone iPad app, scrolls away from bottom, runs an owner command while still scrolled up, and then asserts that the first owner epoch stayed singular, the viewport remained off the bottom, and the owner render never produced a stray prompt-only `%` row.
+
+For the dedicated two-session iPad takeover regression, use:
+
+```bash
+apps/macos/Tests/e2e_terminal_mobile_two_session_standalone.sh
+```
+
+That wrapper launches the same two-session demo stack, takes over the primary terminal on iPad, returns to the list, and then takes over the secondary terminal in the same app session so the multi-session dismissal and relaunch path stays covered.
 
 For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
 

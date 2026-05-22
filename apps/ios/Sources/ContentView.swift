@@ -5,6 +5,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedSession: SpacesMobileTerminalSessionSummary?
     @State private var pendingAuthenticationMessage: String?
+    @State private var terminalListRefreshGeneration = 0
     let model: SpacesMobileAppModel
 
     var body: some View {
@@ -14,23 +15,25 @@ struct ContentView: View {
                 .toolbar {
                     toolbarContent
                 }
+                .navigationDestination(isPresented: selectedSessionPresentationBinding) {
+                    if let selectedSession {
+                        TerminalDetailView(
+                            session: selectedSession,
+                            settings: model.settings,
+                            onAuthenticationRequired: { message in
+                                pendingAuthenticationMessage = message
+                                self.selectedSession = nil
+                            }
+                        ) {
+                            self.selectedSession = nil
+                        }
+                    }
+                }
         }
         .sheet(isPresented: connectionSettingsBinding) {
             ConnectionSettingsView(initialSettings: model.settings, noticeMessage: model.connectionNotice) { settings in
                 model.applyConnectionSettings(settings)
                 Task { await model.refresh() }
-            }
-        }
-        .fullScreenCover(item: selectedSessionBinding) { session in
-            TerminalDetailView(
-                session: session,
-                settings: model.settings,
-                onAuthenticationRequired: { message in
-                    pendingAuthenticationMessage = message
-                    selectedSession = nil
-                }
-            ) {
-                selectedSession = nil
             }
         }
         .alert(
@@ -41,7 +44,7 @@ struct ContentView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
-        .task(id: scenePhase) {
+        .task(id: refreshLoopTaskID) {
             guard scenePhase == .active else { return }
             if model.overview == nil {
                 if !model.settings.isPaired {
@@ -49,16 +52,19 @@ struct ContentView: View {
                     return
                 }
             }
+            guard !model.isShowingConnectionSettings, selectedSession == nil else { return }
             await model.refresh()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled else { return }
-                if !model.isShowingConnectionSettings, selectedSession == nil {
-                    await model.refresh()
-                }
+                guard scenePhase == .active, !model.isShowingConnectionSettings, selectedSession == nil else { return }
+                await model.refresh()
             }
         }
-        .onChange(of: selectedSession?.id) { _, newValue in
+        .onChange(of: selectedSession?.id) { oldValue, newValue in
+            if oldValue != nil, newValue == nil {
+                handleTerminalDismissal()
+            }
             guard newValue == nil, let message = pendingAuthenticationMessage else { return }
             pendingAuthenticationMessage = nil
             Task { @MainActor in
@@ -87,6 +93,26 @@ struct ContentView: View {
             get: { selectedSession },
             set: { selectedSession = $0 }
         )
+    }
+
+    private var selectedSessionPresentationBinding: Binding<Bool> {
+        Binding(
+            get: { selectedSession != nil },
+            set: { isPresented in
+                if !isPresented {
+                    selectedSession = nil
+                }
+            }
+        )
+    }
+
+    private var refreshLoopTaskID: String {
+        [
+            scenePhase == .active ? "active" : "inactive",
+            model.isShowingConnectionSettings ? "settings" : "home",
+            selectedSession?.id ?? "list",
+            "\(terminalListRefreshGeneration)",
+        ].joined(separator: "|")
     }
 
     private var terminalHomeView: some View {
@@ -129,12 +155,18 @@ struct ContentView: View {
                         }
                     }
                 }
+                .id(terminalListRefreshGeneration)
                 .listStyle(.insetGrouped)
                 .refreshable {
                     await model.refresh()
                 }
             }
         }
+    }
+
+    private func handleTerminalDismissal() {
+        terminalListRefreshGeneration += 1
+        Task { await model.refresh() }
     }
 
     @ToolbarContentBuilder private var toolbarContent: some ToolbarContent {
