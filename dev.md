@@ -203,6 +203,7 @@ apps/macos/Tests/run_mobile_terminal_demo.sh
 ```
 
 The launcher expects the debug macOS binaries and the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds a fresh simulator `SpacesMobile.app` into a disposable DerivedData directory under the demo temp root, then installs that same app bundle on both the iPad and iPhone simulators. It refuses to start if another `SpacesApp` instance or bridge listener is already running so the global hotkey and mobile port stay unambiguous. It prints the disposable temp root, PIDs, logs, screenshots, session ID, iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
+The same demo root also contains `mobile-terminal-performance.jsonl`, and the printed JSON includes its `performanceLogPath`. The standalone takeover wrappers consume that file directly when they assert one bootstrap epoch, first render timing, input-ready timing, and scrollback history seeding behavior.
 
 Useful overrides:
 - `SPACES_MOBILE_DEMO_KEEP_ROOT=1` keeps the temp root after shutdown for log inspection.
@@ -225,23 +226,33 @@ apps/macos/Tests/e2e_terminal_mobile_roundtrip_standalone.sh
 
 That wrapper launches the disposable demo stack, seeds terminal output on the Mac-owned session, drives two iPad-owned commands through the mobile app, retakes ownership on Mac, hands it back to iPad twice, and then finishes on Mac again. It preserves the demo root on failure so the render dumps, event log, screenshots, and UI test log stay available for triage.
 
+For the standalone long-output scrollback regression after iPad takeover, use:
+
+```bash
+apps/macos/Tests/e2e_terminal_mobile_scrollback_standalone.sh
+```
+
+That wrapper launches the same disposable demo stack, fills the Mac-owned terminal with long output, transfers ownership to the standalone iPad app, scrolls away from bottom, runs an owner command while still scrolled up, and then asserts that the first owner epoch stayed singular, the viewport remained off the bottom, and the owner render never produced a stray prompt-only `%` row.
+
 For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
 
 ```bash
 apps/macos/Tests/profile_built_in_terminal_stress.sh
 ```
 
-That profiler runs three isolated scenarios against the embedded Ghostty backend:
+That profiler runs four isolated scenarios against the embedded Ghostty backend:
 - `lines`: high-volume append-only output
 - `repaint`: full-screen ANSI clears and redraws
 - `mixed`: status repaints plus ordered line emission
+- `codex_churn`: long scrollback history plus Codex-style prompt, transcript, spinner, footer rewrite, cursor-move, and redraw churn
 
-Each scenario verifies ordered `SEQ` markers in `output.log`, records repeated `spaces terminal tail` wall times, and summarizes terminal metrics such as:
+`codex_churn` is the primary large-churn regression scenario for the built-in terminal path. Each scenario verifies ordered `SEQ` markers in `output.log`, checks the final frame and final `tail` view, records repeated `spaces terminal tail` wall times, samples output-log growth during the run, and summarizes terminal metrics such as:
 - `terminal_output_write`
 - `terminal_surface_refresh`
 - `terminal_tail_read`
 
 The stress summary prints per-scenario `tail_min`, `tail_median`, `tail_avg`, `tail_p95`, and `tail_max` values so one slow sample does not hide the typical case.
+It also prints output-growth summaries from the sampled `output.log` sizes so redraw-heavy regressions show whether tail latency is drifting while the transcript is still growing.
 It also records CLI-side tail metrics for each scenario:
 - `terminal_tail_read`
 - `terminal_tail_command`
@@ -254,7 +265,8 @@ For longer-running stability sampling of the same built-in terminal path:
 DURATION_SECONDS=300 apps/macos/Tests/soak_built_in_terminal.sh
 ```
 
-That soak harness runs a repaint-heavy mixed workload for the configured duration, samples `SpacesApp` RSS, CPU, output growth, and `terminal tail` latency at a fixed interval, then verifies that the emitted sequence numbers and final frame count stayed complete.
+That soak harness supports `SOAK_MODE=repaint`, `SOAK_MODE=mixed`, and `SOAK_MODE=codex_churn` with `SOAK_MODE=codex` kept as an alias. The Codex-style mode adds a large initial scrollback history before the steady redraw workload so late-phase transcript pressure looks closer to real long-running Codex sessions.
+The soak summary samples `SpacesApp` RSS, CPU, output growth, and `terminal tail` latency at a fixed interval, reports early-vs-late tail drift, verifies that the emitted sequence numbers and final frame stayed complete, and confirms that the final `spaces terminal tail` output still shows the terminal footer and expected last frame after the long run.
 
 For repeatable profiling of the app-triggered built-in workspace-terminal open path:
 

@@ -255,7 +255,7 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
     private func handleStateRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
         guard let sessionID = request.sessionID else { return SpacesMobileBridgeResponse(ok: false, message: "Missing session ID.") }
         let startedAt = Date()
-        let payload = try loadCurrentState(sessionID: sessionID)
+        let payload = try loadCurrentState(sessionID: sessionID, includeOutputHistory: request.includeOutputHistory)
         TerminalPerformance.logMetric(
             "mobile_bridge_state", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
         return SpacesMobileBridgeResponse(ok: true, message: "Loaded terminal state.", sessionState: payload)
@@ -371,8 +371,9 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
         return address
     }
 
-    private func loadCurrentState(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
+    private func loadCurrentState(sessionID: String, includeOutputHistory: Bool) throws -> GhosttyRemoteSessionStatePayload {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        if includeOutputHistory { return try loadCurrentStateWithOutputHistory(sessionID: sessionID, paths: paths) }
         guard FileManager.default.fileExists(atPath: paths.subscriptionSocketPath) else {
             throw NSError(
                 domain: "SpacesMobileBridgeServer", code: 404,
@@ -407,6 +408,27 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
                 userInfo: [NSLocalizedDescriptionKey: "Terminal session '\(sessionID)' did not return a state payload."])
         }
         return try GhosttyRemoteSessionStateCodec.decodeLine(data)
+    }
+
+    private func loadCurrentStateWithOutputHistory(sessionID: String, paths: TerminalSessionPaths) throws -> GhosttyRemoteSessionStatePayload {
+        let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
+        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+        let outputURL = URL(fileURLWithPath: paths.outputPath)
+        let outputData = try? Data(contentsOf: outputURL, options: [.mappedIfSafe])
+
+        guard runtimeState != nil || launchConfiguration != nil else {
+            throw NSError(
+                domain: "SpacesMobileBridgeServer", code: 404,
+                userInfo: [NSLocalizedDescriptionKey: "Terminal session '\(sessionID)' has no persisted state."])
+        }
+
+        return GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: "history_seed", emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()),
+            sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtimeState,
+            attachmentSnapshot: attachmentSnapshot, title: runtimeState?.title ?? launchConfiguration?.title ?? sessionID,
+            workingDirectory: runtimeState?.workingDirectory ?? launchConfiguration?.workingDirectory ?? "", snapshot: nil, snapshotText: nil,
+            transcriptTail: nil, outputByteCount: outputData?.count, outputData: outputData)
     }
 
     private func writeResponse(_ response: SpacesMobileBridgeResponse, to fileDescriptor: Int32) throws {

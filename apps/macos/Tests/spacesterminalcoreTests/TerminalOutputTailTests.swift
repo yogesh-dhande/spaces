@@ -108,4 +108,30 @@ final class TerminalOutputTailTests: XCTestCase {
 
         XCTAssertEqual(tailed, "EFGH\nIJ")
     }
+
+    func testStableTranscriptCollapsesPromptEOLMarkArtifactIntoPromptLine() throws {
+        let transcript = try TerminalOutputTail.stableTranscript(from: promptEOLMarkFixtureOutput(), columns: 80, rows: 24)
+
+        XCTAssertTrue(transcript.localizedStandardContains("Last login: Thu May 21 20:43:12 on ttys109"), transcript)
+        XCTAssertTrue(transcript.localizedStandardContains("Using Node v24.11.1"), transcript)
+        XCTAssertTrue(transcript.localizedStandardContains("shell % python3 /tmp/fixture.py --mode lines"), transcript)
+        XCTAssertFalse(
+            transcript.split(separator: "\n").contains { line in String(line).trimmingCharacters(in: .whitespacesAndNewlines) == "%" }, transcript)
+    }
+
+    private func promptEOLMarkFixtureOutput() -> Data {
+        let eolMark =
+            "\u{001B}[1m\u{001B}[7m%\u{001B}[27m\u{001B}[1m\u{001B}[0m" + String(repeating: " ", count: 96)
+            + "\r \r\r\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J"
+        let output = """
+            Last login: Thu May 21 20:43:12 on ttys109\r
+            Using Node \u{001B}[36mv24.11.1\u{001B}[0m\r
+            \(eolMark)shell % \u{001B}[K\u{001B}[?2004hpython3 /tmp/fixture.py --mode lines\r
+            FIXTURE_START mode=lines\r
+            SEQ 00000001 example-scrollback-line\r
+            FIXTURE_DONE mode=lines emitted=1\r
+            shell % 
+            """
+        return Data(output.utf8)
+    }
 }

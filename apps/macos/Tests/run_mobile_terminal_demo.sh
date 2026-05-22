@@ -44,6 +44,7 @@ iphone_app_stderr_log=""
 manual_shell_path=""
 ipad_launch_pid=""
 iphone_launch_pid=""
+performance_log_path=""
 
 run_demo_env() {
   env \
@@ -234,6 +235,7 @@ launch_simulator_app() {
   local stderr_log="$3"
 
   env SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
+    SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$performance_log_path" \
     xcrun simctl launch --console-pty "$udid" "$bundle_id" \
     >"$stdout_log" 2>"$stderr_log" </dev/null &
   echo $!
@@ -433,7 +435,7 @@ PY
 }
 
 print_summary() {
-  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
+  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$performance_log_path" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
 import json
 import sys
 
@@ -446,6 +448,7 @@ import sys
     project_dir,
     app_log,
     bridge_log,
+    performance_log_path,
     ipad_screenshot,
     iphone_screenshot,
     ipad_udid,
@@ -473,6 +476,7 @@ payload = {
     "projectDir": project_dir,
     "appLog": app_log,
     "bridgeLog": bridge_log,
+    "performanceLogPath": performance_log_path,
     "iosAppPath": ios_app_path,
     "ipadSimulatorUDID": ipad_udid,
     "iphoneSimulatorUDID": iphone_udid,
@@ -505,6 +509,7 @@ export SPACES_DEMO_IPAD_UDID=$(printf '%q' "$ipad_udid")
 export SPACES_DEMO_IPHONE_UDID=$(printf '%q' "$iphone_udid")
 export SPACES_CLI=$(printf '%q' "$spaces_cli")
 export SPACES_E2E=$(printf '%q' "$spacese2e")
+export SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH=$(printf '%q' "$performance_log_path")
 
 spaces_demo_list() {
   "\$SPACES_CLI" terminal list
@@ -563,6 +568,7 @@ spaces_runtime_dir="$temp_root/runtime"
 project_dir="$temp_root/project"
 app_log="$temp_root/app.log"
 bridge_log="$temp_root/bridge.log"
+performance_log_path="$temp_root/mobile-terminal-performance.jsonl"
 ipad_screenshot="$temp_root/ipad.png"
 iphone_screenshot="$temp_root/iphone.png"
 ipad_app_stdout_log="$temp_root/ipad-app.stdout.log"
@@ -608,6 +614,7 @@ run_demo_env \
   SPACES_GHOSTTYKIT_XCFRAMEWORK="$ghostty_xcframework" \
   SPACES_GHOSTTY_RESOURCES_DIR="$ghostty_resources" \
   SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
+  SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$performance_log_path" \
   "$spaces_app" >"$app_log" 2>&1 &
 app_pid=$!
 wait_for_pid "$app_pid" "SpacesApp"
@@ -654,6 +661,7 @@ run_demo_env \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACES_MOBILE_BRIDGE_TRACE="$demo_trace" \
   SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
+  SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$performance_log_path" \
   "$spaces_cli" mobile serve --host "$bridge_host" --port "$bridge_port" --pairing-code "$pairing_code" >"$bridge_log" 2>&1 &
 bridge_pid=$!
 wait_for_bridge_port

@@ -120,12 +120,13 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
     public let key: String?
     public let columns: Int?
     public let rows: Int?
+    public let includeOutputHistory: Bool
     public let appendNewline: Bool
 
     public init(
         command: String, authToken: String? = nil, pairingCode: String? = nil, clientApp: SpacesMobileClientApp? = nil, sessionID: String? = nil,
         clientID: String? = nil, client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil, text: String? = nil,
-        key: String? = nil, columns: Int? = nil, rows: Int? = nil, appendNewline: Bool = false
+        key: String? = nil, columns: Int? = nil, rows: Int? = nil, includeOutputHistory: Bool = false, appendNewline: Bool = false
     ) {
         self.command = command
         self.authToken = authToken
@@ -139,6 +140,7 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         self.key = key
         self.columns = columns
         self.rows = rows
+        self.includeOutputHistory = includeOutputHistory
         self.appendNewline = appendNewline
     }
 
@@ -155,6 +157,7 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         case key
         case columns
         case rows
+        case includeOutputHistory
         case appendNewline
     }
 
@@ -172,6 +175,7 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         key = try container.decodeIfPresent(String.self, forKey: .key)
         columns = try container.decodeIfPresent(Int.self, forKey: .columns)
         rows = try container.decodeIfPresent(Int.self, forKey: .rows)
+        includeOutputHistory = try container.decodeIfPresent(Bool.self, forKey: .includeOutputHistory) ?? false
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
     }
 
@@ -189,6 +193,7 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(key, forKey: .key)
         try container.encodeIfPresent(columns, forKey: .columns)
         try container.encodeIfPresent(rows, forKey: .rows)
+        try container.encode(includeOutputHistory, forKey: .includeOutputHistory)
         try container.encode(appendNewline, forKey: .appendNewline)
     }
 }

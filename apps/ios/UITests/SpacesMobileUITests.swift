@@ -150,14 +150,10 @@ final class SpacesMobileUITests: XCTestCase {
     private func performScrollback(in app: XCUIApplication, configuration: UITestConfiguration) {
         guard configuration.scrollbackSwipeCount > 0 else { return }
         focusTerminalSurface(in: app)
-        let e2eScrollRequestPath = configuration.eventLogPath.map { "\($0).scroll-request.json" }
-        let e2eScrollCoordinate = app.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.92))
+        let startCoordinate = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.88))
+        let endCoordinate = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.36))
         for _ in 0..<configuration.scrollbackSwipeCount {
-            if let e2eScrollRequestPath {
-                writeScrollRequest(path: e2eScrollRequestPath, vertical: -2400, repetitions: 24)
-            } else {
-                e2eScrollCoordinate.tap()
-            }
+            startCoordinate.press(forDuration: 0.05, thenDragTo: endCoordinate)
             RunLoop.current.run(until: Date().addingTimeInterval(1.2))
         }
     }
@@ -293,21 +289,6 @@ final class SpacesMobileUITests: XCTestCase {
         }
     }
 
-    private func writeScrollRequest(path: String, vertical: Double, repetitions: Int) {
-        let url = URL(fileURLWithPath: path)
-        let payload: [String: Any] = [
-            "id": UUID().uuidString,
-            "vertical": vertical,
-            "repetitions": repetitions,
-        ]
-        do {
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
-            try data.write(to: url, options: [.atomic])
-        } catch {
-            XCTFail("Failed writing E2E scroll request at \(path): \(error)")
-        }
-    }
 }
 
 private struct UITestConfiguration: Decodable {

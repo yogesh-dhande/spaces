@@ -13,6 +13,8 @@ DEMO_PORT="${SPACES_MOBILE_DEMO_PORT:-}"
 
 DEMO_STDOUT_LOG="$(mktemp "${TMPDIR:-/tmp}/spaces-mobile-codex-standalone.XXXXXX")"
 DEMO_PID=""
+APP_PID=""
+BRIDGE_PID=""
 DEMO_ROOT=""
 SESSION_ID=""
 BRIDGE_HOST=""
@@ -21,9 +23,18 @@ IPAD_UDID=""
 UI_TEST_CONFIG=""
 ACTIVE_UI_TEST_CONFIG=""
 UI_TEST_LOG=""
+TAKEOVER_STARTED_AT=""
 
 cleanup() {
   local exit_code=$?
+  if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" >/dev/null 2>&1; then
+    kill "$APP_PID" >/dev/null 2>&1 || true
+    wait "$APP_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$BRIDGE_PID" ]] && kill -0 "$BRIDGE_PID" >/dev/null 2>&1; then
+    kill "$BRIDGE_PID" >/dev/null 2>&1 || true
+    wait "$BRIDGE_PID" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$DEMO_PID" ]] && kill -0 "$DEMO_PID" >/dev/null 2>&1; then
     kill "$DEMO_PID" >/dev/null 2>&1 || true
     wait "$DEMO_PID" >/dev/null 2>&1 || true
@@ -35,7 +46,7 @@ cleanup() {
     if [[ "$REQUESTED_KEEP_ROOT" == "1" || $exit_code -ne 0 ]]; then
       printf 'Preserved demo root: %s\n' "$DEMO_ROOT" >&2
     else
-      rm -rf "$DEMO_ROOT"
+      rm -rf "$DEMO_ROOT" || true
     fi
   fi
 
@@ -111,6 +122,8 @@ while True:
     if isinstance(payload, dict) and payload.get("root") and payload.get("sessionID"):
         fields = {
             "DEMO_ROOT": payload["root"],
+            "APP_PID": str(payload["appPID"]),
+            "BRIDGE_PID": str(payload["bridgePID"]),
             "SESSION_ID": payload["sessionID"],
             "BRIDGE_HOST": payload["bridgeHost"],
             "BRIDGE_PORT": str(payload["bridgePort"]),
@@ -307,6 +320,12 @@ PY
 
 run_codex_standalone_ui_test() {
   printf 'Running standalone iPad takeover UI test...\n'
+  TAKEOVER_STARTED_AT="$(
+    python3 <<'PY'
+from datetime import datetime, timezone
+print(datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))
+PY
+  )"
   if ! SPACES_MOBILE_UI_TEST_CONFIG_PATH="$UI_TEST_CONFIG" \
     xcodebuild \
       -project apps/ios/SpacesMobile.xcodeproj \
@@ -368,8 +387,102 @@ SWIFT
   fi
 }
 
+assert_takeover_metrics() {
+  python3 - "$DEMO_ROOT" "$SESSION_ID" "$TAKEOVER_STARTED_AT" <<'PY'
+import json
+import sys
+from pathlib import Path
+from datetime import datetime, timezone
+
+demo_root = Path(sys.argv[1])
+session_id = sys.argv[2]
+takeover_started_at_raw = sys.argv[3]
+render_dump_path = demo_root / "codex-standalone-ipad-render.json"
+event_log_path = demo_root / "codex-standalone-ipad-events.jsonl"
+performance_log_path = demo_root / "mobile-terminal-performance.jsonl"
+
+def parse_timestamp(raw: str | None):
+    if not raw:
+        return None
+    normalized = raw.replace("Z", "+00:00")
+    return datetime.fromisoformat(normalized).astimezone(timezone.utc)
+
+render_dump = json.loads(render_dump_path.read_text())
+event_payloads = [
+    json.loads(line)
+    for line in event_log_path.read_text().splitlines()
+    if line.strip()
+]
+performance_events = []
+if performance_log_path.exists():
+    performance_events = [
+        json.loads(line)
+        for line in performance_log_path.read_text().splitlines()
+        if line.strip()
+    ]
+
+session_events = [
+    event for event in performance_events
+    if event.get("sessionID") == session_id
+]
+takeover_started_at = parse_timestamp(takeover_started_at_raw)
+
+if render_dump.get("renderMode") not in {"ownerBootstrapping", "ownerLive"}:
+    raise SystemExit(f"Unexpected render mode after takeover: {render_dump.get('renderMode')!r}")
+if not (render_dump.get("renderedText") or "").strip():
+    raise SystemExit("The standalone iPad render dump was blank after takeover.")
+if not render_dump.get("isInputSurfaceReady"):
+    raise SystemExit("The standalone iPad owner path never reached input-ready state.")
+if not any(event.get("kind") == "input_readiness" and event.get("detail") == "ready" for event in event_payloads):
+    raise SystemExit("The standalone iPad event log never recorded input readiness.")
+
+bootstrap_receipts = [event for event in session_events if event.get("name") == "owner_bootstrap_state_received"]
+local_bootstraps = [event for event in session_events if event.get("name") == "local_owner_bootstrap_begin"]
+first_nonblank = [event for event in session_events if event.get("name") == "owner_first_nonblank_render"]
+first_input_ready = [event for event in session_events if event.get("name") == "owner_first_input_ready"]
+initial_snapshot_exports = [
+    event for event in session_events
+    if event.get("name") == "snapshot_export_begin" and event.get("attributes", {}).get("reason") == "initial"
+    and (
+        takeover_started_at is None
+        or (
+            (event_time := parse_timestamp(event.get("emittedAt"))) is not None
+            and event_time >= takeover_started_at
+        )
+    )
+]
+post_ready_snapshot_exports = [
+    event for event in session_events
+    if event.get("name") == "snapshot_export_begin"
+    and event.get("attributes", {}).get("reason") in {"initial", "input", "input_output"}
+    and first_input_ready
+    and (
+        (event_time := parse_timestamp(event.get("emittedAt"))) is not None
+        and event_time > parse_timestamp(first_input_ready[0].get("emittedAt"))
+    )
+]
+
+if len(bootstrap_receipts) != 1:
+    raise SystemExit(f"Expected exactly one owner bootstrap receipt, found {len(bootstrap_receipts)}")
+if len(local_bootstraps) != 1:
+    raise SystemExit(f"Expected exactly one local owner bootstrap, found {len(local_bootstraps)}")
+if len(first_nonblank) != 1:
+    raise SystemExit(f"Expected exactly one first non-blank render event, found {len(first_nonblank)}")
+if len(first_input_ready) != 1:
+    raise SystemExit(f"Expected exactly one first input-ready event, found {len(first_input_ready)}")
+if len(initial_snapshot_exports) != 1:
+    raise SystemExit(f"Expected exactly one initial snapshot export, found {len(initial_snapshot_exports)}")
+if post_ready_snapshot_exports:
+    raise SystemExit(
+        "Found unexpected snapshot exports after takeover became interactive: "
+        + ", ".join(event.get("attributes", {}).get("reason", "?") for event in post_ready_snapshot_exports)
+    )
+PY
+}
+
 start_demo
 launch_codex_on_mac_owner
 write_ui_test_config
 run_codex_standalone_ui_test
 assert_ipad_terminal_text_rendered
+assert_takeover_metrics

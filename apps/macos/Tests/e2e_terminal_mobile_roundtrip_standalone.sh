@@ -14,6 +14,8 @@ DEMO_PORT="${SPACES_MOBILE_DEMO_PORT:-}"
 
 DEMO_STDOUT_LOG="$(mktemp "${TMPDIR:-/tmp}/spaces-mobile-roundtrip-standalone.XXXXXX")"
 DEMO_PID=""
+APP_PID=""
+BRIDGE_PID=""
 DEMO_ROOT=""
 SESSION_ID=""
 BRIDGE_HOST=""
@@ -25,6 +27,14 @@ UI_TEST_LOG=""
 
 cleanup() {
   local exit_code=$?
+  if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" >/dev/null 2>&1; then
+    kill "$APP_PID" >/dev/null 2>&1 || true
+    wait "$APP_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$BRIDGE_PID" ]] && kill -0 "$BRIDGE_PID" >/dev/null 2>&1; then
+    kill "$BRIDGE_PID" >/dev/null 2>&1 || true
+    wait "$BRIDGE_PID" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$DEMO_PID" ]] && kill -0 "$DEMO_PID" >/dev/null 2>&1; then
     kill "$DEMO_PID" >/dev/null 2>&1 || true
     wait "$DEMO_PID" >/dev/null 2>&1 || true
@@ -36,7 +46,7 @@ cleanup() {
     if [[ "$REQUESTED_KEEP_ROOT" == "1" || $exit_code -ne 0 ]]; then
       printf 'Preserved demo root: %s\n' "$DEMO_ROOT" >&2
     else
-      rm -rf "$DEMO_ROOT"
+      rm -rf "$DEMO_ROOT" || true
     fi
   fi
 
@@ -112,6 +122,8 @@ while True:
     if isinstance(payload, dict) and payload.get("root") and payload.get("sessionID"):
         fields = {
             "DEMO_ROOT": payload["root"],
+            "APP_PID": str(payload["appPID"]),
+            "BRIDGE_PID": str(payload["bridgePID"]),
             "SESSION_ID": payload["sessionID"],
             "BRIDGE_HOST": payload["bridgeHost"],
             "BRIDGE_PORT": str(payload["bridgePort"]),
@@ -404,6 +416,9 @@ def normalize_terminal_text(text: str) -> str:
         normalized.pop()
     return "\n".join(normalized)
 
+def contains_command_output(text: str, command_text: str, output_text: str) -> bool:
+    return f"% {command_text}" in text and f"\n{output_text}\n" in text
+
 def assert_exact_terminal_text(label: str, text: str, expected: str) -> None:
     normalized_actual = normalize_terminal_text(text)
     normalized_expected = normalize_terminal_text(expected)
@@ -541,8 +556,7 @@ with ui_test_log.open("w") as ui_test_output:
             lambda payload: (
                 payload.get("sessionID") == session_id
                 and payload.get("isOwner") is True
-                and f"% {ios_first_command}" in (payload.get("renderedText") or "")
-                and ios_first_output in (payload.get("renderedText") or "")
+                and contains_command_output(payload.get("renderedText") or "", ios_first_command, ios_first_output)
             ),
             timeout=20,
             process=ui_test_process,
@@ -558,8 +572,7 @@ with ui_test_log.open("w") as ui_test_output:
             lambda payload: (
                 payload.get("sessionID") == session_id
                 and payload.get("isOwner") is True
-                and f"% {ios_second_command}" in (payload.get("renderedText") or "")
-                and ios_second_output in (payload.get("renderedText") or "")
+                and contains_command_output(payload.get("renderedText") or "", ios_second_command, ios_second_output)
             ),
             timeout=20,
             process=ui_test_process,

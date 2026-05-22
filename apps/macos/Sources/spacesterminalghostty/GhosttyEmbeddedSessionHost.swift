@@ -242,7 +242,6 @@ extension Notification.Name {
     private var inputStateBroadcastScheduled = false
     private var pendingInputOutputResync = false
     private var inputOutputResyncWorkItem: DispatchWorkItem?
-    private var preferOutputResyncForNextInputActivity = false
 
     public init(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
@@ -508,7 +507,6 @@ extension Notification.Name {
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
             return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
         }
-        if key == "enter" { preferOutputResyncForNextInputActivity = true }
         rendererHostStorage.sendRawBytes(Data(bytes))
         TerminalPerformance.logMetric(
             "terminal_control_key", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
@@ -730,11 +728,6 @@ extension Notification.Name {
     }
 
     private func handleOwnerInputActivity() {
-        if preferOutputResyncForNextInputActivity {
-            preferOutputResyncForNextInputActivity = false
-            pendingInputOutputResync = true
-            return
-        }
         guard let ownerClient = activeOwnerClient() else { return }
         if ownerClient.kind == .localWindow {
             pendingInputOutputResync = true
@@ -822,12 +815,21 @@ extension Notification.Name {
 
     private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputData: Data? = nil) {
         let startedAt = Date()
+        let ownerClient = activeOwnerClient()
+        let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason, ownerKind: ownerClient?.kind)
         trace(
-            "broadcast_state_begin reason=\(reason) include_screen=\(Self.remoteStateShouldIncludeScreenState(reason: reason) ? 1 : 0) runtime=\(traceSize(observedSurfaceSize())) output_bytes=\(outputByteCount ?? 0)"
+            "broadcast_state_begin reason=\(reason) include_screen=\(includeScreenState ? 1 : 0) runtime=\(traceSize(observedSurfaceSize())) output_bytes=\(outputByteCount ?? 0)"
         )
         guard let stateStreamServer, let payload = currentRemoteSessionState(reason: reason, outputByteCount: outputByteCount, outputData: outputData)
         else { return }
         stateStreamServer.broadcast(payload)
+        let payloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(payload).count) ?? 0
+        logMobileTakeoverPerformance(
+            name: "remote_state_publish", count: payloadBytes,
+            attributes: [
+                "reason": reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "snapshot": payload.snapshot == nil ? "0" : "1",
+                "output_bytes": String(payload.outputData?.count ?? 0),
+            ])
         trace(
             "broadcast_state_end reason=\(reason) snapshot=\(payload.snapshot == nil ? 0 : 1) snapshot_text=\(payload.snapshotText == nil ? 0 : 1) runtime=\(traceSize(columns: payload.runtimeState?.columns, rows: payload.runtimeState?.rows))"
         )
@@ -842,23 +844,45 @@ extension Notification.Name {
     private func currentRemoteSessionState(reason: String, outputByteCount: Int?, outputData: Data? = nil) -> GhosttyRemoteSessionStatePayload? {
         let runtimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastPersistedRuntimeState
         let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
-        let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason)
-        let includeTranscriptTail = Self.remoteStateShouldIncludeTranscriptTail(reason: reason)
-        let bootstrapOutputData = outputData ?? initialRemoteOutputData(reason: reason)
+        let ownerClient = activeOwnerClient()
+        let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason, ownerKind: ownerClient?.kind)
+        let includeTranscriptTail = Self.remoteStateShouldIncludeTranscriptTail(reason: reason, runtimeState: runtimeState)
+        let bootstrapOutputData = outputData
         if includeScreenState {
+            let snapshotExportStartedAt = Date()
             trace(
                 "snapshot_export_begin reason=\(reason) runtime=\(traceSize(columns: runtimeState?.columns, rows: runtimeState?.rows)) owner=\(attachmentSnapshot?.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID ?? "nil")"
             )
-        }
-        let resolvedScreenState =
-            includeScreenState ? resolveRemoteScreenState(runtimeState: runtimeState) : (snapshot: nil, snapshotText: nil, source: "disabled")
-        let snapshot = resolvedScreenState.snapshot
-        let snapshotText = resolvedScreenState.snapshotText
-        if includeScreenState {
+            logMobileTakeoverPerformance(
+                name: "snapshot_export_begin",
+                attributes: [
+                    "reason": reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "runtime_columns": String(runtimeState?.columns ?? 0),
+                    "runtime_rows": String(runtimeState?.rows ?? 0),
+                ])
+            let resolvedScreenState = resolveRemoteScreenState(runtimeState: runtimeState)
+            let snapshot = resolvedScreenState.snapshot
+            let snapshotText = resolvedScreenState.snapshotText
             trace(
                 "snapshot_export_end reason=\(reason) snapshot=\(snapshot == nil ? 0 : 1) snapshot_text=\(snapshotText == nil ? 0 : 1) snapshot_size=\(traceSize(columns: snapshot?.columns, rows: snapshot?.rows)) source=\(resolvedScreenState.source)"
             )
+            logMobileTakeoverPerformance(
+                name: "snapshot_export_end", elapsedMS: TerminalPerformance.elapsedMS(since: snapshotExportStartedAt),
+                attributes: [
+                    "reason": reason, "source": resolvedScreenState.source, "snapshot": snapshot == nil ? "0" : "1",
+                    "snapshot_columns": String(snapshot?.columns ?? 0), "snapshot_rows": String(snapshot?.rows ?? 0),
+                ])
+            let transcriptTail =
+                includeTranscriptTail
+                ? ((try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: Self.remoteTranscriptLineCount)) ?? nil) : nil
+            return GhosttyRemoteSessionStatePayload(
+                sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()),
+                sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
+                screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
+                title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, snapshot: snapshot, snapshotText: snapshotText,
+                transcriptTail: transcriptTail, outputByteCount: outputByteCount ?? bootstrapOutputData?.count, outputData: bootstrapOutputData)
         }
+        let snapshot: GhosttyTerminalSnapshot? = nil
+        let snapshotText: String? = nil
         let transcriptTail =
             includeTranscriptTail ? ((try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: Self.remoteTranscriptLineCount)) ?? nil) : nil
         return GhosttyRemoteSessionStatePayload(
@@ -867,13 +891,6 @@ extension Notification.Name {
             screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, title: effectiveTitle,
             workingDirectory: effectiveWorkingDirectory, snapshot: snapshot, snapshotText: snapshotText, transcriptTail: transcriptTail,
             outputByteCount: outputByteCount ?? bootstrapOutputData?.count, outputData: bootstrapOutputData)
-    }
-
-    private func initialRemoteOutputData(reason: String) -> Data? {
-        guard reason == "initial" else { return nil }
-        let outputURL = URL(fileURLWithPath: paths.outputPath)
-        guard let outputData = try? Data(contentsOf: outputURL, options: [.mappedIfSafe]), !outputData.isEmpty else { return nil }
-        return outputData
     }
 
     private func resolveRemoteScreenState(runtimeState: TerminalSessionRuntimeState?) -> (
@@ -885,6 +902,9 @@ extension Notification.Name {
             return (snapshot: sessionSnapshot, snapshotText: sessionSnapshotText, source: "session")
         }
 
+        let isLiveRuntime = runtimeState?.state == .running || runtimeState?.state == .starting
+        guard !isLiveRuntime else { return (snapshot: nil, snapshotText: nil, source: "session_empty") }
+
         let fallbackSnapshot = remoteSnapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
         let fallbackSnapshotText =
             fallbackSnapshot == nil ? remoteSnapshotStream.snapshotText(columns: runtimeState?.columns, rows: runtimeState?.rows) : nil
@@ -895,9 +915,10 @@ extension Notification.Name {
         return (snapshot: nil, snapshotText: nil, source: "vt_stream_empty")
     }
 
-    static func remoteStateShouldIncludeScreenState(reason: String) -> Bool {
+    static func remoteStateShouldIncludeScreenState(reason: String, ownerKind: TerminalClientKind? = nil) -> Bool {
         switch reason {
-        case "initial", "input", "input_output", "terminated": true
+        case "initial", "terminated": true
+        case "input", "input_output": ownerKind != .remoteViewer
         default: false
         }
     }
@@ -911,10 +932,13 @@ extension Notification.Name {
         return snapshotText.contains(where: { !$0.isWhitespace && !$0.isNewline })
     }
 
-    private static func remoteStateShouldIncludeTranscriptTail(reason: String) -> Bool {
+    private static func remoteStateShouldIncludeTranscriptTail(reason: String, runtimeState: TerminalSessionRuntimeState?) -> Bool {
         switch reason {
-        case "initial", "terminated": true
-        default: false
+        case "terminated": return true
+        case "initial":
+            let state = runtimeState?.state
+            return state != .running && state != .starting
+        default: return false
         }
     }
 
@@ -937,6 +961,12 @@ extension Notification.Name {
     private func traceSize(columns: Int?, rows: Int?) -> String {
         guard let columns, let rows else { return "nil" }
         return "\(columns)x\(rows)"
+    }
+
+    private func logMobileTakeoverPerformance(name: String, elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String] = [:]) {
+        SpacesMobileTerminalPerformanceLogger.emit(
+            .init(
+                sessionID: launchConfiguration.sessionID, source: "mac-host", name: name, elapsedMS: elapsedMS, count: count, attributes: attributes))
     }
 }
 

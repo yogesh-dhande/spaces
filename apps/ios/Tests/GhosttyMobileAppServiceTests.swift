@@ -259,6 +259,60 @@
             window.isHidden = true
         }
 
+        func testRemoteTerminalHostViewDoesNotReplayAppliedOutputWhenQueueGrows() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            let snapshot = snapshot(columns: 12, rows: 2, text: "shell % ")
+            let firstBatch = GhosttyRemoteTerminalOutputBatch(id: "event-1", data: Data("!".utf8))
+            let secondBatch = GhosttyRemoteTerminalOutputBatch(id: "event-2", data: Data("?".utf8))
+
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session",
+                    id: "owner-epoch",
+                    bootstrapSnapshot: snapshot,
+                    pendingOutputs: [firstBatch]
+                ),
+                endedRender: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            let initialReplay = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let initialText = GhosttyTerminalSnapshotLayout.plainText(for: initialReplay)
+            XCTAssertTrue(initialText.localizedStandardContains("shell % !"), initialText)
+
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session",
+                    id: "owner-epoch",
+                    bootstrapSnapshot: snapshot,
+                    pendingOutputs: [firstBatch, secondBatch]
+                ),
+                endedRender: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            let replayed = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let replayedText = GhosttyTerminalSnapshotLayout.plainText(for: replayed)
+            XCTAssertTrue(replayedText.localizedStandardContains("shell % !?"), replayedText)
+            XCTAssertFalse(replayedText.localizedStandardContains("shell % !!?"), replayedText)
+
+            window.isHidden = true
+        }
+
         func testRemoteTerminalHostViewTearsDownSessionWhenRemovedFromWindow() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
@@ -775,57 +829,6 @@
             window.isHidden = true
         }
 
-        func testRemoteTerminalHostViewAppliesMultiStepScrollCommand() throws {
-            let window = UIWindow(frame: UIScreen.main.bounds)
-            let viewController = UIViewController()
-            window.rootViewController = viewController
-
-            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
-            viewController.view.addSubview(hostView)
-            window.isHidden = false
-            viewController.view.frame = window.bounds
-            hostView.frame = viewController.view.bounds
-            viewController.view.layoutIfNeeded()
-
-            hostView.update(
-                snapshot: sampleSnapshot(),
-                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                outputData: nil,
-                outputEventToken: nil,
-                fallbackText: "Waiting for terminal state…"
-            )
-
-            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
-
-            hostView.update(
-                snapshot: sampleSnapshot(),
-                replayStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                outputData: scrollbackFixtureOutput(lineCount: 220),
-                outputEventToken: "event-command-scroll",
-                fallbackText: "Waiting for terminal state…"
-            )
-
-            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
-
-            let bottomSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
-            let bottomText = GhosttyTerminalSnapshotLayout.plainText(for: bottomSnapshot)
-            XCTAssertTrue(bottomText.localizedStandardContains("SEQ 000219"), bottomText)
-
-            hostView.applyScrollCommandIfNeeded(
-                GhosttyRemoteTerminalScrollCommand(id: "multi-step-scroll", vertical: -2400, repetitions: 24)
-            )
-
-            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
-
-            let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
-            let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
-            XCTAssertNotEqual(scrolledText, bottomText)
-            XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
-            XCTAssertTrue(scrolledText.localizedStandardContains("SEQ 0001"), scrolledText)
-
-            window.isHidden = true
-        }
-
         private func terminalSurfaceLayer(in hostView: GhosttyRemoteTerminalHostView) -> CALayer? {
             hostView.layer.sublayers?.first(where: { layer in
                 abs(layer.frame.width - hostView.bounds.width) < 0.5
@@ -952,20 +955,31 @@
                     } else {
                         "owner|\(snapshotSignature(snapshot))"
                     }
-                let pendingOutput: GhosttyRemoteTerminalOutputBatch?
+                let pendingOutputs: [GhosttyRemoteTerminalOutputBatch]
                 if outputRepresentsFullHistory || outputData?.isEmpty != false {
-                    pendingOutput = nil
+                    pendingOutputs = []
                 } else {
-                    pendingOutput = GhosttyRemoteTerminalOutputBatch(id: outputEventToken ?? replayStateKey, data: outputData ?? Data())
+                    pendingOutputs = [GhosttyRemoteTerminalOutputBatch(id: outputEventToken ?? replayStateKey, data: outputData ?? Data())]
                 }
+                let historySeed: GhosttyRemoteTerminalOutputBatch? =
+                    if outputRepresentsFullHistory, let outputData, !outputData.isEmpty {
+                        GhosttyRemoteTerminalOutputBatch(id: outputEventToken ?? replayStateKey, data: outputData)
+                    } else {
+                        nil
+                    }
                 ownerEpoch = GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session",
                     id: epochID,
                     bootstrapSnapshot: snapshot,
-                    bootstrapOutputData: outputRepresentsFullHistory ? outputData : nil,
-                    pendingOutput: pendingOutput
+                    historySeed: historySeed,
+                    pendingOutputs: pendingOutputs
                 )
             } else {
                 ownerEpoch = nil
+            }
+            if outputRepresentsFullHistory {
+                setAcceptsTerminalInput(true)
+                _ = becomeFirstResponder()
             }
             update(ownerEpoch: ownerEpoch, endedRender: nil, fallbackText: fallbackText)
         }

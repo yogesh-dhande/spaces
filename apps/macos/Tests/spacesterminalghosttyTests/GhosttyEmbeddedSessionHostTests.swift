@@ -99,6 +99,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "runtime_state"))
     }
 
+    @MainActor func testRemoteOwnerInputStateSkipsLiveScreenSnapshotExport() {
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input", ownerKind: .remoteViewer))
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input_output", ownerKind: .remoteViewer))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input", ownerKind: .localWindow))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input_output", ownerKind: .localWindow))
+    }
+
     @MainActor func testRemoteScreenStateVisibleContentIgnoresBlankSnapshotsAndText() {
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: snapshot(text: "   \n  "), snapshotText: nil))
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: nil, snapshotText: " \n\t "))

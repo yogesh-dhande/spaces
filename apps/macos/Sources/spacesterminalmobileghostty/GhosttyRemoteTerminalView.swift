@@ -17,20 +17,6 @@ import Foundation
 
     private func ghosttyRemoteTerminalTraceSeconds() -> String { String(format: "%.3f", Date().timeIntervalSince1970) }
 
-    public struct GhosttyRemoteTerminalScrollCommand: Equatable {
-        public let id: String
-        public let horizontal: CGFloat
-        public let vertical: CGFloat
-        public let repetitions: Int
-
-        public init(id: String, horizontal: CGFloat = 0, vertical: CGFloat, repetitions: Int = 1) {
-            self.id = id
-            self.horizontal = horizontal
-            self.vertical = vertical
-            self.repetitions = max(repetitions, 1)
-        }
-    }
-
     public struct GhosttyRemoteTerminalOutputBatch: Equatable {
         public let id: String
         public let data: Data
@@ -42,19 +28,21 @@ import Foundation
     }
 
     public struct GhosttyRemoteTerminalOwnerEpoch: Equatable {
+        public let sessionID: String
         public let id: String
         public let bootstrapSnapshot: GhosttyTerminalSnapshot?
-        public let bootstrapOutputData: Data?
-        public let pendingOutput: GhosttyRemoteTerminalOutputBatch?
+        public let historySeed: GhosttyRemoteTerminalOutputBatch?
+        public let pendingOutputs: [GhosttyRemoteTerminalOutputBatch]
 
         public init(
-            id: String, bootstrapSnapshot: GhosttyTerminalSnapshot?, bootstrapOutputData: Data?,
-            pendingOutput: GhosttyRemoteTerminalOutputBatch? = nil
+            sessionID: String, id: String, bootstrapSnapshot: GhosttyTerminalSnapshot?, historySeed: GhosttyRemoteTerminalOutputBatch? = nil,
+            pendingOutputs: [GhosttyRemoteTerminalOutputBatch] = []
         ) {
+            self.sessionID = sessionID
             self.id = id
             self.bootstrapSnapshot = bootstrapSnapshot
-            self.bootstrapOutputData = bootstrapOutputData
-            self.pendingOutput = pendingOutput
+            self.historySeed = historySeed
+            self.pendingOutputs = pendingOutputs
         }
     }
 
@@ -71,37 +59,37 @@ import Foundation
     public struct GhosttyRemoteTerminalView: UIViewRepresentable {
         public let ownerEpoch: GhosttyRemoteTerminalOwnerEpoch?
         public let endedRender: GhosttyRemoteTerminalEndedRender?
-        public let scrollCommand: GhosttyRemoteTerminalScrollCommand?
         public let fallbackText: String
         public let isVisible: Bool
         public let acceptsInput: Bool
         public let isBusy: Bool
         public let onInputReadinessChanged: @MainActor (Bool) -> Void
         public let onOutputBatchApplied: (@MainActor (String) -> Void)?
-        public let onScrollCommandApplied: (@MainActor (GhosttyRemoteTerminalScrollCommand) -> Void)?
+        public let onHistorySeedApplied: (@MainActor (String) -> Void)?
+        public let onScrollGestureApplied: (@MainActor () -> Void)?
         public let onRenderedTextChanged: (@MainActor (String) -> Void)?
         public let onViewportSizeChanged: @MainActor (Int, Int) -> Void
         public let onSendText: @MainActor (String) -> Void
         public let onSendKey: @MainActor (String) -> Void
 
         public init(
-            ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil,
-            scrollCommand: GhosttyRemoteTerminalScrollCommand? = nil, fallbackText: String, isVisible: Bool, acceptsInput: Bool, isBusy: Bool,
-            onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in }, onOutputBatchApplied: (@MainActor (String) -> Void)? = nil,
-            onScrollCommandApplied: (@MainActor (GhosttyRemoteTerminalScrollCommand) -> Void)? = nil,
-            onRenderedTextChanged: (@MainActor (String) -> Void)? = nil, onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
-            onSendText: @escaping @MainActor (String) -> Void, onSendKey: @escaping @MainActor (String) -> Void
+            ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
+            isVisible: Bool, acceptsInput: Bool, isBusy: Bool, onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
+            onOutputBatchApplied: (@MainActor (String) -> Void)? = nil, onHistorySeedApplied: (@MainActor (String) -> Void)? = nil,
+            onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
+            onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void, onSendText: @escaping @MainActor (String) -> Void,
+            onSendKey: @escaping @MainActor (String) -> Void
         ) {
             self.ownerEpoch = ownerEpoch
             self.endedRender = endedRender
-            self.scrollCommand = scrollCommand
             self.fallbackText = fallbackText
             self.isVisible = isVisible
             self.acceptsInput = acceptsInput
             self.isBusy = isBusy
             self.onInputReadinessChanged = onInputReadinessChanged
             self.onOutputBatchApplied = onOutputBatchApplied
-            self.onScrollCommandApplied = onScrollCommandApplied
+            self.onHistorySeedApplied = onHistorySeedApplied
+            self.onScrollGestureApplied = onScrollGestureApplied
             self.onRenderedTextChanged = onRenderedTextChanged
             self.onViewportSizeChanged = onViewportSizeChanged
             self.onSendText = onSendText
@@ -117,10 +105,15 @@ import Foundation
             } else {
                 hostView.onOutputBatchApplied = nil
             }
-            if let onScrollCommandApplied {
-                hostView.onScrollCommandApplied = { command in Task { @MainActor in onScrollCommandApplied(command) } }
+            if let onHistorySeedApplied {
+                hostView.onHistorySeedApplied = { batchID in Task { @MainActor in onHistorySeedApplied(batchID) } }
             } else {
-                hostView.onScrollCommandApplied = nil
+                hostView.onHistorySeedApplied = nil
+            }
+            if let onScrollGestureApplied {
+                hostView.onScrollGestureApplied = { Task { @MainActor in onScrollGestureApplied() } }
+            } else {
+                hostView.onScrollGestureApplied = nil
             }
             hostView.onViewportSizeChanged = { columns, rows in Task { @MainActor in onViewportSizeChanged(columns, rows) } }
             hostView.onSendText = { text in Task { @MainActor in onSendText(text) } }
@@ -133,7 +126,6 @@ import Foundation
             hostView.setTerminalVisible(isVisible)
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
             hostView.update(ownerEpoch: ownerEpoch, endedRender: endedRender, fallbackText: fallbackText)
-            hostView.applyScrollCommandIfNeeded(scrollCommand)
         }
 
         public static func dismantleUIView(_ hostView: GhosttyRemoteTerminalHostView, coordinator: ()) { hostView.prepareForDismantle() }
@@ -144,12 +136,18 @@ import Foundation
         private static let defaultFontSize: Float = 13
         private static let contentInsets = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         private static let sessionResetSequence = Data("\u{001B}c".utf8)
+        private static let promptEOLMarkStartSequence = Data("\u{001B}[1m\u{001B}[7m%".utf8)
+        private static let promptEOLMarkEndSequence = Data("\r \r\r\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J".utf8)
         private var session: ghostty_session_t?
         private var activeOwnerEpoch: GhosttyRemoteTerminalOwnerEpoch?
         private var activeEndedRender: GhosttyRemoteTerminalEndedRender?
         private var lastAppliedOwnerEpochID: String?
-        private var lastAppliedOutputBatchID: String?
+        private var lastAppliedHistorySeedID: String?
+        private var appliedOutputBatchIDs: Set<String> = []
         private var lastAppliedEndedRenderID: String?
+        private var ownerBootstrapStartedAt: Date?
+        private var ownerBootstrapEpochID: String?
+        private var firstNonBlankOwnerEpochID: String?
         private var lastStaticRenderPixelSize = CGSize.zero
         private let fallbackLabel = UILabel()
         private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput))
@@ -159,13 +157,16 @@ import Foundation
         private var lastEmittedRenderedText: String?
         private var lastReportedInputReadiness = false
         private var postRefreshEmissionScheduled = false
+        private var scrollSettledEmissionGeneration: UInt64 = 0
+        private var scrollSettledEmissionTasks: [Task<Void, Never>] = []
+        private var didScrollDuringCurrentPan = false
         private var isTerminalVisible = true
-        private var lastAppliedScrollCommandID: String?
 
         public private(set) var acceptsTerminalInput = false
         public var onInputReadinessChanged: ((Bool) -> Void)? { didSet { publishCurrentInputReadiness() } }
         public var onOutputBatchApplied: ((String) -> Void)?
-        public var onScrollCommandApplied: ((GhosttyRemoteTerminalScrollCommand) -> Void)?
+        public var onHistorySeedApplied: ((String) -> Void)?
+        public var onScrollGestureApplied: (() -> Void)?
         public var onViewportSizeChanged: ((Int, Int) -> Void)?
         public var onSendText: ((String) -> Void)?
         public var onSendKey: ((String) -> Void)?
@@ -247,7 +248,7 @@ import Foundation
         public func update(ownerEpoch: GhosttyRemoteTerminalOwnerEpoch?, endedRender: GhosttyRemoteTerminalEndedRender?, fallbackText: String) {
             if window != nil { ensureSession() }
             ghosttyRemoteTerminalTrace(
-                "update owner_epoch=\(ownerEpoch?.id ?? "nil") ended=\(endedRender?.id ?? "nil") pending_output=\(ownerEpoch?.pendingOutput?.id ?? "nil")"
+                "update owner_epoch=\(ownerEpoch?.id ?? "nil") ended=\(endedRender?.id ?? "nil") pending_output_count=\(ownerEpoch?.pendingOutputs.count ?? 0) pending_output_last=\(ownerEpoch?.pendingOutputs.last?.id ?? "nil")"
             )
             fallbackLabel.text = ownerEpoch == nil && endedRender == nil ? fallbackText : nil
             fallbackLabel.isHidden = ownerEpoch != nil || endedRender != nil
@@ -330,6 +331,7 @@ import Foundation
             switch recognizer.state {
             case .began:
                 lastScrollTranslation = recognizer.translation(in: self)
+                didScrollDuringCurrentPan = false
                 _ = sendMousePosition(at: recognizer.location(in: self))
                 if acceptsTerminalInput { becomeFirstResponder() }
             case .changed:
@@ -338,11 +340,19 @@ import Foundation
                 let deltaY = translation.y - lastScrollTranslation.y
                 lastScrollTranslation = translation
                 guard abs(deltaX) > 0.5 || abs(deltaY) > 0.5 else { return }
+                didScrollDuringCurrentPan = true
+                applyHistorySeedIfNeededBeforeScroll()
                 _ = sendMousePosition(at: recognizer.location(in: self))
                 _ = sendScroll(
                     horizontal: -deltaX * 2, vertical: -deltaY * 2, mods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: recognizer.state)
                 )
-            default: lastScrollTranslation = .zero
+            default:
+                lastScrollTranslation = .zero
+                if didScrollDuringCurrentPan {
+                    scheduleScrollSettledEmissions()
+                    onScrollGestureApplied?()
+                }
+                didScrollDuringCurrentPan = false
             }
         }
 
@@ -433,11 +443,17 @@ import Foundation
             activeOwnerEpoch = nil
             activeEndedRender = nil
             lastAppliedOwnerEpochID = nil
-            lastAppliedOutputBatchID = nil
+            lastAppliedHistorySeedID = nil
+            appliedOutputBatchIDs.removeAll()
             lastAppliedEndedRenderID = nil
+            ownerBootstrapStartedAt = nil
+            ownerBootstrapEpochID = nil
+            firstNonBlankOwnerEpochID = nil
             lastStaticRenderPixelSize = .zero
             currentRenderedText = ""
             lastReportedInputReadiness = false
+            cancelScrollSettledEmissionTasks()
+            didScrollDuringCurrentPan = false
         }
 
         private func createSession(app: ghostty_app_t) -> ghostty_session_t? {
@@ -516,25 +532,6 @@ import Foundation
                 mods: Self.makeScrollMods(hasPreciseDeltas: hasPreciseDeltas, momentumState: momentumState))
         }
 
-        func applyScrollCommandIfNeeded(_ command: GhosttyRemoteTerminalScrollCommand?) {
-            guard let command else { return }
-            guard lastAppliedScrollCommandID != command.id else { return }
-            guard isTerminalVisible else { return }
-            guard session != nil else { return }
-            let commandLocation = CGPoint(x: bounds.midX, y: bounds.midY)
-            let stepHorizontal = command.horizontal / CGFloat(command.repetitions)
-            let stepVertical = command.vertical / CGFloat(command.repetitions)
-            _ = sendMousePosition(at: commandLocation)
-            _ = debugSendScrollForTesting(horizontal: 0, vertical: 0, location: commandLocation, hasPreciseDeltas: true, momentumState: .began)
-            for _ in 0..<command.repetitions {
-                _ = debugSendScrollForTesting(
-                    horizontal: stepHorizontal, vertical: stepVertical, location: commandLocation, hasPreciseDeltas: true, momentumState: .changed)
-            }
-            _ = debugSendScrollForTesting(horizontal: 0, vertical: 0, location: commandLocation, hasPreciseDeltas: true, momentumState: .ended)
-            lastAppliedScrollCommandID = command.id
-            onScrollCommandApplied?(command)
-        }
-
         private func requestSurfaceRefresh() {
             guard let session else { return }
             ghostty_session_refresh(session)
@@ -547,16 +544,39 @@ import Foundation
         private func schedulePostRefreshEmission() {
             guard !postRefreshEmissionScheduled else { return }
             postRefreshEmissionScheduled = true
-            DispatchQueue.main.async { [weak self] in
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    self.postRefreshEmissionScheduled = false
-                    GhosttyMobileAppService.shared.tick()
-                    self.refreshRenderedTextFromLiveSession()
-                    self.emitRenderedTextIfNeeded()
-                    self.reportInputReadinessIfNeeded()
-                }
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self else { return }
+                self.postRefreshEmissionScheduled = false
+                self.performRenderedTextEmissionPass()
             }
+        }
+
+        private func scheduleScrollSettledEmissions() {
+            scrollSettledEmissionGeneration &+= 1
+            let generation = scrollSettledEmissionGeneration
+            cancelScrollSettledEmissionTasks()
+            for delay in [Duration.milliseconds(60), .milliseconds(180), .milliseconds(320)] {
+                let task = Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: delay)
+                    guard let self else { return }
+                    guard !Task.isCancelled, self.scrollSettledEmissionGeneration == generation else { return }
+                    self.performRenderedTextEmissionPass()
+                }
+                scrollSettledEmissionTasks.append(task)
+            }
+        }
+
+        private func cancelScrollSettledEmissionTasks() {
+            scrollSettledEmissionTasks.forEach { $0.cancel() }
+            scrollSettledEmissionTasks.removeAll(keepingCapacity: false)
+        }
+
+        private func performRenderedTextEmissionPass() {
+            GhosttyMobileAppService.shared.tick()
+            refreshRenderedTextFromLiveSession()
+            emitRenderedTextIfNeeded()
+            reportInputReadinessIfNeeded()
         }
 
         private func syncFirstResponder() {
@@ -698,20 +718,32 @@ import Foundation
             activeOwnerEpoch = ownerEpoch
             activeEndedRender = nil
             if lastAppliedOwnerEpochID != ownerEpoch.id {
-                resetSessionForFreshRender(into: session)
+                ownerBootstrapStartedAt = Date()
+                ownerBootstrapEpochID = ownerEpoch.id
+                logPerformanceEvent(
+                    sessionID: ownerEpoch.sessionID, name: "local_owner_bootstrap_begin",
+                    attributes: ["epoch_id": ownerEpoch.id, "snapshot": ownerEpoch.bootstrapSnapshot == nil ? "0" : "1"])
+                resetSessionForFreshRender(into: session, preserveRenderedText: false)
                 lastAppliedOwnerEpochID = ownerEpoch.id
-                lastAppliedOutputBatchID = nil
+                lastAppliedHistorySeedID = nil
+                appliedOutputBatchIDs.removeAll()
                 lastAppliedEndedRenderID = nil
-                if let bootstrapOutputData = ownerEpoch.bootstrapOutputData, !bootstrapOutputData.isEmpty {
-                    applyOutput(bootstrapOutputData, into: session)
-                } else if let bootstrapSnapshot = ownerEpoch.bootstrapSnapshot {
+                if let bootstrapSnapshot = ownerEpoch.bootstrapSnapshot {
                     replay(snapshot: viewportSnapshot(for: bootstrapSnapshot, session: session), into: session)
                     lastStaticRenderPixelSize = currentPixelSize
                 }
+                if ownerBootstrapEpochID == ownerEpoch.id, let ownerBootstrapStartedAt {
+                    logPerformanceEvent(
+                        sessionID: ownerEpoch.sessionID, name: "local_owner_bootstrap_end",
+                        elapsedMS: max(Int(Date().timeIntervalSince(ownerBootstrapStartedAt) * 1000), 0),
+                        attributes: ["epoch_id": ownerEpoch.id, "snapshot": ownerEpoch.bootstrapSnapshot == nil ? "0" : "1"])
+                    self.ownerBootstrapStartedAt = nil
+                    self.ownerBootstrapEpochID = nil
+                }
             }
-            if let pendingOutput = ownerEpoch.pendingOutput, lastAppliedOutputBatchID != pendingOutput.id {
+            for pendingOutput in ownerEpoch.pendingOutputs where !appliedOutputBatchIDs.contains(pendingOutput.id) {
                 applyOutput(pendingOutput.data, into: session)
-                lastAppliedOutputBatchID = pendingOutput.id
+                appliedOutputBatchIDs.insert(pendingOutput.id)
                 onOutputBatchApplied?(pendingOutput.id)
             }
             updateRenderedTextSource(ownerEpoch: ownerEpoch, endedRender: nil, fallbackText: fallbackLabel.text ?? "", session: session)
@@ -722,26 +754,104 @@ import Foundation
             activeEndedRender = endedRender
             let pixelSize = currentPixelSize
             if lastAppliedEndedRenderID != endedRender.id || lastStaticRenderPixelSize != pixelSize {
-                resetSessionForFreshRender(into: session)
+                resetSessionForFreshRender(into: session, preserveRenderedText: false)
                 replay(snapshot: viewportSnapshot(for: endedRender.snapshot, session: session), into: session)
                 lastAppliedEndedRenderID = endedRender.id
                 lastAppliedOwnerEpochID = nil
-                lastAppliedOutputBatchID = nil
+                lastAppliedHistorySeedID = nil
+                appliedOutputBatchIDs.removeAll()
                 lastStaticRenderPixelSize = pixelSize
             }
             updateRenderedTextSource(ownerEpoch: nil, endedRender: endedRender, fallbackText: fallbackLabel.text ?? "", session: session)
         }
 
-        private func resetSessionForFreshRender(into session: ghostty_session_t) {
+        @discardableResult private func applyHistorySeedIfNeededBeforeScroll() -> Bool {
+            guard let session, let activeOwnerEpoch else { return false }
+            return applyHistorySeedIfNeededBeforeScroll(for: activeOwnerEpoch, into: session)
+        }
+
+        @discardableResult private func applyHistorySeedIfNeededBeforeScroll(
+            for ownerEpoch: GhosttyRemoteTerminalOwnerEpoch, into session: ghostty_session_t
+        ) -> Bool {
+            guard let historySeed = ownerEpoch.historySeed, !historySeed.data.isEmpty else { return false }
+            guard lastAppliedHistorySeedID != historySeed.id else { return false }
+            let bootstrapSnapshot = ownerEpoch.bootstrapSnapshot.map { viewportSnapshot(for: $0, session: session) }
+            let preparedHistorySeed = historySeedDataForScrollback(historySeed.data, bootstrapSnapshot: bootstrapSnapshot)
+            logPerformanceEvent(
+                sessionID: ownerEpoch.sessionID, name: "owner_history_seed_apply_begin", count: preparedHistorySeed.count,
+                attributes: ["epoch_id": ownerEpoch.id, "history_seed_id": historySeed.id, "trigger": "scroll"])
+            let startedAt = Date()
+            resetSessionForFreshRender(into: session, preserveRenderedText: true)
+            applyOutput(preparedHistorySeed, into: session)
+            if let bootstrapSnapshot {
+                replay(snapshot: bootstrapSnapshot, into: session)
+                lastStaticRenderPixelSize = currentPixelSize
+            }
+            lastAppliedHistorySeedID = historySeed.id
+            onHistorySeedApplied?(historySeed.id)
+            logPerformanceEvent(
+                sessionID: ownerEpoch.sessionID, name: "owner_history_seed_apply_end",
+                elapsedMS: max(Int(Date().timeIntervalSince(startedAt) * 1000), 0), count: preparedHistorySeed.count,
+                attributes: ["epoch_id": ownerEpoch.id, "history_seed_id": historySeed.id, "trigger": "scroll"])
+            return true
+        }
+
+        private func historySeedDataForScrollback(_ outputData: Data, bootstrapSnapshot: GhosttyTerminalSnapshot?) -> Data {
+            let normalizedOutputData: Data
+            if let bootstrapSnapshot,
+                let renderedTranscript = try? TerminalOutputTail.stableTranscript(
+                    from: outputData, columns: bootstrapSnapshot.columns, rows: bootstrapSnapshot.rows)
+            {
+                normalizedOutputData = Data(renderedTranscript.utf8)
+            } else {
+                normalizedOutputData = strippedPromptEOLMarkArtifacts(from: outputData)
+            }
+            guard let bootstrapSnapshot else { return normalizedOutputData }
+            let visibleLines = GhosttyTerminalSnapshotLayout.lines(for: bootstrapSnapshot).map(\.text)
+            guard let lastNonEmptyIndex = visibleLines.lastIndex(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) else {
+                return normalizedOutputData
+            }
+            guard lastNonEmptyIndex > 0 else { return normalizedOutputData }
+
+            let stableContentLine = visibleLines[..<lastNonEmptyIndex].reversed().map { $0.trimmingCharacters(in: .whitespaces) }.first(where: {
+                !$0.isEmpty
+            })
+            guard let stableContentLine else { return normalizedOutputData }
+
+            let stableContentBytes = Data(stableContentLine.utf8)
+            guard let stableContentRange = normalizedOutputData.range(of: stableContentBytes, options: .backwards) else {
+                return normalizedOutputData
+            }
+            guard let lineFeedIndex = normalizedOutputData[stableContentRange.upperBound...].firstIndex(of: 0x0A) else { return normalizedOutputData }
+            return Data(normalizedOutputData[..<normalizedOutputData.index(after: lineFeedIndex)])
+        }
+
+        private func strippedPromptEOLMarkArtifacts(from outputData: Data) -> Data {
+            var sanitized = Data()
+            var searchStart = outputData.startIndex
+            while searchStart < outputData.endIndex, let startRange = outputData[searchStart...].range(of: Self.promptEOLMarkStartSequence) {
+                sanitized.append(outputData[searchStart..<startRange.lowerBound])
+                guard let endRange = outputData[startRange.lowerBound...].range(of: Self.promptEOLMarkEndSequence) else {
+                    sanitized.append(outputData[startRange.lowerBound...])
+                    return sanitized
+                }
+                searchStart = endRange.upperBound
+            }
+            if searchStart < outputData.endIndex { sanitized.append(outputData[searchStart...]) }
+            return sanitized
+        }
+
+        private func resetSessionForFreshRender(into session: ghostty_session_t, preserveRenderedText: Bool) {
             ghosttyRemoteTerminalTrace("reset_session_for_fresh_render")
             Self.sessionResetSequence.withUnsafeBytes { rawBuffer in
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
                 ghostty_session_process_output(session, baseAddress, UInt(Self.sessionResetSequence.count))
             }
-            currentRenderedText = ""
-            lastEmittedRenderedText = nil
+            if !preserveRenderedText {
+                currentRenderedText = ""
+                lastEmittedRenderedText = nil
+            }
             lastStaticRenderPixelSize = .zero
-            requestSurfaceRefresh()
         }
 
         private func emitRenderedTextIfNeeded() {
@@ -751,7 +861,21 @@ import Foundation
             }
             guard currentRenderedText != lastEmittedRenderedText else { return }
             lastEmittedRenderedText = currentRenderedText
+            if let activeOwnerEpoch, firstNonBlankOwnerEpochID != activeOwnerEpoch.id,
+                currentRenderedText.contains(where: { !$0.isWhitespace && !$0.isNewline })
+            {
+                firstNonBlankOwnerEpochID = activeOwnerEpoch.id
+                logPerformanceEvent(
+                    sessionID: activeOwnerEpoch.sessionID, name: "owner_first_nonblank_render", attributes: ["epoch_id": activeOwnerEpoch.id])
+            }
             onRenderedTextChanged(currentRenderedText)
+        }
+
+        private func logPerformanceEvent(
+            sessionID: String, name: String, elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String] = [:]
+        ) {
+            SpacesMobileTerminalPerformanceLogger.emit(
+                .init(sessionID: sessionID, source: "ios-ghostty", name: name, elapsedMS: elapsedMS, count: count, attributes: attributes))
         }
     }
 #endif

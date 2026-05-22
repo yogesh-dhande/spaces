@@ -103,6 +103,7 @@ struct SpacesMobileE2EConfig {
 struct SpacesMobileE2ERenderDump: Codable, Equatable {
     let sessionID: String
     let title: String
+    let renderMode: String
     let isOwner: Bool
     let showsTerminalSurface: Bool
     let isConnecting: Bool

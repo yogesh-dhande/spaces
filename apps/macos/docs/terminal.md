@@ -52,7 +52,7 @@ Each live session also participates in a service-level control path:
 - `spaces terminal show` asks `SpacesApp` to open a native owner-seeking window for an existing session ID.
 - `spaces terminal send`, `key`, and `takeover` still operate on the per-session control socket that the service owns.
 - `spaces mobile serve` publishes the first-party TCP bridge consumed by the iOS client.
-- `SpacesMobile` consumes that bridge, keeps one selected terminal detail at a time, and renders streamed snapshots through the iOS Ghostty surface adapter when live state is available.
+- `SpacesMobile` consumes that bridge, keeps one selected terminal detail at a time, auto-attempts takeover for the opened session, and renders the owner path through a local iOS Ghostty surface seeded from the exported live snapshot plus streamed live output.
 - Workspace process launch, built-in coding-agent launch, and app-opened workspace terminals use the local app-owned live Ghostty path when they are launched from `SpacesApp`.
 - CLI-managed workspace launches still use the daemon-owned compatibility path.
 
@@ -61,7 +61,7 @@ Each live session also participates in a service-level control path:
 - If no in-process host exists for that session ID, `SpacesApp` falls back to `RemoteGhosttySessionHost` and subscribes to the daemon-owned session state stream for owner handoff compatibility, metadata updates, and ended-session final renders.
 - `TerminalSessionWindowController` attaches a local owner or viewer client record to the daemon-owned session, keeps window reuse keyed by stable session ID, mounts a live Ghostty surface only for the active owner, and otherwise shows takeover or terminal-ended status shells.
 - The embedded Ghostty owner view can rebind a live surface to a replacement AppKit host view without restarting the underlying terminal session, which is the current fork-level bridge toward detachable renderers.
-- The current macOS daemon client path uses the service snapshot stream for owner rendering compatibility and ended-session final renders, with `output.log` replay through `libghostty-vt` retained for transcript history, `spaces terminal tail`, and fallback recovery when the live stream is unavailable.
+- The current macOS daemon client path uses the service live snapshot export for owner bootstrap and ended-session final renders, with `output.log` replay through `libghostty-vt` retained for transcript history, `spaces terminal tail`, and explicit no-live-session fallback recovery.
 - Title and working-directory updates still follow live session metadata emitted by the service.
 - Owner or viewer attachment state is still authoritative in `attachments.json`.
 - Only the active owner attachment may send input or drive PTY size.
@@ -71,7 +71,7 @@ Each live session also participates in a service-level control path:
 - `spaces terminal tail` reads `output.log`, not a live client window.
 - ANSI and full-screen output are replayed through `libghostty-vt`.
 - Replay uses the persisted terminal size from `state.json` so wrapping and redraw-heavy transcripts stay aligned with the last visible geometry.
-- The VT bridge feeds `spaces terminal tail` plus the fallback replay path, and it remains the intended bootstrap path for future snapshot-plus-delta clients because it can hold terminal state independently of a live renderer.
+- The VT bridge feeds `spaces terminal tail` plus the ended-session or no-live-session fallback replay path. Live owner bootstrap does not wait on VT history reconstruction before first paint.
 
 ## Mobile Bridge
 - `spaces mobile serve --host ... --port ... --pairing-code ...` is the first-party TCP bridge for the iOS client.
@@ -83,10 +83,21 @@ Each live session also participates in a service-level control path:
 - Simulator-based manual verification should use `127.0.0.1` as the bridge host. A real device still needs a reachable Mac network address instead of simulator loopback.
 - `GhosttyMobileAppService` prepares simulator stdio before it boots the local iOS Ghostty runtime: missing stdout or stderr descriptors are repaired, and stdin is rebound to a kept-open pipe so the local Ghostty carrier subprocess does not inherit immediate EOF under manual `simctl launch`.
 
+## Mobile Owner Bootstrap
+- `ghostty_session_export_snapshot` is the authoritative live owner export path for mobile takeover.
+- Each takeover creates one owner epoch on iOS. The epoch carries:
+  - the bootstrap snapshot used for first paint
+  - optional deferred history seed data for scrollback
+  - incremental live output batches appended after bootstrap
+- iOS first paint and first input-ready are driven from the bootstrap snapshot plus incremental live output. Full transcript replay is deferred until the user scrolls away from the live bottom edge.
+- Ordinary resize reconciles viewport geometry inside the current owner epoch. It does not schedule another full bootstrap or another full transcript replay.
+- If the current owner epoch becomes desynchronized after takeover, the bridge prefers one explicit refresh or resync request instead of an implicit bootstrap loop.
+- When `SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH` is set, the macOS host and the iOS client append structured JSONL events to that path. The standalone demo and standalone E2E wrappers set this automatically and preserve the file under the disposable demo root as `mobile-terminal-performance.jsonl`.
+
 ## Ghostty Compatibility Boundary
 - The current Ghostty fork still couples PTY ownership to a renderer instance.
-- Because of that, the service keeps the live hidden Ghostty host and exports full Ghostty snapshots over `subscription.sock` to other clients instead of attaching multiple native renderers to the same session. Screen state prefers a live Ghostty surface export, but the service falls back to VT reconstruction from `output.log` when that export is momentarily empty so late joiners still receive a non-blank initial frame.
-- The current iOS client uses a compatibility renderer bridge on top of that snapshot stream: it boots a local Ghostty renderer session on iOS, converts each streamed snapshot into VT output, and replays that VT into the local Ghostty surface. This preserves Ghostty rendering characteristics on iOS without requiring the full session-core attach or detach fork boundary yet.
+- Because of that, the service keeps the live hidden Ghostty host and exports one live Ghostty snapshot for takeover bootstrap plus incremental output and state updates for the active remote owner instead of attaching multiple native renderers to the same session.
+- The current iOS client uses a compatibility renderer bridge on top of that export path: it boots a local Ghostty renderer session on iOS from the exported bootstrap snapshot, applies incremental output batches as they arrive, and seeds older scrollback only after the owner surface is already interactive. This preserves Ghostty rendering characteristics on iOS without requiring the full session-core attach or detach fork boundary yet.
 - The intended fork boundary is a true session core plus attachable renderers:
   - session-owned PTY and terminal state
   - attach or detach renderer instances without killing the session
@@ -103,3 +114,7 @@ The terminal slice is considered healthy when these flows work:
 - owner and viewer attachment persistence and lease expiry
 - transcript replay from `output.log` with persisted geometry
 - iOS attach, auto-takeover to the remote client, ownership transfer back to a macOS owner, and streamed render or input freshness on top of the same session boundary
+- large-transcript iPad takeover through the standalone demo path with a non-blank first owner frame, one owner bootstrap epoch, and preserved live updates after takeover
+- long-output iPad scrollback after takeover, with deferred history seeding, preserved scroll position while scrolled up, and no stray prompt repaint rows during owner rendering
+- built-in terminal churn profiling through `profile_built_in_terminal_stress.sh`, with `codex_churn` kept as the primary redraw-heavy regression scenario
+- longer manual churn sampling through `soak_built_in_terminal.sh`, including `SOAK_MODE=codex_churn` for sustained scrollback pressure and redraw churn

@@ -70,6 +70,7 @@ struct SpacesMobileBridgeClient: Sendable {
 
     func fetchState(
         sessionID: String,
+        includeOutputHistory: Bool = false,
         timeout: Duration = .seconds(3),
         commandChannel: SpacesMobileBridgeCommandChannel? = nil
     ) async throws -> GhosttyRemoteSessionStatePayload {
@@ -77,7 +78,8 @@ struct SpacesMobileBridgeClient: Sendable {
             command: "state",
             authToken: settings.trimmedAuthToken,
             clientApp: clientAppIdentity,
-            sessionID: sessionID
+            sessionID: sessionID,
+            includeOutputHistory: includeOutputHistory
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
@@ -294,6 +296,7 @@ actor SpacesMobileBridgeCommandChannel {
                 key: request.key,
                 columns: request.columns,
                 rows: request.rows,
+                includeOutputHistory: request.includeOutputHistory,
                 appendNewline: request.appendNewline
             )
         }

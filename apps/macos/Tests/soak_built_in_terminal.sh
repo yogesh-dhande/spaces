@@ -19,6 +19,7 @@ APP_LOG="$WORK_ROOT/spaces-app.log"
 SAMPLES_PATH="$WORK_ROOT/samples.tsv"
 SUMMARY_PATH="$WORK_ROOT/summary.txt"
 METRICS_PATH="$WORK_ROOT/metrics.json"
+FINAL_TAIL_PATH="$WORK_ROOT/final-tail.txt"
 APP_PID=""
 
 DURATION_SECONDS="${DURATION_SECONDS:-300}"
@@ -26,6 +27,7 @@ SAMPLE_INTERVAL_SECONDS="${SAMPLE_INTERVAL_SECONDS:-5}"
 FRAMES_PER_SECOND="${FRAMES_PER_SECOND:-8}"
 ROWS="${ROWS:-20}"
 SOAK_MODE="${SOAK_MODE:-repaint}"
+SOAK_HISTORY_LINES="${SOAK_HISTORY_LINES:-12000}"
 APP_PID=""
 
 cleanup() {
@@ -108,14 +110,31 @@ frames=$((DURATION_SECONDS * FRAMES_PER_SECOND))
 sleep_ms=$((1000 / FRAMES_PER_SECOND))
 fixture_mode="mixed"
 session_title="soak-mixed"
-if [[ "$SOAK_MODE" == "repaint" ]]; then
-  fixture_mode="repaint"
-  session_title="soak-repaint"
-fi
-command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "python3 '$FIXTURE_SCRIPT' --mode $fixture_mode --frames $frames --rows $ROWS --width 72 --sleep-ms $sleep_ms" --title "$session_title")"
+expected_lines=$((frames * ROWS))
+fixture_args=(--mode "$fixture_mode" --frames "$frames" --rows "$ROWS" --width 72 --sleep-ms "$sleep_ms")
+case "$SOAK_MODE" in
+  repaint)
+    fixture_mode="repaint"
+    session_title="soak-repaint"
+    fixture_args=(--mode "$fixture_mode" --frames "$frames" --rows "$ROWS" --width 72 --sleep-ms "$sleep_ms")
+    ;;
+  mixed)
+    ;;
+  codex|codex_churn)
+    fixture_mode="codex_churn"
+    session_title="soak-codex-churn"
+    expected_lines=$((SOAK_HISTORY_LINES + frames * ROWS))
+    fixture_args=(--mode "$fixture_mode" --lines "$SOAK_HISTORY_LINES" --frames "$frames" --rows "$ROWS" --width 72 --sleep-ms "$sleep_ms" --flush-every 40)
+    ;;
+  *)
+    echo "Unsupported SOAK_MODE: $SOAK_MODE" >&2
+    exit 1
+    ;;
+esac
+command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "python3 '$FIXTURE_SCRIPT' ${fixture_args[*]}" --title "$session_title")"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse soak session ID" >&2; exit 1; }
-wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=owner"
+wait_for_log_pattern "spaces: perf metric=terminal_window_summon target=session=${session_id} success=1 .*mode=owner|spaces: perf metric=terminal_window_attach_owner_surface target=session=${session_id} success=1 .*mode=owner"
 session_dir="$RUNTIME_DIR/terminal/sessions/$session_id"
 output_log="$session_dir/output.log"
 
@@ -137,9 +156,11 @@ while true; do
   sleep "$SAMPLE_INTERVAL_SECONDS"
 done
 
-wait_for_file_pattern "$output_log" "FIXTURE_DONE mode=${fixture_mode} emitted=$((frames * ROWS))" 120
+wait_for_file_pattern "$output_log" "FIXTURE_DONE mode=${fixture_mode} emitted=${expected_lines}" 120
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 \
+  "$SPACES_CLI" terminal tail "$session_id" --lines 160 >"$FINAL_TAIL_PATH"
 
-python3 - "$SAMPLES_PATH" "$output_log" "$frames" "$ROWS" "$SUMMARY_PATH" "$METRICS_PATH" "$APP_LOG" "$session_id" "$SOAK_MODE" <<'PY'
+python3 - "$SAMPLES_PATH" "$output_log" "$frames" "$ROWS" "$expected_lines" "$SUMMARY_PATH" "$METRICS_PATH" "$APP_LOG" "$session_id" "$SOAK_MODE" "$FINAL_TAIL_PATH" <<'PY'
 import json
 import math
 import re
@@ -151,11 +172,13 @@ samples_path = Path(sys.argv[1])
 output_log = Path(sys.argv[2])
 frames = int(sys.argv[3])
 rows = int(sys.argv[4])
-summary_path = Path(sys.argv[5])
-metrics_path = Path(sys.argv[6])
-app_log_path = Path(sys.argv[7])
-session_id = sys.argv[8]
-soak_mode = sys.argv[9]
+expected_lines = int(sys.argv[5])
+summary_path = Path(sys.argv[6])
+metrics_path = Path(sys.argv[7])
+app_log_path = Path(sys.argv[8])
+session_id = sys.argv[9]
+soak_mode = sys.argv[10]
+final_tail_path = Path(sys.argv[11])
 perf_pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<target>.*?) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
 
 rows_out = []
@@ -174,6 +197,9 @@ for row in samples_path.read_text(encoding="utf-8").splitlines()[1:]:
 text = output_log.read_text(encoding="utf-8", errors="replace")
 seqs = [int(match.group(1)) for match in re.finditer(r"SEQ (\d{8})", text)]
 frames_seen = [int(match.group(1)) for match in re.finditer(r"FRAME (\d{6})", text)]
+final_tail_text = final_tail_path.read_text(encoding="utf-8", errors="replace") if final_tail_path.exists() else ""
+final_tail_sequences = [int(match.group(1)) for match in re.finditer(r"SEQ (\d{8})", final_tail_text)]
+final_tail_frames = [int(match.group(1)) for match in re.finditer(r"FRAME (\d{6})", final_tail_text)]
 app_metrics = {}
 if app_log_path.exists():
     for raw_line in app_log_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -231,23 +257,62 @@ payload = {
     "sequence_complete": bool(seqs) and seqs == list(range(1, len(seqs) + 1)),
     "frame_last": frames_seen[-1] if frames_seen else None,
     "frame_match_expected": (frames_seen[-1] if frames_seen else None) == frames,
-    "expected_lines": frames * rows,
-    "lines_match_expected": len(seqs) == frames * rows,
+    "expected_lines": expected_lines,
+    "lines_match_expected": len(seqs) == expected_lines,
+    "tail_final_contains_fixture_done": f"FIXTURE_DONE mode={'codex_churn' if soak_mode in {'codex', 'codex_churn'} else soak_mode} emitted={expected_lines}" in final_tail_text,
+    "tail_final_contains_footer": "TAIL frame=" in final_tail_text,
+    "tail_final_sequence_last": final_tail_sequences[-1] if final_tail_sequences else None,
+    "tail_final_frame_last": final_tail_frames[-1] if final_tail_frames else None,
+    "tail_final_frame_match_expected": (final_tail_frames[-1] if final_tail_frames else None) == frames if frames else True,
 }
 if rows_out:
     payload["sample_phases"] = {
         "tail_ms": summarize_sample_phases(rows_out, "tail_ms"),
         "cpu_percent": summarize_sample_phases(rows_out, "cpu_percent"),
         "rss_kb": summarize_sample_phases(rows_out, "rss_kb"),
+        "output_bytes": summarize_sample_phases(rows_out, "output_bytes"),
     }
+    payload["output_growth"] = {
+        "first_bytes": rows_out[0]["output_bytes"],
+        "last_bytes": rows_out[-1]["output_bytes"],
+        "delta_bytes": rows_out[-1]["output_bytes"] - rows_out[0]["output_bytes"],
+        "monotonic": all(current["output_bytes"] >= previous["output_bytes"] for previous, current in zip(rows_out, rows_out[1:])),
+    }
+    if payload["sample_phases"].get("tail_ms"):
+        tail_phases = payload["sample_phases"]["tail_ms"]
+        payload["tail_latency_drift_ms"] = round(tail_phases["late"]["avg_ms"] - tail_phases["early"]["avg_ms"], 1)
+    if payload["sample_phases"].get("rss_kb"):
+        rss_phases = payload["sample_phases"]["rss_kb"]
+        payload["rss_growth_kb"] = round(rss_phases["late"]["avg_ms"] - rss_phases["early"]["avg_ms"], 1)
 if app_metrics:
     payload["app_metrics"] = {metric: summarize(values) for metric, values in sorted(app_metrics.items()) if values}
+errors = []
+if not payload["sequence_complete"]:
+    errors.append(f"{soak_mode}: sequence markers were not contiguous")
+if not payload["lines_match_expected"]:
+    errors.append(f"{soak_mode}: expected {expected_lines} sequence lines but found {len(seqs)}")
+if not payload["frame_match_expected"]:
+    errors.append(f"{soak_mode}: expected final frame {frames} but found {payload['frame_last']}")
+if not payload["tail_final_contains_fixture_done"]:
+    errors.append(f"{soak_mode}: final tail output did not include FIXTURE_DONE")
+if not payload["tail_final_frame_match_expected"]:
+    errors.append(f"{soak_mode}: final tail output did not include frame {frames}")
+if soak_mode in {"codex", "codex_churn"}:
+    output_growth = payload.get("output_growth") or {}
+    if output_growth.get("delta_bytes", 0) <= 0:
+        errors.append("codex_churn soak: output bytes did not grow across samples")
+    if not output_growth.get("monotonic", False):
+        errors.append("codex_churn soak: output bytes regressed between samples")
+    if not payload["tail_final_contains_footer"]:
+        errors.append("codex_churn soak: final tail output did not retain the rewritten footer rows")
+if errors:
+    raise SystemExit("\n".join(errors))
 summary = [
     "Built-in terminal soak profile",
     "",
     f"mode={payload['soak_mode']} duration={payload['duration_seconds']}s samples={payload['sample_count']}",
     f"rss_max={payload['rss_kb_max']}KB cpu_avg={payload['cpu_percent_avg']} tail_avg={payload['tail_ms_avg']}ms tail_max={payload['tail_ms_max']}ms",
-    f"output={payload['output_bytes_final']}B seq={payload['sequence_count']} complete={1 if payload['sequence_complete'] else 0} expected={1 if payload['lines_match_expected'] else 0} frame_ok={1 if payload['frame_match_expected'] else 0}",
+    f"output={payload['output_bytes_final']}B seq={payload['sequence_count']} complete={1 if payload['sequence_complete'] else 0} expected={1 if payload['lines_match_expected'] else 0} frame_ok={1 if payload['frame_match_expected'] else 0} tail_final={1 if payload['tail_final_contains_fixture_done'] else 0} footer={1 if payload['tail_final_contains_footer'] else 0}",
 ]
 if "sample_phases" in payload and payload["sample_phases"].get("tail_ms"):
     tail_phases = payload["sample_phases"]["tail_ms"]
@@ -256,6 +321,22 @@ if "sample_phases" in payload and payload["sample_phases"].get("tail_ms"):
     summary.append(
         f"tail_phases: early_avg={early['avg_ms']}ms early_max={early['max_ms']}ms late_avg={late['avg_ms']}ms late_max={late['max_ms']}ms"
     )
+if "output_growth" in payload:
+    growth = payload["output_growth"]
+    summary.append(
+        f"output_growth: first={growth['first_bytes']}B last={growth['last_bytes']}B delta={growth['delta_bytes']}B monotonic={1 if growth['monotonic'] else 0}"
+    )
+if "tail_latency_drift_ms" in payload:
+    summary.append(f"tail_drift_ms={payload['tail_latency_drift_ms']}")
+if "rss_growth_kb" in payload:
+    summary.append(f"rss_growth_kb={payload['rss_growth_kb']}")
+for metric in ("terminal_output_write", "terminal_surface_refresh"):
+    if metric in payload.get("app_metrics", {}):
+        metric_summary = payload["app_metrics"][metric]
+        summary.append(
+            f"{metric}: count={metric_summary['count']} min={metric_summary['min_ms']}ms median={metric_summary['median_ms']}ms "
+            f"avg={metric_summary['avg_ms']}ms p95={metric_summary['p95_ms']}ms max={metric_summary['max_ms']}ms"
+        )
 summary_path.write_text("\n".join(summary) + "\n", encoding="utf-8")
 metrics_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 print(summary_path.read_text(encoding="utf-8"), end="")
@@ -263,4 +344,5 @@ print("\nArtifacts:")
 print(f"  samples:  {samples_path}")
 print(f"  summary:  {summary_path}")
 print(f"  metrics:  {metrics_path}")
+print(f"  final tail:{final_tail_path}")
 PY
