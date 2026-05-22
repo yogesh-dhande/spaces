@@ -511,6 +511,11 @@ private final class StreamSubscription: @unchecked Sendable {
                         decodedState = true
                         Task { @MainActor in onEvent(payload) }
                     } catch {
+                        if let response = try? SpacesMobileBridgeCodec.decodeResponse(line), !response.ok {
+                            lifecycle.finish(error: SpacesMobileBridgeClientError.streamFailed(response.message))
+                            connection.cancel()
+                            return
+                        }
                         lifecycle.finish(error: error)
                         connection.cancel()
                         return

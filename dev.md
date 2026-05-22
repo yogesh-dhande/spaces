@@ -194,7 +194,24 @@ xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destin
 ```
 
 On first launch, the iOS client opens its connection sheet. Enter the bridge host and port, then the pairing code from `spaces mobile serve`. After pairing, the iOS client stores the issued credential and reconnects automatically on later launches. The current client is terminal-only: it lists workspaces and live terminal sessions, auto-attempts takeover when a session detail is opened, mounts the Ghostty surface only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
-For the iOS simulator, keep the bridge host on `127.0.0.1`. A real device needs a reachable Mac network address instead of loopback. The current iOS terminal detail path renders streamed Ghostty snapshots through a local iOS Ghostty surface, so the simulator should show a terminal-like view rather than the earlier plain-text fallback once a session detail is opened.
+For the iOS simulator, keep the bridge host on `127.0.0.1`. A real device needs a reachable Mac network address instead of loopback. The current iOS terminal detail path renders the owner-bootstrap terminal-grid snapshot through a local iOS Ghostty surface, so the simulator should show a terminal-like view after takeover rather than the earlier plain-text fallback.
+
+For manual real-device verification of the iOS client:
+
+1. Connect the iPhone or iPad to the Mac, unlock it, trust the Mac if prompted, and enable Developer Mode on the device if iOS asks.
+2. Open `apps/ios/SpacesMobile.xcodeproj` in Xcode, select the `SpacesMobile` target, enable Automatically manage signing, and choose the Apple Developer team that should sign the app.
+3. If Xcode reports that `com.yogeshdhande.spacesmobile` cannot be signed by that team, stop there and widen the first-party bundle policy before changing the bundle identifier. The current bridge accepts only that bundle identifier for pairing and reconnect.
+4. Keep the Mac app and mobile bridge on the same `SPACES_DB_PATH`, but bind the bridge to a real network interface instead of loopback. `0.0.0.0` is fine for the listener; the phone still needs the Mac's actual LAN IP in the app.
+
+```bash
+export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
+mkdir -p "$(dirname "$SPACES_DB_PATH")"
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces mobile serve --host 0.0.0.0 --port 47071 --pairing-code 246810
+```
+
+5. On the Mac, allow the incoming-network prompt if macOS shows one. In the iOS app, enter the Mac's reachable LAN address as the host, keep port `47071`, and pair with the code from `spaces mobile serve`.
+6. Run the app from Xcode with the physical device selected as the destination. The first connection attempt should trigger the iOS local-network permission prompt; accept it so the app can reach the Mac bridge.
 
 For a disposable one-command demo stack that launches the macOS app, starts `spaces mobile serve`, pairs both the iPad and iPhone simulators, and opens the mobile app on each:
 
@@ -216,7 +233,21 @@ For the real standalone Codex takeover repro path on iPad, use the dedicated wra
 apps/macos/Tests/e2e_terminal_mobile_codex_standalone.sh
 ```
 
-That wrapper launches the disposable demo stack, starts real `codex` in the Mac-owned terminal session, accepts the Codex trust prompt when needed, and then attaches the iPad UI test to the already-running standalone simulator app so takeover happens against the same `simctl`-launched runtime as the manual demo. On failure it preserves the demo root and tails the relevant macOS app, bridge, and UI test logs automatically.
+That wrapper launches the disposable demo stack, starts real Codex in the Mac-owned terminal session, accepts the Codex trust prompt when needed, and then attaches the iPad UI test to the already-running standalone simulator app so takeover happens against the same `simctl`-launched runtime as the manual demo. On failure it preserves the demo root and tails the relevant macOS app, bridge, and UI test logs automatically.
+
+Useful overrides:
+- `SPACES_MOBILE_CODEX_COMMAND='codex resume <thread-id>'` replaces the default `codex` startup command.
+- `SPACES_MOBILE_REOPEN_SAME_SESSION=1` makes the standalone iPad UI test go back to the list and reopen the same terminal repeatedly after takeover.
+
+For the resumed-Codex reopen regression on iPad, use the dedicated wrapper:
+
+```bash
+apps/macos/Tests/e2e_terminal_mobile_codex_resume_reopen_standalone.sh
+```
+
+That wrapper runs `codex resume 019e380a-9def-7852-9834-74c67b2da894` on the Mac-owned session, takes over on iPad, returns to the terminal list, and then reopens the same session repeatedly so the resumed-session owner path and the back-navigation relaunch path stay covered together.
+
+When debugging iPad owner render dumps, keep the mobile live-output path snapshot-free after owner bootstrap. `GhosttyRemoteTerminalView` must not call `ghostty_session_export_snapshot` on its local renderer after applying live output, passive viewer open or reopen must not make the Mac host export a live session snapshot while a local Mac window owns the session, and mobile owner bootstrap must use the cached Ghostty session snapshot rather than the VT snapshot stream. Codex-style cursor and style churn can make fresh live export unsafe during takeover, so render dumps should not synthesize a second visual path from transcript data. Use the bootstrap snapshot, screenshots, event logs, and history-seed performance events for E2E assertions.
 
 For the real standalone Mac/iPad/Mac/iPad/Mac ownership round trip with rendered-content assertions at each handoff, use:
 
@@ -240,7 +271,7 @@ For the dedicated two-session iPad takeover regression, use:
 apps/macos/Tests/e2e_terminal_mobile_two_session_standalone.sh
 ```
 
-That wrapper launches the same two-session demo stack, takes over the primary terminal on iPad, returns to the list, and then takes over the secondary terminal in the same app session so the multi-session dismissal and relaunch path stays covered.
+That wrapper launches the same two-session demo stack, takes over the primary terminal on iPad, alternates back through the list into the secondary terminal, and then repeats the reopen cycle once more so the multi-session dismissal and relaunch path stays covered.
 
 For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
 

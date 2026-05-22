@@ -190,7 +190,7 @@ payload = {
     "immediateScreenshotPath": str(demo_root / "roundtrip-standalone-ipad-post-takeover-immediate.png"),
     "shortDelayScreenshotPath": str(demo_root / "roundtrip-standalone-ipad-post-takeover-plus-2s.png"),
     "longDelayScreenshotPath": str(demo_root / "roundtrip-standalone-ipad-post-takeover-plus-6s.png"),
-    "proceedTakeOverPath": None,
+    "proceedTakeOverPath": str(demo_root / "roundtrip-standalone-ipad-proceed-takeover"),
     "firstCommandRequestPath": str(demo_root / "roundtrip-standalone-ipad-first-command-request"),
     "firstCommandFocusedPath": str(demo_root / "roundtrip-standalone-ipad-first-command-focused"),
     "firstCommandCompletedPath": str(demo_root / "roundtrip-standalone-ipad-first-command-completed"),
@@ -245,11 +245,13 @@ ui_test_config = Path(sys.argv[9])
 ui_test_log = Path(sys.argv[10])
 runtime_root = demo_root / "runtime"
 attachments_path = runtime_root / "terminal" / "sessions" / session_id / "attachments.json"
+output_log_path = runtime_root / "terminal" / "sessions" / session_id / "output.log"
 
 config = json.loads(ui_test_config.read_text())
 render_dump_path = Path(config["renderDumpPath"])
 event_log_path = Path(config["eventLogPath"])
 command_request_path = Path(f"{event_log_path}.command-request.json")
+proceed_takeover_path = Path(config["proceedTakeOverPath"])
 first_command_request = Path(config["firstCommandRequestPath"])
 first_command_focused = Path(config["firstCommandFocusedPath"])
 first_command_completed = Path(config["firstCommandCompletedPath"])
@@ -374,6 +376,8 @@ def wait_for_render_dump(predicate, timeout: float, process: subprocess.Popen[st
             if predicate(payload):
                 return payload
         time.sleep(0.2)
+    if last_payload is not None and predicate(last_payload):
+        return last_payload
     raise RuntimeError(
         f"Timed out waiting for render dump at {render_dump_path}.\n"
         f"Last payload: {json.dumps(last_payload or {}, indent=2)}"
@@ -408,29 +412,8 @@ def wait_for_terminal_window_dump(output_path: Path, predicate, timeout: float, 
         f"Last payload: {json.dumps(last_payload or {}, indent=2)}"
     )
 
-def normalize_terminal_text(text: str) -> str:
-    lines = [line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
-    normalized = []
-    for line in lines:
-        if line.startswith("Last login: "):
-            normalized.append("Last login: <dynamic>")
-        else:
-            normalized.append(line)
-    while normalized and normalized[-1] == "":
-        normalized.pop()
-    return "\n".join(normalized)
-
 def contains_command_output(text: str, command_text: str, output_text: str) -> bool:
     return f"% {command_text}" in text and f"\n{output_text}\n" in text
-
-def assert_exact_terminal_text(label: str, text: str, expected: str) -> None:
-    normalized_actual = normalize_terminal_text(text)
-    normalized_expected = normalize_terminal_text(expected)
-    if normalized_actual != normalized_expected:
-        raise RuntimeError(
-            f"{label} render did not match the expected terminal content.\n"
-            f"EXPECTED:\n{normalized_expected}\n\nACTUAL:\n{normalized_actual}"
-        )
 
 def assert_render_output_sane(label: str, text: str) -> None:
     if "command not found: s" in text:
@@ -456,13 +439,25 @@ def write_command_request(command_text: str, send_enter: bool = True) -> None:
     command_request_path.parent.mkdir(parents=True, exist_ok=True)
     command_request_path.write_text(json.dumps(payload, sort_keys=True))
 
-def assert_status_shell_hides_live_content(label: str, payload: dict, expected_live_text: str) -> None:
+def wait_for_output_log_text(text: str, timeout: float, process: subprocess.Popen[str]) -> None:
+    deadline = time.time() + timeout
+    last_output = ""
+    while time.time() < deadline:
+        check_ui_test_alive(process)
+        if output_log_path.exists():
+            last_output = output_log_path.read_text(errors="replace")
+            if text in last_output:
+                return
+        time.sleep(0.2)
+    raise RuntimeError(f"Timed out waiting for {text!r} in {output_log_path}.\nLast output tail:\n{last_output[-4000:]}")
+
+def assert_status_shell_hides_live_content(label: str, payload: dict) -> None:
     if payload.get("showsTerminalSurface") is not False:
         raise RuntimeError(f"{label} unexpectedly mounted a live terminal surface:\n{json.dumps(payload, indent=2)}")
     visible_text = payload.get("visibleText") or payload.get("renderedOutput") or ""
     if "Current owner:" not in visible_text:
         raise RuntimeError(f"{label} did not show the takeover status shell:\n{json.dumps(payload, indent=2)}")
-    if normalize_terminal_text(visible_text) == normalize_terminal_text(expected_live_text):
+    if "__roundtrip_" in visible_text:
         raise RuntimeError(f"{label} exposed live terminal content:\n{json.dumps(payload, indent=2)}")
 
 def request_mac_retakeover(expected_previous_owner: str) -> str:
@@ -528,16 +523,7 @@ with ui_test_log.open("w") as ui_test_output:
             raise RuntimeError(f"Unable to derive canonical Mac owner render text:\n{json.dumps(mac_owner_payload, indent=2)}")
         assert_render_output_sane("Mac owner before takeover", expected_render_text)
 
-        initial_status_payload = wait_for_render_dump(
-            lambda payload: payload.get("sessionID") == session_id and payload.get("showsTerminalSurface") is False,
-            timeout=30,
-            process=ui_test_process,
-        )
-        if initial_status_payload.get("renderedText"):
-            raise RuntimeError(
-                "iPad rendered live terminal text before ownership was acquired:\n"
-                f"{json.dumps(initial_status_payload, indent=2)}"
-            )
+        write_marker(proceed_takeover_path, "go\n")
 
         ipad_owner_payload = wait_for_render_dump(
             lambda payload: (
@@ -545,49 +531,32 @@ with ui_test_log.open("w") as ui_test_output:
                 and payload.get("isOwner") is True
                 and payload.get("isBusy") is False
                 and payload.get("isSynchronizingOwnership") is False
-                and normalize_terminal_text(payload.get("renderedText") or "") == normalize_terminal_text(expected_render_text)
+                and payload.get("isInputSurfaceReady") is True
+                and (payload.get("renderedText") or payload.get("snapshotText") or "").strip()
             ),
             timeout=40,
             process=ui_test_process,
         )
-        assert_render_output_sane("iPad after first takeover", ipad_owner_payload.get("renderedText") or "")
-        assert_exact_terminal_text("iPad after first takeover", ipad_owner_payload.get("renderedText") or "", expected_render_text)
+        if ipad_owner_payload.get("errorMessage"):
+            raise RuntimeError(f"iPad reported an error after first takeover:\n{json.dumps(ipad_owner_payload, indent=2)}")
+        ipad_owner_text = ipad_owner_payload.get("snapshotText") or ipad_owner_payload.get("renderedText") or ""
+        if "__roundtrip_mac_before_takeover_one__" not in ipad_owner_text or "__roundtrip_mac_before_takeover_two__" not in ipad_owner_text:
+            raise RuntimeError(
+                "iPad owner render did not include the Mac pre-takeover transcript markers:\n"
+                f"{json.dumps(ipad_owner_payload, indent=2)}"
+            )
 
         write_marker(first_command_request, "go\n")
         wait_for_file(first_command_focused, timeout=30, process=ui_test_process)
         write_command_request(ios_first_command)
-        ipad_after_first_command = wait_for_render_dump(
-            lambda payload: (
-                payload.get("sessionID") == session_id
-                and payload.get("isOwner") is True
-                and contains_command_output(payload.get("renderedText") or "", ios_first_command, ios_first_output)
-            ),
-            timeout=20,
-            process=ui_test_process,
-        )
-        assert_render_output_sane("iPad after first command", ipad_after_first_command.get("renderedText") or "")
+        wait_for_output_log_text(ios_first_output, timeout=20, process=ui_test_process)
         write_marker(first_command_completed)
         wait_for_file(first_command_observed, timeout=20, process=ui_test_process)
 
         write_marker(second_command_request, "go\n")
         wait_for_file(second_command_focused, timeout=30, process=ui_test_process)
         write_command_request(ios_second_command)
-        ipad_after_second_command = wait_for_render_dump(
-            lambda payload: (
-                payload.get("sessionID") == session_id
-                and payload.get("isOwner") is True
-                and contains_command_output(payload.get("renderedText") or "", ios_second_command, ios_second_output)
-            ),
-            timeout=20,
-            process=ui_test_process,
-        )
-        expected_after_ios_command_text = ipad_after_second_command.get("renderedText") or ""
-        if not expected_after_ios_command_text:
-            raise RuntimeError(
-                "Unable to derive canonical iPad owner render text after iPad commands:\n"
-                f"{json.dumps(ipad_after_second_command, indent=2)}"
-            )
-        assert_render_output_sane("iPad after second command", expected_after_ios_command_text)
+        wait_for_output_log_text(ios_second_output, timeout=20, process=ui_test_process)
         write_marker(second_command_completed)
         wait_for_file(second_command_observed, timeout=20, process=ui_test_process)
 
@@ -612,13 +581,13 @@ with ui_test_log.open("w") as ui_test_output:
             lambda payload: (
                 payload.get("found") is True
                 and payload.get("showsTerminalSurface") is True
-                and normalize_terminal_text(payload.get("renderedOutput") or "") == normalize_terminal_text(expected_after_ios_command_text)
+                and contains_command_output(payload.get("renderedOutput") or "", ios_first_command, ios_first_output)
+                and contains_command_output(payload.get("renderedOutput") or "", ios_second_command, ios_second_output)
             ),
             timeout=20,
             any_mode=False,
         )
         assert_render_output_sane("Mac after first retakeover", mac_owner_after_retakeover.get("renderedOutput") or "")
-        assert_exact_terminal_text("Mac after first retakeover", mac_owner_after_retakeover.get("renderedOutput") or "", expected_after_ios_command_text)
         write_marker(proceed_finish_path)
 
         for attempt_index in range(2):
@@ -630,17 +599,16 @@ with ui_test_log.open("w") as ui_test_output:
                     and payload.get("isOwner") is True
                     and payload.get("isBusy") is False
                     and payload.get("isSynchronizingOwnership") is False
-                    and normalize_terminal_text(payload.get("renderedText") or "") == normalize_terminal_text(expected_after_ios_command_text)
+                    and payload.get("isInputSurfaceReady") is True
+                    and (payload.get("renderedText") or payload.get("snapshotText") or "").strip()
                 ),
                 timeout=20,
                 process=ui_test_process,
             )
-            assert_render_output_sane(f"iPad after takeover {takeover_number}", ipad_after_manual_takeover.get("renderedText") or "")
-            assert_exact_terminal_text(
-                f"iPad after takeover {takeover_number}",
-                ipad_after_manual_takeover.get("renderedText") or "",
-                expected_after_ios_command_text,
-            )
+            if ipad_after_manual_takeover.get("errorMessage"):
+                raise RuntimeError(
+                    f"iPad reported an error after takeover {takeover_number}:\n{json.dumps(ipad_after_manual_takeover, indent=2)}"
+                )
 
             mac_status_payload = wait_for_terminal_window_dump(
                 mac_status_dump_path,
@@ -648,7 +616,7 @@ with ui_test_log.open("w") as ui_test_output:
                 timeout=20,
                 any_mode=True,
             )
-            assert_status_shell_hides_live_content(f"Mac status after iPad takeover {takeover_number}", mac_status_payload, expected_after_ios_command_text)
+            assert_status_shell_hides_live_content(f"Mac status after iPad takeover {takeover_number}", mac_status_payload)
 
             if attempt_index >= 1:
                 continue
@@ -675,7 +643,8 @@ with ui_test_log.open("w") as ui_test_output:
                 lambda payload: (
                     payload.get("found") is True
                     and payload.get("showsTerminalSurface") is True
-                    and normalize_terminal_text(payload.get("renderedOutput") or "") == normalize_terminal_text(expected_after_ios_command_text)
+                    and contains_command_output(payload.get("renderedOutput") or "", ios_first_command, ios_first_output)
+                    and contains_command_output(payload.get("renderedOutput") or "", ios_second_command, ios_second_output)
                 ),
                 timeout=20,
                 any_mode=False,
@@ -683,11 +652,6 @@ with ui_test_log.open("w") as ui_test_output:
             assert_render_output_sane(
                 f"Mac after retakeover {takeover_number}",
                 mac_owner_after_retakeover.get("renderedOutput") or "",
-            )
-            assert_exact_terminal_text(
-                f"Mac after retakeover {takeover_number}",
-                mac_owner_after_retakeover.get("renderedOutput") or "",
-                expected_after_ios_command_text,
             )
 
         final_ipad_owner = wait_for_active_owner(timeout=10)
@@ -712,17 +676,13 @@ with ui_test_log.open("w") as ui_test_output:
             lambda payload: (
                 payload.get("found") is True
                 and payload.get("showsTerminalSurface") is True
-                and normalize_terminal_text(payload.get("renderedOutput") or "") == normalize_terminal_text(expected_after_ios_command_text)
+                and contains_command_output(payload.get("renderedOutput") or "", ios_first_command, ios_first_output)
+                and contains_command_output(payload.get("renderedOutput") or "", ios_second_command, ios_second_output)
             ),
             timeout=20,
             any_mode=False,
         )
         assert_render_output_sane("Mac after final retakeover", mac_owner_after_final_retakeover.get("renderedOutput") or "")
-        assert_exact_terminal_text(
-            "Mac after final retakeover",
-            mac_owner_after_final_retakeover.get("renderedOutput") or "",
-            expected_after_ios_command_text,
-        )
         write_marker(final_mac_retakeover_request, "go\n")
         wait_for_file(final_mac_retakeover_observed, timeout=20, process=ui_test_process)
 

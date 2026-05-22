@@ -21,7 +21,7 @@ import Foundation
         public func startIfNeeded() throws {
             guard app == nil else { return }
 
-            let resourcesPath = try resolveResourcesPath()
+            let resourcesPath = try Self.resolveResourcesPath(bundleResourceURL: Bundle.main.resourceURL)
             setenv("GHOSTTY_RESOURCES_DIR", resourcesPath, 1)
             try configureProcessEnvironment()
 
@@ -76,18 +76,25 @@ import Foundation
             return runtimeConfig
         }
 
-        private func resolveResourcesPath() throws -> String {
-            let environment = ProcessInfo.processInfo.environment
+        public static func resolveResourcesPath(
+            environment: [String: String] = ProcessInfo.processInfo.environment, bundleResourceURL: URL?, fileManager: FileManager = .default,
+            sourceFilePath: String = #filePath
+        ) throws -> String {
             if let override = environment["SPACES_GHOSTTY_RESOURCES_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines), !override.isEmpty,
-                FileManager.default.fileExists(atPath: override)
+                fileManager.fileExists(atPath: override)
             {
                 return override
             }
 
-            let fileURL = URL(fileURLWithPath: #filePath)
+            if let bundleResourceURL {
+                let bundledCandidate = bundleResourceURL.appendingPathComponent("ghostty", isDirectory: true).path
+                if fileManager.fileExists(atPath: bundledCandidate) { return bundledCandidate }
+            }
+
+            let fileURL = URL(fileURLWithPath: sourceFilePath)
             let macOSRoot = fileURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             let candidate = macOSRoot.appendingPathComponent(".local/ghosttykit/Resources/ghostty", isDirectory: true).path
-            guard FileManager.default.fileExists(atPath: candidate) else {
+            guard fileManager.fileExists(atPath: candidate) else {
                 throw GhosttyMobileAppServiceError.configuration("Ghostty runtime resources are not configured for iOS.")
             }
             return candidate

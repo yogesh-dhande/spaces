@@ -20,7 +20,8 @@ struct MXE2ECommand: ParsableCommand {
             SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self,
             CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
             CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self,
-            DumpTerminalSessionWindowStateCommand.self, RecordScreenCommand.self, ScrollApplicationWindowCommand.self,
+            DumpTerminalSessionWindowStateCommand.self, StartTerminalSessionCommand.self, TerminateTerminalSessionCommand.self,
+            RecordScreenCommand.self, ScrollApplicationWindowCommand.self,
         ])
 }
 
@@ -151,6 +152,43 @@ private struct OpenWorkspaceTerminalCommand: ParsableCommand {
             WorkspaceSummaryPayload(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
                 notes: workspace.notes))
+    }
+}
+
+private struct StartTerminalSessionCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "start-terminal-session")
+
+    @Option(name: .long) var command: String?
+    @Option(name: .long) var title: String?
+    @Option(name: .long) var cwd: String?
+    @Option(name: .long) var shell: String?
+
+    /// Creates a built-in terminal session directly through TerminalService
+    /// without opening a macOS window. The helper always uses a persistent
+    /// lifetime so standalone mobile harnesses can attach later.
+    func run() throws {
+        let normalizedWorkingDirectory = normalizePath(cwd ?? FileManager.default.currentDirectoryPath)
+        let resolvedShell = terminalShellPath(shell)
+        let resolvedTitle = title ?? terminalDefaultTitle(command: command, cwd: normalizedWorkingDirectory)
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: UUID().uuidString, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: resolvedTitle,
+            workingDirectory: normalizedWorkingDirectory, shell: resolvedShell, command: command,
+            createdAt: ISO8601DateFormatter().string(from: Date()))
+        let session = try TerminalService.createSession(launchConfiguration)
+        try emitJSON(session)
+    }
+}
+
+private struct TerminateTerminalSessionCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "terminate-terminal-session")
+
+    @Argument(help: "Terminal session ID.") var sessionID: String
+
+    func run() throws {
+        let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session ID.") }
+        try TerminalService.terminateSession(id: trimmedSessionID)
+        try emitJSON(TerminatedTerminalSessionPayload(sessionID: trimmedSessionID, terminated: true))
     }
 }
 
@@ -927,6 +965,11 @@ private struct WorkspaceDumpPayload: Codable {
     let agentWindows: [AgentWindowPayload]
 }
 
+private struct TerminatedTerminalSessionPayload: Codable {
+    let sessionID: String
+    let terminated: Bool
+}
+
 private struct WorkspaceSummaryPayload: Codable {
     let id: String
     let title: String
@@ -1048,6 +1091,20 @@ private func makeOrchestrator() throws -> WorkspaceOrchestrator { try WorkspaceO
 /// Normalizes filesystem paths before lookups so shell callers can pass either
 /// relative or absolute values safely.
 private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
+
+private func terminalShellPath(_ explicitPath: String?) -> String {
+    if let explicitPath = explicitPath?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitPath.isEmpty { return explicitPath }
+    if let configured = ProcessInfo.processInfo.environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines), !configured.isEmpty {
+        return configured
+    }
+    return "/bin/zsh"
+}
+
+private func terminalDefaultTitle(command: String?, cwd: String) -> String {
+    if let command = command?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty { return command }
+    let name = URL(fileURLWithPath: cwd).lastPathComponent
+    return name.isEmpty ? "Terminal" : name
+}
 
 private func snapshotSpacesSurface(pid: Int32, frontmostPID: Int?) -> SpacesSurfacePayload {
     let appElement = AXUIElementCreateApplication(pid)

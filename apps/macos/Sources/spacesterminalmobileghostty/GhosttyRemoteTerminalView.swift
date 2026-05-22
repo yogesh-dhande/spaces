@@ -269,14 +269,12 @@ import Foundation
             }
             if let ownerEpoch {
                 applyOwnerEpoch(ownerEpoch, into: session)
-                refreshRenderedTextFromLiveSession()
                 emitRenderedTextIfNeeded()
                 reportInputReadinessIfNeeded()
                 return
             }
             if let endedRender {
                 applyEndedRender(endedRender, into: session)
-                refreshRenderedTextFromLiveSession()
                 emitRenderedTextIfNeeded()
                 reportInputReadinessIfNeeded()
                 return
@@ -490,19 +488,11 @@ import Foundation
         }
 
         private func createSession(app: ghostty_app_t) -> ghostty_session_t? {
-            let previousStandardInputDescriptor = dup(STDIN_FILENO)
             let repairedDescriptors: GhosttyMobileAppService.StandardFileDescriptorRepair
             do { repairedDescriptors = try GhosttyMobileAppService.repairStandardFileDescriptors() } catch {
                 ghosttyRemoteTerminalTrace(
                     "create_session repair_stdio_failure error=\(error.localizedDescription.replacingOccurrences(of: "\n", with: "\\n"))")
                 return nil
-            }
-            defer {
-                let restoreDescriptor = previousStandardInputDescriptor >= 0 ? previousStandardInputDescriptor : open("/dev/null", O_RDWR)
-                if restoreDescriptor >= 0 {
-                    _ = dup2(restoreDescriptor, STDIN_FILENO)
-                    if restoreDescriptor != STDIN_FILENO { _ = close(restoreDescriptor) }
-                }
             }
 
             var sessionConfig = ghostty_session_config_new()
@@ -537,9 +527,11 @@ import Foundation
         }
 
         private func applyOutput(_ outputData: Data, into session: ghostty_session_t) {
-            outputData.withUnsafeBytes { rawBuffer in
+            let renderData = renderableOutputData(from: outputData)
+            guard !renderData.isEmpty else { return }
+            renderData.withUnsafeBytes { rawBuffer in
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
-                ghostty_session_process_output(session, baseAddress, UInt(outputData.count))
+                ghostty_session_process_output(session, baseAddress, UInt(renderData.count))
             }
             requestSurfaceRefresh()
         }
@@ -629,7 +621,6 @@ import Foundation
 
         private func performRenderedTextEmissionPass() {
             GhosttyMobileAppService.shared.tick()
-            refreshRenderedTextFromLiveSession()
             emitRenderedTextIfNeeded()
             reportInputReadinessIfNeeded()
         }
@@ -700,15 +691,11 @@ import Foundation
             onViewportSizeChanged?(Int(size.columns), Int(size.rows))
         }
 
+        // Unit tests may inspect an idle local surface directly, but live owner render
+        // dumps must not export the iOS surface after output churn.
         func capturedSnapshotForTesting() -> GhosttyTerminalSnapshot? {
             guard let session else { return nil }
             return exportedSnapshot(from: session)
-        }
-
-        private func refreshRenderedTextFromLiveSession() {
-            guard let session, onRenderedTextChanged != nil, isTerminalVisible else { return }
-            guard let snapshot = exportedSnapshot(from: session) else { return }
-            currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(for: snapshot)
         }
 
         private func exportedSnapshot(from session: ghostty_session_t) -> GhosttyTerminalSnapshot? {
@@ -745,18 +732,16 @@ import Foundation
                 currentRenderedText = ""
                 return
             }
-            if let session, let liveSnapshot = exportedSnapshot(from: session) {
-                currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(for: liveSnapshot)
-                return
-            }
+            if let ownerEpoch, activeOwnerEpoch?.id == ownerEpoch.id, !currentRenderedText.isEmpty { return }
+            if let endedRender, activeEndedRender?.id == endedRender.id, !currentRenderedText.isEmpty { return }
             if let endedRender {
                 currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(
                     for: session.map { viewportSnapshot(for: endedRender.snapshot, session: $0) } ?? endedRender.snapshot)
                 return
             }
             if let ownerEpoch, let bootstrapSnapshot = ownerEpoch.bootstrapSnapshot {
-                currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(
-                    for: session.map { viewportSnapshot(for: bootstrapSnapshot, session: $0) } ?? bootstrapSnapshot)
+                let snapshot = session.map { viewportSnapshot(for: bootstrapSnapshot, session: $0) } ?? bootstrapSnapshot
+                currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(for: snapshot)
                 return
             }
             currentRenderedText = fallbackText
@@ -765,6 +750,7 @@ import Foundation
         private func applyOwnerEpoch(_ ownerEpoch: GhosttyRemoteTerminalOwnerEpoch, into session: ghostty_session_t) {
             activeOwnerEpoch = ownerEpoch
             activeEndedRender = nil
+            let bootstrapSnapshot = ownerEpoch.bootstrapSnapshot.map { viewportSnapshot(for: $0, session: session) }
             if lastAppliedOwnerEpochID != ownerEpoch.id {
                 ownerBootstrapStartedAt = Date()
                 ownerBootstrapEpochID = ownerEpoch.id
@@ -776,10 +762,11 @@ import Foundation
                 lastAppliedHistorySeedID = nil
                 appliedOutputBatchIDs.removeAll()
                 lastAppliedEndedRenderID = nil
-                if let bootstrapSnapshot = ownerEpoch.bootstrapSnapshot {
-                    replay(snapshot: viewportSnapshot(for: bootstrapSnapshot, session: session), into: session)
+                if let bootstrapSnapshot {
+                    replay(snapshot: bootstrapSnapshot, into: session)
                     lastStaticRenderPixelSize = currentPixelSize
                 }
+                currentRenderedText = bootstrapSnapshot.map(GhosttyTerminalSnapshotLayout.plainText) ?? ""
                 if ownerBootstrapEpochID == ownerEpoch.id, let ownerBootstrapStartedAt {
                     logPerformanceEvent(
                         sessionID: ownerEpoch.sessionID, name: "local_owner_bootstrap_end",
@@ -789,12 +776,16 @@ import Foundation
                     self.ownerBootstrapEpochID = nil
                 }
             }
+            var appliedOutput = false
             for pendingOutput in ownerEpoch.pendingOutputs where !appliedOutputBatchIDs.contains(pendingOutput.id) {
                 applyOutput(pendingOutput.data, into: session)
+                appliedOutput = true
                 appliedOutputBatchIDs.insert(pendingOutput.id)
                 onOutputBatchApplied?(pendingOutput.id)
             }
-            updateRenderedTextSource(ownerEpoch: ownerEpoch, endedRender: nil, fallbackText: fallbackLabel.text ?? "", session: session)
+            if !appliedOutput {
+                updateRenderedTextSource(ownerEpoch: ownerEpoch, endedRender: nil, fallbackText: fallbackLabel.text ?? "", session: session)
+            }
         }
 
         private func applyEndedRender(_ endedRender: GhosttyRemoteTerminalEndedRender, into session: ghostty_session_t) {
@@ -824,7 +815,7 @@ import Foundation
             guard let historySeed = ownerEpoch.historySeed, !historySeed.data.isEmpty else { return false }
             guard lastAppliedHistorySeedID != historySeed.id else { return false }
             let bootstrapSnapshot = ownerEpoch.bootstrapSnapshot.map { viewportSnapshot(for: $0, session: session) }
-            let preparedHistorySeed = historySeedDataForScrollback(historySeed.data, bootstrapSnapshot: bootstrapSnapshot)
+            let preparedHistorySeed = historySeed.data
             logPerformanceEvent(
                 sessionID: ownerEpoch.sessionID, name: "owner_history_seed_apply_begin", count: preparedHistorySeed.count,
                 attributes: ["epoch_id": ownerEpoch.id, "history_seed_id": historySeed.id, "trigger": "scroll"])
@@ -842,36 +833,6 @@ import Foundation
                 elapsedMS: max(Int(Date().timeIntervalSince(startedAt) * 1000), 0), count: preparedHistorySeed.count,
                 attributes: ["epoch_id": ownerEpoch.id, "history_seed_id": historySeed.id, "trigger": "scroll"])
             return true
-        }
-
-        private func historySeedDataForScrollback(_ outputData: Data, bootstrapSnapshot: GhosttyTerminalSnapshot?) -> Data {
-            let normalizedOutputData: Data
-            if let bootstrapSnapshot,
-                let renderedTranscript = try? TerminalOutputTail.stableTranscript(
-                    from: outputData, columns: bootstrapSnapshot.columns, rows: bootstrapSnapshot.rows)
-            {
-                normalizedOutputData = Data(renderedTranscript.utf8)
-            } else {
-                normalizedOutputData = strippedPromptEOLMarkArtifacts(from: outputData)
-            }
-            guard let bootstrapSnapshot else { return normalizedOutputData }
-            let visibleLines = GhosttyTerminalSnapshotLayout.lines(for: bootstrapSnapshot).map(\.text)
-            guard let lastNonEmptyIndex = visibleLines.lastIndex(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) else {
-                return normalizedOutputData
-            }
-            guard lastNonEmptyIndex > 0 else { return normalizedOutputData }
-
-            let stableContentLine = visibleLines[..<lastNonEmptyIndex].reversed().map { $0.trimmingCharacters(in: .whitespaces) }.first(where: {
-                !$0.isEmpty
-            })
-            guard let stableContentLine else { return normalizedOutputData }
-
-            let stableContentBytes = Data(stableContentLine.utf8)
-            guard let stableContentRange = normalizedOutputData.range(of: stableContentBytes, options: .backwards) else {
-                return normalizedOutputData
-            }
-            guard let lineFeedIndex = normalizedOutputData[stableContentRange.upperBound...].firstIndex(of: 0x0A) else { return normalizedOutputData }
-            return Data(normalizedOutputData[..<normalizedOutputData.index(after: lineFeedIndex)])
         }
 
         private func strippedPromptEOLMarkArtifacts(from outputData: Data) -> Data {
@@ -901,6 +862,8 @@ import Foundation
             }
             lastStaticRenderPixelSize = .zero
         }
+
+        private func renderableOutputData(from outputData: Data) -> Data { strippedPromptEOLMarkArtifacts(from: outputData) }
 
         private func emitRenderedTextIfNeeded() {
             guard let onRenderedTextChanged else {

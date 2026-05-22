@@ -20,6 +20,21 @@
             XCTAssertFalse(runtimeConfig.supports_selection_clipboard)
         }
 
+        func testResolveResourcesPathUsesBundledGhosttyResources() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let bundledResources = root.appendingPathComponent("ghostty", isDirectory: true)
+            try FileManager.default.createDirectory(at: bundledResources, withIntermediateDirectories: true)
+
+            let resolved = try GhosttyMobileAppService.resolveResourcesPath(
+                environment: [:],
+                bundleResourceURL: root,
+                sourceFilePath: "/unavailable/Sources/spacesterminalmobileghostty/GhosttyMobileAppService.swift"
+            )
+
+            XCTAssertEqual(resolved, bundledResources.path)
+        }
+
         func testRepairStandardFileDescriptorsRepairsOutputBeforeInstallingKeepAliveStandardInputWhenStdinIsMissing() throws {
             var validDescriptors: Set<Int32> = []
             var duplicateCalls: [(source: Int32, target: Int32)] = []
@@ -1047,6 +1062,7 @@
                 cells: cells
             )
         }
+
     }
 
     private extension GhosttyRemoteTerminalHostView {

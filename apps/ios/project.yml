@@ -13,6 +13,9 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - Sources
+    resources:
+      - path: ../macos/.local/ghosttykit/Resources/ghostty
+        type: folder
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.yogeshdhande.spacesmobile
@@ -40,6 +43,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.yogeshdhande.spacesmobile.tests
     dependencies:
       - package: SpacesPackage
         product: spacesterminalcore
@@ -54,6 +58,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.yogeshdhande.spacesmobile.uitests
         TEST_TARGET_NAME: SpacesMobile
     dependencies:
       - target: SpacesMobile

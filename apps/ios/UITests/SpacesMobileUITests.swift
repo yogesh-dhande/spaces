@@ -26,6 +26,10 @@ final class SpacesMobileUITests: XCTestCase {
         try runTerminalTakeOverScenario()
     }
 
+    func testTerminalTakeOverReopenSameSessionFromList() throws {
+        try runTerminalTakeOverScenario()
+    }
+
     private func runTerminalTakeOverScenario() throws {
         let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
         let app = if configuration.attachToExistingApp {
@@ -69,7 +73,11 @@ final class SpacesMobileUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(4))
         captureScreenshot(app, name: "post-takeover-plus-6s", filePath: configuration.longDelayScreenshotPath)
         if let secondarySessionID = configuration.secondarySessionID {
-            try takeOverSecondSessionFromList(in: app, configuration: configuration, sessionID: secondarySessionID)
+            try takeOverSessionsAcrossListCycles(
+                in: app,
+                configuration: configuration,
+                sessionIDs: [secondarySessionID, configuration.sessionID, secondarySessionID]
+            )
             return
         }
         if configuration.scrollbackSwipeCount > 0 {
@@ -155,25 +163,49 @@ final class SpacesMobileUITests: XCTestCase {
         }
     }
 
-    private func takeOverSecondSessionFromList(in app: XCUIApplication, configuration: UITestConfiguration, sessionID: String) throws {
+    private func takeOverSessionsAcrossListCycles(
+        in app: XCUIApplication,
+        configuration: UITestConfiguration,
+        sessionIDs: [String]
+    ) throws {
+        for (index, sessionID) in sessionIDs.enumerated() {
+            try returnToTerminalList(in: app)
+            try takeOverSessionFromList(
+                in: app,
+                sessionID: sessionID,
+                timeout: 20,
+                context: "list cycle \(index + 1)"
+            )
+        }
+        captureScreenshot(app, name: "post-second-session-takeover", filePath: configuration.finalScreenshotPath)
+    }
+
+    private func returnToTerminalList(in app: XCUIApplication) throws {
         let backButton = app.buttons["terminal.back"]
         if backButton.waitForExistence(timeout: 2) {
             backButton.tap()
         } else {
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.06)).tap()
         }
+        XCTAssertTrue(waitForRunningApp(app, timeout: 5), "App stopped running after returning to the terminal list")
+    }
 
-        let secondSessionRow = app.buttons["terminal.row.\(sessionID)"]
-        XCTAssertTrue(secondSessionRow.waitForExistence(timeout: 10), "Second terminal row \(sessionID) did not reappear after returning to the list")
-        secondSessionRow.tap()
+    private func takeOverSessionFromList(
+        in app: XCUIApplication,
+        sessionID: String,
+        timeout: TimeInterval,
+        context: String
+    ) throws {
+        let sessionRow = app.buttons["terminal.row.\(sessionID)"]
+        XCTAssertTrue(sessionRow.waitForExistence(timeout: timeout), "Terminal row \(sessionID) did not reappear during \(context)")
+        sessionRow.tap()
 
         guard waitForOwnerState(in: app, timeout: 20) != nil else {
-            XCTFail("Timed out waiting for owner state after taking over second session \(sessionID)")
+            XCTFail("Timed out waiting for owner state after taking over session \(sessionID) during \(context)")
             return
         }
-        XCTAssertTrue(waitForOwnerReadyState(in: app, timeout: 5), "Owner-ready badge did not return promptly after second session takeover")
-        assertOwnerReadyStable(in: app, duration: 1, context: "after second session takeover")
-        captureScreenshot(app, name: "post-second-session-takeover", filePath: configuration.finalScreenshotPath)
+        XCTAssertTrue(waitForOwnerReadyState(in: app, timeout: 5), "Owner-ready badge did not return promptly after taking over session \(sessionID) during \(context)")
+        assertOwnerReadyStable(in: app, duration: 1, context: "after taking over session \(sessionID) during \(context)")
     }
 
     private func performScrollback(in app: XCUIApplication, configuration: UITestConfiguration) {
@@ -419,9 +451,9 @@ private struct UITestConfiguration: Decodable {
         secondCommandCompletedPath = try container.decodeIfPresent(String.self, forKey: .secondCommandCompletedPath)
         secondCommandObservedPath = try container.decodeIfPresent(String.self, forKey: .secondCommandObservedPath)
         proceedFinishPath = try container.decodeIfPresent(String.self, forKey: .proceedFinishPath)
-        firstCommandText = try container.decode(String.self, forKey: .firstCommandText)
+        firstCommandText = try container.decodeIfPresent(String.self, forKey: .firstCommandText) ?? ""
         secondCommandText = try container.decodeIfPresent(String.self, forKey: .secondCommandText)
-        manualRetakeoverAttempts = try container.decode(Int.self, forKey: .manualRetakeoverAttempts)
+        manualRetakeoverAttempts = try container.decodeIfPresent(Int.self, forKey: .manualRetakeoverAttempts) ?? 0
         manualRetakeoverObservedPrefix = try container.decodeIfPresent(String.self, forKey: .manualRetakeoverObservedPrefix)
         postFirstCommandScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postFirstCommandScreenshotPath)
         postSecondCommandScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postSecondCommandScreenshotPath)

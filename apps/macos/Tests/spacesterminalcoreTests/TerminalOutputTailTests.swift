@@ -119,6 +119,15 @@ final class TerminalOutputTailTests: XCTestCase {
             transcript.split(separator: "\n").contains { line in String(line).trimmingCharacters(in: .whitespacesAndNewlines) == "%" }, transcript)
     }
 
+    func testStableTranscriptIncludesPromptOutputAfterTakeoverAppend() throws {
+        let transcript = try TerminalOutputTail.stableTranscript(from: promptAppendFixtureOutput(), columns: 96, rows: 53)
+
+        XCTAssertTrue(transcript.localizedStandardContains("shell % echo __roundtrip_ipad_one__"), transcript)
+        XCTAssertTrue(transcript.localizedStandardContains("__roundtrip_ipad_one__"), transcript)
+        XCTAssertFalse(
+            transcript.split(separator: "\n").contains { line in String(line).trimmingCharacters(in: .whitespacesAndNewlines) == "%" }, transcript)
+    }
+
     private func promptEOLMarkFixtureOutput() -> Data {
         let eolMark =
             "\u{001B}[1m\u{001B}[7m%\u{001B}[27m\u{001B}[1m\u{001B}[0m" + String(repeating: " ", count: 96)
@@ -131,6 +140,24 @@ final class TerminalOutputTailTests: XCTestCase {
             SEQ 00000001 example-scrollback-line\r
             FIXTURE_DONE mode=lines emitted=1\r
             shell % 
+            """
+        return Data(output.utf8)
+    }
+
+    private func promptAppendFixtureOutput() -> Data {
+        let eolMark =
+            "\u{001B}[1m\u{001B}[7m%\u{001B}[27m\u{001B}[1m\u{001B}[0m" + String(repeating: " ", count: 96)
+            + "\r \r\r\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J"
+        let output = """
+            Last login: Fri May 22 11:03:38 on ttys260\r
+            Using Node \u{001B}[36mv24.11.1\u{001B}[0m\r
+            \(eolMark)shell % \u{001B}[K\u{001B}[?2004hprintf '__roundtrip_mac_before_takeover_two__\\n'\u{001B}[?2004l\r
+            __roundtrip_mac_before_takeover_two__\r
+            \(eolMark)shell % \u{001B}[K\u{001B}[?2004h\r
+            \u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[Jshell % \r
+            \u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[Jshell % e\u{0008}echo __roundtrip_ipad_one__\u{001B}[27D\u{001B}[32me\u{001B}[32mc\u{001B}[32mh\u{001B}[32mo\u{001B}[39m\u{001B}[23C\u{001B}[?2004l\r
+            __roundtrip_ipad_one__\r
+            \(eolMark)shell % \u{001B}[K\u{001B}[?2004h
             """
         return Data(output.utf8)
     }

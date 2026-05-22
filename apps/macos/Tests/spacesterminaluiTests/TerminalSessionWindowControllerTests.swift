@@ -1416,7 +1416,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertFalse(viewerController.debugShowsTerminalSurface)
     }
 
-    @MainActor func testGhosttyControllersRefreshOwnershipImmediatelyFromAttachmentChangeNotification() throws {
+    @MainActor func testGhosttyControllersRefreshOwnershipAfterAttachmentChangeNotification() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1460,6 +1460,8 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         ownerController.debugSimulateAttachmentStateDidChange()
         viewerController.debugSimulateAttachmentStateDidChange()
+        await Task.yield()
+        await Task.yield()
 
         XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: takeover status")
         XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty (owner)")

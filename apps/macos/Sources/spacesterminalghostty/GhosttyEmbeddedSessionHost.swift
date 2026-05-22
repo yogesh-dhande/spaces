@@ -143,8 +143,9 @@ extension Notification.Name {
     public var debugSurfaceRefreshRequestCount: Int { terminalView.debugSurfaceRefreshRequestCount }
 
     public func debugVisibleSurfaceText() -> String? {
-        guard let snapshot = terminalView.snapshot() else { return nil }
-        return GhosttyTerminalSnapshotLayout.plainText(for: snapshot)
+        if let sessionSnapshotText = terminalView.sessionSnapshotText(), !sessionSnapshotText.isEmpty { return sessionSnapshotText }
+        if let snapshotText = terminalView.snapshotText(), !snapshotText.isEmpty { return snapshotText }
+        return nil
     }
 }
 
@@ -242,6 +243,8 @@ extension Notification.Name {
     private var inputStateBroadcastScheduled = false
     private var pendingInputOutputResync = false
     private var inputOutputResyncWorkItem: DispatchWorkItem?
+    private var lastCachedSessionSnapshot: GhosttyTerminalSnapshot?
+    private var lastCachedSessionSnapshotText: String?
 
     public init(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
@@ -305,13 +308,20 @@ extension Notification.Name {
                 attachedAt: ISO8601DateFormatter().string(from: Date()))
             postAttachmentStateDidChange()
         }
+        if mode == .owner, client.kind == .localWindow { _ = captureLiveSessionScreenState() }
         refreshRuntimeState(force: true)
     }
 
     public func detach(clientID: String) throws {
         let detachedClientWasOwner = isOwner(clientID: clientID)
         try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
-        let remainingOwnerClientID = activeOwnerClientID()
+        var remainingOwnerClientID = activeOwnerClientID()
+        if detachedClientWasOwner, remainingOwnerClientID == nil, let localOwnerClientID = activeLocalWindowClientID(excluding: clientID) {
+            let transferredAt = ISO8601DateFormatter().string(from: Date())
+            try TerminalSessionPersistence.transferOwnership(
+                sessionID: launchConfiguration.sessionID, newOwnerClientID: localOwnerClientID, paths: paths, transferredAt: transferredAt)
+            remainingOwnerClientID = localOwnerClientID
+        }
         if Self.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: detachedClientWasOwner, remainingOwnerClientID: remainingOwnerClientID) {
             rendererHostStorage.setSurfaceFocused(false)
         }
@@ -328,6 +338,15 @@ extension Notification.Name {
 
     public func activeOwnerClientID() -> String? {
         ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).first(where: { $0.mode == .owner })?.clientID
+    }
+
+    private func activeLocalWindowClientID(excluding excludedClientID: String) -> String? {
+        guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) else { return nil }
+        let clientsByID = Dictionary(uniqueKeysWithValues: snapshot.clients.map { ($0.id, $0) })
+        return snapshot.attachments.filter { $0.detachedAt == nil && $0.clientID != excludedClientID }.compactMap { attachment -> TerminalClient? in
+            guard let client = clientsByID[attachment.clientID], client.kind == .localWindow, client.disconnectedAt == nil else { return nil }
+            return client
+        }.first?.id
     }
 
     public var rendererHost: GhosttyEmbeddedRendererHost { rendererHostStorage }
@@ -596,9 +615,19 @@ extension Notification.Name {
         guard let staleClientIDs = try? TerminalSessionPersistence.staleRemoteClientIDs(paths: paths, now: now), !staleClientIDs.isEmpty else {
             return []
         }
+        let activeAttachmentsBeforeExpiry = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
+        let staleClientIDSet = Set(staleClientIDs)
+        let detachedClientWasOwner = activeAttachmentsBeforeExpiry.contains {
+            $0.mode == .owner && $0.detachedAt == nil && staleClientIDSet.contains($0.clientID)
+        }
         let detachedAt = ISO8601DateFormatter().string(from: now)
         for clientID in staleClientIDs { try? TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: detachedAt) }
-        let remainingOwnerClientID = activeOwnerClientID()
+        var remainingOwnerClientID = activeOwnerClientID()
+        if detachedClientWasOwner, remainingOwnerClientID == nil, let localOwnerClientID = activeLocalWindowClientID(excluding: "") {
+            try? TerminalSessionPersistence.transferOwnership(
+                sessionID: launchConfiguration.sessionID, newOwnerClientID: localOwnerClientID, paths: paths, transferredAt: detachedAt)
+            remainingOwnerClientID = localOwnerClientID
+        }
         if Self.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: false, remainingOwnerClientID: remainingOwnerClientID) {
             rendererHostStorage.setSurfaceFocused(false)
         }
@@ -859,7 +888,7 @@ extension Notification.Name {
                     "reason": reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "runtime_columns": String(runtimeState?.columns ?? 0),
                     "runtime_rows": String(runtimeState?.rows ?? 0),
                 ])
-            let resolvedScreenState = resolveRemoteScreenState(runtimeState: runtimeState)
+            let resolvedScreenState = resolveRemoteScreenState(runtimeState: runtimeState, reason: reason, ownerKind: ownerClient?.kind)
             let snapshot = resolvedScreenState.snapshot
             let snapshotText = resolvedScreenState.snapshotText
             trace(
@@ -893,11 +922,19 @@ extension Notification.Name {
             outputByteCount: outputByteCount ?? bootstrapOutputData?.count, outputData: bootstrapOutputData)
     }
 
-    private func resolveRemoteScreenState(runtimeState: TerminalSessionRuntimeState?) -> (
+    private func resolveRemoteScreenState(runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?) -> (
         snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, source: String
     ) {
-        let sessionSnapshot = rendererHostStorage.sessionSnapshot()
-        let sessionSnapshotText = sessionSnapshot == nil ? rendererHostStorage.sessionSnapshotText() : nil
+        if Self.remoteStateShouldUseCachedSessionSnapshot(reason: reason, ownerKind: ownerKind) {
+            if Self.remoteScreenStateHasVisibleContent(snapshot: lastCachedSessionSnapshot, snapshotText: lastCachedSessionSnapshotText) {
+                return (snapshot: lastCachedSessionSnapshot, snapshotText: lastCachedSessionSnapshotText, source: "session_cached")
+            }
+            return (snapshot: nil, snapshotText: nil, source: "session_cached_empty")
+        }
+
+        let liveSessionScreenState = captureLiveSessionScreenState()
+        let sessionSnapshot = liveSessionScreenState.snapshot
+        let sessionSnapshotText = liveSessionScreenState.snapshotText
         if Self.remoteScreenStateHasVisibleContent(snapshot: sessionSnapshot, snapshotText: sessionSnapshotText) {
             return (snapshot: sessionSnapshot, snapshotText: sessionSnapshotText, source: "session")
         }
@@ -915,12 +952,27 @@ extension Notification.Name {
         return (snapshot: nil, snapshotText: nil, source: "vt_stream_empty")
     }
 
+    private func captureLiveSessionScreenState() -> (snapshot: GhosttyTerminalSnapshot?, snapshotText: String?) {
+        let sessionSnapshot = rendererHostStorage.sessionSnapshot()
+        let sessionSnapshotText = sessionSnapshot == nil ? rendererHostStorage.sessionSnapshotText() : nil
+        if Self.remoteScreenStateHasVisibleContent(snapshot: sessionSnapshot, snapshotText: sessionSnapshotText) {
+            lastCachedSessionSnapshot = sessionSnapshot
+            lastCachedSessionSnapshotText = sessionSnapshotText
+        }
+        return (snapshot: sessionSnapshot, snapshotText: sessionSnapshotText)
+    }
+
     static func remoteStateShouldIncludeScreenState(reason: String, ownerKind: TerminalClientKind? = nil) -> Bool {
         switch reason {
-        case "initial", "terminated": true
+        case "initial": ownerKind == .remoteViewer
+        case "terminated": true
         case "input", "input_output": ownerKind != .remoteViewer
         default: false
         }
+    }
+
+    static func remoteStateShouldUseCachedSessionSnapshot(reason: String, ownerKind: TerminalClientKind? = nil) -> Bool {
+        reason == "initial" && ownerKind == .remoteViewer
     }
 
     static func remoteScreenStateHasVisibleContent(snapshot: GhosttyTerminalSnapshot?, snapshotText: String?) -> Bool {

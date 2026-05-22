@@ -1002,7 +1002,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main
         ) { [weak self] notification in
             let changedSessionID = notification.userInfo?["sessionID"] as? String
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
                 self.refreshNow()
             }
@@ -1420,7 +1420,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     public func debugStateDump() -> TerminalSessionWindowDebugState {
         let renderedOutput: String
-        if !terminalContainer.isHidden, let snapshotText = ghosttyRendererHost?.debugVisibleSurfaceText(), !snapshotText.isEmpty {
+        if !terminalContainer.isHidden, let snapshotText = ghosttyRendererHost?.sessionSnapshotText(), !snapshotText.isEmpty {
             renderedOutput = snapshotText
         } else {
             renderedOutput = outputView.string

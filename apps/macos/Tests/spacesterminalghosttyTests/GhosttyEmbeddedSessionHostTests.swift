@@ -90,13 +90,20 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(GhosttyEmbeddedTerminalSessionDriver.usesLoginShell(command: "shell:printf hello"))
     }
 
-    @MainActor func testResizeRemoteStateSkipsScreenSnapshotExport() {
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial"))
+    @MainActor func testRemoteStateScreenSnapshotPolicyKeepsPassiveInitialSnapshotFree() {
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial"))
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial", ownerKind: .localWindow))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial", ownerKind: .remoteViewer))
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldUseCachedSessionSnapshot(reason: "initial"))
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldUseCachedSessionSnapshot(reason: "initial", ownerKind: .localWindow))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldUseCachedSessionSnapshot(reason: "initial", ownerKind: .remoteViewer))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input"))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input_output"))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "terminated"))
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize"))
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "runtime_state"))
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldUseCachedSessionSnapshot(reason: "input", ownerKind: .remoteViewer))
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldUseCachedSessionSnapshot(reason: "terminated", ownerKind: .remoteViewer))
     }
 
     @MainActor func testRemoteOwnerInputStateSkipsLiveScreenSnapshotExport() {
@@ -600,6 +607,36 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         wait(for: [attachmentNotifications], timeout: 2)
     }
 
+    @MainActor func testDetachingRemoteOwnerTransfersOwnershipBackToActiveLocalWindow() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-owner-return", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        let localClient = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+        let remoteClient = TerminalClient(
+            id: "remote-ipad", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
+
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+        XCTAssertEqual(host.handleControlRequest(.init(command: "attach", client: remoteClient, attachmentMode: .viewer)).ok, true)
+        XCTAssertEqual(host.handleControlRequest(.init(command: "takeover", clientID: remoteClient.id)).ok, true)
+        XCTAssertEqual(host.activeOwnerClientID(), remoteClient.id)
+
+        let detachResponse = host.handleControlRequest(.init(command: "detach", clientID: remoteClient.id))
+        XCTAssertEqual(detachResponse, TerminalControlResponse(ok: true, message: "Detached terminal client."))
+
+        let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+        XCTAssertEqual(activeAttachments.first(where: { $0.mode == .owner })?.clientID, localClient.id)
+        XCTAssertFalse(activeAttachments.contains { $0.clientID == remoteClient.id })
+    }
+
     @MainActor func testControlAttachUsesServerTimeForRemoteLease() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -678,6 +715,36 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty)
 
         wait(for: [attachmentNotifications], timeout: 2)
+    }
+
+    @MainActor func testExpiringStaleRemoteOwnerTransfersOwnershipBackToActiveLocalWindow() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-owner-expiry", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        let localClient = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+        let remoteClient = TerminalClient(
+            id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: remoteClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteClient.id, paths: paths, transferredAt: "2026-05-17T00:00:01Z")
+
+        let expiredAt = ISO8601DateFormatter().date(from: "2026-05-17T00:01:05Z")!
+        XCTAssertEqual(host.expireStaleRemoteClientsIfNeeded(now: expiredAt), [remoteClient.id])
+
+        let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+        XCTAssertEqual(activeAttachments.first(where: { $0.mode == .owner })?.clientID, localClient.id)
+        XCTAssertFalse(activeAttachments.contains { $0.clientID == remoteClient.id })
     }
 
     func testDetachingViewerKeepsOwnerFocusState() {

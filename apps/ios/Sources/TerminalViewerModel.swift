@@ -724,7 +724,7 @@ private enum TerminalViewerRenderMode: String {
             let refreshedState = await refreshLatestState(
                 timeout: Self.inputRequestTimeout,
                 ignoreTransientTimeout: true,
-                reason: "owner_bootstrap_fallback"
+                reason: "owner_bootstrap_refresh"
             )
             trace("ownership_sync_using_fetched_state snapshot=\(refreshedState?.snapshot == nil ? 0 : 1) output_bytes=\(refreshedState?.outputData?.count ?? 0)")
             beginOwnerRenderEpoch(from: refreshedState ?? latestState)
@@ -979,6 +979,10 @@ private enum TerminalViewerRenderMode: String {
             trace("host_input_readiness ready=1 accepts_input=\(acceptsInput ? 1 : 0)")
             isInputSurfaceReady = acceptsInput
             if isInputSurfaceReady { handleOwnerInputSurfaceReady() }
+            return
+        }
+        guard !(isOwner && hasConfirmedOwnerInputReadiness && ownerRenderEpochState != nil && !isSessionUnavailable) else {
+            trace("host_input_readiness ready=0 ignored_after_owner_ready")
             return
         }
         guard !(hasConfirmedOwnerInputReadiness && acceptsInput) else { return }

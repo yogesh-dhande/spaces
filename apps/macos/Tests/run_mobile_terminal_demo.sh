@@ -11,7 +11,7 @@ ghostty_xcframework="${SPACES_GHOSTTYKIT_XCFRAMEWORK:-$repo_root/apps/macos/.loc
 ghostty_resources="${SPACES_GHOSTTY_RESOURCES_DIR:-$repo_root/apps/macos/.local/ghosttykit/Resources/ghostty}"
 
 pairing_code="${SPACES_MOBILE_DEMO_PAIRING_CODE:-246810}"
-bridge_host="${SPACES_MOBILE_DEMO_HOST:-127.0.0.1}"
+bridge_host="${SPACES_MOBILE_DEMO_HOST:-0.0.0.0}"
 bridge_port="${SPACES_MOBILE_DEMO_PORT:-47071}"
 workspace_title="${SPACES_MOBILE_DEMO_WORKSPACE_TITLE:-Spaces Demo}"
 ipad_name="${SPACES_MOBILE_DEMO_IPAD_NAME:-iPad Pro 13-inch (M5)}"

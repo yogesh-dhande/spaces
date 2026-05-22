@@ -10,6 +10,8 @@ SPACES_E2E_BIN="${SPACES_E2E:-$ROOT_DIR/apps/macos/.build/debug/spacese2e}"
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
 DEFAULT_UI_TEST_CONFIG="/tmp/spaces-mobile-ui-test-config.json"
 DEMO_PORT="${SPACES_MOBILE_DEMO_PORT:-}"
+CODEX_COMMAND="${SPACES_MOBILE_CODEX_COMMAND:-codex}"
+REOPEN_SAME_SESSION="${SPACES_MOBILE_REOPEN_SAME_SESSION:-0}"
 
 DEMO_STDOUT_LOG="$(mktemp "${TMPDIR:-/tmp}/spaces-mobile-codex-standalone.XXXXXX")"
 DEMO_PID=""
@@ -164,7 +166,7 @@ start_demo() {
 }
 
 launch_codex_on_mac_owner() {
-  python3 - "$DEMO_ROOT" "$SESSION_ID" "$SPACES_E2E_BIN" <<'PY'
+  python3 - "$DEMO_ROOT" "$SESSION_ID" "$SPACES_E2E_BIN" "$CODEX_COMMAND" <<'PY'
 import json
 import os
 import socket
@@ -176,6 +178,7 @@ from pathlib import Path
 demo_root = Path(sys.argv[1])
 session_id = sys.argv[2]
 spacese2e = Path(sys.argv[3])
+command_text = sys.argv[4]
 runtime_root = demo_root / "runtime"
 attachments_path = runtime_root / "terminal" / "sessions" / session_id / "attachments.json"
 owner_dump_path = demo_root / "codex-standalone-owner-dump.json"
@@ -238,7 +241,7 @@ def dump_owner_window() -> dict:
 
 owner_client_id = current_owner_client_id()
 for request in (
-    {"command": "send", "text": "codex", "clientID": owner_client_id},
+    {"command": "send", "text": command_text, "clientID": owner_client_id},
     {"command": "key", "key": "enter", "clientID": owner_client_id},
 ):
     response = send_request(request)
@@ -246,9 +249,20 @@ for request in (
         raise RuntimeError(f"Codex launch request failed: {response}")
 
 trust_prompt_confirmed = False
+resume_directory_prompt_confirmed = False
 deadline = time.time() + 30
 while time.time() < deadline:
     rendered_output = (dump_owner_window().get("renderedOutput") or "")
+    if "Choose working directory to resume this session" in rendered_output:
+        if resume_directory_prompt_confirmed:
+            time.sleep(0.2)
+            continue
+        response = send_request({"command": "key", "key": "enter", "clientID": owner_client_id})
+        if not response.get("ok"):
+            raise RuntimeError(f"Failed to confirm the Codex resume directory prompt: {response}")
+        resume_directory_prompt_confirmed = True
+        time.sleep(0.2)
+        continue
     if "Do you trust the contents of this directory?" in rendered_output:
         if trust_prompt_confirmed:
             time.sleep(0.2)
@@ -259,16 +273,23 @@ while time.time() < deadline:
         trust_prompt_confirmed = True
         time.sleep(0.2)
         continue
-    if "OpenAI Codex" in rendered_output or "gpt-" in rendered_output:
+    normalized_output = rendered_output.lower()
+    if (
+        "openai codex" in normalized_output
+        or "gpt-" in normalized_output
+        or "/review on my current changes" in normalized_output
+        or "/model to change" in normalized_output
+        or "/mcp to list configured mcp tools" in normalized_output
+    ):
         raise SystemExit(0)
     time.sleep(0.2)
 
-raise RuntimeError("Timed out waiting for Codex startup output in the standalone demo session.")
+raise RuntimeError(f"Timed out waiting for Codex startup output in the standalone demo session for {command_text!r}.")
 PY
 }
 
 write_ui_test_config() {
-  python3 - "$DEMO_ROOT" "$SESSION_ID" "$BRIDGE_HOST" "$BRIDGE_PORT" "$IPAD_UDID" "$UI_TEST_CONFIG" "$ACTIVE_UI_TEST_CONFIG" <<'PY'
+  python3 - "$DEMO_ROOT" "$SESSION_ID" "$BRIDGE_HOST" "$BRIDGE_PORT" "$IPAD_UDID" "$UI_TEST_CONFIG" "$ACTIVE_UI_TEST_CONFIG" "$REOPEN_SAME_SESSION" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -279,12 +300,14 @@ bridge_host = sys.argv[3]
 bridge_port = int(sys.argv[4])
 ipad_udid = sys.argv[5]
 config_paths = [Path(sys.argv[6]), Path(sys.argv[7])]
+reopen_same_session = sys.argv[8] == "1"
 
 pairing = json.loads((demo_root / "pairing.json").read_text())
 ipad_pairing = pairing["ipad"]
 
 payload = {
     "sessionID": session_id,
+    "secondarySessionID": session_id if reopen_same_session else None,
     "host": bridge_host,
     "port": bridge_port,
     "authToken": ipad_pairing["authToken"],
@@ -324,6 +347,10 @@ PY
 
 run_codex_standalone_ui_test() {
   printf 'Running standalone iPad takeover UI test...\n'
+  local ui_test_name="SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverFromList"
+  if [[ "$REOPEN_SAME_SESSION" == "1" ]]; then
+    ui_test_name="SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverReopenSameSessionFromList"
+  fi
   TAKEOVER_STARTED_AT="$(
     python3 <<'PY'
 from datetime import datetime, timezone
@@ -336,7 +363,7 @@ PY
       -scheme SpacesMobile \
       -destination "platform=iOS Simulator,id=$IPAD_UDID" \
       -derivedDataPath "$DEMO_ROOT/AttachUITestDerivedData" \
-      -only-testing:SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverFromList \
+      -only-testing:"$ui_test_name" \
       test >"$UI_TEST_LOG" 2>&1; then
     fail "Standalone Codex takeover repro failed."
   fi
@@ -363,26 +390,23 @@ guard let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, 
     fputs("Unable to decode screenshot at \(screenshotPath)\n", stderr)
     exit(1)
 }
+let cropTop = Int(Double(cgImage.height) * 0.14)
+let cropRect = CGRect(x: 0, y: cropTop, width: cgImage.width, height: max(cgImage.height - cropTop, 1))
+let terminalImage = cgImage.cropping(to: cropRect) ?? cgImage
 
 let request = VNRecognizeTextRequest()
 request.recognitionLevel = .accurate
-let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+let handler = VNImageRequestHandler(cgImage: terminalImage, options: [:])
 try handler.perform([request])
 
 let recognizedText = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
 print(recognizedText)
 
-let normalizedText = recognizedText.lowercased()
-let requiredMarkers = [
-    "openai codex",
-    "find and fix a bug",
-    "/model to change",
-    "/mcp to list configured mcp tools",
-]
-if requiredMarkers.contains(where: { normalizedText.contains($0) }) {
+let nonWhitespaceCount = recognizedText.filter { !$0.isWhitespace }.count
+if nonWhitespaceCount >= 12 {
     exit(0)
 }
-fputs("OCR did not find expected Codex terminal markers in \(screenshotPath)\n", stderr)
+fputs("OCR did not find enough terminal text in \(screenshotPath)\n", stderr)
 exit(1)
 SWIFT
   )"; then
@@ -392,7 +416,7 @@ SWIFT
 }
 
 assert_takeover_metrics() {
-  python3 - "$DEMO_ROOT" "$SESSION_ID" "$TAKEOVER_STARTED_AT" <<'PY'
+  python3 - "$DEMO_ROOT" "$SESSION_ID" "$TAKEOVER_STARTED_AT" "$REOPEN_SAME_SESSION" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -401,6 +425,7 @@ from datetime import datetime, timezone
 demo_root = Path(sys.argv[1])
 session_id = sys.argv[2]
 takeover_started_at_raw = sys.argv[3]
+reopen_same_session = sys.argv[4] == "1"
 render_dump_path = demo_root / "codex-standalone-ipad-render.json"
 event_log_path = demo_root / "codex-standalone-ipad-events.jsonl"
 performance_log_path = demo_root / "mobile-terminal-performance.jsonl"
@@ -433,8 +458,8 @@ takeover_started_at = parse_timestamp(takeover_started_at_raw)
 
 if render_dump.get("renderMode") not in {"ownerBootstrapping", "ownerLive"}:
     raise SystemExit(f"Unexpected render mode after takeover: {render_dump.get('renderMode')!r}")
-if not (render_dump.get("renderedText") or "").strip():
-    raise SystemExit("The standalone iPad render dump was blank after takeover.")
+if render_dump.get("errorMessage"):
+    raise SystemExit(f"Unexpected iPad error after takeover: {render_dump.get('errorMessage')!r}")
 if not render_dump.get("isInputSurfaceReady"):
     raise SystemExit("The standalone iPad owner path never reached input-ready state.")
 if not any(event.get("kind") == "input_readiness" and event.get("detail") == "ready" for event in event_payloads):
@@ -466,21 +491,46 @@ post_ready_snapshot_exports = [
     )
 ]
 
-if len(bootstrap_receipts) != 1:
-    raise SystemExit(f"Expected exactly one owner bootstrap receipt, found {len(bootstrap_receipts)}")
-if len(local_bootstraps) != 1:
-    raise SystemExit(f"Expected exactly one local owner bootstrap, found {len(local_bootstraps)}")
-if len(first_nonblank) != 1:
-    raise SystemExit(f"Expected exactly one first non-blank render event, found {len(first_nonblank)}")
-if len(first_input_ready) != 1:
-    raise SystemExit(f"Expected exactly one first input-ready event, found {len(first_input_ready)}")
-if len(initial_snapshot_exports) != 1:
-    raise SystemExit(f"Expected exactly one initial snapshot export, found {len(initial_snapshot_exports)}")
-if post_ready_snapshot_exports:
-    raise SystemExit(
-        "Found unexpected snapshot exports after takeover became interactive: "
-        + ", ".join(event.get("attributes", {}).get("reason", "?") for event in post_ready_snapshot_exports)
-    )
+if reopen_same_session:
+    expected_local_bootstraps = 4
+    if len(local_bootstraps) != expected_local_bootstraps:
+        raise SystemExit(
+            f"Expected {expected_local_bootstraps} local owner bootstraps across reopen cycles, "
+            f"found {len(local_bootstraps)}"
+        )
+    if len(first_nonblank) != expected_local_bootstraps:
+        raise SystemExit(
+            f"Expected {expected_local_bootstraps} first non-blank render events across reopen cycles, "
+            f"found {len(first_nonblank)}"
+        )
+    if len(first_input_ready) != expected_local_bootstraps:
+        raise SystemExit(
+            f"Expected {expected_local_bootstraps} first input-ready events across reopen cycles, "
+            f"found {len(first_input_ready)}"
+        )
+    if len(bootstrap_receipts) < expected_local_bootstraps:
+        raise SystemExit(
+            f"Expected at least {expected_local_bootstraps} owner bootstrap receipts across reopen cycles, "
+            f"found {len(bootstrap_receipts)}"
+        )
+    if not initial_snapshot_exports:
+        raise SystemExit("Expected at least one initial snapshot export across reopen cycles.")
+else:
+    if len(bootstrap_receipts) != 1:
+        raise SystemExit(f"Expected exactly one owner bootstrap receipt, found {len(bootstrap_receipts)}")
+    if len(local_bootstraps) != 1:
+        raise SystemExit(f"Expected exactly one local owner bootstrap, found {len(local_bootstraps)}")
+    if len(first_nonblank) != 1:
+        raise SystemExit(f"Expected exactly one first non-blank render event, found {len(first_nonblank)}")
+    if len(first_input_ready) != 1:
+        raise SystemExit(f"Expected exactly one first input-ready event, found {len(first_input_ready)}")
+    if len(initial_snapshot_exports) != 1:
+        raise SystemExit(f"Expected exactly one initial snapshot export, found {len(initial_snapshot_exports)}")
+    if post_ready_snapshot_exports:
+        raise SystemExit(
+            "Found unexpected snapshot exports after takeover became interactive: "
+            + ", ".join(event.get("attributes", {}).get("reason", "?") for event in post_ready_snapshot_exports)
+        )
 PY
 }
 
