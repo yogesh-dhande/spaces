@@ -35,6 +35,35 @@
             XCTAssertEqual(resolved, bundledResources.path)
         }
 
+        func testConfigureGhosttyProcessEnvironmentSetsHomeAndXDGDirectories() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let home = root.appendingPathComponent("home", isDirectory: true)
+            let support = root.appendingPathComponent("support", isDirectory: true)
+            let caches = root.appendingPathComponent("caches", isDirectory: true)
+            var environment: [String: (value: String, overwrite: Int32)] = [:]
+
+            try GhosttyMobileAppService.configureGhosttyProcessEnvironment(
+                homeDirectory: home,
+                applicationSupportDirectory: support,
+                cachesDirectory: caches,
+                setEnvironment: { name, value, overwrite in
+                    environment[name] = (value, overwrite)
+                    return 0
+                }
+            )
+
+            XCTAssertEqual(environment["HOME"]?.value, home.path)
+            XCTAssertEqual(environment["HOME"]?.overwrite, 1)
+            XCTAssertEqual(environment["SHELL"]?.value, "/bin/sh")
+            XCTAssertEqual(environment["XDG_CONFIG_HOME"]?.value, support.appendingPathComponent("ghostty/config", isDirectory: true).path)
+            XCTAssertEqual(environment["XDG_STATE_HOME"]?.value, support.appendingPathComponent("ghostty/state", isDirectory: true).path)
+            XCTAssertEqual(environment["XDG_CACHE_HOME"]?.value, caches.appendingPathComponent("ghostty/cache", isDirectory: true).path)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: environment["XDG_CONFIG_HOME"]?.value ?? ""))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: environment["XDG_STATE_HOME"]?.value ?? ""))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: environment["XDG_CACHE_HOME"]?.value ?? ""))
+        }
+
         func testRepairStandardFileDescriptorsRepairsOutputBeforeInstallingKeepAliveStandardInputWhenStdinIsMissing() throws {
             var validDescriptors: Set<Int32> = []
             var duplicateCalls: [(source: Int32, target: Int32)] = []
@@ -174,7 +203,6 @@
 
             XCTAssertNotNil(GhosttyMobileAppService.shared.app)
             XCTAssertTrue(hostView.subviews.contains { $0 is UILabel })
-            XCTAssertNotNil(terminalSurfaceLayer(in: hostView))
 
             window.isHidden = true
         }
@@ -367,7 +395,7 @@
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
             XCTAssertTrue(hostView.hasActiveSessionForTesting)
-            XCTAssertTrue(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
+            XCTAssertFalse(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
 
             hostView.removeFromSuperview()
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
@@ -390,7 +418,7 @@
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
             XCTAssertTrue(hostView.hasActiveSessionForTesting)
-            XCTAssertTrue(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
+            XCTAssertFalse(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
             XCTAssertNotNil(hostView.capturedSnapshotForTesting())
 
             window.isHidden = true
@@ -476,14 +504,25 @@
             }
             wait(for: [unexpectedInitialPublication], timeout: 0.2)
 
-            let readinessChanged = expectation(description: "input readiness changed after responder update")
+            let unexpectedResponderPublication = expectation(description: "input readiness should not track responder status")
+            unexpectedResponderPublication.isInverted = true
             var reportedReadiness: [Bool] = []
+            hostView.onInputReadinessChanged = { ready in
+                reportedReadiness.append(ready)
+                unexpectedResponderPublication.fulfill()
+            }
+
+            XCTAssertTrue(hostView.resignFirstResponder())
+            wait(for: [unexpectedResponderPublication], timeout: 0.2)
+            XCTAssertTrue(reportedReadiness.isEmpty)
+
+            let readinessChanged = expectation(description: "input readiness changed after input was disabled")
             hostView.onInputReadinessChanged = { ready in
                 reportedReadiness.append(ready)
                 if ready == false { readinessChanged.fulfill() }
             }
 
-            XCTAssertTrue(hostView.resignFirstResponder())
+            hostView.setAcceptsTerminalInput(false)
             wait(for: [readinessChanged], timeout: 2)
             XCTAssertEqual(reportedReadiness.last, false)
 
@@ -733,7 +772,7 @@
         func testRemoteTerminalHostViewEncodesPreciseScrollMods() {
             XCTAssertEqual(
                 Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed)),
-                Int32(0b0000_0101)
+                Int32(0b0000_0111)
             )
             XCTAssertEqual(
                 Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: false, momentumState: .ended)),
@@ -741,7 +780,7 @@
             )
             XCTAssertEqual(
                 Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: false, momentumState: .possible)),
-                Int32(0b0000_1010)
+                Int32(0b0000_1100)
             )
         }
 

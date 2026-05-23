@@ -164,8 +164,9 @@ private enum TerminalViewerRenderMode: String {
     var isOwnershipSynchronizationPending: Bool { isOwnershipSynchronizationScheduled || isSynchronizingOwnership }
     var isTakingOver: Bool { !isOwner && (isAwaitingTakeoverConfirmation || isBusy || isOwnershipSynchronizationPending) }
     var acceptsInput: Bool { isOwner && !isBusy && !isConnecting && !isOwnershipSynchronizationPending && !isSessionUnavailable }
+    var keepsTerminalInputSurfaceActive: Bool { isOwner && !isConnecting && !isSessionUnavailable }
     var isPreparingInput: Bool {
-        isOwner && !isSessionUnavailable && (isBusy || isConnecting || isOwnershipSynchronizationPending || !isInputSurfaceReady)
+        isOwner && !isSessionUnavailable && (isBusy || isConnecting || ownerRenderEpochState == nil || !isInputSurfaceReady)
     }
     var viewportColumns: Int? { viewportSize?.columns }
     var viewportRows: Int? { viewportSize?.rows }
@@ -274,6 +275,7 @@ private enum TerminalViewerRenderMode: String {
 
     func sendText(_ text: String, appendNewline: Bool = false) async {
         guard isOwner else { return }
+        guard acceptsInput, hasConfirmedOwnerInputReadiness else { return }
         guard !text.isEmpty else { return }
         if appendNewline {
             bufferInputText(text)
@@ -286,6 +288,7 @@ private enum TerminalViewerRenderMode: String {
 
     func sendKey(_ key: String) async {
         guard isOwner else { return }
+        guard acceptsInput, hasConfirmedOwnerInputReadiness else { return }
         flushBufferedInputText()
         enqueueInputSend(kind: "send_key", detail: key) { [weak self, key] in
             guard let self else { return }
@@ -977,8 +980,8 @@ private enum TerminalViewerRenderMode: String {
     func setInputSurfaceReady(_ ready: Bool) {
         if ready {
             trace("host_input_readiness ready=1 accepts_input=\(acceptsInput ? 1 : 0)")
-            isInputSurfaceReady = acceptsInput
-            if isInputSurfaceReady { handleOwnerInputSurfaceReady() }
+            isInputSurfaceReady = true
+            handleOwnerInputSurfaceReady()
             return
         }
         guard !(isOwner && hasConfirmedOwnerInputReadiness && ownerRenderEpochState != nil && !isSessionUnavailable) else {
@@ -1004,7 +1007,6 @@ private enum TerminalViewerRenderMode: String {
                 ]
             )
         }
-        requestHistorySeedIfNeeded()
     }
 
     private func requestHistorySeedIfNeeded() {

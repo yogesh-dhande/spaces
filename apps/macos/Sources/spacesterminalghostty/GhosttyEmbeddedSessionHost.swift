@@ -538,6 +538,7 @@ extension Notification.Name {
         guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
         do {
             try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+            refreshCachedOwnerBootstrapSnapshotBeforeRemoteTakeover()
             try TerminalSessionPersistence.transferOwnership(
                 sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths,
                 transferredAt: ISO8601DateFormatter().string(from: Date()))
@@ -556,6 +557,20 @@ extension Notification.Name {
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
             return TerminalControlResponse(ok: false, message: String(describing: error))
         }
+    }
+
+    private func refreshCachedOwnerBootstrapSnapshotBeforeRemoteTakeover() {
+        guard activeOwnerClient()?.kind == .localWindow else { return }
+        // Remote owner bootstrap intentionally consumes this cached Ghostty session snapshot.
+        // Refresh it at the ownership boundary so iPad does not inherit stale line-editor cells
+        // captured by an earlier input/output resync.
+        requestSurfaceRefreshAction()
+        GhosttyEmbeddedAppService.shared.tick()
+        let refreshedState = captureLiveSessionScreenState()
+        logMobileTakeoverPerformance(
+            name: "owner_bootstrap_cache_refresh",
+            attributes: ["snapshot": refreshedState.snapshot == nil ? "0" : "1", "snapshot_text": refreshedState.snapshotText == nil ? "0" : "1"])
+        trace("takeover_cached_owner_bootstrap_refreshed")
     }
 
     private func controlResponseForResizeRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {

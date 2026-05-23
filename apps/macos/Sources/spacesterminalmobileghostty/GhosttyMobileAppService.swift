@@ -158,10 +158,31 @@ import Foundation
             return errno != EBADF
         }
 
+        static func configureGhosttyProcessEnvironment(
+            homeDirectory: URL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true),
+            applicationSupportDirectory: URL? = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
+            cachesDirectory: URL? = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first, fileManager: FileManager = .default,
+            setEnvironment: (String, String, Int32) -> Int32 = { setenv($0, $1, $2) }
+        ) throws {
+            let supportRoot = applicationSupportDirectory ?? homeDirectory.appendingPathComponent("Library/Application Support", isDirectory: true)
+            let cacheRoot = cachesDirectory ?? homeDirectory.appendingPathComponent("Library/Caches", isDirectory: true)
+            let configDirectory = supportRoot.appendingPathComponent("ghostty/config", isDirectory: true)
+            let stateDirectory = supportRoot.appendingPathComponent("ghostty/state", isDirectory: true)
+            let cacheDirectory = cacheRoot.appendingPathComponent("ghostty/cache", isDirectory: true)
+
+            try [homeDirectory, configDirectory, stateDirectory, cacheDirectory].forEach {
+                try fileManager.createDirectory(at: $0, withIntermediateDirectories: true)
+            }
+
+            _ = setEnvironment("HOME", homeDirectory.path, 1)
+            _ = setEnvironment("SHELL", "/bin/sh", 1)
+            _ = setEnvironment("XDG_CONFIG_HOME", configDirectory.path, 1)
+            _ = setEnvironment("XDG_STATE_HOME", stateDirectory.path, 1)
+            _ = setEnvironment("XDG_CACHE_HOME", cacheDirectory.path, 1)
+        }
+
         private func configureProcessEnvironment() throws {
-            let environment = ProcessInfo.processInfo.environment
-            if environment["HOME"]?.isEmpty != false { setenv("HOME", NSHomeDirectory(), 0) }
-            if environment["SHELL"]?.isEmpty != false { setenv("SHELL", "/bin/sh", 0) }
+            try Self.configureGhosttyProcessEnvironment()
             // Simulator stdin can remain guarded even when valid; always swap in a disposable pipe so Ghostty can close and re-open carrier stdio.
             let repairedDescriptors = try Self.repairStandardFileDescriptors()
             if let previousDescriptor = retainedStandardInputWriteDescriptor,

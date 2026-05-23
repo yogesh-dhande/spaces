@@ -137,8 +137,18 @@ import Foundation
         nonisolated(unsafe) static var sessionFreeHandlerForTesting: @Sendable (ghostty_session_t) -> Void = { session in
             ghostty_session_free(session)
         }
+        nonisolated(unsafe) private static let hostManagedReceiveBufferCallback: ghostty_surface_receive_buffer_cb = { userdata, ptr, len in
+            guard ptr != nil, len > 0 else { return }
+            let hostView = userdata.map { Unmanaged<GhosttyRemoteTerminalHostView>.fromOpaque($0).takeUnretainedValue() }
+            ghosttyRemoteTerminalTrace("host_managed_output_ignored len=\(len) has_host=\(hostView != nil)")
+        }
+        nonisolated(unsafe) private static let hostManagedResizeCallback: ghostty_surface_receive_resize_cb = {
+            userdata, columns, rows, widthPixels, heightPixels in
+            let hostView = userdata.map { Unmanaged<GhosttyRemoteTerminalHostView>.fromOpaque($0).takeUnretainedValue() }
+            Task { @MainActor in hostView?.handleHostManagedResize(columns: columns, rows: rows, widthPixels: widthPixels, heightPixels: heightPixels)
+            }
+        }
 
-        private static let carrierCommand = "direct:/bin/cat"
         private static let defaultFontSize: Float = 13
         private static let contentInsets = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         private static let sessionResetSequence = Data("\u{001B}c".utf8)
@@ -163,6 +173,12 @@ import Foundation
         private var currentRenderedText = ""
         private var lastEmittedRenderedText: String?
         private var lastReportedInputReadiness = false
+        private var lastReportedViewportSize: (columns: Int, rows: Int)?
+        private var lastSyncedPixelSize = CGSize.zero
+        private var lastSyncedScaleFactor: Double = 0
+        private var lastSyncedFocus = false
+        private var lastSyncedOcclusion = false
+        private var firstResponderRequestScheduled = false
         private var postRefreshEmissionScheduled = false
         private var scrollSettledEmissionGeneration: UInt64 = 0
         private var scrollSettledEmissionTasks: [Task<Void, Never>] = []
@@ -220,6 +236,7 @@ import Foundation
                 return
             }
             ensureSession()
+            requestFirstResponderIfNeeded()
             syncSessionState()
             reportInputReadinessIfNeeded()
         }
@@ -399,7 +416,7 @@ import Foundation
             guard acceptsTerminalInput != enabled else { return }
             acceptsTerminalInput = enabled
             ghosttyRemoteTerminalTrace("set_accepts_input enabled=\(enabled ? 1 : 0)")
-            syncFirstResponder()
+            if enabled { requestFirstResponderIfNeeded() } else { syncFirstResponder() }
             reportInputReadinessIfNeeded()
         }
 
@@ -459,6 +476,12 @@ import Foundation
             ownerBootstrapEpochID = nil
             firstNonBlankOwnerEpochID = nil
             lastStaticRenderPixelSize = .zero
+            lastReportedViewportSize = nil
+            lastSyncedPixelSize = .zero
+            lastSyncedScaleFactor = 0
+            lastSyncedFocus = false
+            lastSyncedOcclusion = false
+            firstResponderRequestScheduled = false
             currentRenderedText = ""
             lastReportedInputReadiness = false
             cancelScrollSettledEmissionTasks()
@@ -488,33 +511,29 @@ import Foundation
         }
 
         private func createSession(app: ghostty_app_t) -> ghostty_session_t? {
-            let repairedDescriptors: GhosttyMobileAppService.StandardFileDescriptorRepair
-            do { repairedDescriptors = try GhosttyMobileAppService.repairStandardFileDescriptors() } catch {
-                ghosttyRemoteTerminalTrace(
-                    "create_session repair_stdio_failure error=\(error.localizedDescription.replacingOccurrences(of: "\n", with: "\\n"))")
-                return nil
-            }
-
             var sessionConfig = ghostty_session_config_new()
             sessionConfig.surface.platform_tag = GHOSTTY_PLATFORM_IOS
             sessionConfig.surface.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(uiview: Unmanaged.passUnretained(self).toOpaque()))
+            sessionConfig.surface.backend = GHOSTTY_SURFACE_IO_BACKEND_HOST_MANAGED
+            sessionConfig.surface.receive_userdata = Unmanaged.passUnretained(self).toOpaque()
+            sessionConfig.surface.receive_buffer = Self.hostManagedReceiveBufferCallback
+            sessionConfig.surface.receive_resize = Self.hostManagedResizeCallback
             sessionConfig.surface.scale_factor = scaleFactor
             sessionConfig.surface.font_size = Self.defaultFontSize
             sessionConfig.surface.use_login_shell = false
-            let createdSession = Self.carrierCommand.withCString { commandPointer in
-                sessionConfig.surface.command = commandPointer
-                return ghostty_session_new(app, &sessionConfig)
-            }
+            let createdSession = ghostty_session_new(app, &sessionConfig)
 
-            guard let createdSession else {
-                if let retainedStandardInputWriteDescriptor = repairedDescriptors.retainedStandardInputWriteDescriptor {
-                    _ = close(retainedStandardInputWriteDescriptor)
-                }
-                return nil
-            }
-            if let previousRetainedDescriptor = retainedSessionStandardInputWriteDescriptor { _ = close(previousRetainedDescriptor) }
-            retainedSessionStandardInputWriteDescriptor = repairedDescriptors.retainedStandardInputWriteDescriptor
+            guard let createdSession else { return nil }
             return createdSession
+        }
+
+        private func handleHostManagedResize(columns: UInt16, rows: UInt16, widthPixels: UInt32, heightPixels: UInt32) {
+            ghosttyRemoteTerminalTrace("host_managed_resize columns=\(columns) rows=\(rows) pixels=\(widthPixels)x\(heightPixels)")
+            guard columns > 0, rows > 0 else { return }
+            let viewport = (columns: Int(columns), rows: Int(rows))
+            guard lastReportedViewportSize?.columns != viewport.columns || lastReportedViewportSize?.rows != viewport.rows else { return }
+            lastReportedViewportSize = viewport
+            onViewportSizeChanged?(viewport.columns, viewport.rows)
         }
 
         private func replay(snapshot: GhosttyTerminalSnapshot, into session: ghostty_session_t) {
@@ -540,10 +559,28 @@ import Foundation
             guard let session else { return }
             let scale = scaleFactor
             let pixelSize = currentPixelSize
-            ghostty_session_set_content_scale(session, scale, scale)
-            ghostty_session_set_focus(session, isFirstResponder)
-            ghostty_session_set_occlusion(session, window != nil && isTerminalVisible && alpha > 0.001)
-            ghostty_session_set_size(session, UInt32(max(pixelSize.width, 1)), UInt32(max(pixelSize.height, 1)))
+            let hasSizeChanged = pixelSize != lastSyncedPixelSize
+            let hasScaleChanged = scale != lastSyncedScaleFactor
+            let isFocused = isFirstResponder
+            let hasFocusChanged = isFocused != lastSyncedFocus
+            let isOccluded = window != nil && isTerminalVisible && alpha > 0.001
+            let hasOcclusionChanged = isOccluded != lastSyncedOcclusion
+            if hasScaleChanged {
+                ghostty_session_set_content_scale(session, scale, scale)
+                lastSyncedScaleFactor = scale
+            }
+            if hasFocusChanged {
+                ghostty_session_set_focus(session, isFocused)
+                lastSyncedFocus = isFocused
+            }
+            if hasOcclusionChanged {
+                ghostty_session_set_occlusion(session, isOccluded)
+                lastSyncedOcclusion = isOccluded
+            }
+            if hasSizeChanged {
+                ghostty_session_set_size(session, UInt32(max(pixelSize.width, 1)), UInt32(max(pixelSize.height, 1)))
+                lastSyncedPixelSize = pixelSize
+            }
             ghosttyRemoteTerminalTrace(
                 "sync_state visible=\(isTerminalVisible ? 1 : 0) accepts_input=\(acceptsTerminalInput ? 1 : 0) first_responder=\(isFirstResponder ? 1 : 0) pixel=\(Int(pixelSize.width))x\(Int(pixelSize.height)) owner_epoch=\(activeOwnerEpoch?.id ?? "nil") ended=\(activeEndedRender?.id ?? "nil")"
             )
@@ -553,9 +590,8 @@ import Foundation
                 replay(snapshot: viewportSnapshot(for: endedRender.snapshot, session: session), into: session)
                 lastStaticRenderPixelSize = pixelSize
             }
-            requestSurfaceRefresh()
-            notifyViewportSizeIfChanged()
-            syncFirstResponder()
+            if hasSizeChanged || hasScaleChanged || hasFocusChanged || hasOcclusionChanged { requestSurfaceRefresh() }
+            if hasSizeChanged || hasScaleChanged { notifyViewportSizeIfChanged() }
             reportInputReadinessIfNeeded()
         }
 
@@ -575,7 +611,7 @@ import Foundation
         ) -> Bool {
             if let location { _ = sendMousePosition(at: location) }
             return sendScroll(
-                horizontal: horizontal, vertical: vertical,
+                horizontal: horizontal, vertical: -vertical,
                 mods: Self.makeScrollMods(hasPreciseDeltas: hasPreciseDeltas, momentumState: momentumState))
         }
 
@@ -627,11 +663,26 @@ import Foundation
 
         private func syncFirstResponder() {
             guard window != nil else { return }
-            if acceptsTerminalInput { if !isFirstResponder { becomeFirstResponder() } } else if isFirstResponder { resignFirstResponder() }
+            if !acceptsTerminalInput, isFirstResponder { resignFirstResponder() }
         }
 
-        private var isInputSurfaceReady: Bool { acceptsTerminalInput && isFirstResponder && window != nil }
-        private var canProcessKeyboardInput: Bool { isInputSurfaceReady }
+        private func requestFirstResponderIfNeeded() {
+            guard acceptsTerminalInput, window != nil, !isFirstResponder, !firstResponderRequestScheduled else { return }
+            firstResponderRequestScheduled = true
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self else { return }
+                self.firstResponderRequestScheduled = false
+                guard self.acceptsTerminalInput, self.window != nil, !self.isFirstResponder else {
+                    self.reportInputReadinessIfNeeded()
+                    return
+                }
+                _ = self.becomeFirstResponder()
+            }
+        }
+
+        private var isInputSurfaceReady: Bool { acceptsTerminalInput && session != nil && window != nil }
+        private var canProcessKeyboardInput: Bool { acceptsTerminalInput && isFirstResponder && session != nil && window != nil }
 
         private func sendMousePosition(at point: CGPoint, mods: ghostty_input_mods_e = GHOSTTY_MODS_NONE) -> Bool {
             guard let session else { return false }
@@ -687,8 +738,11 @@ import Foundation
             guard let session else { return }
             let size = ghostty_session_size(session)
             guard size.columns > 0, size.rows > 0 else { return }
+            let resolved = (columns: Int(size.columns), rows: Int(size.rows))
+            guard lastReportedViewportSize?.columns != resolved.columns || lastReportedViewportSize?.rows != resolved.rows else { return }
+            lastReportedViewportSize = resolved
             ghosttyRemoteTerminalTrace("viewport_callback columns=\(size.columns) rows=\(size.rows)")
-            onViewportSizeChanged?(Int(size.columns), Int(size.rows))
+            onViewportSizeChanged?(resolved.columns, resolved.rows)
         }
 
         // Unit tests may inspect an idle local surface directly, but live owner render
@@ -748,9 +802,18 @@ import Foundation
         }
 
         private func applyOwnerEpoch(_ ownerEpoch: GhosttyRemoteTerminalOwnerEpoch, into session: ghostty_session_t) {
+            let previousOwnerEpoch = activeOwnerEpoch
             activeOwnerEpoch = ownerEpoch
             activeEndedRender = nil
             let bootstrapSnapshot = ownerEpoch.bootstrapSnapshot.map { viewportSnapshot(for: $0, session: session) }
+            let isFirstOwnerEpoch = lastAppliedOwnerEpochID == nil
+            let preservesExistingRenderedHistory =
+                ownerEpoch.pendingOutputs.isEmpty && ownerEpoch.historySeed == nil && bootstrapSnapshot != nil
+                && previousOwnerEpoch?.bootstrapSnapshot == ownerEpoch.bootstrapSnapshot && lastAppliedOwnerEpochID != nil
+            if preservesExistingRenderedHistory {
+                updateRenderedTextSource(ownerEpoch: ownerEpoch, endedRender: nil, fallbackText: fallbackLabel.text ?? "", session: session)
+                return
+            }
             if lastAppliedOwnerEpochID != ownerEpoch.id {
                 ownerBootstrapStartedAt = Date()
                 ownerBootstrapEpochID = ownerEpoch.id
@@ -762,11 +825,17 @@ import Foundation
                 lastAppliedHistorySeedID = nil
                 appliedOutputBatchIDs.removeAll()
                 lastAppliedEndedRenderID = nil
-                if let bootstrapSnapshot {
+                if let historySeed = ownerEpoch.historySeed, !historySeed.data.isEmpty {
+                    applyOutput(historySeed.data, into: session)
+                    lastAppliedHistorySeedID = historySeed.id
+                    onHistorySeedApplied?(historySeed.id)
+                } else if let bootstrapSnapshot {
                     replay(snapshot: bootstrapSnapshot, into: session)
                     lastStaticRenderPixelSize = currentPixelSize
                 }
-                currentRenderedText = bootstrapSnapshot.map(GhosttyTerminalSnapshotLayout.plainText) ?? ""
+                currentRenderedText =
+                    exportedSnapshot(from: session).map(GhosttyTerminalSnapshotLayout.plainText) ?? bootstrapSnapshot.map(
+                        GhosttyTerminalSnapshotLayout.plainText) ?? ""
                 if ownerBootstrapEpochID == ownerEpoch.id, let ownerBootstrapStartedAt {
                     logPerformanceEvent(
                         sessionID: ownerEpoch.sessionID, name: "local_owner_bootstrap_end",
@@ -778,6 +847,11 @@ import Foundation
             }
             var appliedOutput = false
             for pendingOutput in ownerEpoch.pendingOutputs where !appliedOutputBatchIDs.contains(pendingOutput.id) {
+                if isFirstOwnerEpoch, ownerEpoch.id.hasPrefix("owner|"), bootstrapSnapshot != nil {
+                    appliedOutputBatchIDs.insert(pendingOutput.id)
+                    onOutputBatchApplied?(pendingOutput.id)
+                    continue
+                }
                 applyOutput(pendingOutput.data, into: session)
                 appliedOutput = true
                 appliedOutputBatchIDs.insert(pendingOutput.id)
@@ -863,7 +937,20 @@ import Foundation
             lastStaticRenderPixelSize = .zero
         }
 
-        private func renderableOutputData(from outputData: Data) -> Data { strippedPromptEOLMarkArtifacts(from: outputData) }
+        private func renderableOutputData(from outputData: Data) -> Data { normalizeBareLineFeeds(strippedPromptEOLMarkArtifacts(from: outputData)) }
+
+        private func normalizeBareLineFeeds(_ data: Data) -> Data {
+            guard data.contains(0x0A) else { return data }
+            var normalized = Data()
+            normalized.reserveCapacity(data.count)
+            var previousByte: UInt8?
+            for byte in data {
+                if byte == 0x0A, previousByte != 0x0D { normalized.append(0x0D) }
+                normalized.append(byte)
+                previousByte = byte
+            }
+            return normalized
+        }
 
         private func emitRenderedTextIfNeeded() {
             guard let onRenderedTextChanged else {
