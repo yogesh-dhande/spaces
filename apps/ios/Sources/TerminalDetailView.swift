@@ -11,7 +11,6 @@ struct TerminalDetailView: View {
     @State private var hasMountedTerminalSurface = false
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
-    private let inputToolbarHeight: CGFloat = 58
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var shouldCaptureRenderedText: Bool { e2eConfig.isEnabled && e2eConfig.matches(sessionID: session.id) }
     private var e2eCommandRequestPath: String? {
@@ -101,9 +100,7 @@ struct TerminalDetailView: View {
                 errorBanner(errorMessage)
             }
         }
-        .padding(.bottom, model.keepsTerminalInputSurfaceActive ? inputToolbarHeight : 0)
         .background(Color(red: 0.10, green: 0.12, blue: 0.15).ignoresSafeArea())
-        .ignoresSafeArea(.keyboard, edges: .bottom)
         .toolbar(.hidden, for: .navigationBar)
         .task { model.start() }
         .task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }
