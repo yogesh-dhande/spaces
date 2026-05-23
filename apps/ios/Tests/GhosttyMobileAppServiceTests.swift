@@ -20,6 +20,30 @@
             XCTAssertFalse(runtimeConfig.supports_selection_clipboard)
         }
 
+        func testPhoneViewportReportsReadableColumns() {
+            let viewport = GhosttyRemoteTerminalViewport.reportedSize(
+                rawColumns: 80,
+                rawRows: 24,
+                bounds: CGRect(x: 0, y: 0, width: 393, height: 700),
+                idiom: .phone
+            )
+
+            XCTAssertEqual(viewport.columns, 39)
+            XCTAssertEqual(viewport.rows, 24)
+        }
+
+        func testPadViewportKeepsGhosttyColumns() {
+            let viewport = GhosttyRemoteTerminalViewport.reportedSize(
+                rawColumns: 120,
+                rawRows: 40,
+                bounds: CGRect(x: 0, y: 0, width: 1024, height: 900),
+                idiom: .pad
+            )
+
+            XCTAssertEqual(viewport.columns, 120)
+            XCTAssertEqual(viewport.rows, 40)
+        }
+
         func testResolveResourcesPathUsesBundledGhosttyResources() throws {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -950,6 +974,73 @@
             XCTAssertNotEqual(scrolledText, bottomText)
             XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
             XCTAssertTrue(scrolledText.localizedStandardContains("SEQ 0001"), scrolledText)
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewUsesHistorySeedInsteadOfBootstrapSnapshotForScrollback() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            let bootstrapSnapshot = snapshot(columns: 8, rows: 2, text: "SNAPSHOT_ONLY")
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session",
+                    id: "owner-epoch",
+                    bootstrapSnapshot: bootstrapSnapshot,
+                    historySeed: nil,
+                    pendingOutputs: []
+                ),
+                endedRender: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session",
+                    id: "owner-epoch",
+                    bootstrapSnapshot: bootstrapSnapshot,
+                    historySeed: GhosttyRemoteTerminalOutputBatch(
+                        id: "history|owner-epoch",
+                        data: Data("history-only-line\nshell % ".utf8)
+                    ),
+                    pendingOutputs: []
+                ),
+                endedRender: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+            hostView.setAcceptsTerminalInput(true)
+            _ = hostView.becomeFirstResponder()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            let refreshedSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let refreshedText = GhosttyTerminalSnapshotLayout.plainText(for: refreshedSnapshot)
+            XCTAssertTrue(refreshedText.localizedStandardContains("history-only-line"), refreshedText)
+            XCTAssertFalse(refreshedText.localizedStandardContains("SNAPSHOT"), refreshedText)
+
+            let didScroll = hostView.debugSendScrollForTesting(
+                horizontal: 0,
+                vertical: -2400,
+                location: CGPoint(x: hostView.bounds.midX, y: hostView.bounds.midY)
+            )
+            XCTAssertTrue(didScroll)
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+
+            let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
+            XCTAssertTrue(scrolledText.localizedStandardContains("history-only-line"), scrolledText)
+            XCTAssertFalse(scrolledText.localizedStandardContains("SNAPSHOT"), scrolledText)
 
             window.isHidden = true
         }

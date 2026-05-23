@@ -1011,6 +1011,7 @@ private enum TerminalViewerRenderMode: String {
 
     private func requestHistorySeedIfNeeded() {
         guard isOwner, let ownerRenderEpochState else { return }
+        guard ownerRenderEpochState.historySeed == nil else { return }
         guard requestedHistorySeedEpochID != ownerRenderEpochState.id else { return }
         requestedHistorySeedEpochID = ownerRenderEpochState.id
         historySeedTask?.cancel()
@@ -1103,25 +1104,34 @@ private enum TerminalViewerRenderMode: String {
         requestedHistorySeedEpochID = nil
         reportedOwnerReadyEpochID = nil
         hasConfirmedOwnerInputReadiness = false
+        let epochID = ownerRenderEpochID(for: payload)
+        let historySeed: GhosttyRemoteTerminalOutputBatch? =
+            if let outputData = payload.outputData, !outputData.isEmpty {
+                GhosttyRemoteTerminalOutputBatch(id: "history|\(epochID)", data: outputData)
+            } else {
+                nil
+            }
         ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
             sessionID: session.id,
-            id: ownerRenderEpochID(for: payload),
+            id: epochID,
             bootstrapSnapshot: bootstrapSnapshot,
+            historySeed: historySeed,
             pendingOutputs: []
         )
         trace(
-            "owner_render_epoch_begin id=\(ownerRenderEpochState?.id ?? "nil") snapshot=1"
+            "owner_render_epoch_begin id=\(epochID) snapshot=1"
         )
         logPerformanceEvent(
             name: "owner_bootstrap_state_received",
             attributes: [
-                "epoch_id": ownerRenderEpochState?.id ?? "nil",
+                "epoch_id": epochID,
                 "payload_reason": payload.reason,
                 "snapshot_columns": String(bootstrapSnapshot.columns),
                 "snapshot_rows": String(bootstrapSnapshot.rows),
             ]
         )
         if isInputSurfaceReady { handleOwnerInputSurfaceReady() }
+        requestHistorySeedIfNeeded()
     }
 
     private func appendOwnerRenderOutput(data: Data, token: String) {

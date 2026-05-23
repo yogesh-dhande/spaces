@@ -150,7 +150,7 @@ import Foundation
         }
 
         private static let defaultFontSize: Float = 11
-        private static let contentInsets = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        private static let contentInsets = GhosttyRemoteTerminalViewport.contentInsets
         private static let sessionResetSequence = Data("\u{001B}c".utf8)
         private static let promptEOLMarkStartSequence = Data("\u{001B}[1m\u{001B}[7m%".utf8)
         private static let promptEOLMarkEndSequence = Data("\r \r\r\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J".utf8)
@@ -722,7 +722,8 @@ import Foundation
         private func handleHostManagedResize(columns: UInt16, rows: UInt16, widthPixels: UInt32, heightPixels: UInt32) {
             ghosttyRemoteTerminalTrace("host_managed_resize columns=\(columns) rows=\(rows) pixels=\(widthPixels)x\(heightPixels)")
             guard columns > 0, rows > 0 else { return }
-            let viewport = (columns: Int(columns), rows: Int(rows))
+            let viewport = GhosttyRemoteTerminalViewport.reportedSize(
+                rawColumns: Int(columns), rawRows: Int(rows), bounds: bounds, idiom: traitCollection.userInterfaceIdiom)
             guard lastReportedViewportSize?.columns != viewport.columns || lastReportedViewportSize?.rows != viewport.rows else { return }
             lastReportedViewportSize = viewport
             onViewportSizeChanged?(viewport.columns, viewport.rows)
@@ -802,6 +803,7 @@ import Foundation
             momentumState: UIGestureRecognizer.State = .changed
         ) -> Bool {
             if let location { _ = sendMousePosition(at: location) }
+            applyHistorySeedIfNeededBeforeScroll()
             return sendScroll(
                 horizontal: horizontal, vertical: -vertical,
                 mods: Self.makeScrollMods(hasPreciseDeltas: hasPreciseDeltas, momentumState: momentumState))
@@ -904,10 +906,10 @@ import Foundation
 
         private func viewportSnapshot(for snapshot: GhosttyTerminalSnapshot, session: ghostty_session_t) -> GhosttyTerminalSnapshot {
             let localSize = ghostty_session_size(session)
-            let localColumns = Int(localSize.columns)
-            let localRows = Int(localSize.rows)
-            guard localColumns > 0, localRows > 0 else { return snapshot }
-            return GhosttyTerminalSnapshotViewport.crop(snapshot, columns: localColumns, rows: localRows, horizontalAlignment: .leading)
+            let viewport = GhosttyRemoteTerminalViewport.reportedSize(
+                rawColumns: Int(localSize.columns), rawRows: Int(localSize.rows), bounds: bounds, idiom: traitCollection.userInterfaceIdiom)
+            guard viewport.columns > 0, viewport.rows > 0 else { return snapshot }
+            return GhosttyTerminalSnapshotViewport.crop(snapshot, columns: viewport.columns, rows: viewport.rows, horizontalAlignment: .leading)
         }
 
         static func makeScrollMods(hasPreciseDeltas: Bool, momentumState: UIGestureRecognizer.State) -> ghostty_input_scroll_mods_t {
@@ -939,7 +941,8 @@ import Foundation
             guard let session else { return }
             let size = ghostty_session_size(session)
             guard size.columns > 0, size.rows > 0 else { return }
-            let resolved = (columns: Int(size.columns), rows: Int(size.rows))
+            let resolved = GhosttyRemoteTerminalViewport.reportedSize(
+                rawColumns: Int(size.columns), rawRows: Int(size.rows), bounds: bounds, idiom: traitCollection.userInterfaceIdiom)
             guard lastReportedViewportSize?.columns != resolved.columns || lastReportedViewportSize?.rows != resolved.rows else { return }
             lastReportedViewportSize = resolved
             ghosttyRemoteTerminalTrace("viewport_callback columns=\(size.columns) rows=\(size.rows)")
@@ -1046,6 +1049,8 @@ import Foundation
                     self.ownerBootstrapEpochID = nil
                 }
             }
+            let appliedHistorySeed = applyHistorySeedIfNeeded(
+                for: ownerEpoch, into: session, trigger: "owner_epoch_update", preserveRenderedText: false)
             var appliedOutput = false
             for pendingOutput in ownerEpoch.pendingOutputs where !appliedOutputBatchIDs.contains(pendingOutput.id) {
                 if isFirstOwnerEpoch, ownerEpoch.id.hasPrefix("owner|"), bootstrapSnapshot != nil {
@@ -1058,7 +1063,7 @@ import Foundation
                 appliedOutputBatchIDs.insert(pendingOutput.id)
                 onOutputBatchApplied?(pendingOutput.id)
             }
-            if !appliedOutput {
+            if !appliedHistorySeed && !appliedOutput {
                 updateRenderedTextSource(ownerEpoch: ownerEpoch, endedRender: nil, fallbackText: fallbackLabel.text ?? "", session: session)
             }
         }
@@ -1081,32 +1086,28 @@ import Foundation
 
         @discardableResult private func applyHistorySeedIfNeededBeforeScroll() -> Bool {
             guard let session, let activeOwnerEpoch else { return false }
-            return applyHistorySeedIfNeededBeforeScroll(for: activeOwnerEpoch, into: session)
+            return applyHistorySeedIfNeeded(for: activeOwnerEpoch, into: session, trigger: "scroll", preserveRenderedText: true)
         }
 
-        @discardableResult private func applyHistorySeedIfNeededBeforeScroll(
-            for ownerEpoch: GhosttyRemoteTerminalOwnerEpoch, into session: ghostty_session_t
+        @discardableResult private func applyHistorySeedIfNeeded(
+            for ownerEpoch: GhosttyRemoteTerminalOwnerEpoch, into session: ghostty_session_t, trigger: String, preserveRenderedText: Bool
         ) -> Bool {
             guard let historySeed = ownerEpoch.historySeed, !historySeed.data.isEmpty else { return false }
             guard lastAppliedHistorySeedID != historySeed.id else { return false }
-            let bootstrapSnapshot = ownerEpoch.bootstrapSnapshot.map { viewportSnapshot(for: $0, session: session) }
             let preparedHistorySeed = historySeed.data
             logPerformanceEvent(
                 sessionID: ownerEpoch.sessionID, name: "owner_history_seed_apply_begin", count: preparedHistorySeed.count,
-                attributes: ["epoch_id": ownerEpoch.id, "history_seed_id": historySeed.id, "trigger": "scroll"])
+                attributes: ["epoch_id": ownerEpoch.id, "history_seed_id": historySeed.id, "trigger": trigger])
             let startedAt = Date()
-            resetSessionForFreshRender(into: session, preserveRenderedText: true)
+            resetSessionForFreshRender(into: session, preserveRenderedText: preserveRenderedText)
             applyOutput(preparedHistorySeed, into: session)
-            if let bootstrapSnapshot {
-                replay(snapshot: bootstrapSnapshot, into: session)
-                lastStaticRenderPixelSize = currentPixelSize
-            }
+            currentRenderedText = exportedSnapshot(from: session).map(GhosttyTerminalSnapshotLayout.plainText) ?? currentRenderedText
             lastAppliedHistorySeedID = historySeed.id
             onHistorySeedApplied?(historySeed.id)
             logPerformanceEvent(
                 sessionID: ownerEpoch.sessionID, name: "owner_history_seed_apply_end",
                 elapsedMS: max(Int(Date().timeIntervalSince(startedAt) * 1000), 0), count: preparedHistorySeed.count,
-                attributes: ["epoch_id": ownerEpoch.id, "history_seed_id": historySeed.id, "trigger": "scroll"])
+                attributes: ["epoch_id": ownerEpoch.id, "history_seed_id": historySeed.id, "trigger": trigger])
             return true
         }
 
