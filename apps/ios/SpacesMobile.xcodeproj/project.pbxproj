@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		07BF7831235AE0F2E2CA97B3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B0B57F94C61B24E0729B79F1 /* Assets.xcassets */; };
 		1BF92F57C51FD34F3F9B3E05 /* spacesterminalmobileghostty in Frameworks */ = {isa = PBXBuildFile; productRef = 5C91403688DCC6A2B90B5AC8 /* spacesterminalmobileghostty */; };
 		1CEC201CDB2F0F869548081A /* spacesmobilecore in Frameworks */ = {isa = PBXBuildFile; productRef = 69AE1995F1B3C38E8A9708D4 /* spacesmobilecore */; };
 		246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */; };
@@ -16,8 +17,8 @@
 		3E6556FA28213E142655B870 /* SpacesMobileBridgeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAC519ED5515A6509CAD7C1F /* SpacesMobileBridgeClient.swift */; };
 		4073E59B929A6A3937DC57A8 /* GhosttyMobileAppServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */; };
 		63CAF57DC64D2ABDDFFD193A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9747BD35A2E71FC54E592EEA /* ContentView.swift */; };
-		8C0F9C3B91E54F63B7A92120 /* ghostty in Resources */ = {isa = PBXBuildFile; fileRef = 8C0F9C3A91E54F63B7A92120 /* ghostty */; };
 		A09A88A72DBD3C5715B03A0D /* spacesterminalcore in Frameworks */ = {isa = PBXBuildFile; productRef = 496FCCD383CAF3E9BD137D1B /* spacesterminalcore */; };
+		A36481FF653604E873C1A93B /* ghostty in Resources */ = {isa = PBXBuildFile; fileRef = F242C1DB3E9B92832963F8A6 /* ghostty */; };
 		BF1953C7983E74DEEBABC73C /* SpacesMobileConnectionSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */; };
 		CC7C2A2DA9176A2A7993FCD5 /* spacesterminalmobileghostty in Frameworks */ = {isa = PBXBuildFile; productRef = 822087096353D1C543E2C4F3 /* spacesterminalmobileghostty */; };
 		ECD7605414703F81C20D3C1F /* SpacesMobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */; };
@@ -37,19 +38,20 @@
 
 /* Begin PBXFileReference section */
 		160A1AE591A4376DA6C06AE7 /* SpacesMobileUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileUITests.swift; sourceTree = "<group>"; };
-		2A942269988694E66C1CA6F4 /* SpacesMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SpacesMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2A942269988694E66C1CA6F4 /* SpacesMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SpacesMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModel.swift; sourceTree = "<group>"; };
 		41C157DD37A42EDAF1DC5407 /* macos */ = {isa = PBXFileReference; lastKnownFileType = folder; name = macos; path = ../macos; sourceTree = SOURCE_ROOT; };
-		5B16B0331923D686A4D0AEE5 /* SpacesMobileUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SpacesMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		5B16B0331923D686A4D0AEE5 /* SpacesMobileUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalDetailView.swift; sourceTree = "<group>"; };
-		8C0F9C3A91E54F63B7A92120 /* ghostty */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ../macos/.local/ghosttykit/Resources/ghostty; sourceTree = SOURCE_ROOT; };
 		89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyMobileAppServiceTests.swift; sourceTree = "<group>"; };
 		963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileConnectionSettings.swift; sourceTree = "<group>"; };
 		9747BD35A2E71FC54E592EEA /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A1A8A24AA9252CFEE41B435E /* SpacesMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileApp.swift; sourceTree = "<group>"; };
+		B0B57F94C61B24E0729B79F1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BEBBC1D6B0751E287CF24826 /* ConnectionSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSettingsView.swift; sourceTree = "<group>"; };
 		CAC519ED5515A6509CAD7C1F /* SpacesMobileBridgeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileBridgeClient.swift; sourceTree = "<group>"; };
-		E27B3DF6C14953F91F1A311D /* SpacesMobileTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SpacesMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E27B3DF6C14953F91F1A311D /* SpacesMobileTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		F242C1DB3E9B92832963F8A6 /* ghostty */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ghostty; path = ../macos/.local/ghosttykit/Resources/ghostty; sourceTree = SOURCE_ROOT; };
 		F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewerModel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -76,6 +78,14 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		053C9409A83DB4D8AD7796DE /* .local */ = {
+			isa = PBXGroup;
+			children = (
+				7082DF6B34E95AC15B0E2B3B /* ghosttykit */,
+			);
+			path = .local;
+			sourceTree = "<group>";
+		};
 		503B7623EC298940F0110912 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
@@ -99,6 +109,30 @@
 			path = Tests;
 			sourceTree = "<group>";
 		};
+		50F31D55B90BFFD635C5D674 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				F242C1DB3E9B92832963F8A6 /* ghostty */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		7082DF6B34E95AC15B0E2B3B /* ghosttykit */ = {
+			isa = PBXGroup;
+			children = (
+				50F31D55B90BFFD635C5D674 /* Resources */,
+			);
+			path = ghosttykit;
+			sourceTree = "<group>";
+		};
+		77689346D2C290A5F2D8E603 /* macos */ = {
+			isa = PBXGroup;
+			children = (
+				053C9409A83DB4D8AD7796DE /* .local */,
+			);
+			path = macos;
+			sourceTree = "<group>";
+		};
 		80C53D729D7E7F3AB9BBDC82 /* Products */ = {
 			isa = PBXGroup;
 			children = (
@@ -112,13 +146,23 @@
 		81B5CC448F6FA35B26C3E451 = {
 			isa = PBXGroup;
 			children = (
+				B0B57F94C61B24E0729B79F1 /* Assets.xcassets */,
+				A2CBFAA5B4DF490C0C86C859 /* apps */,
 				CB2D338B9B55AD82C84E6311 /* Packages */,
-				8C0F9C3A91E54F63B7A92120 /* ghostty */,
 				503B7623EC298940F0110912 /* Sources */,
 				504A7EEA4BE7AE55C6855384 /* Tests */,
 				E5AB46FF545C04AB6319A6DB /* UITests */,
 				80C53D729D7E7F3AB9BBDC82 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		A2CBFAA5B4DF490C0C86C859 /* apps */ = {
+			isa = PBXGroup;
+			children = (
+				77689346D2C290A5F2D8E603 /* macos */,
+			);
+			name = apps;
+			path = ..;
 			sourceTree = "<group>";
 		};
 		CB2D338B9B55AD82C84E6311 /* Packages */ = {
@@ -163,8 +207,8 @@
 			buildConfigurationList = F08D22918FFEF938C30D1670 /* Build configuration list for PBXNativeTarget "SpacesMobile" */;
 			buildPhases = (
 				28FC29C423AA4C2F0A49EE5F /* Sources */,
+				B5868B03FBB3F8891A03A7E6 /* Resources */,
 				5D199486D51945804C6582FF /* Frameworks */,
-				8C0F9C3C91E54F63B7A92120 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -210,7 +254,14 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					208F5D8D223E754EF66F12E0 = {
+						DevelopmentTeam = BEMDA62NB6;
 						TestTargetID = 4949E5F0DB06D967871C1581;
+					};
+					4949E5F0DB06D967871C1581 = {
+						DevelopmentTeam = BEMDA62NB6;
+					};
+					A22491DEE0C1C690D99FCFB0 = {
+						DevelopmentTeam = BEMDA62NB6;
 					};
 				};
 			};
@@ -239,11 +290,12 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		8C0F9C3C91E54F63B7A92120 /* Resources */ = {
+		B5868B03FBB3F8891A03A7E6 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				8C0F9C3B91E54F63B7A92120 /* ghostty in Resources */,
+				07BF7831235AE0F2E2CA97B3 /* Assets.xcassets in Resources */,
+				A36481FF653604E873C1A93B /* ghostty in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

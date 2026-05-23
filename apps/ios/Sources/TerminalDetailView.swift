@@ -11,6 +11,7 @@ struct TerminalDetailView: View {
     @State private var hasMountedTerminalSurface = false
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
+    private let inputToolbarHeight: CGFloat = 58
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var shouldCaptureRenderedText: Bool { e2eConfig.isEnabled && e2eConfig.matches(sessionID: session.id) }
     private var e2eCommandRequestPath: String? {
@@ -74,12 +75,10 @@ struct TerminalDetailView: View {
                                 model.updateViewportSize(columns: columns, rows: rows)
                             },
                             onSendText: { text in
-                                writeE2EEventIfNeeded(kind: "send_text", detail: text)
-                                Task { await model.sendText(text) }
+                                sendTerminalText(text)
                             },
                             onSendKey: { key in
-                                writeE2EEventIfNeeded(kind: "send_key", detail: key)
-                                Task { await model.sendKey(key) }
+                                sendTerminalKey(key)
                             }
                         )
                         .accessibilityIdentifier("terminal.surface")
@@ -102,7 +101,9 @@ struct TerminalDetailView: View {
                 errorBanner(errorMessage)
             }
         }
+        .padding(.bottom, model.keepsTerminalInputSurfaceActive ? inputToolbarHeight : 0)
         .background(Color(red: 0.10, green: 0.12, blue: 0.15).ignoresSafeArea())
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .toolbar(.hidden, for: .navigationBar)
         .task { model.start() }
         .task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }
@@ -116,6 +117,17 @@ struct TerminalDetailView: View {
         }
         .onDisappear { model.stop() }
         .accessibilityIdentifier("terminal.detail.\(session.id)")
+    }
+
+    private func sendTerminalText(_ text: String) {
+        guard !text.isEmpty else { return }
+        writeE2EEventIfNeeded(kind: "send_text", detail: text)
+        Task { await model.sendText(text) }
+    }
+
+    private func sendTerminalKey(_ key: String) {
+        writeE2EEventIfNeeded(kind: "send_key", detail: key)
+        Task { await model.sendKey(key) }
     }
 
     private var topOverlay: some View {

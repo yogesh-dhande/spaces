@@ -149,7 +149,7 @@ import Foundation
             }
         }
 
-        private static let defaultFontSize: Float = 13
+        private static let defaultFontSize: Float = 11
         private static let contentInsets = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         private static let sessionResetSequence = Data("\u{001B}c".utf8)
         private static let promptEOLMarkStartSequence = Data("\u{001B}[1m\u{001B}[7m%".utf8)
@@ -167,6 +167,11 @@ import Foundation
         private var firstNonBlankOwnerEpochID: String?
         private var lastStaticRenderPixelSize = CGSize.zero
         private let fallbackLabel = UILabel()
+        private let suppressedSoftwareKeyboardInputView = UIView(frame: .zero)
+        private lazy var terminalAccessoryView = TerminalAccessoryToolbar(
+            onText: { [weak self] text in self?.sendAccessoryText(text) }, onKey: { [weak self] key in self?.sendAccessoryKey(key) },
+            onControl: { [weak self] in self?.toggleAccessoryControlModifier() },
+            onKeyboardToggle: { [weak self] in self?.toggleAccessorySoftwareKeyboard() })
         private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput))
         private lazy var scrollPanRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan))
         private var lastScrollTranslation = CGPoint.zero
@@ -179,6 +184,8 @@ import Foundation
         private var lastSyncedFocus = false
         private var lastSyncedOcclusion = false
         private var firstResponderRequestScheduled = false
+        private var accessoryControlModifierPending = false
+        private var suppressesSoftwareKeyboard = false
         private var postRefreshEmissionScheduled = false
         private var scrollSettledEmissionGeneration: UInt64 = 0
         private var scrollSettledEmissionTasks: [Task<Void, Never>] = []
@@ -210,6 +217,8 @@ import Foundation
         public var keyboardAppearance: UIKeyboardAppearance = .dark
         public var returnKeyType: UIReturnKeyType = .default
         public var enablesReturnKeyAutomatically = false
+        public override var inputView: UIView? { suppressesSoftwareKeyboard ? suppressedSoftwareKeyboardInputView : nil }
+        public override var inputAccessoryView: UIView? { acceptsTerminalInput ? terminalAccessoryView : nil }
         public override var canBecomeFirstResponder: Bool { acceptsTerminalInput }
         public var hasText: Bool { false }
 
@@ -310,6 +319,7 @@ import Foundation
                 return
             }
             guard !text.isEmpty else { return }
+            if sendPendingControlModifierIfNeeded(for: text) { return }
             if text == "\n" { onSendKey?("enter") } else { onSendText?(text) }
         }
 
@@ -319,6 +329,7 @@ import Foundation
                 reportInputReadinessIfNeeded()
                 return
             }
+            clearAccessoryControlModifier()
             onSendKey?("backspace")
         }
 
@@ -329,6 +340,7 @@ import Foundation
                 return
             }
             guard let pasted = UIPasteboard.general.string, !pasted.isEmpty else { return }
+            clearAccessoryControlModifier()
             onSendText?(pasted)
         }
 
@@ -378,18 +390,180 @@ import Foundation
             }
         }
 
-        @objc private func handleEscape() { if canProcessKeyboardInput { onSendKey?("esc") } }
-        @objc private func handleControlC() { if canProcessKeyboardInput { onSendKey?("ctrl+c") } }
-        @objc private func handleUpArrow() { if canProcessKeyboardInput { onSendKey?("up") } }
-        @objc private func handleDownArrow() { if canProcessKeyboardInput { onSendKey?("down") } }
-        @objc private func handleLeftArrow() { if canProcessKeyboardInput { onSendKey?("left") } }
-        @objc private func handleRightArrow() { if canProcessKeyboardInput { onSendKey?("right") } }
-        @objc private func handleTab() { if canProcessKeyboardInput { onSendKey?("tab") } }
-        @objc private func handleBackTab() { if canProcessKeyboardInput { onSendKey?("backtab") } }
-        @objc private func handlePageUp() { if canProcessKeyboardInput { onSendKey?("pageup") } }
-        @objc private func handlePageDown() { if canProcessKeyboardInput { onSendKey?("pagedown") } }
-        @objc private func handleHome() { if canProcessKeyboardInput { onSendKey?("home") } }
-        @objc private func handleEnd() { if canProcessKeyboardInput { onSendKey?("end") } }
+        @objc private func handleEscape() { sendAccessoryKey("esc") }
+        @objc private func handleControlC() {
+            if canProcessKeyboardInput {
+                clearAccessoryControlModifier()
+                onSendKey?("ctrl+c")
+            }
+        }
+        @objc private func handleUpArrow() { sendAccessoryKey("up") }
+        @objc private func handleDownArrow() { sendAccessoryKey("down") }
+        @objc private func handleLeftArrow() { sendAccessoryKey("left") }
+        @objc private func handleRightArrow() { sendAccessoryKey("right") }
+        @objc private func handleTab() { sendAccessoryKey("tab") }
+        @objc private func handleBackTab() { sendAccessoryKey("backtab") }
+        @objc private func handlePageUp() { sendAccessoryKey("pageup") }
+        @objc private func handlePageDown() { sendAccessoryKey("pagedown") }
+        @objc private func handleHome() { sendAccessoryKey("home") }
+        @objc private func handleEnd() { sendAccessoryKey("end") }
+
+        private func sendAccessoryText(_ text: String) {
+            guard canProcessKeyboardInput, !text.isEmpty else { return }
+            if sendPendingControlModifierIfNeeded(for: text) { return }
+            clearAccessoryControlModifier()
+            onSendText?(text)
+        }
+
+        private func sendAccessoryKey(_ key: String) {
+            guard canProcessKeyboardInput else { return }
+            clearAccessoryControlModifier()
+            onSendKey?(key)
+        }
+
+        private func toggleAccessoryControlModifier() {
+            guard canProcessKeyboardInput else { return }
+            accessoryControlModifierPending.toggle()
+            terminalAccessoryView.isControlPending = accessoryControlModifierPending
+        }
+
+        private func clearAccessoryControlModifier() {
+            guard accessoryControlModifierPending else { return }
+            accessoryControlModifierPending = false
+            terminalAccessoryView.isControlPending = false
+        }
+
+        private func sendPendingControlModifierIfNeeded(for text: String) -> Bool {
+            guard accessoryControlModifierPending else { return false }
+            defer { clearAccessoryControlModifier() }
+            guard text.count == 1, let scalar = text.unicodeScalars.first, scalar.properties.isAlphabetic else { return false }
+            onSendKey?("ctrl+\(String(scalar).lowercased())")
+            return true
+        }
+
+        private func toggleAccessorySoftwareKeyboard() { setSoftwareKeyboardVisible(suppressesSoftwareKeyboard) }
+
+        private final class TerminalAccessoryToolbar: UIView {
+            var isControlPending = false { didSet { updateControlButtonAppearance() } }
+            var isKeyboardVisible = true { didSet { updateKeyboardButtonImage() } }
+
+            private let onText: (String) -> Void
+            private let onKey: (String) -> Void
+            private let onControl: () -> Void
+            private let onKeyboardToggle: () -> Void
+            private let scrollView = UIScrollView()
+            private let stackView = UIStackView()
+            private let controlButton = UIButton(type: .system)
+            private let keyboardButton = UIButton(type: .system)
+
+            override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: 58) }
+
+            init(
+                onText: @escaping (String) -> Void, onKey: @escaping (String) -> Void, onControl: @escaping () -> Void,
+                onKeyboardToggle: @escaping () -> Void
+            ) {
+                self.onText = onText
+                self.onKey = onKey
+                self.onControl = onControl
+                self.onKeyboardToggle = onKeyboardToggle
+                super.init(frame: .zero)
+                configureView()
+            }
+
+            @available(*, unavailable) required init?(coder: NSCoder) { nil }
+
+            private func configureView() {
+                backgroundColor = UIColor(red: 0.10, green: 0.12, blue: 0.15, alpha: 1)
+                autoresizingMask = [.flexibleHeight]
+
+                scrollView.translatesAutoresizingMaskIntoConstraints = false
+                scrollView.showsHorizontalScrollIndicator = false
+                addSubview(scrollView)
+
+                stackView.translatesAutoresizingMaskIntoConstraints = false
+                stackView.axis = .horizontal
+                stackView.alignment = .center
+                stackView.spacing = 8
+                scrollView.addSubview(stackView)
+
+                NSLayoutConstraint.activate([
+                    heightAnchor.constraint(equalToConstant: 58), scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                    scrollView.trailingAnchor.constraint(equalTo: trailingAnchor), scrollView.topAnchor.constraint(equalTo: topAnchor),
+                    scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+                    stackView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor, constant: 12),
+                    stackView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor, constant: -12),
+                    stackView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 10),
+                    stackView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -10),
+                    stackView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor, constant: -20),
+                ])
+
+                addTextButton("esc") { [weak self] in self?.onKey("esc") }
+                configureButton(controlButton, title: "ctrl")
+                controlButton.addAction(UIAction { [weak self] _ in self?.onControl() }, for: .touchUpInside)
+                stackView.addArrangedSubview(controlButton)
+                addTextButton("tab") { [weak self] in self?.onKey("tab") }
+                addTextButton("~") { [weak self] in self?.onText("~") }
+                addTextButton("/") { [weak self] in self?.onText("/") }
+                addTextButton("-") { [weak self] in self?.onText("-") }
+                addTextButton("_") { [weak self] in self?.onText("_") }
+                addIconButton("arrow.left", accessibilityLabel: "Left arrow") { [weak self] in self?.onKey("left") }
+                addIconButton("arrow.down", accessibilityLabel: "Down arrow") { [weak self] in self?.onKey("down") }
+                addIconButton("arrow.up", accessibilityLabel: "Up arrow") { [weak self] in self?.onKey("up") }
+                addIconButton("arrow.right", accessibilityLabel: "Right arrow") { [weak self] in self?.onKey("right") }
+                configureButton(keyboardButton, imageName: "keyboard.chevron.compact.down")
+                keyboardButton.accessibilityLabel = "Hide keyboard"
+                keyboardButton.addAction(UIAction { [weak self] _ in self?.onKeyboardToggle() }, for: .touchUpInside)
+                stackView.addArrangedSubview(keyboardButton)
+            }
+
+            private func addTextButton(_ title: String, action: @escaping () -> Void) {
+                let button = UIButton(type: .system)
+                configureButton(button, title: title)
+                button.addAction(UIAction { _ in action() }, for: .touchUpInside)
+                stackView.addArrangedSubview(button)
+            }
+
+            private func addIconButton(_ imageName: String, accessibilityLabel: String, action: @escaping () -> Void) {
+                let button = UIButton(type: .system)
+                configureButton(button, imageName: imageName)
+                button.accessibilityLabel = accessibilityLabel
+                button.addAction(UIAction { _ in action() }, for: .touchUpInside)
+                stackView.addArrangedSubview(button)
+            }
+
+            private func configureButton(_ button: UIButton, title: String? = nil, imageName: String? = nil) {
+                button.translatesAutoresizingMaskIntoConstraints = false
+                button.backgroundColor = UIColor.white.withAlphaComponent(0.13)
+                button.tintColor = .white
+                button.layer.cornerRadius = 8
+                button.layer.cornerCurve = .continuous
+                button.layer.borderWidth = 1
+                button.layer.borderColor = UIColor.white.withAlphaComponent(0.14).cgColor
+                button.titleLabel?.font = .monospacedSystemFont(ofSize: 17, weight: .semibold)
+                button.setTitleColor(.white, for: .normal)
+                if let title {
+                    button.setTitle(title, for: .normal)
+                    button.widthAnchor.constraint(greaterThanOrEqualToConstant: 64).isActive = true
+                }
+                if let imageName {
+                    button.setImage(UIImage(systemName: imageName), for: .normal)
+                    button.widthAnchor.constraint(equalToConstant: 56).isActive = true
+                }
+                button.heightAnchor.constraint(equalToConstant: 38).isActive = true
+            }
+
+            private func updateControlButtonAppearance() {
+                controlButton.backgroundColor = isControlPending ? .white : UIColor.white.withAlphaComponent(0.13)
+                controlButton.setTitleColor(isControlPending ? .black : .white, for: .normal)
+                controlButton.layer.borderColor = UIColor.white.withAlphaComponent(isControlPending ? 0 : 0.14).cgColor
+            }
+
+            private func updateKeyboardButtonImage() {
+                let imageName = isKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard"
+                keyboardButton.setImage(UIImage(systemName: imageName), for: .normal)
+                keyboardButton.accessibilityLabel = isKeyboardVisible ? "Hide keyboard" : "Show keyboard"
+            }
+        }
 
         private func configureFallbackLabel() {
             fallbackLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -417,6 +591,24 @@ import Foundation
             acceptsTerminalInput = enabled
             ghosttyRemoteTerminalTrace("set_accepts_input enabled=\(enabled ? 1 : 0)")
             if enabled { requestFirstResponderIfNeeded() } else { syncFirstResponder() }
+            reportInputReadinessIfNeeded()
+        }
+
+        func setSoftwareKeyboardVisible(_ visible: Bool) {
+            guard acceptsTerminalInput else {
+                reportInputReadinessIfNeeded()
+                return
+            }
+            suppressesSoftwareKeyboard = !visible
+            terminalAccessoryView.isKeyboardVisible = visible
+            if visible {
+                if isFirstResponder { reloadInputViews() } else { becomeFirstResponder() }
+            } else if isFirstResponder {
+                reloadInputViews()
+            } else {
+                becomeFirstResponder()
+            }
+            scheduleKeyboardVisibilityRefresh()
             reportInputReadinessIfNeeded()
         }
 
@@ -622,6 +814,15 @@ import Foundation
             setNeedsDisplay()
             layer.setNeedsDisplay()
             schedulePostRefreshEmission()
+        }
+
+        private func scheduleKeyboardVisibilityRefresh() {
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self else { return }
+                self.syncSessionState()
+                self.requestSurfaceRefresh()
+            }
         }
 
         private func schedulePostRefreshEmission() {

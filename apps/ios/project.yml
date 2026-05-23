@@ -13,13 +13,16 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - Sources
-    resources:
+      - path: Assets.xcassets
+        buildPhase: resources
       - path: ../macos/.local/ghosttykit/Resources/ghostty
         type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.yogeshdhande.spacesmobile
         PRODUCT_NAME: SpacesMobile
+        DEVELOPMENT_TEAM: BEMDA62NB6
         SWIFT_VERSION: 6.0
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: YES
@@ -43,6 +46,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: BEMDA62NB6
         PRODUCT_BUNDLE_IDENTIFIER: com.yogeshdhande.spacesmobile.tests
     dependencies:
       - package: SpacesPackage
@@ -58,6 +62,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: BEMDA62NB6
         PRODUCT_BUNDLE_IDENTIFIER: com.yogeshdhande.spacesmobile.uitests
         TEST_TARGET_NAME: SpacesMobile
     dependencies:
