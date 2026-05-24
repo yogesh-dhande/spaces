@@ -9,35 +9,50 @@ XCFRAMEWORK_ROOT="${1:-${SPACES_GHOSTTYKIT_XCFRAMEWORK:-$LOCAL_ROOT/GhosttyKit.x
 HEADER_PATH="$XCFRAMEWORK_ROOT/macos-arm64_x86_64/Headers/ghostty.h"
 MACOS_LIB_DIR="$XCFRAMEWORK_ROOT/macos-arm64_x86_64"
 LIBRARY_PATH=""
-REQUIRED_EXPORTS=(
-    "ghostty_surface_set_data_callback"
-    "ghostty_surface_send_input_raw"
+REQUIRED_DECLARATIONS=(
+    "ghostty_renderer_t"
+    "ghostty_session_state_cb"
+    "ghostty_session_t"
+    "ghostty_surface_host_s"
+    "ghostty_terminal_snapshot_s"
 )
-
-if [[ "${SPACES_GHOSTTYKIT_REQUIRE_HOST_REBIND:-0}" == "1" ]]; then
-    REQUIRED_EXPORTS+=("ghostty_surface_set_host")
-fi
-
-if [[ "${SPACES_GHOSTTYKIT_REQUIRE_SESSION_RENDER_SPLIT:-0}" == "1" ]]; then
-    REQUIRED_EXPORTS+=(
-        "ghostty_surface_export_snapshot"
-        "ghostty_session_new"
-        "ghostty_session_export_snapshot"
-        "ghostty_renderer_attach"
-        "ghostty_renderer_detach"
-        "ghostty_terminal_snapshot_free"
-    )
-fi
-
-if [[ "${SPACES_GHOSTTYKIT_REQUIRE_SESSION_STATE_CALLBACK:-0}" == "1" ]]; then
-    REQUIRED_EXPORTS+=(
-        "ghostty_session_state_revision"
-        "ghostty_session_take_pending_state_flags"
-        "ghostty_session_title"
-        "ghostty_session_working_directory"
-        "ghostty_session_set_state_callback"
-    )
-fi
+REQUIRED_SYMBOLS=(
+    "ghostty_renderer_attach"
+    "ghostty_renderer_detach"
+    "ghostty_renderer_free"
+    "ghostty_renderer_new"
+    "ghostty_renderer_set_host"
+    "ghostty_session_config_new"
+    "ghostty_session_export_snapshot"
+    "ghostty_session_foreground_pid"
+    "ghostty_session_free"
+    "ghostty_session_new"
+    "ghostty_session_process_output"
+    "ghostty_session_refresh"
+    "ghostty_session_send_input_raw"
+    "ghostty_session_set_content_scale"
+    "ghostty_session_set_data_callback"
+    "ghostty_session_set_display_id"
+    "ghostty_session_set_focus"
+    "ghostty_session_set_occlusion"
+    "ghostty_session_set_size"
+    "ghostty_session_set_state_callback"
+    "ghostty_session_size"
+    "ghostty_session_state_revision"
+    "ghostty_session_surface"
+    "ghostty_session_take_pending_state_flags"
+    "ghostty_session_title"
+    "ghostty_session_working_directory"
+    "ghostty_surface_complete_clipboard_request"
+    "ghostty_surface_export_snapshot"
+    "ghostty_surface_free_text"
+    "ghostty_surface_read_selection"
+    "ghostty_surface_read_text"
+    "ghostty_surface_set_data_callback"
+    "ghostty_surface_set_host"
+    "ghostty_surface_send_input_raw"
+    "ghostty_terminal_snapshot_free"
+)
 
 file_contains_fixed() {
     local needle="$1"
@@ -79,17 +94,33 @@ else
 fi
 
 LIBRARY_SYMBOLS="$(nm -gU "$LIBRARY_PATH")"
+MISSING_DECLARATIONS=()
+MISSING_SYMBOLS=()
 
-for export_name in "${REQUIRED_EXPORTS[@]}"; do
-    if ! file_contains_fixed "$export_name" "$HEADER_PATH"; then
-        echo "Missing GhosttyKit declaration for ${export_name} in $HEADER_PATH" >&2
-        exit 1
-    fi
-
-    if ! text_matches_regex "_${export_name}$" "$LIBRARY_SYMBOLS"; then
-        echo "Missing GhosttyKit export for ${export_name} in $LIBRARY_PATH" >&2
-        exit 1
+for declaration_name in "${REQUIRED_DECLARATIONS[@]}" "${REQUIRED_SYMBOLS[@]}"; do
+    if ! file_contains_fixed "$declaration_name" "$HEADER_PATH"; then
+        MISSING_DECLARATIONS+=("$declaration_name")
     fi
 done
 
-echo "Verified GhosttyKit additive embedded terminal exports in $XCFRAMEWORK_ROOT"
+for symbol_name in "${REQUIRED_SYMBOLS[@]}"; do
+    if ! text_matches_regex "_${symbol_name}$" "$LIBRARY_SYMBOLS"; then
+        MISSING_SYMBOLS+=("$symbol_name")
+    fi
+done
+
+if [[ "${#MISSING_DECLARATIONS[@]}" -gt 0 || "${#MISSING_SYMBOLS[@]}" -gt 0 ]]; then
+    echo "GhosttyKit.xcframework is missing APIs required by the Spaces embedded terminal." >&2
+    echo "  header:  $HEADER_PATH" >&2
+    echo "  library: $LIBRARY_PATH" >&2
+    if [[ "${#MISSING_DECLARATIONS[@]}" -gt 0 ]]; then
+        echo "  missing declarations: ${MISSING_DECLARATIONS[*]}" >&2
+    fi
+    if [[ "${#MISSING_SYMBOLS[@]}" -gt 0 ]]; then
+        echo "  missing exports: ${MISSING_SYMBOLS[*]}" >&2
+    fi
+    echo "Publish and pin a matching GhosttyKit release before running SwiftPM." >&2
+    exit 1
+fi
+
+echo "Verified GhosttyKit embedded terminal API contract in $XCFRAMEWORK_ROOT"

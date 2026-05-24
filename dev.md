@@ -73,7 +73,7 @@ apps/macos/scripts/setup_ghosttykit.sh
 
 That installs `GhosttyKit.xcframework` and the Ghostty resource bundle under `apps/macos/.local/ghosttykit/`, which the current branch-local resolver will discover automatically.
 The default fork build comes from `apps/macos/ghosttykit-release-tag.txt`, and the setup script also accepts an explicit release tag argument plus `SPACES_GHOSTTYKIT_RELEASE_TAG` and `SPACES_GHOSTTYKIT_REPO` overrides when you need a different build or fork locally.
-The setup flow finishes by running `apps/macos/scripts/verify_ghosttykit.sh`, which checks that the downloaded artifact still declares and exports the raw input and surface callback hooks that Spaces uses for owner rendering and final-state replay. Passive-viewer attachment exports are not part of the required contract.
+The setup flow finishes by running `apps/macos/scripts/verify_ghosttykit.sh`, which checks that the downloaded artifact declares and exports the embedded terminal APIs that Spaces uses for raw I/O, host rebinding, session state callbacks, renderer attachment, and live snapshot capture. Passive-viewer attachment exports are not part of the required contract.
 The GitHub Actions PR and release workflows run this setup before SwiftPM resolves the macOS package so clean runners have the pinned branch-local `GhosttyKit` artifact in place.
 
 If `SPACES_PROJECT_DIR` points at another checkout that already has `apps/macos/.local/ghosttykit/`, the setup script copies those local artifacts first and only falls back to GitHub release download when needed.

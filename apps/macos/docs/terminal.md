@@ -4,10 +4,7 @@ This document describes the built-in terminal runtime in Spaces: what owns a ses
 
 ## Scope
 - `ghostty-embedded` is the only supported built-in terminal backend for Spaces-owned sessions.
-- Spaces consumes a forked `GhosttyKit.xcframework` from `yogesh-dhande/ghostty` because the integration depends on additive PTY I/O exports:
-  - `ghostty_surface_set_data_callback(...)`
-  - `ghostty_surface_send_input_raw(...)`
-  - `ghostty_surface_set_host(...)`
+- Spaces consumes a forked `GhosttyKit.xcframework` from `yogesh-dhande/ghostty` because the integration depends on additive embedded terminal exports for raw PTY I/O, host rebinding, session state callbacks, renderer attachment, and live terminal snapshot capture.
 - Spaces no longer depends on fork-level passive-viewer attachment APIs; live rendering is owner-only on both macOS and iOS.
 - Spaces also builds `libghostty-vt` from the same fork lineage for transcript replay so `spaces terminal tail` and non-surface clients stay aligned with Ghostty terminal behavior.
 - The built-in terminal path does not require tmux.
