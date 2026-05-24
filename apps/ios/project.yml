@@ -24,6 +24,8 @@ targets:
         PRODUCT_NAME: SpacesMobile
         DEVELOPMENT_TEAM: BEMDA62NB6
         SWIFT_VERSION: 6.0
+        # GhosttyKit.xcframework lacks an Intel iOS simulator slice.
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Spaces
@@ -50,6 +52,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         DEVELOPMENT_TEAM: BEMDA62NB6
         PRODUCT_BUNDLE_IDENTIFIER: com.yogeshdhande.spacesmobile.tests
+        # GhosttyKit.xcframework lacks an Intel iOS simulator slice.
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
     dependencies:
       - package: SpacesPackage
         product: spacesterminalcore
@@ -66,6 +70,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         DEVELOPMENT_TEAM: BEMDA62NB6
         PRODUCT_BUNDLE_IDENTIFIER: com.yogeshdhande.spacesmobile.uitests
+        # GhosttyKit.xcframework lacks an Intel iOS simulator slice.
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         TEST_TARGET_NAME: SpacesMobile
     dependencies:
       - target: SpacesMobile
