@@ -308,7 +308,6 @@ extension Notification.Name {
                 attachedAt: ISO8601DateFormatter().string(from: Date()))
             postAttachmentStateDidChange()
         }
-        if mode == .owner, client.kind == .localWindow { _ = captureLiveSessionScreenState() }
         refreshRuntimeState(force: true)
     }
 
@@ -561,11 +560,6 @@ extension Notification.Name {
 
     private func refreshCachedOwnerBootstrapSnapshotBeforeRemoteTakeover() {
         guard activeOwnerClient()?.kind == .localWindow else { return }
-        // Remote owner bootstrap intentionally consumes this cached Ghostty session snapshot.
-        // Refresh it at the ownership boundary so iPad does not inherit stale line-editor cells
-        // captured by an earlier input/output resync.
-        requestSurfaceRefreshAction()
-        GhosttyEmbeddedAppService.shared.tick()
         let refreshedState = captureLiveSessionScreenState()
         logMobileTakeoverPerformance(
             name: "owner_bootstrap_cache_refresh",

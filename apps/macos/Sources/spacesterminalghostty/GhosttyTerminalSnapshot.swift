@@ -4,6 +4,8 @@ import GhosttyKit
 import spacesterminalcore
 
 public enum GhosttyTerminalSnapshotCapture {
+    nonisolated(unsafe) static var sessionCaptureHandlerForTesting: ((ghostty_session_t?) -> GhosttyTerminalSnapshot?)?
+
     public static func captureFromSurface(_ surface: ghostty_surface_t?) -> GhosttyTerminalSnapshot? {
         guard let surface else { return nil }
         var snapshot = ghostty_terminal_snapshot_s()
@@ -13,6 +15,7 @@ public enum GhosttyTerminalSnapshotCapture {
     }
 
     public static func captureFromSession(_ session: ghostty_session_t?) -> GhosttyTerminalSnapshot? {
+        if let sessionCaptureHandlerForTesting { return sessionCaptureHandlerForTesting(session) }
         guard let session else { return nil }
         var snapshot = ghostty_terminal_snapshot_s()
         guard ghostty_session_export_snapshot(session, &snapshot) else { return nil }

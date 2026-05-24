@@ -211,8 +211,8 @@ final class SpacesMobileUITests: XCTestCase {
     private func performScrollback(in app: XCUIApplication, configuration: UITestConfiguration) {
         guard configuration.scrollbackSwipeCount > 0 else { return }
         focusTerminalSurface(in: app)
-        let startCoordinate = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.88))
-        let endCoordinate = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.36))
+        let startCoordinate = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.36))
+        let endCoordinate = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.88))
         for _ in 0..<configuration.scrollbackSwipeCount {
             startCoordinate.press(forDuration: 0.05, thenDragTo: endCoordinate)
             RunLoop.current.run(until: Date().addingTimeInterval(1.2))

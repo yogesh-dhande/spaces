@@ -17,6 +17,40 @@ import Foundation
 
     private func ghosttyRemoteTerminalTraceSeconds() -> String { String(format: "%.3f", Date().timeIntervalSince1970) }
 
+    struct GhosttyRemoteTerminalScrollMapper {
+        private static let minimumMomentumVelocity: CGFloat = 8
+        private static let maximumMomentumVelocity: CGFloat = 6_000
+        private static let maximumMomentumFrameDelta: CGFloat = 240
+
+        static func scrollDelta(forPanDelta panDelta: CGPoint, scaleFactor: Double) -> CGPoint {
+            let scale = CGFloat(scaleFactor)
+            return CGPoint(x: -panDelta.x * scale, y: panDelta.y * scale)
+        }
+
+        static func clampedMomentumVelocity(_ velocity: CGPoint) -> CGPoint {
+            CGPoint(
+                x: min(max(velocity.x, -maximumMomentumVelocity), maximumMomentumVelocity),
+                y: min(max(velocity.y, -maximumMomentumVelocity), maximumMomentumVelocity))
+        }
+
+        static func momentumFrameDelta(velocity: CGPoint, elapsed: TimeInterval, scaleFactor: Double) -> CGPoint {
+            let elapsed = max(0, elapsed)
+            let pointDelta = CGPoint(
+                x: min(max(velocity.x * elapsed, -maximumMomentumFrameDelta), maximumMomentumFrameDelta),
+                y: min(max(velocity.y * elapsed, -maximumMomentumFrameDelta), maximumMomentumFrameDelta))
+            return scrollDelta(forPanDelta: pointDelta, scaleFactor: scaleFactor)
+        }
+
+        static func decayedMomentumVelocity(_ velocity: CGPoint, elapsed: TimeInterval, decelerationRate: CGFloat) -> CGPoint {
+            let decay = pow(decelerationRate, CGFloat(max(0, elapsed) * 1_000))
+            return CGPoint(x: velocity.x * decay, y: velocity.y * decay)
+        }
+
+        static func shouldContinueMomentum(velocity: CGPoint) -> Bool {
+            abs(velocity.x) >= minimumMomentumVelocity || abs(velocity.y) >= minimumMomentumVelocity
+        }
+    }
+
     public struct GhosttyRemoteTerminalOutputBatch: Equatable {
         public let id: String
         public let data: Data
@@ -190,6 +224,9 @@ import Foundation
         private var scrollSettledEmissionGeneration: UInt64 = 0
         private var scrollSettledEmissionTasks: [Task<Void, Never>] = []
         private var didScrollDuringCurrentPan = false
+        private var momentumDisplayLink: CADisplayLink?
+        private var momentumVelocity = CGPoint.zero
+        private var lastMomentumTimestamp: CFTimeInterval = 0
         private var isTerminalVisible = true
 
         public private(set) var acceptsTerminalInput = false
@@ -240,6 +277,7 @@ import Foundation
         public override func didMoveToWindow() {
             super.didMoveToWindow()
             guard window != nil else {
+                stopScrollMomentum(finishedScroll: didScrollDuringCurrentPan)
                 teardownSession()
                 reportInputReadinessIfNeeded()
                 return
@@ -364,6 +402,7 @@ import Foundation
         @objc private func handleScrollPan(_ recognizer: UIPanGestureRecognizer) {
             switch recognizer.state {
             case .began:
+                stopScrollMomentum(finishedScroll: false)
                 lastScrollTranslation = recognizer.translation(in: self)
                 didScrollDuringCurrentPan = false
                 _ = sendMousePosition(at: recognizer.location(in: self))
@@ -377,17 +416,72 @@ import Foundation
                 didScrollDuringCurrentPan = true
                 applyHistorySeedIfNeededBeforeScroll()
                 _ = sendMousePosition(at: recognizer.location(in: self))
+                let scrollDelta = GhosttyRemoteTerminalScrollMapper.scrollDelta(forPanDelta: CGPoint(x: deltaX, y: deltaY), scaleFactor: scaleFactor)
                 _ = sendScroll(
-                    horizontal: -deltaX * 2, vertical: -deltaY * 2, mods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: recognizer.state)
-                )
+                    horizontal: scrollDelta.x, vertical: scrollDelta.y,
+                    mods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: recognizer.state))
+            case .ended:
+                lastScrollTranslation = .zero
+                guard didScrollDuringCurrentPan else { return }
+                let velocity = GhosttyRemoteTerminalScrollMapper.clampedMomentumVelocity(recognizer.velocity(in: self))
+                if GhosttyRemoteTerminalScrollMapper.shouldContinueMomentum(velocity: velocity) {
+                    startScrollMomentum(velocity: velocity)
+                } else {
+                    finishScrollGesture()
+                }
             default:
                 lastScrollTranslation = .zero
-                if didScrollDuringCurrentPan {
-                    scheduleScrollSettledEmissions()
-                    onScrollGestureApplied?()
-                }
-                didScrollDuringCurrentPan = false
+                stopScrollMomentum(finishedScroll: false)
+                if didScrollDuringCurrentPan { finishScrollGesture() }
             }
+        }
+
+        private func startScrollMomentum(velocity: CGPoint) {
+            stopScrollMomentum(finishedScroll: false)
+            momentumVelocity = velocity
+            lastMomentumTimestamp = 0
+            let displayLink = CADisplayLink(target: self, selector: #selector(handleScrollMomentumFrame))
+            displayLink.add(to: .main, forMode: .common)
+            momentumDisplayLink = displayLink
+        }
+
+        @objc private func handleScrollMomentumFrame(_ displayLink: CADisplayLink) {
+            guard isTerminalVisible, window != nil else {
+                stopScrollMomentum(finishedScroll: didScrollDuringCurrentPan)
+                return
+            }
+            if lastMomentumTimestamp == 0 {
+                lastMomentumTimestamp = displayLink.timestamp
+                return
+            }
+            let elapsed = displayLink.timestamp - lastMomentumTimestamp
+            lastMomentumTimestamp = displayLink.timestamp
+            let scrollDelta = GhosttyRemoteTerminalScrollMapper.momentumFrameDelta(
+                velocity: momentumVelocity, elapsed: elapsed, scaleFactor: scaleFactor)
+            if abs(scrollDelta.x) > 0 || abs(scrollDelta.y) > 0 {
+                _ = sendScroll(
+                    horizontal: scrollDelta.x, vertical: scrollDelta.y, mods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed))
+            }
+            momentumVelocity = GhosttyRemoteTerminalScrollMapper.decayedMomentumVelocity(
+                momentumVelocity, elapsed: elapsed, decelerationRate: UIScrollView.DecelerationRate.normal.rawValue)
+            guard GhosttyRemoteTerminalScrollMapper.shouldContinueMomentum(velocity: momentumVelocity) else {
+                stopScrollMomentum(finishedScroll: didScrollDuringCurrentPan)
+                return
+            }
+        }
+
+        private func stopScrollMomentum(finishedScroll: Bool) {
+            momentumDisplayLink?.invalidate()
+            momentumDisplayLink = nil
+            momentumVelocity = .zero
+            lastMomentumTimestamp = 0
+            if finishedScroll { finishScrollGesture() }
+        }
+
+        private func finishScrollGesture() {
+            scheduleScrollSettledEmissions()
+            onScrollGestureApplied?()
+            didScrollDuringCurrentPan = false
         }
 
         @objc private func handleEscape() { sendAccessoryKey("esc") }
@@ -620,6 +714,7 @@ import Foundation
                 lastEmittedRenderedText = nil
                 currentRenderedText = ""
             } else {
+                stopScrollMomentum(finishedScroll: didScrollDuringCurrentPan)
                 currentRenderedText = ""
             }
             isHidden = !visible
@@ -628,7 +723,10 @@ import Foundation
             reportInputReadinessIfNeeded()
         }
 
-        func prepareForDismantle() { teardownSession() }
+        func prepareForDismantle() {
+            stopScrollMomentum(finishedScroll: didScrollDuringCurrentPan)
+            teardownSession()
+        }
 
         var hasActiveSessionForTesting: Bool { session != nil }
         var hasRetainedSessionStandardInputWriteDescriptorForTesting: Bool { retainedSessionStandardInputWriteDescriptor != nil }
@@ -650,6 +748,7 @@ import Foundation
         }
 
         private func teardownSession() {
+            stopScrollMomentum(finishedScroll: didScrollDuringCurrentPan)
             guard let session else { return }
             ghosttyRemoteTerminalTrace("teardown_session")
             if isFirstResponder { resignFirstResponder() }
@@ -1029,11 +1128,7 @@ import Foundation
                 lastAppliedHistorySeedID = nil
                 appliedOutputBatchIDs.removeAll()
                 lastAppliedEndedRenderID = nil
-                if let historySeed = ownerEpoch.historySeed, !historySeed.data.isEmpty {
-                    applyOutput(historySeed.data, into: session)
-                    lastAppliedHistorySeedID = historySeed.id
-                    onHistorySeedApplied?(historySeed.id)
-                } else if let bootstrapSnapshot {
+                if let bootstrapSnapshot {
                     replay(snapshot: bootstrapSnapshot, into: session)
                     lastStaticRenderPixelSize = currentPixelSize
                 }
@@ -1049,8 +1144,6 @@ import Foundation
                     self.ownerBootstrapEpochID = nil
                 }
             }
-            let appliedHistorySeed = applyHistorySeedIfNeeded(
-                for: ownerEpoch, into: session, trigger: "owner_epoch_update", preserveRenderedText: false)
             var appliedOutput = false
             for pendingOutput in ownerEpoch.pendingOutputs where !appliedOutputBatchIDs.contains(pendingOutput.id) {
                 if isFirstOwnerEpoch, ownerEpoch.id.hasPrefix("owner|"), bootstrapSnapshot != nil {
@@ -1063,7 +1156,7 @@ import Foundation
                 appliedOutputBatchIDs.insert(pendingOutput.id)
                 onOutputBatchApplied?(pendingOutput.id)
             }
-            if !appliedHistorySeed && !appliedOutput {
+            if !appliedOutput {
                 updateRenderedTextSource(ownerEpoch: ownerEpoch, endedRender: nil, fallbackText: fallbackLabel.text ?? "", session: session)
             }
         }
@@ -1101,7 +1194,6 @@ import Foundation
             let startedAt = Date()
             resetSessionForFreshRender(into: session, preserveRenderedText: preserveRenderedText)
             applyOutput(preparedHistorySeed, into: session)
-            currentRenderedText = exportedSnapshot(from: session).map(GhosttyTerminalSnapshotLayout.plainText) ?? currentRenderedText
             lastAppliedHistorySeedID = historySeed.id
             onHistorySeedApplied?(historySeed.id)
             logPerformanceEvent(

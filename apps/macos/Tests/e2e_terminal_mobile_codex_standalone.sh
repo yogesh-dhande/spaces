@@ -464,6 +464,15 @@ if not render_dump.get("isInputSurfaceReady"):
     raise SystemExit("The standalone iPad owner path never reached input-ready state.")
 if not any(event.get("kind") == "input_readiness" and event.get("detail") == "ready" for event in event_payloads):
     raise SystemExit("The standalone iPad event log never recorded input readiness.")
+rendered_terminal_text = "\n".join(
+    str(render_dump.get(key) or "")
+    for key in ("renderedText", "snapshotText", "visibleText")
+).lower()
+if "codex resume" in rendered_terminal_text and not any(
+    marker in rendered_terminal_text
+    for marker in ("openai codex", "gpt-", "/model to change", "/mcp to list configured mcp tools", "conversation interrupted", "›")
+):
+    raise SystemExit("The iPad owner bootstrap appears to be the stale pre-takeover shell prompt.")
 
 bootstrap_receipts = [event for event in session_events if event.get("name") == "owner_bootstrap_state_received"]
 local_bootstraps = [event for event in session_events if event.get("name") == "local_owner_bootstrap_begin"]

@@ -294,6 +294,65 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertFalse((host.rendererHost as AnyObject) === host)
     }
 
+    @MainActor func testLocalOwnerAttachDoesNotExportLiveSessionSnapshot() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-local-owner-no-snapshot-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-23T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: .init(rootDirectory: root.path))
+        let ownerClient = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-23T00:00:00Z")
+        var sessionCaptureCount = 0
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in
+            sessionCaptureCount += 1
+            return nil
+        }
+        defer {
+            GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil
+            host.core.terminate()
+        }
+
+        try host.attach(client: ownerClient, mode: .owner, into: nil)
+
+        XCTAssertEqual(sessionCaptureCount, 0)
+    }
+
+    @MainActor func testRemoteTakeoverFromLocalOwnerExportsLiveSessionSnapshotWithoutSurfaceRefresh() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-remote-takeover-no-snapshot-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-23T00:00:00Z")
+        var surfaceRefreshCount = 0
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths) { surfaceRefreshCount += 1 }
+        let localOwner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-23T00:00:00Z")
+        let remoteOwner = TerminalClient(
+            id: "remote-ipad", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-23T00:00:01Z")
+        var sessionCaptureCount = 0
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in
+            sessionCaptureCount += 1
+            return self.snapshot(text: "OpenAI Codex")
+        }
+        defer {
+            GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil
+            host.core.terminate()
+        }
+
+        try host.attach(client: localOwner, mode: .owner, into: nil)
+        XCTAssertEqual(host.core.handleControlRequest(.init(command: "attach", client: remoteOwner, attachmentMode: .viewer)).ok, true)
+        XCTAssertEqual(host.core.handleControlRequest(.init(command: "takeover", clientID: remoteOwner.id)).ok, true)
+
+        XCTAssertEqual(sessionCaptureCount, 1)
+        XCTAssertEqual(surfaceRefreshCount, 0)
+    }
+
     @MainActor func testIncomingOutputRequestsSurfaceRefreshImmediately() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

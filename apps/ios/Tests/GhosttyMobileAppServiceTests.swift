@@ -44,6 +44,45 @@
             XCTAssertEqual(viewport.rows, 40)
         }
 
+        func testTouchScrollFingerDownMapsTowardOlderScrollback() {
+            let delta = GhosttyRemoteTerminalScrollMapper.scrollDelta(
+                forPanDelta: CGPoint(x: 0, y: 12),
+                scaleFactor: 2
+            )
+
+            XCTAssertEqual(delta.y, 24)
+        }
+
+        func testTouchScrollFingerUpMapsTowardLiveBottom() {
+            let delta = GhosttyRemoteTerminalScrollMapper.scrollDelta(
+                forPanDelta: CGPoint(x: 0, y: -12),
+                scaleFactor: 2
+            )
+
+            XCTAssertEqual(delta.y, -24)
+        }
+
+        func testTouchScrollUsesScaleFactorAsPointToPixelConversion() {
+            let delta = GhosttyRemoteTerminalScrollMapper.scrollDelta(
+                forPanDelta: CGPoint(x: 4, y: 10),
+                scaleFactor: 3
+            )
+
+            XCTAssertEqual(delta.x, -12)
+            XCTAssertEqual(delta.y, 30)
+        }
+
+        func testHighVelocityMomentumProducesBoundedDeltas() {
+            let delta = GhosttyRemoteTerminalScrollMapper.momentumFrameDelta(
+                velocity: CGPoint(x: 20_000, y: 20_000),
+                elapsed: 1,
+                scaleFactor: 3
+            )
+
+            XCTAssertEqual(delta.x, -720)
+            XCTAssertEqual(delta.y, 720)
+        }
+
         func testResolveResourcesPathUsesBundledGhosttyResources() throws {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -1025,8 +1064,8 @@
 
             let refreshedSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
             let refreshedText = GhosttyTerminalSnapshotLayout.plainText(for: refreshedSnapshot)
-            XCTAssertTrue(refreshedText.localizedStandardContains("history-only-line"), refreshedText)
-            XCTAssertFalse(refreshedText.localizedStandardContains("SNAPSHOT"), refreshedText)
+            XCTAssertFalse(refreshedText.localizedStandardContains("history-only-line"), refreshedText)
+            XCTAssertTrue(refreshedText.localizedStandardContains("SNAPSHOT"), refreshedText)
 
             let didScroll = hostView.debugSendScrollForTesting(
                 horizontal: 0,
