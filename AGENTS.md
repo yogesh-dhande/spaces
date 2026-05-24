@@ -25,6 +25,14 @@
 - When working from a repo-local checkout and other worktrees may also be running Spaces, bind your shell to the current worktree profile before using the debug app, `spaces`, or `spacese2e`: `eval "$(apps/macos/.build/debug/spaces profile show --shell)"`.
 - Treat other worktrees' running Spaces instances as separate profiles. Do not kill them just to unblock your own workflow; only stop the app instance for the current profile, and let desktop-global verification wait for desktop control when another profile owns it.
 
+## GhosttyKit Dependency Workflow
+- The Ghostty fork publishes a GitHub release for every committed update to its `spaces` branch.
+- Use `ghosttykit-<full-ghostty-sha>` as the GhosttyKit release tag in `apps/macos/ghosttykit-release-tag.txt`, and use the matching full Ghostty commit SHA in `apps/macos/ghosttyvt-revision.txt`.
+- Update those pin files in the normal Spaces pull request that depends on the Ghostty change. Do not use a Spaces-side scheduled or auto-sync workflow to advance the pin.
+- Spaces CI and Spaces app releases must consume those SHA-derived GhosttyKit release assets. Do not depend on uncommitted Ghostty work.
+- Local debugging may build GhosttyKit from uncommitted changes in the local Ghostty checkout with `SPACES_GHOSTTYKIT_BUILD_FROM_SOURCE=1`, but commit and push Ghostty changes to the fork's `spaces` branch before making Spaces PRs depend on them.
+- If Spaces CI cannot find or verify the GhosttyKit release for the pinned SHA, fix or publish the Ghostty fork release instead of changing Spaces CI to build Ghostty from source.
+
 ## Verification Rules
 - Always run lint and build before finalizing macOS app changes.
 - Run `scripts/coverage.sh` after changes unless the change is limited to `apps/web` or docs/comments.

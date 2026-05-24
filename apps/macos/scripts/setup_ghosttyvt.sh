@@ -5,7 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REVISION_FILE="$APP_ROOT/ghosttyvt-revision.txt"
 GHOSTTYKIT_RELEASE_TAG_FILE="$APP_ROOT/ghosttykit-release-tag.txt"
-GHOSTTYKIT_ARTIFACT_RUN_FILE="$APP_ROOT/ghosttykit-artifact-run.txt"
 LOCAL_ROOT="$APP_ROOT/.local/ghosttyvt"
 SOURCE_ROOT="$LOCAL_ROOT/src"
 TOOLCHAIN_ROOT="$LOCAL_ROOT/toolchain"
@@ -13,7 +12,6 @@ DEFAULT_REPO="https://github.com/yogesh-dhande/ghostty.git"
 DEFAULT_BRANCH="spaces"
 REPO_URL="${SPACES_GHOSTTYVT_REPO:-$DEFAULT_REPO}"
 REPO_BRANCH="${SPACES_GHOSTTYVT_BRANCH:-$DEFAULT_BRANCH}"
-GHOSTTYKIT_REPO="${SPACES_GHOSTTYKIT_REPO:-yogesh-dhande/ghostty}"
 
 if [[ -f "$REVISION_FILE" ]]; then
     DEFAULT_REVISION="$(tr -d '[:space:]' < "$REVISION_FILE")"
@@ -25,15 +23,7 @@ fi
 REVISION="${SPACES_GHOSTTYVT_REVISION:-$DEFAULT_REVISION}"
 
 EXPECTED_RELEASE_TAG=""
-if [[ -f "$GHOSTTYKIT_ARTIFACT_RUN_FILE" ]]; then
-    DEFAULT_ACTIONS_RUN_ID="$(tr -d '[:space:]' < "$GHOSTTYKIT_ARTIFACT_RUN_FILE")"
-else
-    DEFAULT_ACTIONS_RUN_ID=""
-fi
-
-EXPECTED_ACTIONS_RUN_ID="${SPACES_GHOSTTYKIT_ACTIONS_RUN_ID:-$DEFAULT_ACTIONS_RUN_ID}"
-
-if [[ -z "$EXPECTED_ACTIONS_RUN_ID" && -f "$GHOSTTYKIT_RELEASE_TAG_FILE" ]]; then
+if [[ -f "$GHOSTTYKIT_RELEASE_TAG_FILE" ]]; then
     EXPECTED_RELEASE_TAG="$(tr -d '[:space:]' < "$GHOSTTYKIT_RELEASE_TAG_FILE")"
 fi
 
@@ -103,23 +93,7 @@ fi
         git fetch --force origin "refs/tags/$EXPECTED_RELEASE_TAG:refs/tags/$EXPECTED_RELEASE_TAG"
     fi
 
-    if [[ "$REPO_URL" == "$DEFAULT_REPO" && -z "${SPACES_GHOSTTYVT_REVISION:-}" && -n "$EXPECTED_ACTIONS_RUN_ID" ]]; then
-        IFS=$'\t' read -r EXPECTED_ARTIFACT_STATUS EXPECTED_ARTIFACT_CONCLUSION EXPECTED_ARTIFACT_COMMIT EXPECTED_ARTIFACT_URL <<<"$(
-            gh run view "$EXPECTED_ACTIONS_RUN_ID" \
-                --repo "$GHOSTTYKIT_REPO" \
-                --json status,conclusion,headSha,url \
-                --jq '[.status, (.conclusion // ""), .headSha, .url] | @tsv'
-        )"
-        if [[ "$EXPECTED_ARTIFACT_STATUS" != "completed" || "$EXPECTED_ARTIFACT_CONCLUSION" != "success" ]]; then
-            echo "GhosttyKit artifact run is not a successful completed run: $EXPECTED_ARTIFACT_URL ($EXPECTED_ARTIFACT_STATUS/$EXPECTED_ARTIFACT_CONCLUSION)" >&2
-            exit 1
-        fi
-        if [[ "$REVISION" != "$EXPECTED_ARTIFACT_COMMIT" ]]; then
-            echo "ghosttyvt revision $REVISION does not match GhosttyKit artifact run $EXPECTED_ACTIONS_RUN_ID ($EXPECTED_ARTIFACT_COMMIT)" >&2
-            echo "update apps/macos/ghosttyvt-revision.txt or override SPACES_GHOSTTYVT_REVISION for local experiments" >&2
-            exit 1
-        fi
-    elif [[ "$REPO_URL" == "$DEFAULT_REPO" && -z "${SPACES_GHOSTTYVT_REVISION:-}" && -n "$EXPECTED_RELEASE_TAG" ]]; then
+    if [[ "$REPO_URL" == "$DEFAULT_REPO" && -z "${SPACES_GHOSTTYVT_REVISION:-}" && -n "$EXPECTED_RELEASE_TAG" ]]; then
         EXPECTED_RELEASE_COMMIT="$(git rev-list -n 1 "$EXPECTED_RELEASE_TAG" 2>/dev/null || true)"
         if [[ -z "$EXPECTED_RELEASE_COMMIT" ]]; then
             echo "missing expected GhosttyKit release tag '$EXPECTED_RELEASE_TAG' in $REPO_URL" >&2

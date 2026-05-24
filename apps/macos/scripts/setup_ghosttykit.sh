@@ -5,8 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VERIFY_SCRIPT="$SCRIPT_DIR/verify_ghosttykit.sh"
 RELEASE_TAG_FILE="$APP_ROOT/ghosttykit-release-tag.txt"
-ARTIFACT_RUN_FILE="$APP_ROOT/ghosttykit-artifact-run.txt"
-GHOSTTYVT_REVISION_FILE="$APP_ROOT/ghosttyvt-revision.txt"
 LOCAL_ROOT="$APP_ROOT/.local/ghosttykit"
 XCFRAMEWORK_ROOT="$LOCAL_ROOT/GhosttyKit.xcframework"
 RESOURCES_ROOT="$LOCAL_ROOT/Resources"
@@ -16,8 +14,6 @@ GHOSTTYVT_TOOLCHAIN_ROOT="$GHOSTTYVT_LOCAL_ROOT/toolchain/zig-aarch64-macos-0.15
 SOURCE_PROJECT_DIR="${SPACES_PROJECT_DIR:-}"
 FORK_REPO="${SPACES_GHOSTTYKIT_REPO:-yogesh-dhande/ghostty}"
 BUILD_FROM_SOURCE="${SPACES_GHOSTTYKIT_BUILD_FROM_SOURCE:-0}"
-XCFRAMEWORK_ARTIFACT_NAME="${SPACES_GHOSTTYKIT_XCFRAMEWORK_ARTIFACT_NAME:-GhosttyKit.xcframework.tar.gz}"
-RESOURCES_ARTIFACT_NAME="${SPACES_GHOSTTYKIT_RESOURCES_ARTIFACT_NAME:-GhosttyKit-resources.tar.gz}"
 
 if [[ -f "$RELEASE_TAG_FILE" ]]; then
     DEFAULT_RELEASE_TAG="$(tr -d '[:space:]' < "$RELEASE_TAG_FILE")"
@@ -25,14 +21,7 @@ else
     DEFAULT_RELEASE_TAG="build-2026-04-29"
 fi
 
-if [[ -f "$ARTIFACT_RUN_FILE" ]]; then
-    DEFAULT_ACTIONS_RUN_ID="$(tr -d '[:space:]' < "$ARTIFACT_RUN_FILE")"
-else
-    DEFAULT_ACTIONS_RUN_ID=""
-fi
-
 RELEASE_TAG="${1:-${SPACES_GHOSTTYKIT_RELEASE_TAG:-$DEFAULT_RELEASE_TAG}}"
-ACTIONS_RUN_ID="${SPACES_GHOSTTYKIT_ACTIONS_RUN_ID:-$DEFAULT_ACTIONS_RUN_ID}"
 
 mkdir -p "$LOCAL_ROOT"
 
@@ -44,55 +33,6 @@ download_release_asset() {
         cd "$destination_dir"
         gh release download "$RELEASE_TAG" --pattern "$pattern" --repo "$FORK_REPO"
     )
-}
-
-read_pinned_ghostty_revision() {
-    [[ -f "$GHOSTTYVT_REVISION_FILE" ]] || return 0
-    tr -d '[:space:]' < "$GHOSTTYVT_REVISION_FILE"
-}
-
-validate_actions_run() {
-    [[ -n "$ACTIONS_RUN_ID" ]] || return 0
-
-    local status conclusion head_sha run_url expected_revision
-    IFS=$'\t' read -r status conclusion head_sha run_url <<<"$(
-        gh run view "$ACTIONS_RUN_ID" \
-            --repo "$FORK_REPO" \
-            --json status,conclusion,headSha,url \
-            --jq '[.status, (.conclusion // ""), .headSha, .url] | @tsv'
-    )"
-
-    if [[ "$status" != "completed" || "$conclusion" != "success" ]]; then
-        echo "GhosttyKit artifact run is not a successful completed run: $run_url ($status/$conclusion)" >&2
-        exit 1
-    fi
-
-    expected_revision="$(read_pinned_ghostty_revision)"
-    if [[ -n "$expected_revision" && "$head_sha" != "$expected_revision" ]]; then
-        echo "GhosttyKit artifact run $ACTIONS_RUN_ID points at $head_sha, but ghosttyvt-revision.txt pins $expected_revision" >&2
-        echo "update apps/macos/ghosttyvt-revision.txt to the artifact run commit or use a matching run" >&2
-        exit 1
-    fi
-}
-
-download_actions_artifact_file() {
-    local artifact_name="$1"
-    local expected_file="$2"
-    local destination_dir="$3"
-    local tmp_dir downloaded_file
-
-    tmp_dir="$(mktemp -d)"
-    gh run download "$ACTIONS_RUN_ID" --repo "$FORK_REPO" --name "$artifact_name" --dir "$tmp_dir"
-
-    downloaded_file="$(find "$tmp_dir" -type f -name "$expected_file" -print -quit)"
-    if [[ -z "$downloaded_file" ]]; then
-        echo "GhosttyKit artifact '$artifact_name' from run $ACTIONS_RUN_ID did not contain $expected_file" >&2
-        exit 1
-    fi
-
-    mkdir -p "$destination_dir"
-    cp "$downloaded_file" "$destination_dir/$expected_file"
-    rm -rf "$tmp_dir"
 }
 
 copy_from_existing_checkout_if_available() {
@@ -207,14 +147,8 @@ build_local_source_if_requested
 copy_from_local_source_build_if_requested
 
 if [[ ! -d "$XCFRAMEWORK_ROOT" ]]; then
-    if [[ -n "$ACTIONS_RUN_ID" ]]; then
-        validate_actions_run
-        echo "==> Downloading GhosttyKit.xcframework from $FORK_REPO Actions run $ACTIONS_RUN_ID"
-        download_actions_artifact_file "$XCFRAMEWORK_ARTIFACT_NAME" "GhosttyKit.xcframework.tar.gz" "$LOCAL_ROOT"
-    else
-        echo "==> Downloading GhosttyKit.xcframework from $FORK_REPO ($RELEASE_TAG)"
-        download_release_asset "GhosttyKit.xcframework.tar.gz" "$LOCAL_ROOT"
-    fi
+    echo "==> Downloading GhosttyKit.xcframework from $FORK_REPO ($RELEASE_TAG)"
+    download_release_asset "GhosttyKit.xcframework.tar.gz" "$LOCAL_ROOT"
     (
         cd "$LOCAL_ROOT"
         tar xzf GhosttyKit.xcframework.tar.gz
@@ -247,14 +181,8 @@ if [[ -f "$XCFRAMEWORK_ROOT/Info.plist" ]]; then
 fi
 
 if [[ ! -d "$RESOURCES_ROOT/ghostty/shell-integration" || ! -d "$RESOURCES_ROOT/terminfo" ]]; then
-    if [[ -n "$ACTIONS_RUN_ID" ]]; then
-        validate_actions_run
-        echo "==> Downloading Ghostty runtime resources from $FORK_REPO Actions run $ACTIONS_RUN_ID"
-        download_actions_artifact_file "$RESOURCES_ARTIFACT_NAME" "GhosttyKit-resources.tar.gz" "$RESOURCES_ROOT"
-    else
-        echo "==> Downloading Ghostty runtime resources from $FORK_REPO ($RELEASE_TAG)"
-        download_release_asset "GhosttyKit-resources.tar.gz" "$RESOURCES_ROOT"
-    fi
+    echo "==> Downloading Ghostty runtime resources from $FORK_REPO ($RELEASE_TAG)"
+    download_release_asset "GhosttyKit-resources.tar.gz" "$RESOURCES_ROOT"
     (
         cd "$RESOURCES_ROOT"
         tar xzf GhosttyKit-resources.tar.gz
