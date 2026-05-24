@@ -811,7 +811,6 @@ import Foundation
             sessionConfig.surface.receive_resize = Self.hostManagedResizeCallback
             sessionConfig.surface.scale_factor = scaleFactor
             sessionConfig.surface.font_size = Self.defaultFontSize
-            sessionConfig.surface.use_login_shell = false
             let createdSession = ghostty_session_new(app, &sessionConfig)
 
             guard let createdSession else { return nil }

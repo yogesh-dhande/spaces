@@ -84,12 +84,6 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(GhosttyEmbeddedTerminalSessionDriver.launchCommand(shell: "/bin/zsh", command: "shell:printf hello"), "shell:printf hello")
     }
 
-    func testSessionDriverDirectCommandsSkipLoginShellWrapping() {
-        XCTAssertFalse(GhosttyEmbeddedTerminalSessionDriver.usesLoginShell(command: "direct:/bin/cat"))
-        XCTAssertTrue(GhosttyEmbeddedTerminalSessionDriver.usesLoginShell(command: "echo hello"))
-        XCTAssertTrue(GhosttyEmbeddedTerminalSessionDriver.usesLoginShell(command: "shell:printf hello"))
-    }
-
     @MainActor func testRemoteStateScreenSnapshotPolicyKeepsPassiveInitialSnapshotFree() {
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial"))
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial", ownerKind: .localWindow))

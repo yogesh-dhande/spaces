@@ -68,7 +68,6 @@ import spacesterminalcore
             allocatedStrings.append(wrapped)
             sessionConfig.surface.command = UnsafePointer(wrapped)
             sessionConfig.surface.wait_after_command = false
-            sessionConfig.surface.use_login_shell = Self.usesLoginShell(command: command)
         }
 
         let workingDirectory = launchConfiguration.workingDirectory
@@ -319,8 +318,6 @@ import spacesterminalcore
         let escaped = command.replacingOccurrences(of: "'", with: "'\\''")
         return "\(shell) -l -c '\(escaped)'"
     }
-
-    nonisolated static func usesLoginShell(command: String) -> Bool { !command.hasPrefix("direct:") }
 
     private nonisolated static let surfaceDataCallback: ghostty_surface_data_cb = { userdata, bytes, len in
         guard let userdata, let bytes, len > 0 else { return }
