@@ -103,5 +103,8 @@ require_universal_binary \
 require_universal_binary \
   "$mountpoint/Spaces.app/Contents/Resources/spaces" \
   "Spaces.app bundled CLI"
+require_universal_binary \
+  "$mountpoint/Spaces.app/Contents/Resources/SpacesTerminalService" \
+  "Spaces.app bundled terminal service"
 
 echo "✓ Release artifacts verified"

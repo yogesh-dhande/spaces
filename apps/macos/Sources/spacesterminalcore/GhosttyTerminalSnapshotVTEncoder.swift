@@ -22,8 +22,8 @@ public enum GhosttyTerminalSnapshotVTEncoder {
         let underline: Bool
 
         init(cell: GhosttyTerminalSnapshot.Cell, snapshot: GhosttyTerminalSnapshot) {
-            foregroundRGB = cell.foregroundRGB == 0 ? snapshot.defaultForegroundRGB : cell.foregroundRGB
-            backgroundRGB = cell.backgroundRGB == 0 ? snapshot.defaultBackgroundRGB : cell.backgroundRGB
+            foregroundRGB = cell.foregroundRGB
+            backgroundRGB = cell.backgroundRGB
             bold = cell.flags & boldFlag != 0
             italic = cell.flags & italicFlag != 0
             faint = cell.flags & faintFlag != 0

@@ -151,20 +151,24 @@ import Foundation
             }
         }
 
-        private static func resolveExecutableURL(
-            environment: [String: String] = ProcessInfo.processInfo.environment, fileManager: FileManager = .default
-        ) throws -> URL {
+        static func resolveExecutableURL(environment: [String: String] = ProcessInfo.processInfo.environment, fileManager: FileManager = .default)
+            throws -> URL
+        {
             let currentExecutablePath = environment["_"] ?? Bundle.main.executableURL?.path ?? CommandLine.arguments.first ?? ""
             let currentExecutableDirectory = URL(fileURLWithPath: currentExecutablePath).deletingLastPathComponent()
             let currentDirectory = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
+            let bundledResourceDirectory = currentExecutableDirectory.deletingLastPathComponent().appendingPathComponent(
+                "Resources", isDirectory: true)
             let candidates = [
                 environment["SPACES_TERMINAL_SERVICE_EXECUTABLE"],
                 currentExecutableDirectory.appendingPathComponent("SpacesTerminalService", isDirectory: false).path(),
+                Bundle.main.resourceURL?.appendingPathComponent("SpacesTerminalService", isDirectory: false).path(),
+                bundledResourceDirectory.appendingPathComponent("SpacesTerminalService", isDirectory: false).path(),
                 currentDirectory.appendingPathComponent("apps/macos/.build/debug/SpacesTerminalService", isDirectory: false).path(),
                 currentDirectory.appendingPathComponent("apps/macos/.build/release/SpacesTerminalService", isDirectory: false).path(),
                 currentDirectory.appendingPathComponent(".build/debug/SpacesTerminalService", isDirectory: false).path(),
                 currentDirectory.appendingPathComponent(".build/release/SpacesTerminalService", isDirectory: false).path(),
-            ].compactMap { $0 }
+            ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
 
             for candidate in candidates where fileManager.isExecutableFile(atPath: candidate) {
                 return URL(fileURLWithPath: candidate, isDirectory: false)

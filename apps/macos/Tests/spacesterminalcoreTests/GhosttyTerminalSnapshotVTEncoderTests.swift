@@ -41,4 +41,13 @@ struct GhosttyTerminalSnapshotVTEncoderTests {
         #expect(!encoded.contains("一 "))
         #expect(encoded.contains("\u{1B}[?25l"))
     }
+
+    @Test func preservesExplicitBlackCellColors() throws {
+        let snapshot = GhosttyTerminalSnapshot(
+            columns: 1, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xEEEEEE, defaultBackgroundRGB: 0xDDDDDD,
+            cells: [.init(codepoint: 88, foregroundRGB: 0x000000, backgroundRGB: 0x000000, flags: 0)])
+
+        let encoded = try #require(String(data: GhosttyTerminalSnapshotVTEncoder.encode(snapshot), encoding: .utf8))
+        #expect(encoded.contains("\u{1B}[0;38;2;0;0;0;48;2;0;0;0mX"))
+    }
 }

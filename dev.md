@@ -471,15 +471,15 @@ scripts/release-and-deploy.sh <version> [build-number]
 
 This workflow:
 - syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
-- builds universal `arm64` + `x86_64` release binaries for both the app and CLI
-- code-signs the app and CLI
+- builds universal `arm64` + `x86_64` release binaries for the app, CLI, and `SpacesTerminalService`
+- code-signs the app, CLI, and terminal service
 - creates a signed manual-download DMG
 - creates a Sparkle-served `Spaces.app` zip archive
 - updates `dist/updates/stable/appcast.xml` plus any Sparkle delta files
 - stages the Sparkle feed and Sparkle archives into `apps/web/public/releases`
 - builds the static site so Firebase can serve `https://usespaces.dev/releases/*`
 - optionally notarizes the DMG when `NOTARIZE=1`
-- verifies the final DMG signature plus the bundled installer and app before publish
+- verifies the final DMG signature plus the bundled installer, app, CLI, and terminal service before publish
 - publishes the DMG to GitHub Releases
 
 Important environment variables:
@@ -498,7 +498,7 @@ Important environment variables:
 
 For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
 
-Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, and one stable `appcast.xml`, all backed by those universal binaries.
+Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, and one stable `appcast.xml`, all backed by those universal binaries. The app bundle carries `spaces` and `SpacesTerminalService` in `Contents/Resources`; the DMG installer also copies both executables to the selected CLI install directory so installed CLI commands can start the terminal service without extra environment variables.
 
 ## Website Deploy
 

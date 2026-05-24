@@ -284,5 +284,5 @@ Spaces focuses those windows; it does not decide their geometry.
 - The app should check for updates periodically and allow manual update checks.
 - Update discovery and installation should use one stable Sparkle appcast feed.
 - Manual downloads may still be published separately, but the in-app updater should not depend on GitHub release APIs.
-- The manual-download DMG should present a single guided installer entry point that installs both `Spaces.app` and the required `spaces` CLI together.
+- The manual-download DMG should present a single guided installer entry point that installs `Spaces.app`, the required `spaces` CLI, and the terminal service used by built-in terminal commands together.
 - `spaces --version` should report the current version.
