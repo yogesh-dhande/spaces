@@ -80,6 +80,18 @@ If `SPACES_PROJECT_DIR` points at another checkout that already has `apps/macos/
 If you are iterating on unpublished fork APIs, run `apps/macos/scripts/setup_ghosttyvt.sh` first and then set `SPACES_GHOSTTYKIT_BUILD_FROM_SOURCE=1` when invoking `apps/macos/scripts/setup_ghosttykit.sh`. That rebuilds `GhosttyKit.xcframework` from the branch-local Ghostty fork checkout under `apps/macos/.local/ghosttyvt/src/` and refreshes the local resources from the same source tree instead of downloading the pinned release artifact.
 The repo also runs [`.github/workflows/sync-ghosttykit-release.yml`](.github/workflows/sync-ghosttykit-release.yml) daily to bump that pinned tag to the latest published build from the Spaces-owned fork via pull request. The fork itself should run its own daily upstream-sync and rebuild automation; this repo only consumes the published release tag.
 
+When the Ghostty fork publishes a release that Spaces should consume, update `apps/macos/ghosttykit-release-tag.txt` to the release tag and update `apps/macos/ghosttyvt-revision.txt` to the commit behind that same tag. Then refresh local artifacts and run the normal verification pass:
+
+```bash
+git ls-remote --tags https://github.com/yogesh-dhande/ghostty.git refs/tags/<new-tag>
+rm -rf apps/macos/.local/ghosttykit apps/macos/.local/ghosttyvt
+apps/macos/scripts/setup_ghosttykit.sh
+apps/macos/scripts/setup_ghosttyvt.sh
+scripts/verify.sh
+```
+
+`scripts/sync-ghosttykit-release.sh` only updates `ghosttykit-release-tag.txt`; complete dependency bumps must keep `ghosttyvt-revision.txt` aligned with the tag commit. `setup_ghosttykit.sh` fails if the release artifact does not satisfy the embedded terminal API contract, and `setup_ghosttyvt.sh` fails if the pinned VT revision does not match the GhosttyKit release tag.
+
 To validate the real in-process Ghostty owner renderer path in `SpacesApp`, launch the app normally with an isolated database root:
 
 ```bash
