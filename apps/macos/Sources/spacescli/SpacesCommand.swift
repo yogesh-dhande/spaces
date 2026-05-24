@@ -2,6 +2,7 @@ import ArgumentParser
 import Darwin
 import Dispatch
 import Foundation
+import spacesmobilebridge
 import spacesmobilecore
 import spacesterminalcore
 import spacesterminalghostty
@@ -235,14 +236,34 @@ struct TerminalProxyCommand: ParsableCommand {
 struct MobileCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mobile", abstract: "Expose first-party workspace and terminal browsing for the iOS client.",
-        subcommands: [MobileServeCommand.self])
+        subcommands: [MobileStatusCommand.self, MobileServeCommand.self], defaultSubcommand: MobileStatusCommand.self)
+}
+
+struct MobileStatusCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "status", abstract: "Show the first-party mobile bridge address and pairing code.")
+
+    func run() throws {
+        _ = try TerminalService.ensureRunning()
+        let status = try SpacesMobileBridgeSettingsStore().status()
+        print("Spaces mobile bridge")
+        print("port=\(status.port)")
+        print("pairing_code=\(status.pairingCode)")
+        print("bonjour=\(status.bonjourServiceName)\ttype=\(status.bonjourServiceType)")
+        if status.networkAddresses.isEmpty {
+            print("addresses=(none)")
+        } else {
+            print("addresses=\(status.networkAddresses.map { "\($0):\(status.port)" }.joined(separator: ","))")
+        }
+        print("iphone=Open Spaces on iPhone, choose \(status.bonjourServiceName) under Nearby Macs, then enter the pairing code.")
+    }
 }
 
 struct MobileServeCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "serve", abstract: "Run the first-party mobile bridge for the iOS client.")
+    static let configuration = CommandConfiguration(commandName: "serve", abstract: "Run a standalone first-party mobile bridge for the iOS client.")
 
-    @Option(name: .long, help: "TCP host to bind. Use 127.0.0.1 for simulator-only access.") var host = "127.0.0.1"
-    @Option(name: .long, help: "TCP port to bind. Defaults to 47071 for the first-party iOS client.") var port = 47071
+    @Option(name: .long, help: "TCP host to bind. Defaults to all IPv4 interfaces for iPhone and simulator access.") var host =
+        SpacesMobileBridgeDefaults.host
+    @Option(name: .long, help: "TCP port to bind. Defaults to the stable first-party mobile bridge port.") var port = SpacesMobileBridgeDefaults.port
     @Option(name: .long, help: "One-time pairing code accepted by the first-party iOS client. Defaults to a generated 6-digit code.") var pairingCode:
         String?
 

@@ -18,6 +18,7 @@ let package = Package(
         .library(name: "spacesterminalmobileghostty", targets: ["spacesterminalmobileghostty"]),
         .library(name: "spacesterminalui", targets: ["spacesterminalui"]),
         .library(name: "spacesmobilecore", targets: ["spacesmobilecore"]),
+        .library(name: "spacesmobilebridge", targets: ["spacesmobilebridge"]),
         .library(name: "workspacecore", targets: ["workspacecore"]),
         .library(name: "spacesui", targets: ["spacesui"]),
         .library(name: "spacescli", targets: ["spacescli"]),
@@ -45,6 +46,10 @@ let package = Package(
         .target(name: "spacesterminalcore", dependencies: ["ghosttyvtshim"]),
         .target(name: "spacesmobilecore", dependencies: ["spacesterminalcore"]),
         .target(
+            name: "spacesmobilebridge",
+            dependencies: ["spacesmobilecore", "workspacecore", "spacesterminalcore"]
+        ),
+        .target(
             name: "spacesterminalghostty",
             dependencies: ["spacesterminalcore", "ghosttyvtshim", "GhosttyKit"],
             linkerSettings: [.linkedLibrary("c++")]
@@ -68,6 +73,7 @@ let package = Package(
             dependencies: [
                 "workspacecore",
                 "systembridge",
+                "spacesmobilebridge",
                 "spacesterminalui",
                 .product(name: "Sparkle", package: "Sparkle"),
             ]
@@ -75,6 +81,7 @@ let package = Package(
         .target(
             name: "spacescli",
             dependencies: [
+                "spacesmobilebridge",
                 "spacesmobilecore",
                 "workspacecore",
                 "spacesterminalcore",
@@ -94,7 +101,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "SpacesTerminalService",
-            dependencies: ["spacesterminalcore", "spacesterminalghostty"],
+            dependencies: ["spacesterminalcore", "spacesterminalghostty", "spacesmobilebridge"],
             path: "Sources/SpacesTerminalService"
         ),
         .executableTarget(name: "spaces", dependencies: ["spacescli"], path: "Sources/spaces"),
@@ -124,6 +131,7 @@ let package = Package(
             name: "spacescliTests",
             dependencies: [
                 "spacescli",
+                "spacesmobilebridge",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
         )

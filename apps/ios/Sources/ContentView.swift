@@ -135,7 +135,7 @@ struct ContentView: View {
                 ContentUnavailableView(
                     "No Terminals",
                     systemImage: "terminal",
-                    description: Text("Start `spaces mobile serve` on your Mac and refresh.")
+                    description: Text("Start a Spaces terminal on your Mac and refresh.")
                 )
             } else {
                 List {

@@ -1,6 +1,7 @@
 import AppKit
 import Dispatch
 import Foundation
+import spacesmobilebridge
 import spacesterminalcore
 import spacesterminalghostty
 
@@ -17,18 +18,21 @@ import spacesterminalghostty
     }
     private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
     private var lifecycleTimer: Timer?
+    private let mobileBridgeSupervisor = SpacesMobileBridgeSupervisor()
 
     init() throws { socketPath = try TerminalServicePaths.socketPath() }
 
     func start() throws {
         try recoverStaleSessions()
         try server.start()
+        mobileBridgeSupervisor.start()
         startLifecycleTimer()
     }
 
     func shutdown() {
         lifecycleTimer?.invalidate()
         lifecycleTimer = nil
+        mobileBridgeSupervisor.stop()
         for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) }
         server.stop()
     }

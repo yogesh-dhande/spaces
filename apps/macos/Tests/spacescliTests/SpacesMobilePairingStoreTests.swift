@@ -3,6 +3,7 @@ import XCTest
 import spacesmobilecore
 
 @testable import spacescli
+@testable import spacesmobilebridge
 
 final class SpacesMobilePairingStoreTests: XCTestCase {
     func testIssueTokenAndAuthorizeAllowedBundle() throws {

@@ -2,6 +2,7 @@ import ArgumentParser
 import Darwin
 import Foundation
 import XCTest
+import spacesmobilebridge
 import spacesterminalcore
 import spacesterminalghostty
 import systembridge
@@ -183,11 +184,18 @@ final class MXCommandTests: XCTestCase {
     }
 
     func testMobileServeParsesHostPortAndPairingCode() throws {
-        let command = try MobileServeCommand.parse(["--host", "0.0.0.0", "--port", "47071", "--pairing-code", "246810"])
+        let command = try MobileServeCommand.parse(["--host", "0.0.0.0", "--port", "47847", "--pairing-code", "246810"])
 
         XCTAssertEqual(command.host, "0.0.0.0")
-        XCTAssertEqual(command.port, 47071)
+        XCTAssertEqual(command.port, 47_847)
         XCTAssertEqual(command.pairingCode, "246810")
+    }
+
+    func testMobileServeDefaultsAreLanReachableAndStable() throws {
+        let command = try MobileServeCommand.parse([])
+
+        XCTAssertEqual(command.host, SpacesMobileBridgeDefaults.host)
+        XCTAssertEqual(command.port, SpacesMobileBridgeDefaults.port)
     }
 
     func testSpacesCommandListsFlattenedPublicVerbs() {

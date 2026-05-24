@@ -2,6 +2,7 @@ import AppKit
 import Carbon
 import Foundation
 import Sparkle
+import spacesmobilebridge
 import spacesterminalcore
 import spacesterminalghostty
 import spacesterminalui
@@ -2605,6 +2606,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
 
+        let mobileButton = sidebarRowIconButton(
+            symbol: "iphone.gen3.radiowaves.left.and.right", tooltip: "Mobile connection", action: #selector(showMobileConnection))
         let settingsButton = sidebarRowIconButton(symbol: "gearshape", tooltip: "User settings", action: #selector(showSettings))
         let reloadButton = sidebarRowIconButton(symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped))
 
@@ -2616,6 +2619,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(iconView)
         stack.addArrangedSubview(NSView())
+        stack.addArrangedSubview(mobileButton)
         stack.addArrangedSubview(settingsButton)
         stack.addArrangedSubview(reloadButton)
 
@@ -6124,6 +6128,41 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func reloadTapped() { reloadData() }
 
+    @objc private func showMobileConnection() {
+        do {
+            _ = try TerminalService.ensureRunning()
+            let status = try SpacesMobileBridgeSettingsStore().status()
+            let addresses = status.networkAddresses.map { "\($0):\(status.port)" }
+            let firstAddress = addresses.first ?? "\(SpacesMobileBridgeDefaults.loopbackHost):\(status.port)"
+            let addressText = addresses.isEmpty ? "No LAN address detected" : addresses.joined(separator: "\n")
+            let message = """
+                Pairing code: \(status.pairingCode)
+                Port: \(status.port)
+                Bonjour: \(status.bonjourServiceName)
+
+                Addresses:
+                \(addressText)
+
+                On iPhone, open Spaces, choose \(status.bonjourServiceName) under Nearby Macs, then enter the pairing code.
+                """
+
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Mobile Connection"
+            alert.informativeText = message
+            alert.addButton(withTitle: "Done")
+            alert.addButton(withTitle: "Copy Pairing Code")
+            alert.addButton(withTitle: "Copy Address")
+
+            let response = alert.runModal()
+            if response == .alertSecondButtonReturn {
+                copyToPasteboard(status.pairingCode)
+            } else if response == .alertThirdButtonReturn {
+                copyToPasteboard(firstAddress)
+            }
+        } catch { showError(error) }
+    }
+
     @objc private func showSettings() {
         if projectHasUnsavedChanges {
             let response = unsavedChangesPrompt()
@@ -6140,6 +6179,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         selectedWorkspaceID = nil
         lastSelectedRow = -1
         showSettingsDetail()
+    }
+
+    private func copyToPasteboard(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
     }
 
     @objc private func openWorkspaceEditor(_ sender: NSButton) {

@@ -51,8 +51,8 @@ Each live session also participates in a service-level control path:
 - `spaces terminal list` reads live session summaries from the service abstraction.
 - `spaces terminal show` asks `SpacesApp` to open a native owner-seeking window for an existing session ID.
 - `spaces terminal send`, `key`, and `takeover` still operate on the per-session control socket that the service owns.
-- `spaces mobile serve` publishes the first-party TCP bridge consumed by the iOS client.
-- `SpacesMobile` consumes that bridge, keeps one selected terminal detail at a time, auto-attempts takeover for the opened session, and renders the owner path through a local iOS Ghostty surface seeded from the exported live snapshot plus streamed live output.
+- `SpacesTerminalService` publishes the first-party TCP bridge consumed by the iOS client. `spaces mobile status` starts the service if needed and prints the current pairing details, while `spaces mobile serve` remains available for standalone harnesses.
+- `SpacesMobile` discovers the bridge through Bonjour or accepts manual host entry, keeps one selected terminal detail at a time, auto-attempts takeover for the opened session, and renders the owner path through a local iOS Ghostty surface seeded from the exported live snapshot plus streamed live output.
 - Workspace process launch, built-in coding-agent launch, and app-opened workspace terminals use the local app-owned live Ghostty path when they are launched from `SpacesApp`.
 - CLI-managed workspace launches still use the daemon-owned compatibility path.
 
@@ -74,13 +74,17 @@ Each live session also participates in a service-level control path:
 - The VT bridge feeds `spaces terminal tail` plus the ended-session or no-live-session fallback replay path. Live owner bootstrap does not wait on VT history reconstruction before first paint.
 
 ## Mobile Bridge
-- `spaces mobile serve --host ... --port ... --pairing-code ...` is the first-party TCP bridge for the iOS client.
+- `SpacesTerminalService` starts the first-party TCP bridge for the iOS client on launch. The default listener binds all IPv4 interfaces on port `47847`, which keeps simulator loopback and real-device LAN access on the same stable port.
+- The bridge settings live under the terminal root in `mobile-bridge.json`; the pairing code is generated once per profile unless overridden by `SPACES_MOBILE_PAIRING_CODE`.
+- `spaces mobile status` shows the active port, pairing code, Bonjour service name, and reachable IPv4 addresses. `spaces mobile serve --host ... --port ... --pairing-code ...` runs the same bridge as a standalone process for harnesses.
+- The Mac sidebar mobile connection action shows the same pairing code, port, Bonjour name, and reachable addresses without requiring a terminal.
+- The service advertises `_spaces-mobile._tcp.` with Bonjour so the iOS connection sheet can offer nearby Macs without requiring the user to type an IP address.
 - The bridge serves workspace and terminal overview data plus authenticated attach, subscribe, takeover, send, and key requests over the same session boundary.
 - Pairing is first-party only: the Mac bridge issues a per-install auth token after one-time pairing-code verification and persists the paired installation alongside the expected iOS bundle identifier.
 - Every later request must present both the stored auth token and the first-party iOS bundle identity, so an unpaired or non-first-party client is rejected before it can browse or control sessions.
 - Remote attachments are lease-based. Host time stamps the lease, and only client-identified activity refreshes that specific remote lease.
 - The mobile bridge is an internal first-party transport seam, not a stable third-party public API.
-- Simulator-based manual verification should use `127.0.0.1` as the bridge host. A real device still needs a reachable Mac network address instead of simulator loopback.
+- Simulator-based manual verification can use `127.0.0.1` as the bridge host or the discovered Bonjour service. A real device can choose the nearby Mac from the connection sheet or use one of the LAN addresses printed by `spaces mobile status`.
 - `GhosttyMobileAppService` prepares simulator stdio before it boots the local iOS Ghostty runtime: missing stdout or stderr descriptors are repaired, and stdin is rebound to a kept-open pipe so the local Ghostty carrier subprocess does not inherit immediate EOF under manual `simctl launch`.
 
 ## Mobile Owner Bootstrap

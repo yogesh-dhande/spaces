@@ -7,12 +7,14 @@ source "$script_dir/terminal_harness_lock.sh"
 spaces_app="${SPACES_APP:-$repo_root/apps/macos/.build/debug/SpacesApp}"
 spaces_cli="${SPACES_CLI:-$repo_root/apps/macos/.build/debug/spaces}"
 spacese2e="${SPACES_E2E:-$repo_root/apps/macos/.build/debug/spacese2e}"
+terminal_service="${SPACES_TERMINAL_SERVICE_EXECUTABLE:-$repo_root/apps/macos/.build/debug/SpacesTerminalService}"
 ghostty_xcframework="${SPACES_GHOSTTYKIT_XCFRAMEWORK:-$repo_root/apps/macos/.local/ghosttykit/GhosttyKit.xcframework}"
 ghostty_resources="${SPACES_GHOSTTY_RESOURCES_DIR:-$repo_root/apps/macos/.local/ghosttykit/Resources/ghostty}"
 
 pairing_code="${SPACES_MOBILE_DEMO_PAIRING_CODE:-246810}"
-bridge_host="${SPACES_MOBILE_DEMO_HOST:-0.0.0.0}"
-bridge_port="${SPACES_MOBILE_DEMO_PORT:-47071}"
+bridge_bind_host="${SPACES_MOBILE_DEMO_BIND_HOST:-0.0.0.0}"
+bridge_host="${SPACES_MOBILE_DEMO_HOST:-127.0.0.1}"
+bridge_port="${SPACES_MOBILE_DEMO_PORT:-47847}"
 workspace_title="${SPACES_MOBILE_DEMO_WORKSPACE_TITLE:-Spaces Demo}"
 ipad_name="${SPACES_MOBILE_DEMO_IPAD_NAME:-iPad Pro 13-inch (M5)}"
 iphone_name="${SPACES_MOBILE_DEMO_IPHONE_NAME:-iPhone 17 Pro}"
@@ -72,15 +74,53 @@ stop_demo_workspace() {
     HOME="$temp_root/home" \
     SPACES_DB_PATH="$spaces_db_path" \
     SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+    SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
+    SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
+    SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
+    SPACES_MOBILE_PAIRING_CODE="$pairing_code" \
     "$spacese2e" stop-workspace --workspace-dir "$project_dir" >/dev/null 2>&1 || true
+}
+
+terminal_service_socket_path() {
+  python3 - "$spaces_runtime_dir" <<'PY'
+import pathlib
+import sys
+
+runtime_dir = pathlib.Path(sys.argv[1])
+terminal_root = runtime_dir / "terminal"
+hash_value = 5381
+for byte in str(terminal_root).encode("utf-8"):
+    hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
+print(f"/tmp/spaces-terminal-sockets/service-{hash_value:016x}.sock")
+PY
+}
+
+discover_terminal_service_pid() {
+  local service_socket_path
+  service_socket_path="$(terminal_service_socket_path)"
+  if [[ ! -S "$service_socket_path" ]]; then
+    return
+  fi
+  lsof -nP -t "$service_socket_path" 2>/dev/null | head -n 1 || true
+}
+
+stop_terminal_service() {
+  if [[ -z "$spaces_runtime_dir" ]]; then
+    return
+  fi
+  local service_pid="${bridge_pid:-}"
+  if [[ -z "$service_pid" || "$service_pid" == "$app_pid" ]]; then
+    service_pid="$(discover_terminal_service_pid || true)"
+  fi
+  if [[ -n "$service_pid" && "$service_pid" != "$app_pid" ]]; then
+    kill "$service_pid" >/dev/null 2>&1 || true
+    wait "$service_pid" >/dev/null 2>&1 || true
+  fi
 }
 
 cleanup() {
   stop_demo_workspace
-  if [[ -n "$bridge_pid" ]]; then
-    kill "$bridge_pid" >/dev/null 2>&1 || true
-    wait "$bridge_pid" >/dev/null 2>&1 || true
-  fi
+  stop_terminal_service
   if [[ -n "$ipad_launch_pid" ]]; then
     kill "$ipad_launch_pid" >/dev/null 2>&1 || true
     wait "$ipad_launch_pid" >/dev/null 2>&1 || true
@@ -127,6 +167,9 @@ fail_if_existing_spaces_app() {
 }
 
 fail_if_bridge_port_in_use() {
+  if [[ "$bridge_port" == "0" ]]; then
+    return
+  fi
   if lsof -nP -iTCP:"$bridge_port" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "Refusing to launch demo because port $bridge_port is already in use." >&2
     lsof -nP -iTCP:"$bridge_port" -sTCP:LISTEN >&2 || true
@@ -279,6 +322,43 @@ raise SystemExit(f"bridge port not ready: {last_error}")
 PY
 }
 
+refresh_mobile_bridge_status() {
+  run_demo_env \
+    HOME="$temp_root/home" \
+    SPACES_DB_PATH="$spaces_db_path" \
+    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+    SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
+    SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
+    SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
+    SPACES_MOBILE_PAIRING_CODE="$pairing_code" \
+    "$spaces_cli" mobile status >"$bridge_log"
+
+  local parsed_status status_port status_pairing_code
+  parsed_status="$(
+    python3 - "$bridge_log" <<'PY'
+import pathlib
+import shlex
+import sys
+
+status_path = pathlib.Path(sys.argv[1])
+port = ""
+pairing_code = ""
+for line in status_path.read_text(errors="replace").splitlines():
+    if line.startswith("port="):
+        port = line.split("=", 1)[1].strip()
+    elif line.startswith("pairing_code="):
+        pairing_code = line.split("=", 1)[1].strip()
+if not port or not pairing_code:
+    raise SystemExit(f"mobile status did not include port and pairing code: {status_path}")
+print(f"status_port={shlex.quote(port)}")
+print(f"status_pairing_code={shlex.quote(pairing_code)}")
+PY
+  )"
+  eval "$parsed_status"
+  bridge_port="$status_port"
+  pairing_code="$status_pairing_code"
+}
+
 discover_session_ids() {
   python3 - "$spaces_runtime_dir" "$temp_root" <<'PY'
 import pathlib
@@ -327,6 +407,10 @@ open_demo_workspace_terminal() {
     HOME="$temp_root/home" \
     SPACES_DB_PATH="$spaces_db_path" \
     SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+    SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
+    SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
+    SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
+    SPACES_MOBILE_PAIRING_CODE="$pairing_code" \
     "$spacese2e" open-workspace-terminal --workspace-dir "$project_dir"
 }
 
@@ -445,7 +529,7 @@ PY
 }
 
 print_summary() {
-  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$session_id" "$secondary_session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$performance_log_path" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
+  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$session_id" "$secondary_session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$performance_log_path" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_bind_host" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
 import json
 import sys
 
@@ -464,6 +548,7 @@ import sys
     iphone_screenshot,
     ipad_udid,
     iphone_udid,
+    bridge_bind_host,
     bridge_host,
     bridge_port,
     workspace_title,
@@ -479,6 +564,8 @@ payload = {
     "root": root,
     "appPID": int(app_pid),
     "bridgePID": int(bridge_pid),
+    "terminalServicePID": int(bridge_pid),
+    "bridgeBindHost": bridge_bind_host,
     "bridgeHost": bridge_host,
     "bridgePort": int(bridge_port),
     "sessionID": session_id,
@@ -515,6 +602,10 @@ write_manual_shell_helper() {
 export HOME=$(printf '%q' "$temp_root/home")
 export SPACES_DB_PATH=$(printf '%q' "$spaces_db_path")
 export SPACES_RUNTIME_DIR=$(printf '%q' "$spaces_runtime_dir")
+export SPACES_TERMINAL_SERVICE_EXECUTABLE=$(printf '%q' "$terminal_service")
+export SPACES_MOBILE_BRIDGE_HOST=$(printf '%q' "$bridge_bind_host")
+export SPACES_MOBILE_BRIDGE_PORT=$(printf '%q' "$bridge_port")
+export SPACES_MOBILE_PAIRING_CODE=$(printf '%q' "$pairing_code")
 export SPACES_DEMO_ROOT=$(printf '%q' "$temp_root")
 export SPACES_DEMO_SESSION_ID=$(printf '%q' "$session_id")
 export SPACES_DEMO_SECONDARY_SESSION_ID=$(printf '%q' "$secondary_session_id")
@@ -573,6 +664,10 @@ spaces_demo_tail_bridge_log() {
   tail -f "\$SPACES_DEMO_ROOT/bridge.log"
 }
 
+spaces_demo_mobile_status() {
+  "\$SPACES_CLI" mobile status
+}
+
 spaces_demo_tail_ipad_stderr() {
   tail -f "\$SPACES_DEMO_ROOT/ipad-app.stderr.log"
 }
@@ -583,6 +678,7 @@ EOF
 require_executable "$spaces_app" "SpacesApp"
 require_executable "$spaces_cli" "spaces CLI"
 require_executable "$spacese2e" "spacese2e"
+require_executable "$terminal_service" "SpacesTerminalService"
 require_path "$ghostty_xcframework" "GhosttyKit.xcframework"
 require_path "$ghostty_resources" "Ghostty resources"
 fail_if_existing_spaces_app
@@ -637,6 +733,10 @@ run_demo_env \
   HOME="$temp_root/home" \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+  SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
+  SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
+  SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
+  SPACES_MOBILE_PAIRING_CODE="$pairing_code" \
   SPACES_GHOSTTYKIT_XCFRAMEWORK="$ghostty_xcframework" \
   SPACES_GHOSTTY_RESOURCES_DIR="$ghostty_resources" \
   SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
@@ -649,6 +749,10 @@ run_demo_env \
   HOME="$temp_root/home" \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+  SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
+  SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
+  SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
+  SPACES_MOBILE_PAIRING_CODE="$pairing_code" \
   SPACES_PROJECT_DIR="$repo_root" \
   "$spacese2e" seed-fixture \
     --project-dir "$project_dir" \
@@ -712,16 +816,17 @@ if [[ -z "$secondary_session_id" ]]; then
   exit 1
 fi
 
-run_demo_env \
-  HOME="$temp_root/home" \
-  SPACES_DB_PATH="$spaces_db_path" \
-  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
-  SPACES_MOBILE_BRIDGE_TRACE="$demo_trace" \
-  SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
-  SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$performance_log_path" \
-  "$spaces_cli" mobile serve --host "$bridge_host" --port "$bridge_port" --pairing-code "$pairing_code" >"$bridge_log" 2>&1 &
-bridge_pid=$!
+refresh_mobile_bridge_status
 wait_for_bridge_port
+bridge_pid="$(discover_terminal_service_pid || true)"
+if [[ -z "$bridge_pid" ]]; then
+  bridge_pid="$app_pid"
+fi
+{
+  echo "bind_host=$bridge_bind_host"
+  echo "client_host=$bridge_host"
+  echo "terminal_service_pid=$bridge_pid"
+} >>"$bridge_log"
 
 ipad_installation_id="$(generate_installation_id)"
 iphone_installation_id="$(generate_installation_id)"
@@ -774,6 +879,7 @@ echo "  spaces_demo_mac_takeover"
 echo "  spaces_demo_reopen"
 echo "  spaces_demo_tail_mac_log"
 echo "  spaces_demo_tail_bridge_log"
+echo "  spaces_demo_mobile_status"
 echo "  spaces_demo_tail_ipad_stderr"
 
 while true; do
@@ -781,8 +887,8 @@ while true; do
     echo "SpacesApp exited. Cleaning up demo." >&2
     exit 0
   fi
-  if ! ps -p "$bridge_pid" >/dev/null 2>&1; then
-    echo "Mobile bridge exited. Cleaning up demo." >&2
+  if [[ -n "$bridge_pid" && "$bridge_pid" != "$app_pid" ]] && ! ps -p "$bridge_pid" >/dev/null 2>&1; then
+    echo "Terminal service exited. Cleaning up demo." >&2
     exit 0
   fi
   sleep 1

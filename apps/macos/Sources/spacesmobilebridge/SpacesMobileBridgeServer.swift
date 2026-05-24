@@ -5,7 +5,7 @@ import spacesmobilecore
 import spacesterminalcore
 import workspacecore
 
-final class SpacesMobileBridgeServer: @unchecked Sendable {
+public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private struct StreamRelay {
         let relaySocketFD: Int32
         let relayQueue: DispatchQueue
@@ -86,13 +86,15 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
     private let pairingCode: String
     private let pairingStore: SpacesMobilePairingStore
     private let queue: DispatchQueue
+    private let stateLock = NSLock()
     private let traceEnabled = ProcessInfo.processInfo.environment["SPACES_MOBILE_BRIDGE_TRACE"] == "1"
 
     private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
     private var streamRelays: [Int32: StreamRelay] = [:]
+    private var running = false
 
-    init(host: String, port: Int, pairingCode: String, pairingStore: SpacesMobilePairingStore? = nil) throws {
+    public init(host: String, port: Int, pairingCode: String, pairingStore: SpacesMobilePairingStore? = nil) throws {
         self.host = host
         self.port = port
         self.pairingCode = pairingCode
@@ -100,11 +102,18 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
         queue = DispatchQueue(label: "spaces.mobile.bridge")
     }
 
-    var listeningPort: Int = 0
+    public private(set) var listeningPort: Int = 0
 
-    static func generatePairingCode() -> String { String(format: "%06d", Int.random(in: 0...999_999)) }
+    public var isRunning: Bool {
+        stateLock.lock()
+        let value = running
+        stateLock.unlock()
+        return value
+    }
 
-    func start() throws {
+    public static func generatePairingCode() -> String { String(format: "%06d", Int.random(in: 0...999_999)) }
+
+    public func start() throws {
         let socketFD = socket(AF_INET, SOCK_STREAM, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
 
@@ -147,12 +156,14 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
             guard let self else { return }
             if self.listenSocketFD >= 0 { close(self.listenSocketFD) }
             self.listenSocketFD = -1
+            self.setRunning(false)
         }
         acceptSource = source
         source.resume()
+        setRunning(true)
     }
 
-    func stop() {
+    public func stop() {
         queue.async {
             for clientFD in Array(self.streamRelays.keys) { self.closeStreamRelay(clientFD: clientFD) }
             self.acceptSource?.cancel()
@@ -507,6 +518,12 @@ final class SpacesMobileBridgeServer: @unchecked Sendable {
         guard traceEnabled else { return }
         fputs("spaces-mobile-bridge-trace \(message)\n", stdout)
         fflush(stdout)
+    }
+
+    private func setRunning(_ value: Bool) {
+        stateLock.lock()
+        running = value
+        stateLock.unlock()
     }
 
 }

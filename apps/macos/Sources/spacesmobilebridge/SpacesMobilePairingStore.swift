@@ -3,7 +3,7 @@ import Foundation
 import spacesmobilecore
 import spacesterminalcore
 
-struct SpacesMobilePairedInstallation: Codable, Equatable {
+public struct SpacesMobilePairedInstallation: Codable, Equatable {
     let installationID: String
     let bundleID: String
     let platform: String
@@ -14,7 +14,7 @@ struct SpacesMobilePairedInstallation: Codable, Equatable {
     let lastUsedAt: String
 }
 
-enum SpacesMobilePairingError: LocalizedError {
+public enum SpacesMobilePairingError: LocalizedError {
     case unsupportedBundle(String)
     case missingClientApp
     case missingAuthToken
@@ -23,7 +23,7 @@ enum SpacesMobilePairingError: LocalizedError {
     case invalidAuthToken
     case unpairedInstallation(String)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .unsupportedBundle(let bundleID): "Unsupported mobile bundle '\(bundleID)'."
         case .missingClientApp: "Missing mobile client application identity."
@@ -36,17 +36,17 @@ enum SpacesMobilePairingError: LocalizedError {
     }
 }
 
-final class SpacesMobilePairingStore: @unchecked Sendable {
+public final class SpacesMobilePairingStore: @unchecked Sendable {
     private let pairingsPath: String
     private let fileManager: FileManager
 
-    init(fileManager: FileManager = .default) throws {
+    public init(fileManager: FileManager = .default) throws {
         self.fileManager = fileManager
         let root = try TerminalServicePaths.terminalRootDirectory(fileManager: fileManager)
         pairingsPath = root.appendingPathComponent("mobile-pairings.json", isDirectory: false).path
     }
 
-    func issueToken(for clientApp: SpacesMobileClientApp, pairingCode: String, expectedPairingCode: String) throws -> String {
+    public func issueToken(for clientApp: SpacesMobileClientApp, pairingCode: String, expectedPairingCode: String) throws -> String {
         try validate(clientApp: clientApp)
         let normalizedCode = pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedCode.isEmpty else { throw SpacesMobilePairingError.missingPairingCode }
@@ -68,7 +68,7 @@ final class SpacesMobilePairingStore: @unchecked Sendable {
         return token
     }
 
-    func authorize(clientApp: SpacesMobileClientApp?, authToken: String?) throws {
+    public func authorize(clientApp: SpacesMobileClientApp?, authToken: String?) throws {
         guard let clientApp else { throw SpacesMobilePairingError.missingClientApp }
         try validate(clientApp: clientApp)
         guard let authToken, !authToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

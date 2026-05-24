@@ -21,6 +21,7 @@
 		A36481FF653604E873C1A93B /* ghostty in Resources */ = {isa = PBXBuildFile; fileRef = F242C1DB3E9B92832963F8A6 /* ghostty */; };
 		BF1953C7983E74DEEBABC73C /* SpacesMobileConnectionSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */; };
 		CC7C2A2DA9176A2A7993FCD5 /* spacesterminalmobileghostty in Frameworks */ = {isa = PBXBuildFile; productRef = 822087096353D1C543E2C4F3 /* spacesterminalmobileghostty */; };
+		EB899C843473EE91D4A36B96 /* SpacesMobileBridgeDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C274F10D0826B130F984E6E /* SpacesMobileBridgeDiscovery.swift */; };
 		ECD7605414703F81C20D3C1F /* SpacesMobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */; };
 		EF5A873F100F9A6B3757F99E /* spacesterminalcore in Frameworks */ = {isa = PBXBuildFile; productRef = 43EB21BA2206002F56560C15 /* spacesterminalcore */; };
 		F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */; };
@@ -38,6 +39,7 @@
 
 /* Begin PBXFileReference section */
 		160A1AE591A4376DA6C06AE7 /* SpacesMobileUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileUITests.swift; sourceTree = "<group>"; };
+		1C274F10D0826B130F984E6E /* SpacesMobileBridgeDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileBridgeDiscovery.swift; sourceTree = "<group>"; };
 		2A942269988694E66C1CA6F4 /* SpacesMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SpacesMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModel.swift; sourceTree = "<group>"; };
 		41C157DD37A42EDAF1DC5407 /* macos */ = {isa = PBXFileReference; lastKnownFileType = folder; name = macos; path = ../macos; sourceTree = SOURCE_ROOT; };
@@ -94,6 +96,7 @@
 				A1A8A24AA9252CFEE41B435E /* SpacesMobileApp.swift */,
 				35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */,
 				CAC519ED5515A6509CAD7C1F /* SpacesMobileBridgeClient.swift */,
+				1C274F10D0826B130F984E6E /* SpacesMobileBridgeDiscovery.swift */,
 				963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */,
 				7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */,
 				F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */,
@@ -311,6 +314,7 @@
 				317C6199E7E4075EFA52B4F7 /* SpacesMobileApp.swift in Sources */,
 				ECD7605414703F81C20D3C1F /* SpacesMobileAppModel.swift in Sources */,
 				3E6556FA28213E142655B870 /* SpacesMobileBridgeClient.swift in Sources */,
+				EB899C843473EE91D4A36B96 /* SpacesMobileBridgeDiscovery.swift in Sources */,
 				BF1953C7983E74DEEBABC73C /* SpacesMobileConnectionSettings.swift in Sources */,
 				246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */,
 				F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */,
@@ -491,6 +495,9 @@
 				DEVELOPMENT_TEAM = BEMDA62NB6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Spaces;
+				INFOPLIST_KEY_NSBonjourServices = (
+					"_spaces-mobile._tcp.",
+				);
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Spaces connects to your Mac's first-party terminal bridge.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -515,6 +522,9 @@
 				DEVELOPMENT_TEAM = BEMDA62NB6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Spaces;
+				INFOPLIST_KEY_NSBonjourServices = (
+					"_spaces-mobile._tcp.",
+				);
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Spaces connects to your Mac's first-party terminal bridge.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;

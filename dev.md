@@ -115,7 +115,7 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" ap
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal tail <session-id> --lines 5
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
-  mobile serve --host 127.0.0.1 --port 47071 --pairing-code 246810
+  mobile status
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal show <session-id>
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
@@ -130,7 +130,7 @@ For the headless mobile-shaped control proof of concept against the Ghostty-owne
 python3 apps/macos/Tests/poc_mobile_terminal_client.py --start-app
 ```
 
-That flow launches an isolated `SpacesApp`, starts one `ghostty-embedded` session, exposes it through `spaces mobile serve`, pairs a first-party iPhone-shaped client, verifies non-owner input rejection at the control plane, closes the real macOS owner window, promotes the mobile client, sends text plus `Enter`, reopens the native owner window for the same session, and finally transfers ownership back to that reopened macOS owner.
+That flow launches an isolated `SpacesApp`, starts one `ghostty-embedded` session, exposes it through the first-party mobile bridge, pairs a first-party iPhone-shaped client, verifies non-owner input rejection at the control plane, closes the real macOS owner window, promotes the mobile client, sends text plus `Enter`, reopens the native owner window for the same session, and finally transfers ownership back to that reopened macOS owner.
 
 For the maintained E2E wrapper around that same flow:
 
@@ -141,7 +141,7 @@ apps/macos/Tests/e2e_terminal_mobile_client.sh
 Use the shell wrapper when you want one command that exercises the full attach, takeover, owner-close, owner-reopen, send, and key path without remembering the Python invocation.
 Set `SPACES_MOBILE_E2E_UI_TEST_NAME=SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverAfterMacRetakeover` to run the iPad auto-takeover -> Mac retakeover -> iPad `Take Over` regression path.
 
-`spaces mobile serve` is the current first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface.
+The daemon-hosted mobile bridge is the current first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spaces mobile serve` remains available when a harness needs a standalone bridge process with explicit host, port, or pairing-code overrides.
 
 For direct CLI verification of Spaces terminal commands:
 
@@ -189,43 +189,46 @@ export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
 mkdir -p "$(dirname "$SPACES_DB_PATH")"
 pkill -x SpacesApp 2>/dev/null || true
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces mobile serve --host 127.0.0.1 --port 47071 --pairing-code 246810
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal command --backend ghostty-embedded --command cat --title ios-demo
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces mobile status
 xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)' build
 ```
 
-On first launch, the iOS client opens its connection sheet. Enter the bridge host and port, then the pairing code from `spaces mobile serve`. After pairing, the iOS client stores the issued credential and reconnects automatically on later launches. The current client is terminal-only: it lists workspaces and live terminal sessions, auto-attempts takeover when a session detail is opened, mounts the Ghostty surface only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
-For the iOS simulator, keep the bridge host on `127.0.0.1`. A real device needs a reachable Mac network address instead of loopback. The current iOS terminal detail path renders the owner-bootstrap terminal-grid snapshot through a local iOS Ghostty surface, so the simulator should show a terminal-like view after takeover rather than the earlier plain-text fallback.
+On first launch, the iOS client opens its connection sheet. Choose the nearby Mac when it appears or enter `127.0.0.1` for the simulator, then enter the pairing code from `spaces mobile status`. After pairing, the iOS client stores the issued credential and reconnects automatically on later launches. The current client is terminal-only: it lists workspaces and live terminal sessions, auto-attempts takeover when a session detail is opened, mounts the Ghostty surface only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
+For the iOS simulator, `127.0.0.1` still works because the daemon bridge binds all IPv4 interfaces by default. A real device can use the nearby Mac discovered by Bonjour or one of the LAN addresses printed by `spaces mobile status`. The current iOS terminal detail path renders the owner-bootstrap terminal-grid snapshot through a local iOS Ghostty surface, so the simulator should show a terminal-like view after takeover rather than the earlier plain-text fallback.
 
 For manual real-device verification of the iOS client:
 
 1. Connect the iPhone or iPad to the Mac, unlock it, trust the Mac if prompted, and enable Developer Mode on the device if iOS asks.
 2. Open `apps/ios/SpacesMobile.xcodeproj` in Xcode, select the `SpacesMobile` target, enable Automatically manage signing, and choose the Apple Developer team that should sign the app.
 3. If Xcode reports that `com.yogeshdhande.spacesmobile` cannot be signed by that team, stop there and widen the first-party bundle policy before changing the bundle identifier. The current bridge accepts only that bundle identifier for pairing and reconnect.
-4. Keep the Mac app and mobile bridge on the same `SPACES_DB_PATH`, but bind the bridge to a real network interface instead of loopback. `0.0.0.0` is fine for the listener; the phone still needs the Mac's actual LAN IP in the app.
+4. Keep the Mac app and mobile bridge on the same `SPACES_DB_PATH`; the daemon bridge binds all IPv4 interfaces on port `47847` by default.
 
 ```bash
 export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
 mkdir -p "$(dirname "$SPACES_DB_PATH")"
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces mobile serve --host 0.0.0.0 --port 47071 --pairing-code 246810
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal command --backend ghostty-embedded --command cat --title ios-demo
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces mobile status
 ```
 
-5. On the Mac, allow the incoming-network prompt if macOS shows one. In the iOS app, enter the Mac's reachable LAN address as the host, keep port `47071`, and pair with the code from `spaces mobile serve`.
+5. On the Mac, allow the incoming-network prompt if macOS shows one. In the iOS app, choose the nearby Mac or enter one of the printed LAN addresses as the host, keep port `47847`, and pair with the code from `spaces mobile status`.
 6. Run the app from Xcode with the physical device selected as the destination. The first connection attempt should trigger the iOS local-network permission prompt; accept it so the app can reach the Mac bridge.
 
-For a disposable one-command demo stack that launches the macOS app, starts `spaces mobile serve`, pairs both the iPad and iPhone simulators, and opens the mobile app on each:
+For a disposable one-command demo stack that launches the macOS app, uses the daemon-hosted mobile bridge, pairs both the iPad and iPhone simulators, and opens the mobile app on each:
 
 ```bash
 apps/macos/Tests/run_mobile_terminal_demo.sh
 ```
 
-The launcher expects the debug macOS binaries and the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds a fresh simulator `SpacesMobile.app` into a disposable DerivedData directory under the demo temp root, then installs that same app bundle on both the iPad and iPhone simulators. It provisions two live workspace terminal sessions before launching the mobile clients so list-navigation and second-session takeover flows can be reproduced without extra manual setup. It refuses to start if another `SpacesApp` instance or bridge listener is already running so the global hotkey and mobile port stay unambiguous. It prints the disposable temp root, PIDs, logs, screenshots, both terminal session IDs, the iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
+The launcher expects the debug macOS binaries and the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds a fresh simulator `SpacesMobile.app` into a disposable DerivedData directory under the demo temp root, then installs that same app bundle on both the iPad and iPhone simulators. It provisions two live workspace terminal sessions before launching the mobile clients so list-navigation and second-session takeover flows can be reproduced without extra manual setup. It refuses to start if another `SpacesApp` instance or bridge listener is already running so the global hotkey and mobile port stay unambiguous, then reads the daemon bridge details through `spaces mobile status`. It prints the disposable temp root, PIDs, logs, screenshots, both terminal session IDs, the iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
 The same demo root also contains `mobile-terminal-performance.jsonl`, and the printed JSON includes its `performanceLogPath`. The standalone takeover wrappers consume that file directly when they assert one bootstrap epoch, first render timing, input-ready timing, and scrollback history seeding behavior.
 
 Useful overrides:
 - `SPACES_MOBILE_DEMO_KEEP_ROOT=1` keeps the temp root after shutdown for log inspection.
 - `SPACES_MOBILE_DEMO_IPAD_NAME=...` and `SPACES_MOBILE_DEMO_IPHONE_NAME=...` target different simulator names when the defaults are unavailable.
 - `SPACES_MOBILE_DEMO_APP_PATH=...` skips the scripted `xcodebuild` and installs an explicit `SpacesMobile.app` bundle.
+- `SPACES_MOBILE_DEMO_PORT=...` sets the daemon bridge port for that disposable profile.
 
 For the real standalone Codex takeover repro path on iPad, use the dedicated wrapper instead of driving the demo by hand:
 

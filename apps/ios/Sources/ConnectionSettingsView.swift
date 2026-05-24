@@ -8,6 +8,7 @@ struct ConnectionSettingsView: View {
     @State private var pairingCode = ""
     @State private var isPairing = false
     @State private var errorMessage: String?
+    @State private var discovery = SpacesMobileBridgeDiscovery()
     let noticeMessage: String?
     let onSave: (SpacesMobileConnectionSettings) -> Void
 
@@ -24,6 +25,31 @@ struct ConnectionSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("Nearby Macs") {
+                    if discovery.discoveredBridges.isEmpty {
+                        HStack {
+                            ProgressView()
+                            Text("Searching")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        ForEach(discovery.discoveredBridges) { bridge in
+                            Button {
+                                settings.host = bridge.host
+                                settings.port = bridge.port
+                            } label: {
+                                HStack {
+                                    Label(bridge.serviceName, systemImage: "macbook.and.iphone")
+                                    Spacer()
+                                    Text("\(bridge.host):\(bridge.port)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Section("Bridge") {
                     TextField("Host", text: $settings.host)
                         .textInputAutocapitalization(.never)
@@ -76,7 +102,7 @@ struct ConnectionSettingsView: View {
 
                 Section("Defaults") {
                     Text(
-                        "Run `spaces mobile serve` on your Mac, then enter the 6-digit pairing code once. Spaces stores the issued device credential and reuses it automatically."
+                        "Run `spaces mobile status` on your Mac for the pairing code. Spaces stores the issued device credential and reuses it automatically."
                     )
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -94,6 +120,12 @@ struct ConnectionSettingsView: View {
                     }
                     .disabled(!settings.isValid)
                 }
+            }
+            .task {
+                discovery.start()
+            }
+            .onDisappear {
+                discovery.stop()
             }
         }
     }

@@ -15,7 +15,7 @@ private enum SpacesMobileSettingsStore {
             storedSettings = SpacesMobileConnectionSettings()
         }
 
-        return appliedTestOverrides(to: storedSettings, environment: environment)
+        return appliedTestOverrides(to: storedSettings.migratedToCurrentDefaults(), environment: environment)
     }
 
     static func save(_ settings: SpacesMobileConnectionSettings) {

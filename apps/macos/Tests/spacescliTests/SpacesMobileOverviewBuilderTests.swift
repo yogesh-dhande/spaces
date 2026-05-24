@@ -4,6 +4,7 @@ import spacesterminalcore
 import workspacecore
 
 @testable import spacescli
+@testable import spacesmobilebridge
 
 final class SpacesMobileOverviewBuilderTests: XCTestCase {
     func testMatchesNestedWorkspaceByLongestWorkingDirectoryPrefix() {

@@ -29,6 +29,8 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Spaces
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Spaces connects to your Mac's first-party terminal bridge.
+        INFOPLIST_KEY_NSBonjourServices:
+          - _spaces-mobile._tcp.
         DEVELOPMENT_ASSET_PATHS: ""
     dependencies:
       - package: SpacesPackage
