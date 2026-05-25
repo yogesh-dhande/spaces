@@ -855,7 +855,7 @@ import Foundation
             let hasScaleChanged = scale != lastSyncedScaleFactor
             let isFocused = isFirstResponder
             let hasFocusChanged = isFocused != lastSyncedFocus
-            let isOccluded = window != nil && isTerminalVisible && alpha > 0.001
+            let isOccluded = window == nil || !isTerminalVisible || alpha <= 0.001
             let hasOcclusionChanged = isOccluded != lastSyncedOcclusion
             if hasScaleChanged {
                 ghostty_session_set_content_scale(session, scale, scale)

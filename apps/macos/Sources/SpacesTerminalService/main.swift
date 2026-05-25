@@ -91,6 +91,10 @@ import spacesterminalghostty
                     ?? TerminalSessionRuntimeState(
                         sessionID: sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: nil, state: .exited,
                         updatedAt: now, exitedAt: now, title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory)
+                if runtimeState.servicePID != getpid(), Self.isLive(runtimeState), Self.isProcessAlive(pid: Int(runtimeState.servicePID)) {
+                    return TerminalServiceResponse(
+                        ok: false, message: "Terminal session \(sessionID) is owned by another process and was not stopped by the terminal service.")
+                }
                 let exitedState = TerminalSessionRuntimeState(
                     sessionID: runtimeState.sessionID, backend: runtimeState.backend, servicePID: runtimeState.servicePID,
                     childPID: runtimeState.childPID, state: .exited, updatedAt: now, exitedAt: now,
@@ -183,6 +187,10 @@ import spacesterminalghostty
         guard pid > 0 else { return false }
         if kill(pid_t(pid), 0) == 0 { return true }
         return errno == EPERM
+    }
+
+    private static func isLive(_ runtimeState: TerminalSessionRuntimeState) -> Bool {
+        runtimeState.state == .starting || runtimeState.state == .running
     }
 }
 
