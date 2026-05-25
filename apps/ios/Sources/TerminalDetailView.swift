@@ -3,6 +3,8 @@ import spacesterminalmobileghostty
 import spacesmobilecore
 
 struct TerminalDetailView: View {
+    private static let chromeControlHeight: CGFloat = 48
+
     let session: SpacesMobileTerminalSessionSummary
     let settings: SpacesMobileConnectionSettings
     let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
@@ -150,7 +152,7 @@ struct TerminalDetailView: View {
             Group {
                 if model.isOwner {
                     if model.isPreparingInput {
-                        chromeProgressBadge("Preparing input…")
+                        chromeActivityBadge(accessibilityLabel: "Preparing input")
                             .accessibilityIdentifier("terminal.ownerPreparing")
                     } else {
                         chromeBadge("Owner")
@@ -165,12 +167,15 @@ struct TerminalDetailView: View {
                     } label: {
                         Text("Take Over")
                             .font(.headline.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                     }
                     .disabled(model.isBusy)
                     .accessibilityIdentifier("terminal.takeover")
                 }
             }
         }
+        .frame(height: Self.chromeControlHeight)
         .overlay(alignment: .center) {
             if model.isConnecting {
                 ProgressView()
@@ -205,8 +210,8 @@ struct TerminalDetailView: View {
         Button(action: action) {
             label()
                 .foregroundStyle(.white)
+                .frame(height: Self.chromeControlHeight)
                 .padding(.horizontal, 18)
-                .padding(.vertical, 14)
                 .background(
                     Capsule()
                         .fill(.black.opacity(0.28))
@@ -219,8 +224,10 @@ struct TerminalDetailView: View {
         Text(text)
             .font(.headline.weight(.semibold))
             .foregroundStyle(.white.opacity(0.9))
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
             .padding(.horizontal, 18)
-            .padding(.vertical, 14)
+            .frame(height: Self.chromeControlHeight)
             .background(
                 Capsule()
                     .fill(.black.opacity(0.18))
@@ -236,14 +243,32 @@ struct TerminalDetailView: View {
             Text(text)
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.9))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        .frame(height: Self.chromeControlHeight)
         .background(
             Capsule()
                 .fill(.black.opacity(0.18))
                 .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 1))
         )
+    }
+
+    private func chromeActivityBadge(accessibilityLabel: String) -> some View {
+        ZStack {
+            ProgressView()
+                .controlSize(.small)
+                .tint(.white.opacity(0.9))
+        }
+        .frame(width: Self.chromeControlHeight, height: Self.chromeControlHeight)
+        .background(
+            Capsule()
+                .fill(.black.opacity(0.18))
+                .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 1))
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
     }
 
     private func errorBanner(_ message: String) -> some View {

@@ -167,8 +167,9 @@ private enum TerminalViewerRenderMode: String {
     var acceptsInput: Bool { isOwner && !isBusy && !isConnecting && !isOwnershipSynchronizationPending && !isSessionUnavailable }
     var keepsTerminalInputSurfaceActive: Bool { isOwner && !isConnecting && !isSessionUnavailable }
     var isPreparingInput: Bool {
-        isOwner && !isSessionUnavailable
-            && (isBusy || isConnecting || isOwnershipSynchronizationPending || ownerRenderEpochState == nil || !isInputSurfaceReady)
+        guard isOwner && !isSessionUnavailable else { return false }
+        guard ownerRenderEpochState != nil, isInputSurfaceReady else { return true }
+        return isBusy || isConnecting
     }
     var viewportColumns: Int? { viewportSize?.columns }
     var viewportRows: Int? { viewportSize?.rows }
@@ -711,28 +712,38 @@ private enum TerminalViewerRenderMode: String {
         let previousEmittedAt = latestState?.emittedAt
         let previousScreenRevision = latestState?.screenStateRevision
         let previousRuntimeSize = latestState.map { ($0.runtimeState?.columns, $0.runtimeState?.rows) }
+        let stateWaitTargetViewportSize: (columns: Int, rows: Int)?
         if let targetViewportSize {
-            trace("ownership_resize_begin columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
-            do {
-                lastSentResizeSize = targetViewportSize
-                try await bridgeClient.resize(
-                    sessionID: session.id,
-                    clientID: remoteClient.id,
-                    columns: targetViewportSize.columns,
-                    rows: targetViewportSize.rows,
-                    timeout: Self.inputRequestTimeout
-                )
-                trace("ownership_resize_success columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
-            } catch {
-                trace("ownership_resize_failure columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows) error=\(sanitizedTraceDetail(error.localizedDescription))")
-                if !Self.isTransientReconnectError(error) {
-                    if handleAuthenticationFailure(error) { return }
-                    errorMessage = error.localizedDescription
+            if shouldResizeOwnerRuntime(to: targetViewportSize) {
+                trace("ownership_resize_begin columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
+                stateWaitTargetViewportSize = targetViewportSize
+                do {
+                    lastSentResizeSize = targetViewportSize
+                    try await bridgeClient.resize(
+                        sessionID: session.id,
+                        clientID: remoteClient.id,
+                        columns: targetViewportSize.columns,
+                        rows: targetViewportSize.rows,
+                        timeout: Self.inputRequestTimeout
+                    )
+                    trace("ownership_resize_success columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
+                } catch {
+                    trace("ownership_resize_failure columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows) error=\(sanitizedTraceDetail(error.localizedDescription))")
+                    if !Self.isTransientReconnectError(error) {
+                        if handleAuthenticationFailure(error) { return }
+                        errorMessage = error.localizedDescription
+                    }
                 }
+            } else {
+                lastSentResizeSize = targetViewportSize
+                stateWaitTargetViewportSize = nil
+                trace("ownership_resize_skip_matching_runtime columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
             }
+        } else {
+            stateWaitTargetViewportSize = nil
         }
         let streamedState = await awaitOwnerStateFromStream(
-            targetViewportSize: targetViewportSize,
+            targetViewportSize: stateWaitTargetViewportSize,
             previousEmittedAt: previousEmittedAt,
             previousScreenRevision: previousScreenRevision,
             previousRuntimeSize: previousRuntimeSize
@@ -757,6 +768,13 @@ private enum TerminalViewerRenderMode: String {
             trace("ownership_sync_using_fetched_state snapshot=\(refreshedState?.snapshot == nil ? 0 : 1) output_bytes=\(refreshedState?.outputData?.count ?? 0)")
             beginOwnerRenderEpoch(from: refreshedState ?? latestState)
         }
+    }
+
+    private func shouldResizeOwnerRuntime(to targetViewportSize: (columns: Int, rows: Int)) -> Bool {
+        guard ownerRenderEpochState != nil else { return true }
+        let runtimeColumns = latestState?.runtimeState?.columns
+        let runtimeRows = latestState?.runtimeState?.rows
+        return runtimeColumns != targetViewportSize.columns || runtimeRows != targetViewportSize.rows
     }
 
     private func awaitOwnerStateFromStream(

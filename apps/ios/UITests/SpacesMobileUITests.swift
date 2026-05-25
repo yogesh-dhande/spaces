@@ -262,17 +262,13 @@ final class SpacesMobileUITests: XCTestCase {
             if ownerBadge.exists {
                 return ownerBadge
             }
-            let ownerPreparing = app.otherElements["terminal.ownerPreparing"]
+            let ownerPreparing = app.descendants(matching: .any)["terminal.ownerPreparing"]
             if ownerPreparing.exists {
                 return ownerPreparing
             }
             let ownerText = app.staticTexts["Owner"]
             if ownerText.exists {
                 return ownerText
-            }
-            let preparingText = app.staticTexts["Preparing input…"]
-            if preparingText.exists {
-                return preparingText
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
@@ -304,10 +300,10 @@ final class SpacesMobileUITests: XCTestCase {
     }
 
     private func isShowingPreparingInput(in app: XCUIApplication) -> Bool {
-        if app.otherElements["terminal.ownerPreparing"].exists {
+        if app.descendants(matching: .any)["terminal.ownerPreparing"].exists {
             return true
         }
-        return app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Preparing input")).count > 0
+        return false
     }
 
     private func captureScreenshot(_ app: XCUIApplication, name: String, filePath: String?) {
