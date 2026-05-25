@@ -1144,9 +1144,7 @@ import Foundation
                     self.ownerBootstrapEpochID = nil
                 }
             }
-            let appliedFullHistorySeed =
-                ownerEpoch.id.hasPrefix("history|")
-                && applyHistorySeedIfNeeded(for: ownerEpoch, into: session, trigger: "bootstrap", preserveRenderedText: false)
+            let appliedFullHistorySeed = applyHistorySeedIfNeeded(for: ownerEpoch, into: session, trigger: "bootstrap", preserveRenderedText: false)
             var appliedOutput = appliedFullHistorySeed
             for pendingOutput in ownerEpoch.pendingOutputs where !appliedOutputBatchIDs.contains(pendingOutput.id) {
                 if isFirstOwnerEpoch, ownerEpoch.id.hasPrefix("owner|"), bootstrapSnapshot != nil {

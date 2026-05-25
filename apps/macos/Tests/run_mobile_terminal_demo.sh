@@ -22,6 +22,7 @@ bundle_id="com.yogeshdhande.spacesmobile"
 keep_root="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
 app_path_override="${SPACES_MOBILE_DEMO_APP_PATH:-}"
 demo_trace="${SPACES_MOBILE_DEMO_TRACE:-1}"
+build_macos="${SPACES_MOBILE_DEMO_BUILD_MACOS:-1}"
 
 app_pid=""
 bridge_pid=""
@@ -193,6 +194,15 @@ require_path() {
     echo "$label not found at $path" >&2
     exit 1
   fi
+}
+
+build_macos_debug_products() {
+  if [[ "$build_macos" == "0" ]]; then
+    return
+  fi
+
+  echo "Building macOS debug products..."
+  run_demo_env "$repo_root/scripts/swiftpm.sh" build
 }
 
 resolve_ios_app_path() {
@@ -675,14 +685,15 @@ EOF
   chmod +x "$manual_shell_path"
 }
 
-require_executable "$spaces_app" "SpacesApp"
-require_executable "$spaces_cli" "spaces CLI"
-require_executable "$spacese2e" "spacese2e"
-require_executable "$terminal_service" "SpacesTerminalService"
 require_path "$ghostty_xcframework" "GhosttyKit.xcframework"
 require_path "$ghostty_resources" "Ghostty resources"
 fail_if_existing_spaces_app
 fail_if_bridge_port_in_use
+build_macos_debug_products
+require_executable "$spaces_app" "SpacesApp"
+require_executable "$spaces_cli" "spaces CLI"
+require_executable "$spacese2e" "spacese2e"
+require_executable "$terminal_service" "SpacesTerminalService"
 
 temp_root="$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-demo.XXXXXX")"
 spaces_db_path="$temp_root/spaces.db"

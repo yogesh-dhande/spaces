@@ -1064,8 +1064,8 @@
 
             let refreshedSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
             let refreshedText = GhosttyTerminalSnapshotLayout.plainText(for: refreshedSnapshot)
-            XCTAssertFalse(refreshedText.localizedStandardContains("history-only-line"), refreshedText)
-            XCTAssertTrue(refreshedText.localizedStandardContains("SNAPSHOT"), refreshedText)
+            XCTAssertTrue(refreshedText.localizedStandardContains("history-only-line"), refreshedText)
+            XCTAssertFalse(refreshedText.localizedStandardContains("SNAPSHOT"), refreshedText)
 
             let didScroll = hostView.debugSendScrollForTesting(
                 horizontal: 0,
