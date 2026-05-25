@@ -266,6 +266,7 @@ import Foundation
             isAccessibilityElement = true
             accessibilityIdentifier = "terminal.surface"
             accessibilityLabel = "Terminal surface"
+            configureInputAssistant()
             configureFallbackLabel()
             configureGestures()
         }
@@ -384,12 +385,14 @@ import Foundation
 
         @discardableResult public override func becomeFirstResponder() -> Bool {
             let becameFirstResponder = super.becomeFirstResponder()
+            if becameFirstResponder { scheduleKeyboardVisibilityRefresh() }
             reportInputReadinessIfNeeded()
             return becameFirstResponder
         }
 
         @discardableResult public override func resignFirstResponder() -> Bool {
             let resignedFirstResponder = super.resignFirstResponder()
+            if resignedFirstResponder { scheduleKeyboardVisibilityRefresh() }
             reportInputReadinessIfNeeded()
             return resignedFirstResponder
         }
@@ -538,6 +541,8 @@ import Foundation
         private func toggleAccessorySoftwareKeyboard() { setSoftwareKeyboardVisible(suppressesSoftwareKeyboard) }
 
         private final class TerminalAccessoryToolbar: UIView {
+            private static let toolbarHeight: CGFloat = 58
+
             var isControlPending = false { didSet { updateControlButtonAppearance() } }
             var isKeyboardVisible = true { didSet { updateKeyboardButtonImage() } }
 
@@ -546,11 +551,17 @@ import Foundation
             private let onControl: () -> Void
             private let onKeyboardToggle: () -> Void
             private let scrollView = UIScrollView()
-            private let stackView = UIStackView()
+            private let contentStackView = UIStackView()
+            private let pinnedStackView = UIStackView()
             private let controlButton = UIButton(type: .system)
+            private let joystickButton = DirectionalPadButton(type: .system)
             private let keyboardButton = UIButton(type: .system)
 
-            override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: 58) }
+            override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: Self.toolbarHeight) }
+
+            override func sizeThatFits(_ size: CGSize) -> CGSize {
+                CGSize(width: size.width, height: Self.toolbarHeight)
+            }
 
             init(
                 onText: @escaping (String) -> Void, onKey: @escaping (String) -> Void, onControl: @escaping () -> Void,
@@ -560,7 +571,7 @@ import Foundation
                 self.onKey = onKey
                 self.onControl = onControl
                 self.onKeyboardToggle = onKeyboardToggle
-                super.init(frame: .zero)
+                super.init(frame: CGRect(x: 0, y: 0, width: 0, height: Self.toolbarHeight))
                 configureView()
             }
 
@@ -568,61 +579,90 @@ import Foundation
 
             private func configureView() {
                 backgroundColor = UIColor(red: 0.10, green: 0.12, blue: 0.15, alpha: 1)
-                autoresizingMask = [.flexibleHeight]
+                autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                insetsLayoutMarginsFromSafeArea = false
+                layoutMargins = .zero
+                preservesSuperviewLayoutMargins = false
+
+                let toolbarStackView = UIStackView()
+                toolbarStackView.translatesAutoresizingMaskIntoConstraints = false
+                toolbarStackView.axis = .horizontal
+                toolbarStackView.alignment = .center
+                toolbarStackView.spacing = 8
+                addSubview(toolbarStackView)
 
                 scrollView.translatesAutoresizingMaskIntoConstraints = false
+                scrollView.alwaysBounceHorizontal = true
+                scrollView.contentInsetAdjustmentBehavior = .never
                 scrollView.showsHorizontalScrollIndicator = false
-                addSubview(scrollView)
+                scrollView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                scrollView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                toolbarStackView.addArrangedSubview(scrollView)
 
-                stackView.translatesAutoresizingMaskIntoConstraints = false
-                stackView.axis = .horizontal
-                stackView.alignment = .center
-                stackView.spacing = 8
-                scrollView.addSubview(stackView)
+                contentStackView.translatesAutoresizingMaskIntoConstraints = false
+                contentStackView.axis = .horizontal
+                contentStackView.alignment = .center
+                contentStackView.spacing = 8
+                scrollView.addSubview(contentStackView)
+
+                pinnedStackView.translatesAutoresizingMaskIntoConstraints = false
+                pinnedStackView.axis = .horizontal
+                pinnedStackView.alignment = .center
+                pinnedStackView.spacing = 8
+                pinnedStackView.setContentHuggingPriority(.required, for: .horizontal)
+                pinnedStackView.setContentCompressionResistancePriority(.required, for: .horizontal)
+                toolbarStackView.addArrangedSubview(pinnedStackView)
 
                 NSLayoutConstraint.activate([
-                    heightAnchor.constraint(equalToConstant: 58), scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
-                    scrollView.trailingAnchor.constraint(equalTo: trailingAnchor), scrollView.topAnchor.constraint(equalTo: topAnchor),
-                    scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-                    stackView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor, constant: 12),
-                    stackView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor, constant: -12),
-                    stackView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 10),
-                    stackView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -10),
-                    stackView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor, constant: -20),
+                    heightAnchor.constraint(equalToConstant: Self.toolbarHeight),
+                    toolbarStackView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+                    toolbarStackView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+                    toolbarStackView.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+                    toolbarStackView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+                    scrollView.heightAnchor.constraint(equalTo: toolbarStackView.heightAnchor),
+                    contentStackView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+                    contentStackView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+                    contentStackView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+                    contentStackView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+                    contentStackView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor),
                 ])
 
+                addTextButton("/") { [weak self] in self?.onText("/") }
+                addTextButton("~") { [weak self] in self?.onText("~") }
                 addTextButton("esc") { [weak self] in self?.onKey("esc") }
                 configureButton(controlButton, title: "ctrl")
+                controlButton.accessibilityLabel = "Control"
                 controlButton.addAction(UIAction { [weak self] _ in self?.onControl() }, for: .touchUpInside)
-                stackView.addArrangedSubview(controlButton)
+                contentStackView.addArrangedSubview(controlButton)
                 addTextButton("tab") { [weak self] in self?.onKey("tab") }
-                addTextButton("~") { [weak self] in self?.onText("~") }
-                addTextButton("/") { [weak self] in self?.onText("/") }
                 addTextButton("-") { [weak self] in self?.onText("-") }
                 addTextButton("_") { [weak self] in self?.onText("_") }
-                addIconButton("arrow.left", accessibilityLabel: "Left arrow") { [weak self] in self?.onKey("left") }
-                addIconButton("arrow.down", accessibilityLabel: "Down arrow") { [weak self] in self?.onKey("down") }
-                addIconButton("arrow.up", accessibilityLabel: "Up arrow") { [weak self] in self?.onKey("up") }
-                addIconButton("arrow.right", accessibilityLabel: "Right arrow") { [weak self] in self?.onKey("right") }
+                configureButton(joystickButton, imageName: "arrow.up.and.down.and.arrow.left.and.right")
+                joystickButton.accessibilityIdentifier = "terminal.accessory.arrow-joystick"
+                joystickButton.accessibilityLabel = "Arrow key joystick"
+                joystickButton.accessibilityHint = "Tap or drag toward an edge to send an arrow key."
+                joystickButton.onDirection = { [weak self] direction in self?.onKey(direction) }
+                joystickButton.accessibilityCustomActions = [
+                    UIAccessibilityCustomAction(name: "Up arrow") { [weak self] _ in self?.onKey("up"); return true },
+                    UIAccessibilityCustomAction(name: "Down arrow") { [weak self] _ in self?.onKey("down"); return true },
+                    UIAccessibilityCustomAction(name: "Left arrow") { [weak self] _ in self?.onKey("left"); return true },
+                    UIAccessibilityCustomAction(name: "Right arrow") { [weak self] _ in self?.onKey("right"); return true },
+                ]
+                pinnedStackView.addArrangedSubview(joystickButton)
+
                 configureButton(keyboardButton, imageName: "keyboard.chevron.compact.down")
+                keyboardButton.accessibilityIdentifier = "terminal.accessory.keyboard-toggle"
                 keyboardButton.accessibilityLabel = "Hide keyboard"
                 keyboardButton.addAction(UIAction { [weak self] _ in self?.onKeyboardToggle() }, for: .touchUpInside)
-                stackView.addArrangedSubview(keyboardButton)
+                pinnedStackView.addArrangedSubview(keyboardButton)
             }
 
             private func addTextButton(_ title: String, action: @escaping () -> Void) {
                 let button = UIButton(type: .system)
                 configureButton(button, title: title)
+                button.accessibilityLabel = title
                 button.addAction(UIAction { _ in action() }, for: .touchUpInside)
-                stackView.addArrangedSubview(button)
-            }
-
-            private func addIconButton(_ imageName: String, accessibilityLabel: String, action: @escaping () -> Void) {
-                let button = UIButton(type: .system)
-                configureButton(button, imageName: imageName)
-                button.accessibilityLabel = accessibilityLabel
-                button.addAction(UIAction { _ in action() }, for: .touchUpInside)
-                stackView.addArrangedSubview(button)
+                contentStackView.addArrangedSubview(button)
             }
 
             private func configureButton(_ button: UIButton, title: String? = nil, imageName: String? = nil) {
@@ -640,7 +680,7 @@ import Foundation
                     button.widthAnchor.constraint(greaterThanOrEqualToConstant: 64).isActive = true
                 }
                 if let imageName {
-                    button.setImage(UIImage(systemName: imageName), for: .normal)
+                    button.setImage(UIImage(systemName: imageName) ?? UIImage(systemName: "arrow.up.and.down"), for: .normal)
                     button.widthAnchor.constraint(equalToConstant: 56).isActive = true
                 }
                 button.heightAnchor.constraint(equalToConstant: 38).isActive = true
@@ -657,6 +697,65 @@ import Foundation
                 keyboardButton.setImage(UIImage(systemName: imageName), for: .normal)
                 keyboardButton.accessibilityLabel = isKeyboardVisible ? "Hide keyboard" : "Show keyboard"
             }
+
+            var buttonAccessibilityLabelsForTesting: (scrollable: [String], pinned: [String]) {
+                (buttonLabels(in: contentStackView), buttonLabels(in: pinnedStackView))
+            }
+
+            func layoutFramesForTesting(width: CGFloat) -> (scrollView: CGRect, joystickButton: CGRect, keyboardButton: CGRect) {
+                frame = CGRect(x: 0, y: 0, width: width, height: Self.toolbarHeight)
+                setNeedsLayout()
+                layoutIfNeeded()
+                return (
+                    scrollView: scrollView.frame,
+                    joystickButton: joystickButton.convert(joystickButton.bounds, to: self),
+                    keyboardButton: keyboardButton.convert(keyboardButton.bounds, to: self)
+                )
+            }
+
+            private func buttonLabels(in stackView: UIStackView) -> [String] {
+                stackView.arrangedSubviews.compactMap { $0.accessibilityLabel }
+            }
+        }
+
+        private final class DirectionalPadButton: UIButton {
+            var onDirection: ((String) -> Void)?
+
+            override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+                isHighlighted = true
+                return true
+            }
+
+            override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+                isHighlighted = bounds.insetBy(dx: -20, dy: -20).contains(touch.location(in: self))
+                return true
+            }
+
+            override func endTracking(_ touch: UITouch?, with event: UIEvent?) {
+                defer { isHighlighted = false }
+                guard let touch else { return }
+                let point = touch.location(in: self)
+                guard bounds.insetBy(dx: -20, dy: -20).contains(point) else { return }
+                onDirection?(direction(for: point))
+            }
+
+            override func cancelTracking(with event: UIEvent?) {
+                isHighlighted = false
+            }
+
+            private func direction(for point: CGPoint) -> String {
+                let dx = point.x - bounds.midX
+                let dy = point.y - bounds.midY
+                guard abs(dx) > 4 || abs(dy) > 4 else { return "up" }
+                if abs(dx) > abs(dy) { return dx < 0 ? "left" : "right" }
+                return dy < 0 ? "up" : "down"
+            }
+        }
+
+        private func configureInputAssistant() {
+            inputAssistantItem.leadingBarButtonGroups = []
+            inputAssistantItem.trailingBarButtonGroups = []
+            inputAssistantItem.allowsHidingShortcuts = true
         }
 
         private func configureFallbackLabel() {
@@ -918,11 +1017,17 @@ import Foundation
         }
 
         private func scheduleKeyboardVisibilityRefresh() {
-            Task { @MainActor [weak self] in
-                await Task.yield()
-                guard let self else { return }
-                self.syncSessionState()
-                self.requestSurfaceRefresh()
+            for delayMS in [0, 120, 320] {
+                Task { @MainActor [weak self] in
+                    if delayMS == 0 {
+                        await Task.yield()
+                    } else {
+                        try? await Task.sleep(for: .milliseconds(delayMS))
+                    }
+                    guard let self else { return }
+                    self.syncSessionState()
+                    self.requestSurfaceRefresh()
+                }
             }
         }
 
@@ -1053,6 +1158,19 @@ import Foundation
         func capturedSnapshotForTesting() -> GhosttyTerminalSnapshot? {
             guard let session else { return nil }
             return exportedSnapshot(from: session)
+        }
+
+        var inputAssistantIsSuppressedForTesting: Bool {
+            inputAssistantItem.leadingBarButtonGroups.isEmpty && inputAssistantItem.trailingBarButtonGroups.isEmpty
+                && inputAssistantItem.allowsHidingShortcuts
+        }
+
+        var accessoryToolbarButtonAccessibilityLabelsForTesting: (scrollable: [String], pinned: [String]) {
+            terminalAccessoryView.buttonAccessibilityLabelsForTesting
+        }
+
+        func accessoryToolbarLayoutFramesForTesting(width: CGFloat) -> (scrollView: CGRect, joystickButton: CGRect, keyboardButton: CGRect) {
+            terminalAccessoryView.layoutFramesForTesting(width: width)
         }
 
         private func exportedSnapshot(from session: ghostty_session_t) -> GhosttyTerminalSnapshot? {

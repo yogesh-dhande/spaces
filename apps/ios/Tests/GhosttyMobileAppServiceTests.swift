@@ -282,6 +282,38 @@
             XCTAssertEqual(hostView.keyboardType, .asciiCapable)
         }
 
+        func testRemoteTerminalHostViewSuppressesSystemKeyboardAssistant() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+
+            XCTAssertTrue(hostView.inputAssistantIsSuppressedForTesting)
+        }
+
+        func testRemoteTerminalAccessoryToolbarKeepsTrailingControlsPinned() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            hostView.setAcceptsTerminalInput(true)
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            XCTAssertEqual(accessoryView.intrinsicContentSize.height, 58)
+            XCTAssertEqual(accessoryView.frame.height, 58)
+            XCTAssertEqual(accessoryView.sizeThatFits(CGSize(width: 320, height: 0)).height, 58)
+            XCTAssertTrue(accessoryView.autoresizingMask.contains(.flexibleHeight))
+
+            let labels = hostView.accessoryToolbarButtonAccessibilityLabelsForTesting
+            XCTAssertEqual(labels.scrollable, ["/", "~", "esc", "Control", "tab", "-", "_"])
+            XCTAssertEqual(labels.pinned, ["Arrow key joystick", "Hide keyboard"])
+
+            let frames = hostView.accessoryToolbarLayoutFramesForTesting(width: 320)
+            XCTAssertGreaterThan(frames.scrollView.width, 0)
+            XCTAssertGreaterThanOrEqual(frames.joystickButton.minX, frames.scrollView.maxX + 7.5)
+            XCTAssertGreaterThanOrEqual(frames.keyboardButton.minX, frames.joystickButton.maxX + 7.5)
+            XCTAssertLessThanOrEqual(frames.keyboardButton.maxX, 308.5)
+            XCTAssertEqual(frames.joystickButton.width, 56, accuracy: 0.5)
+            XCTAssertEqual(frames.keyboardButton.width, 56, accuracy: 0.5)
+
+            hostView.setSoftwareKeyboardVisible(false)
+            XCTAssertEqual(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned, ["Arrow key joystick", "Show keyboard"])
+        }
+
         func testRemoteTerminalHostViewReplaysSnapshotIntoGhosttySession() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
