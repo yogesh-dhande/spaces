@@ -25,14 +25,13 @@
 - When working from a repo-local checkout and other worktrees may also be running Spaces, bind your shell to the current worktree profile before using the debug app, `spaces`, or `spacese2e`: `eval "$(apps/macos/.build/debug/spaces profile show --shell)"`.
 - Treat other worktrees' running Spaces instances as separate profiles. Do not kill them just to unblock your own workflow; only stop the app instance for the current profile, and let desktop-global verification wait for desktop control when another profile owns it.
 
-## GhosttyKit Dependency Workflow
-- The Ghostty fork publishes a GitHub release for every committed update to its `spaces` branch.
-- Use `ghosttykit-<full-ghostty-sha>` as the GhosttyKit release tag in `apps/macos/ghosttykit-release-tag.txt`, and use the matching full Ghostty commit SHA in `apps/macos/ghosttyvt-revision.txt`.
-- Update those pin files in the normal Spaces pull request that depends on the Ghostty change. Do not use a Spaces-side scheduled or auto-sync workflow to advance the pin.
-- Spaces CI and Spaces app releases must consume those SHA-derived GhosttyKit release assets. Do not depend on uncommitted Ghostty work.
-- Local debugging may build GhosttyKit from uncommitted changes in the local Ghostty checkout with `SPACES_GHOSTTYKIT_BUILD_FROM_SOURCE=1`, but commit and push Ghostty changes to the fork's `spaces` branch before making Spaces PRs depend on them.
-- Before updating the Spaces pin or calling a GhosttyKit fix ready, check the Ghostty fork and any `apps/macos/.local/ghosttyvt/src` checkout for uncommitted or unpushed changes. Move any needed `.local` patch into the fork checkout, commit it, push it, and consume the resulting SHA release.
-- If Spaces CI cannot find or verify the GhosttyKit release for the pinned SHA, fix or publish the Ghostty fork release instead of changing Spaces CI to build Ghostty from source.
+## Ghostty Dependency Workflow
+- The Ghostty fork is tracked as a git submodule at `apps/macos/vendor/ghostty` on the fork's `spaces` branch.
+- The submodule gitlink is the single source of truth for the Ghostty commit used by `GhosttyKit.xcframework` and `libghostty-vt`.
+- Edit Ghostty in `apps/macos/vendor/ghostty`, commit and push fork changes to the fork's `spaces` branch, then update the parent repo's submodule pointer in the normal Spaces pull request that depends on that Ghostty change.
+- PR checks consume Spaces-owned prebuilt artifacts from a GitHub release named `ghostty-artifacts-<full-ghostty-sha>` in this repo. The Ghostty Artifacts workflow runs on pushes and exits early when the matching release already exists.
+- Spaces app releases build Ghostty artifacts from the pinned submodule source before building the app.
+- Local debugging may use `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty` for uncommitted Ghostty experiments, but Spaces PR and release workflows must use committed Ghostty fork work.
 
 ## Verification Rules
 - Always run lint and build before finalizing macOS app changes.

@@ -95,8 +95,8 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
 
     if (handle == NULL) {
         const char *cwd_candidates[] = {
-            "apps/macos/.local/ghosttyvt/src/zig-out/lib/libghostty-vt.dylib",
-            ".local/ghosttyvt/src/zig-out/lib/libghostty-vt.dylib",
+            "apps/macos/.local/ghosttyvt/lib/libghostty-vt.dylib",
+            ".local/ghosttyvt/lib/libghostty-vt.dylib",
             NULL,
         };
         for (size_t i = 0; cwd_candidates[i] != NULL; i++) {
@@ -121,7 +121,7 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
                         snprintf(
                             candidate,
                             sizeof(candidate),
-                            "%s/apps/macos/.local/ghosttyvt/src/zig-out/lib/libghostty-vt.dylib",
+                            "%s/apps/macos/.local/ghosttyvt/lib/libghostty-vt.dylib",
                             resolved_path
                         );
                         handle = dlopen(candidate, RTLD_NOW | RTLD_LOCAL);
@@ -129,7 +129,7 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
                         snprintf(
                             candidate,
                             sizeof(candidate),
-                            "%s/.local/ghosttyvt/src/zig-out/lib/libghostty-vt.dylib",
+                            "%s/.local/ghosttyvt/lib/libghostty-vt.dylib",
                             resolved_path
                         );
                         handle = dlopen(candidate, RTLD_NOW | RTLD_LOCAL);

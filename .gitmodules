@@ -1,0 +1,4 @@
+[submodule "apps/macos/vendor/ghostty"]
+	path = apps/macos/vendor/ghostty
+	url = https://github.com/yogesh-dhande/ghostty.git
+	branch = spaces

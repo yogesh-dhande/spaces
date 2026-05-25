@@ -3,7 +3,7 @@ import Foundation
 import PackageDescription
 
 let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
-let ghosttyVTIncludeDirectory = "\(packageDirectory)/.local/ghosttyvt/src/zig-out/include"
+let ghosttyVTIncludeDirectory = "\(packageDirectory)/.local/ghosttyvt/include"
 
 let package = Package(
     name: "spaces",

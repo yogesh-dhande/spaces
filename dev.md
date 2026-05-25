@@ -65,45 +65,45 @@ apps/macos/.build/debug/spaces terminal list
 
 Override `SPACES_DB_PATH` when you need a one-off isolated profile root. Override `SPACES_RUNTIME_DIR` only when the runtime files themselves also need to move with that profile.
 
-For branch-local libghostty artifact setup, run:
+For branch-local Ghostty artifact setup, run:
 
 ```bash
-apps/macos/scripts/setup_ghosttykit.sh
+apps/macos/scripts/setup_ghostty.sh
 ```
 
-That installs `GhosttyKit.xcframework` and the Ghostty resource bundle under `apps/macos/.local/ghosttykit/`, which the current branch-local resolver will discover automatically.
-The default fork build comes from `apps/macos/ghosttykit-release-tag.txt`. Treat that file as the GhosttyKit release identifier, not a latest-build pointer. The Ghostty fork publishes a GitHub release for every committed update to its `spaces` branch, and the release tag is `ghosttykit-<full-ghostty-sha>`. Keep `apps/macos/ghosttyvt-revision.txt` set to the matching full SHA so the downloaded `GhosttyKit.xcframework` and locally built `libghostty-vt` come from the same committed fork state.
-The setup flow finishes by running `apps/macos/scripts/verify_ghosttykit.sh`, which checks that the downloaded artifact declares and exports the embedded terminal APIs that Spaces uses for raw I/O, host rebinding, session state callbacks, renderer attachment, and live snapshot capture. Passive-viewer attachment exports are not part of the required contract.
-The GitHub Actions PR and release workflows run this setup before SwiftPM resolves the macOS package so clean runners have the pinned branch-local `GhosttyKit` artifact in place. CI and Spaces app release builds consume only the SHA-derived GhosttyKit release. If the release for the pinned SHA is missing or invalid, fix the Ghostty fork release instead of making Spaces CI build Ghostty from source or depend on a transient Actions run. The Spaces repo does not run scheduled or auto-sync automation to advance this pin.
+That installs `GhosttyKit.xcframework`, Ghostty resources, `libghostty-vt` headers, and `libghostty-vt` libraries under:
+- `apps/macos/.local/ghosttykit/GhosttyKit.xcframework`
+- `apps/macos/.local/ghosttykit/Resources`
+- `apps/macos/.local/ghosttyvt/include`
+- `apps/macos/.local/ghosttyvt/lib`
 
-If `SPACES_PROJECT_DIR` points at another checkout that already has `apps/macos/.local/ghosttykit/`, the setup script copies those local artifacts first and only falls back to GitHub release download when needed.
-If you are iterating on uncommitted fork APIs locally, run `apps/macos/scripts/setup_ghosttyvt.sh` first and then set `SPACES_GHOSTTYKIT_BUILD_FROM_SOURCE=1` when invoking `apps/macos/scripts/setup_ghosttykit.sh`. That rebuilds `GhosttyKit.xcframework` from the branch-local Ghostty fork checkout under `apps/macos/.local/ghosttyvt/src/` and refreshes the local resources from the same source tree instead of downloading the pinned release artifact. This path is for local debugging and testing only. Before a Spaces PR depends on Ghostty changes, commit and push those changes to the Ghostty fork's `spaces` branch, let the fork publish the SHA-derived release, and pin Spaces to that release tag and SHA.
-Before advancing the Spaces pin, inspect both the canonical Ghostty fork checkout and the branch-local source checkout for local-only work:
+The Ghostty fork is tracked as the submodule at `apps/macos/vendor/ghostty`. The parent repo's submodule pointer is the single source of truth for the Ghostty commit used by both `GhosttyKit.xcframework` and `libghostty-vt`.
+By default, `setup_ghostty.sh` reuses local artifacts only when `apps/macos/.local/ghostty-artifacts/manifest.json` matches the submodule SHA. Otherwise it downloads the Spaces-owned GitHub release named `ghostty-artifacts-<full-ghostty-sha>`.
+The setup flow finishes by running `apps/macos/scripts/verify_ghosttykit.sh`, which checks that the artifact declares and exports the embedded terminal APIs that Spaces uses for raw I/O, host rebinding, session state callbacks, renderer attachment, and live snapshot capture. Passive-viewer attachment exports are not part of the required contract.
+
+When a Spaces branch depends on Ghostty fork work, edit and commit the fork change inside the submodule, push it to the fork's `spaces` branch, and update the parent repo's submodule pointer:
 
 ```bash
-git -C /Users/yogesh/projects/ghostty status --short --branch
-git -C apps/macos/.local/ghosttyvt/src status --short --branch
+git -C apps/macos/vendor/ghostty status --short --branch
+git -C apps/macos/vendor/ghostty push origin HEAD:spaces
+git add apps/macos/vendor/ghostty
 ```
 
-If a needed patch exists only under `apps/macos/.local/ghosttyvt/src`, apply it to `/Users/yogesh/projects/ghostty`, commit it on the fork's `spaces` branch, push it, and use that pushed commit SHA as the release identifier.
-
-When a Spaces branch depends on committed Ghostty fork work, update `apps/macos/ghosttykit-release-tag.txt` to `ghosttykit-<full-ghostty-sha>` and update `apps/macos/ghosttyvt-revision.txt` to the matching full Ghostty commit SHA in that same Spaces pull request. Then refresh local artifacts and run the normal verification pass:
+PR checks run `apps/macos/scripts/setup_ghostty.sh --download-only --strict`, so a PR that points at a Ghostty SHA without a published `ghostty-artifacts-<sha>` release fails with an explicit setup error. The Ghostty Artifacts workflow runs on pushes and exits early when the matching release already exists. After the release is present, refresh local artifacts and run the normal verification pass:
 
 ```bash
-git ls-remote --tags https://github.com/yogesh-dhande/ghostty.git refs/tags/ghosttykit-<ghostty-sha>
+git -C apps/macos/vendor/ghostty rev-parse HEAD
 rm -rf apps/macos/.local/ghosttykit apps/macos/.local/ghosttyvt
-apps/macos/scripts/setup_ghosttykit.sh
-apps/macos/scripts/setup_ghosttyvt.sh
+apps/macos/scripts/setup_ghostty.sh
 scripts/verify.sh
 ```
 
-A complete dependency bump keeps the release tag and VT revision pinned to the same Ghostty commit. `setup_ghosttykit.sh` fails if the release artifact does not satisfy the embedded terminal API contract, and `setup_ghosttyvt.sh` fails if the pinned VT revision does not match the GhosttyKit release tag.
+Spaces app releases run `apps/macos/scripts/setup_ghostty.sh --build --strict`, so release builds consume the pinned submodule source instead of prebuilt PR artifacts. For uncommitted local Ghostty experiments, use `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty`; the generated manifest records the dirty source state and must not be used for PR or release workflows.
 
 To validate the real in-process Ghostty owner renderer path in `SpacesApp`, launch the app normally with an isolated database root:
 
 ```bash
-apps/macos/scripts/setup_ghosttyvt.sh
-SPACES_GHOSTTYKIT_BUILD_FROM_SOURCE=1 apps/macos/scripts/setup_ghosttykit.sh
+apps/macos/scripts/setup_ghostty.sh --build --allow-dirty
 export SPACES_DB_PATH="$TMPDIR/spaces-ghostty-owner/spaces.db"
 mkdir -p "$(dirname "$SPACES_DB_PATH")"
 pkill -x SpacesApp 2>/dev/null || true
@@ -124,7 +124,7 @@ To verify the embedded Ghostty backend on an isolated database root:
 ```bash
 export SPACES_DB_PATH="$TMPDIR/spaces-ghostty/spaces.db"
 export SPACES_RUNTIME_DIR="$(dirname "$SPACES_DB_PATH")/runtime"
-apps/macos/scripts/setup_ghosttykit.sh
+apps/macos/scripts/setup_ghostty.sh
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/SpacesApp
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal command --backend ghostty-embedded --command cat --title verify-ghostty
@@ -170,19 +170,17 @@ apps/macos/Tests/e2e_terminal_cli_commands.sh
 
 That script exercises `spaces terminal command`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Spaces terminal session.
 
-The Spaces terminal `tail` path also depends on a local `libghostty-vt` build. Set that up before building or profiling terminal changes:
+The Spaces terminal `tail` path also depends on the local `libghostty-vt` artifacts. Set them up before building or profiling terminal changes:
 
 ```bash
-apps/macos/scripts/setup_ghosttyvt.sh
+apps/macos/scripts/setup_ghostty.sh
 ```
 
-That script pins a local `ghostty` checkout to `apps/macos/ghosttyvt-revision.txt`, installs Zig `0.15.2` under `apps/macos/.local/ghosttyvt/toolchain/`, and builds `libghostty-vt` under `apps/macos/.local/ghosttyvt/src/zig-out/`.
-The default source remote is the same Spaces-owned fork that publishes `GhosttyKit.xcframework`, and the setup script clones or refetches that fork through its `spaces` branch. The fork keeps `main` mirrored from upstream, so the reviewable fork delta lives in the `spaces -> main` pull request.
+The setup script installs Zig `0.15.2` under `apps/macos/.local/ghosttyvt/toolchain/` when a source build is requested. The fork keeps `main` mirrored from upstream, so the reviewable fork delta lives in the `spaces -> main` pull request.
 For a browser view of fork drift against upstream, open [ghostty-org/ghostty compare view](https://github.com/ghostty-org/ghostty/compare/main...yogesh-dhande:ghostty:spaces).
-When you use the repo defaults, the setup flow also verifies that `apps/macos/ghosttyvt-revision.txt` matches the SHA-derived release in `apps/macos/ghosttykit-release-tag.txt` so the editable Ghostty source, published xcframework, and local `libghostty-vt` build stay on the same fork lineage.
-The GitHub Actions PR and release workflows run this setup before the macOS build and coverage pass so clean runners have the matching `libghostty-vt` headers and dylib available.
+The GitHub Actions PR and release workflows run this setup before the macOS build and coverage pass so clean runners have the matching `GhosttyKit`, `libghostty-vt` headers, and dylib available.
 
-The terminal E2E, profiling, and soak scripts that launch `SpacesApp` acquire a shared harness lock before they run `setup_ghosttykit` or launch a new app instance. They stop only the app instance for their own profile. Hotkey-sensitive and real-system desktop-control workflows also wait for desktop-global control instead of killing unrelated running Spaces instances. When desktop control is already owned by another Spaces instance, the wait path also posts a macOS notification that asks you to close the running app when you are done with it.
+The terminal E2E, profiling, and soak scripts that launch `SpacesApp` acquire a shared harness lock before they run the Ghostty setup script or launch a new app instance. They stop only the app instance for their own profile. Hotkey-sensitive and real-system desktop-control workflows also wait for desktop-global control instead of killing unrelated running Spaces instances. When desktop control is already owned by another Spaces instance, the wait path also posts a macOS notification that asks you to close the running app when you are done with it.
 
 For repeatable profiling of the built-in terminal owner and ownership-transfer flows:
 

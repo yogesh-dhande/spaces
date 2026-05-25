@@ -425,6 +425,6 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 ## External Dependencies
 - macOS 14+
 - yabai for window identity and focus
-- forked GhosttyKit plus libghostty-vt for built-in terminal ownership and replay
+- forked GhosttyKit plus libghostty-vt from the pinned `apps/macos/vendor/ghostty` submodule for built-in terminal ownership and replay
 - Google Chrome for browser-session automation
 - SQLite for local persistence
