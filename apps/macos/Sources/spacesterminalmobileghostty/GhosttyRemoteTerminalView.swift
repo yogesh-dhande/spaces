@@ -171,6 +171,17 @@ import Foundation
         nonisolated(unsafe) static var sessionFreeHandlerForTesting: @Sendable (ghostty_session_t) -> Void = { session in
             ghostty_session_free(session)
         }
+        nonisolated(unsafe) private static let hostManagedReceiveBufferCallback: ghostty_surface_receive_buffer_cb = { userdata, ptr, len in
+            guard ptr != nil, len > 0 else { return }
+            let hostView = userdata.map { Unmanaged<GhosttyRemoteTerminalHostView>.fromOpaque($0).takeUnretainedValue() }
+            ghosttyRemoteTerminalTrace("host_managed_output_ignored len=\(len) has_host=\(hostView != nil)")
+        }
+        nonisolated(unsafe) private static let hostManagedResizeCallback: ghostty_surface_receive_resize_cb = {
+            userdata, columns, rows, widthPixels, heightPixels in
+            let hostView = userdata.map { Unmanaged<GhosttyRemoteTerminalHostView>.fromOpaque($0).takeUnretainedValue() }
+            Task { @MainActor in hostView?.handleHostManagedResize(columns: columns, rows: rows, widthPixels: widthPixels, heightPixels: heightPixels)
+            }
+        }
 
         private static let defaultFontSize: Float = 11
         private static let contentInsets = GhosttyRemoteTerminalViewport.contentInsets
@@ -794,13 +805,27 @@ import Foundation
             var sessionConfig = ghostty_session_config_new()
             sessionConfig.surface.platform_tag = GHOSTTY_PLATFORM_IOS
             sessionConfig.surface.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(uiview: Unmanaged.passUnretained(self).toOpaque()))
-            sessionConfig.surface.userdata = Unmanaged.passUnretained(self).toOpaque()
+            sessionConfig.surface.backend = GHOSTTY_SURFACE_IO_BACKEND_HOST_MANAGED
+            sessionConfig.surface.receive_userdata = Unmanaged.passUnretained(self).toOpaque()
+            sessionConfig.surface.receive_buffer = Self.hostManagedReceiveBufferCallback
+            sessionConfig.surface.receive_resize = Self.hostManagedResizeCallback
             sessionConfig.surface.scale_factor = scaleFactor
             sessionConfig.surface.font_size = Self.defaultFontSize
+            sessionConfig.surface.use_login_shell = false
             let createdSession = ghostty_session_new(app, &sessionConfig)
 
             guard let createdSession else { return nil }
             return createdSession
+        }
+
+        private func handleHostManagedResize(columns: UInt16, rows: UInt16, widthPixels: UInt32, heightPixels: UInt32) {
+            ghosttyRemoteTerminalTrace("host_managed_resize columns=\(columns) rows=\(rows) pixels=\(widthPixels)x\(heightPixels)")
+            guard columns > 0, rows > 0 else { return }
+            let viewport = GhosttyRemoteTerminalViewport.reportedSize(
+                rawColumns: Int(columns), rawRows: Int(rows), bounds: bounds, idiom: traitCollection.userInterfaceIdiom)
+            guard lastReportedViewportSize?.columns != viewport.columns || lastReportedViewportSize?.rows != viewport.rows else { return }
+            lastReportedViewportSize = viewport
+            onViewportSizeChanged?(viewport.columns, viewport.rows)
         }
 
         private func replay(snapshot: GhosttyTerminalSnapshot, into session: ghostty_session_t) {
@@ -1119,7 +1144,10 @@ import Foundation
                     self.ownerBootstrapEpochID = nil
                 }
             }
-            var appliedOutput = false
+            let appliedFullHistorySeed =
+                ownerEpoch.id.hasPrefix("history|")
+                && applyHistorySeedIfNeeded(for: ownerEpoch, into: session, trigger: "bootstrap", preserveRenderedText: false)
+            var appliedOutput = appliedFullHistorySeed
             for pendingOutput in ownerEpoch.pendingOutputs where !appliedOutputBatchIDs.contains(pendingOutput.id) {
                 if isFirstOwnerEpoch, ownerEpoch.id.hasPrefix("owner|"), bootstrapSnapshot != nil {
                     appliedOutputBatchIDs.insert(pendingOutput.id)

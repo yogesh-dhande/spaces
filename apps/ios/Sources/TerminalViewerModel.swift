@@ -70,6 +70,7 @@ private enum TerminalViewerRenderMode: String {
     private var historySeedTask: Task<Void, Never>?
     private var viewportSize: (columns: Int, rows: Int)?
     private var lastSentResizeSize: (columns: Int, rows: Int)?
+    private var needsOwnershipSynchronizationAfterCurrentRun = false
     private var isAwaitingTakeoverConfirmation = false {
         didSet {
             guard isAwaitingTakeoverConfirmation != oldValue else { return }
@@ -166,7 +167,8 @@ private enum TerminalViewerRenderMode: String {
     var acceptsInput: Bool { isOwner && !isBusy && !isConnecting && !isOwnershipSynchronizationPending && !isSessionUnavailable }
     var keepsTerminalInputSurfaceActive: Bool { isOwner && !isConnecting && !isSessionUnavailable }
     var isPreparingInput: Bool {
-        isOwner && !isSessionUnavailable && (isBusy || isConnecting || ownerRenderEpochState == nil || !isInputSurfaceReady)
+        isOwner && !isSessionUnavailable
+            && (isBusy || isConnecting || isOwnershipSynchronizationPending || ownerRenderEpochState == nil || !isInputSurfaceReady)
     }
     var viewportColumns: Int? { viewportSize?.columns }
     var viewportRows: Int? { viewportSize?.rows }
@@ -207,6 +209,7 @@ private enum TerminalViewerRenderMode: String {
         bufferedInputText = ""
         viewportSize = nil
         lastSentResizeSize = nil
+        needsOwnershipSynchronizationAfterCurrentRun = false
         ownerRenderEpochState = nil
         ownerRecoveryGraceDeadline = nil
         requestedHistorySeedEpochID = nil
@@ -268,8 +271,13 @@ private enum TerminalViewerRenderMode: String {
         trace(
             "viewport_update columns=\(resolved.columns) rows=\(resolved.rows) owner=\(isOwner ? 1 : 0) busy=\(isBusy ? 1 : 0) syncing=\(isSynchronizingOwnership ? 1 : 0) sync_scheduled=\(isOwnershipSynchronizationScheduled ? 1 : 0)"
         )
-        if isOwner && !isBusy && !isSynchronizingOwnership {
-            scheduleOwnershipSynchronization()
+        if isOwner && !isBusy {
+            if isSynchronizingOwnership {
+                needsOwnershipSynchronizationAfterCurrentRun = true
+                trace("ownership_sync_reschedule_after_current")
+            } else {
+                scheduleOwnershipSynchronization()
+            }
         }
     }
 
@@ -620,7 +628,11 @@ private enum TerminalViewerRenderMode: String {
     private func scheduleOwnershipSynchronization() {
         guard isOwner else { return }
         guard !isBusy else { return }
-        guard !isSynchronizingOwnership else { return }
+        if isSynchronizingOwnership {
+            needsOwnershipSynchronizationAfterCurrentRun = true
+            trace("ownership_sync_reschedule_after_current")
+            return
+        }
         trace("schedule_ownership_sync viewport=\(traceSize(columns: viewportSize?.columns, rows: viewportSize?.rows)) runtime=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows))")
         startOwnershipSynchronization()
     }
@@ -638,10 +650,15 @@ private enum TerminalViewerRenderMode: String {
     }
 
     private func runOwnershipSynchronization() async {
+        var shouldScheduleFollowUp = false
         defer {
-            isOwnershipSynchronizationScheduled = false
             isSynchronizingOwnership = false
             ownershipSynchronizationTask = nil
+            isOwnershipSynchronizationScheduled = false
+            if shouldScheduleFollowUp {
+                needsOwnershipSynchronizationAfterCurrentRun = false
+                scheduleOwnershipSynchronization()
+            }
         }
         guard isOwner else { return }
         isSynchronizingOwnership = true
@@ -670,6 +687,14 @@ private enum TerminalViewerRenderMode: String {
             ]
         )
         trace("ownership_sync_end runtime_after=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows)) owner=\(isOwner ? 1 : 0)")
+        shouldScheduleFollowUp = shouldResynchronizeOwnership(afterTargeting: targetViewportSize)
+    }
+
+    private func shouldResynchronizeOwnership(afterTargeting targetViewportSize: (columns: Int, rows: Int)?) -> Bool {
+        guard isOwner, !isBusy else { return false }
+        if needsOwnershipSynchronizationAfterCurrentRun { return true }
+        guard let targetViewportSize, let viewportSize else { return false }
+        return targetViewportSize.columns != viewportSize.columns || targetViewportSize.rows != viewportSize.rows
     }
 
     private func awaitViewportSizeIfNeeded() async -> (columns: Int, rows: Int)? {
@@ -816,6 +841,7 @@ private enum TerminalViewerRenderMode: String {
         historySeedTask = nil
         requestedHistorySeedEpochID = nil
         reportedOwnerReadyEpochID = nil
+        needsOwnershipSynchronizationAfterCurrentRun = false
         isOwnershipSynchronizationScheduled = false
         isSynchronizingOwnership = false
         streamHandle?.cancel()
@@ -931,6 +957,7 @@ private enum TerminalViewerRenderMode: String {
             isInputSurfaceReady = false
             lastSentResizeSize = nil
             ownerRenderEpochState = nil
+            needsOwnershipSynchronizationAfterCurrentRun = false
             ownershipSynchronizationTask?.cancel()
             ownershipSynchronizationTask = nil
             historySeedTask?.cancel()

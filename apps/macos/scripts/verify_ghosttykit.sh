@@ -13,8 +13,12 @@ REQUIRED_DECLARATIONS=(
     "ghostty_renderer_t"
     "ghostty_session_state_cb"
     "ghostty_session_t"
+    "ghostty_surface_io_backend_e"
+    "ghostty_surface_receive_buffer_cb"
+    "ghostty_surface_receive_resize_cb"
     "ghostty_surface_host_s"
     "ghostty_terminal_snapshot_s"
+    "use_login_shell"
 )
 REQUIRED_SYMBOLS=(
     "ghostty_renderer_attach"
@@ -22,6 +26,7 @@ REQUIRED_SYMBOLS=(
     "ghostty_renderer_free"
     "ghostty_renderer_new"
     "ghostty_renderer_set_host"
+    "ghostty_renderer_surface"
     "ghostty_session_config_new"
     "ghostty_session_export_snapshot"
     "ghostty_session_foreground_pid"
@@ -46,11 +51,13 @@ REQUIRED_SYMBOLS=(
     "ghostty_surface_complete_clipboard_request"
     "ghostty_surface_export_snapshot"
     "ghostty_surface_free_text"
+    "ghostty_surface_process_exit"
     "ghostty_surface_read_selection"
     "ghostty_surface_read_text"
     "ghostty_surface_set_data_callback"
     "ghostty_surface_set_host"
     "ghostty_surface_send_input_raw"
+    "ghostty_surface_write_buffer"
     "ghostty_terminal_snapshot_free"
 )
 

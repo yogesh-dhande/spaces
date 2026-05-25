@@ -31,6 +31,7 @@
 - Update those pin files in the normal Spaces pull request that depends on the Ghostty change. Do not use a Spaces-side scheduled or auto-sync workflow to advance the pin.
 - Spaces CI and Spaces app releases must consume those SHA-derived GhosttyKit release assets. Do not depend on uncommitted Ghostty work.
 - Local debugging may build GhosttyKit from uncommitted changes in the local Ghostty checkout with `SPACES_GHOSTTYKIT_BUILD_FROM_SOURCE=1`, but commit and push Ghostty changes to the fork's `spaces` branch before making Spaces PRs depend on them.
+- Before updating the Spaces pin or calling a GhosttyKit fix ready, check the Ghostty fork and any `apps/macos/.local/ghosttyvt/src` checkout for uncommitted or unpushed changes. Move any needed `.local` patch into the fork checkout, commit it, push it, and consume the resulting SHA release.
 - If Spaces CI cannot find or verify the GhosttyKit release for the pinned SHA, fix or publish the Ghostty fork release instead of changing Spaces CI to build Ghostty from source.
 
 ## Verification Rules

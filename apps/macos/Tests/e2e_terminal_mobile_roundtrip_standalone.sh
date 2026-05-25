@@ -337,19 +337,28 @@ def wait_for_active_owner(excluded_client_ids: set[str] | None = None, timeout: 
     raise RuntimeError(f"Timed out waiting for active owner.\n{last_snapshot}")
 
 def send_unix_control_request(request: dict) -> dict:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(5)
-    client.connect(str(socket_path(demo_root, session_id)))
-    client.sendall(json.dumps(request).encode("utf-8"))
-    client.shutdown(socket.SHUT_WR)
-    response = bytearray()
+    path = socket_path(demo_root, session_id)
+    deadline = time.time() + 10
     while True:
-        chunk = client.recv(4096)
-        if not chunk:
-            break
-        response.extend(chunk)
-    client.close()
-    return json.loads(response.decode("utf-8"))
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(5)
+        try:
+            client.connect(str(path))
+            client.sendall(json.dumps(request).encode("utf-8"))
+            client.shutdown(socket.SHUT_WR)
+            response = bytearray()
+            while True:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                response.extend(chunk)
+            return json.loads(response.decode("utf-8"))
+        except (ConnectionRefusedError, FileNotFoundError):
+            if time.time() >= deadline:
+                raise
+            time.sleep(0.2)
+        finally:
+            client.close()
 
 def send_owner_command(command_text: str) -> None:
     owner_client_id = current_owner_client_id()

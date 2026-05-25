@@ -78,6 +78,14 @@ The GitHub Actions PR and release workflows run this setup before SwiftPM resolv
 
 If `SPACES_PROJECT_DIR` points at another checkout that already has `apps/macos/.local/ghosttykit/`, the setup script copies those local artifacts first and only falls back to GitHub release download when needed.
 If you are iterating on uncommitted fork APIs locally, run `apps/macos/scripts/setup_ghosttyvt.sh` first and then set `SPACES_GHOSTTYKIT_BUILD_FROM_SOURCE=1` when invoking `apps/macos/scripts/setup_ghosttykit.sh`. That rebuilds `GhosttyKit.xcframework` from the branch-local Ghostty fork checkout under `apps/macos/.local/ghosttyvt/src/` and refreshes the local resources from the same source tree instead of downloading the pinned release artifact. This path is for local debugging and testing only. Before a Spaces PR depends on Ghostty changes, commit and push those changes to the Ghostty fork's `spaces` branch, let the fork publish the SHA-derived release, and pin Spaces to that release tag and SHA.
+Before advancing the Spaces pin, inspect both the canonical Ghostty fork checkout and the branch-local source checkout for local-only work:
+
+```bash
+git -C /Users/yogesh/projects/ghostty status --short --branch
+git -C apps/macos/.local/ghosttyvt/src status --short --branch
+```
+
+If a needed patch exists only under `apps/macos/.local/ghosttyvt/src`, apply it to `/Users/yogesh/projects/ghostty`, commit it on the fork's `spaces` branch, push it, and use that pushed commit SHA as the release identifier.
 
 When a Spaces branch depends on committed Ghostty fork work, update `apps/macos/ghosttykit-release-tag.txt` to `ghosttykit-<full-ghostty-sha>` and update `apps/macos/ghosttyvt-revision.txt` to the matching full Ghostty commit SHA in that same Spaces pull request. Then refresh local artifacts and run the normal verification pass:
 

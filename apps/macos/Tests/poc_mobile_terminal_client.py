@@ -631,7 +631,9 @@ def ipad_owner_ready(session_id: str):
             payload.get("sessionID") == session_id
             and payload.get("isOwner") is True
             and payload.get("isBusy") is False
+            and payload.get("isOwnershipSynchronizationScheduled") is False
             and payload.get("isSynchronizingOwnership") is False
+            and payload.get("isPreparingInput") is False
             and payload.get("isInputSurfaceReady") is True
             and bool(terminal_render_text(payload).strip())
         )
