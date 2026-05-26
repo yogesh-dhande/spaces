@@ -1,6 +1,6 @@
 # Spaces Spec
 
-This document defines how Spaces should behave from the user's point of view. It is the source of truth for UX and product semantics. Implementation choices and the rationale behind them belong in [docs/architecture.md](docs/architecture.md).
+This document defines how Spaces should behave from the user's point of view. It is the source of truth for UX and product semantics. Implementation choices and the rationale behind them belong in [implementation.md](implementation.md).
 
 ## Product Intent
 Spaces is a local macOS control plane for switching between coding contexts quickly.

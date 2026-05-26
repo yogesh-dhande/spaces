@@ -2,23 +2,19 @@
 
 ## Purpose
 - Use this file for coding workflow, verification, and implementation guardrails.
-- Put product behavior from the user's point of view in `apps/macos/spec.md`.
-- Put implementation details and the rationale behind design choices in `apps/macos/docs/architecture.md`.
-- Put UI design and interaction guidelines in `design.md`.
+- Put product behavior from the user's point of view in `docs/spec.md`.
+- Put implementation details and the rationale behind design choices in `docs/implementation.md`.
+- Put UI design and interaction guidelines in `docs/design.md`.
 - Put product overview and adoption pitch in `README.md`.
-- Put repository development, build, and deploy workflows in `dev.md`.
+- Put repository development, build, and deploy workflows in `docs/dev.md`.
 
 ## Product Constraints
 - `Spaces` is a macOS Swift app for orchestration of coding tools
 - The CLI is named `spaces`.
-- Workspaces map to captured window sets managed via yabai.
-- Use yabai as the single source of truth for window IDs.
-- Avoid window-level automation outside yabai
-- Any project setting used during workspace creation or launch must be overridable per workspace after creation.
-- Workspace-oriented runtime actions and metadata that the CLI supports must stay available via `spaces`, but app-level configuration is managed in the app rather than through `spaces`.
 
 ## Coding Agent Workflow
-- If on the `main` branch, switch to a new branch before committing changes. When asked to push, commit, push, and create a PR if there isn't one already. Do not add a coding agent name as a prefix to the branch name or the PR title. Please check the PR status before pushing to existing branches with previously opened PRs. If the PR is closed, create a new branch and a new PR.
+- Before committing, go through uncommitted changes and the conversation history to figure out if there are any unnecessary fixes, dead code, or fallback paths we added during debuging that we should consider removing to avoid unnecessary code complexity, code maintenance, or performance issues.
+- If on the `main` branch, switch to a new branch before committing changes. When asked to push, commit, push, and create a PR if there isn't one already. Do not add a coding agent name as a prefix to the branch name or the PR title as multiple coding agents may have contributed to the same commit. Please check the PR status before pushing to existing branches with previously opened PRs. If the PR is closed, create a new branch and a new PR.
 - When fixing a bug, reproduce it first using the real system, `~/projects/spaces/apps/macos/.build/debug/spaces` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
 - Use the real-system scripts for hotkey-sensitive verification before resorting to ad hoc manual app launches. Those scripts may wait for desktop control instead of killing unrelated running Spaces instances.
 - When manually launching a repo-local debug build, use the derived profile helper or `scripts/dev-build-and-launch.sh` so the app, CLI, and E2E helpers stay on the same worktree-scoped profile.
@@ -34,24 +30,18 @@
 - Local debugging may use `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty` for uncommitted Ghostty experiments, but Spaces PR and release workflows must use committed Ghostty fork work.
 
 ## Verification Rules
-- Always run lint and build before finalizing macOS app changes.
-- Run `scripts/coverage.sh` after changes unless the change is limited to `apps/web` or docs/comments.
-- Prefer `scripts/verify.sh` for the normal macOS verification pass so lint, build, and coverage run sequentially.
-- Treat `scripts/lint.sh` as read-only verification. Use `scripts/format.sh` for explicit tree-wide formatting, and rely on `.githooks/pre-commit` to format staged Swift files before commit.
-- `scripts/swiftpm.sh` is guarded by a fail-fast lock. Do not start overlapping build, test, or coverage runs; rerun after the active workflow finishes.
-- Whenever `scripts/coverage.sh` is run, report the overall coverage percentage.
-- Whenever `scripts/coverage.sh` is run, also report module-level coverage percentages for major modules such as systembridge, workspacecore, spacescli, etc.
 - Consider adding or expanding tests before finalizing code changes.
+- Run `scripts/verify.sh` for the normal macOS verification pass so lint, build, and coverage run sequentially.
 - When running `git commit` via Codex, allow at least a 10-minute timeout so pre-commit checks can finish.
 
 ## Documentation Rules
-- Keep docs short and non-overlapping.
-- Treat `README.md`, `dev.md`, `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, and `design.md` as current-state references, not changelogs; avoid temporal wording like "now", "previously", "new", or "changed" when describing the intended steady state.
-- Update `apps/macos/spec.md` when UX or user-visible behavior changes.
-- Update `apps/macos/docs/architecture.md` when data flow, persistence, implementation structure, or the rationale behind a design choice changes.
-- Update `design.md` when the visual system, reusable interaction patterns, or UI styling guidance changes.
+- Keep docs concise and non-overlapping.
+- Treat `README.md`, `docs/dev.md`, `docs/spec.md`, `docs/implementation.md`, and `docs/design.md` as current-state references, not changelogs; avoid temporal wording like "now", "no longer", "previously", "new", or "changed" when describing the intended steady state.
+- Update `docs/spec.md` when UX or user-visible behavior changes.
+- Update `docs/implementation.md` when data flow, persistence, implementation structure, or the rationale behind a design choice changes.
+- Update `docs/design.md` when the visual system, reusable interaction patterns, or UI styling guidance changes.
 - Update `README.md` when the product overview, feature list, or adoption pitch changes.
-- Update `dev.md` when development, build, deploy, or manual E2E workflows change.
+- Update `docs/dev.md` when development, build, deploy, or manual E2E workflows change.
 - Update `apps/web/app/docs/content.ts` when docs navigation or summaries need to reflect new product docs.
 - When behavior is added through the CLI, update CLI help and architecture docs in the same change.
 
@@ -63,7 +53,7 @@
 
 ## GUI Rules
 - UI should feel modern and compact.
-- Follow `design.md` when adding or updating UI.
+- Follow `docs/design.md` when adding or updating UI.
 - Use icons for obvious actions such as add or remove.
 - Use text labels for actions that are not obvious.
 - Use icons instead of text for status where practical.

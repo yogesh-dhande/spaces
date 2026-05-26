@@ -1,6 +1,6 @@
 # Spaces Development
 
-Build, test, and release workflows for the Spaces monorepo. For product overview and adoption, see [README.md](README.md).
+Build, test, and release workflows for the Spaces monorepo. For product overview and adoption, see [README.md](../README.md).
 
 ## Repo Layout
 - `apps/macos`: macOS app, `spaces` CLI, Swift sources, tests, product docs
@@ -8,13 +8,13 @@ Build, test, and release workflows for the Spaces monorepo. For product overview
 - `scripts`: root wrappers for build, test, coverage, release, and deploy workflows
 
 ## Documentation Map
-- [`README.md`](README.md): product overview and adoption pitch
-- [`AGENTS.md`](AGENTS.md): how coding agents should write, verify, and document changes
-- [`apps/macos/spec.md`](apps/macos/spec.md): expected product behavior and UX
-- [`apps/macos/docs/architecture.md`](apps/macos/docs/architecture.md): module boundaries, data model, and implementation rationale
-- [`apps/macos/docs/terminal.md`](apps/macos/docs/terminal.md): built-in terminal and libghostty integration notes, constraints, and verification guidance
-- [`design.md`](design.md): visual system and interaction patterns
-- [`apps/web/app/docs`](apps/web/app/docs): user-facing product and CLI documentation
+- [`README.md`](../README.md): product overview and adoption pitch
+- [`AGENTS.md`](../AGENTS.md): how coding agents should write, verify, and document changes
+- [`docs/spec.md`](spec.md): expected product behavior and UX
+- [`docs/implementation.md`](implementation.md): module boundaries, data model, and implementation rationale
+- [`docs/terminal.md`](terminal.md): built-in terminal and libghostty integration notes, constraints, and verification guidance
+- [`docs/design.md`](design.md): visual system and interaction patterns
+- [`apps/web/app/docs`](../apps/web/app/docs): user-facing product and CLI documentation
 
 ## Requirements
 - macOS 14+
@@ -368,7 +368,7 @@ The pre-commit hook does two things:
 - runs `scripts/lint.sh`, which formats staged macOS Swift source and test files and then runs any additional lint checks
 - runs `scripts/coverage.sh`
 
-Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](.github/workflows/pr-checks.yml), which runs the same Swift lint/build/coverage flow plus the static website build.
+Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](../.github/workflows/pr-checks.yml), which runs the same Swift lint/build/coverage flow plus the static website build.
 
 ## Manual E2E
 
@@ -473,7 +473,7 @@ Sparkle update hosting lives under `https://usespaces.dev/releases/` on the stat
 
 ## Website Deploy
 
-Firebase Hosting deploys from [`.github/workflows/firebase-hosting-merge.yml`](.github/workflows/firebase-hosting-merge.yml). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.
+Firebase Hosting deploys from [`.github/workflows/firebase-hosting-merge.yml`](../.github/workflows/firebase-hosting-merge.yml). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.
 
 The workflow authenticates with GitHub OIDC through Google Workload Identity Federation, then deploys through the Firebase Hosting REST API. This avoids `firebase-tools` service-account-key assumptions while keeping the deploy keyless.
 

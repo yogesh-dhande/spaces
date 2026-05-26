@@ -8,8 +8,8 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 
 ## Scope
 - This guide is for product UI patterns and visual rules.
-- `apps/macos/spec.md` remains the source of truth for user-visible behavior.
-- `apps/macos/docs/architecture.md` remains the source of truth for structure and data flow.
+- `docs/spec.md` remains the source of truth for user-visible behavior.
+- `docs/implementation.md` remains the source of truth for structure and data flow.
 
 ## Design Intent
 - Spaces should feel compact, modern, and operational.

@@ -82,7 +82,7 @@ Download the signed DMG from [GitHub Releases](https://github.com/yogesh-dhande/
 
 ## Development
 
-Full build, test, lint, coverage, manual E2E, and release workflows: [`dev.md`](dev.md).
+Full build, test, lint, coverage, manual E2E, and release workflows: [`docs/dev.md`](docs/dev.md).
 
 ## License
 

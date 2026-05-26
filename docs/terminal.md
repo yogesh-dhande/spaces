@@ -1,6 +1,6 @@
 # Built-in Terminal
 
-This document describes the built-in terminal runtime in Spaces: what owns a session, what clients attach to, what is persisted on disk, and where the current Ghostty compatibility boundary sits. User-visible behavior belongs in [spec.md](../spec.md). Broader module boundaries belong in [architecture.md](architecture.md).
+This document describes the built-in terminal runtime in Spaces: what owns a session, what clients attach to, what is persisted on disk, and where the current Ghostty compatibility boundary sits. User-visible behavior belongs in [spec.md](spec.md). Broader module boundaries belong in [implementation.md](implementation.md).
 
 ## Scope
 - `ghostty-embedded` is the only supported built-in terminal backend for Spaces-owned sessions.
