@@ -222,10 +222,7 @@ import spacesterminalcore
         syncHiddenHostWindowSize(width: width, height: height)
     }
 
-    func snapshot() -> GhosttyTerminalSnapshot? {
-        guard let session else { return nil }
-        return GhosttyTerminalSnapshotCapture.captureFromSession(session)
-    }
+    func snapshot() -> GhosttyTerminalSnapshot? { return GhosttyTerminalSnapshotCapture.captureFromSession(session) }
 
     func snapshotText() -> String? {
         guard let surface else { return nil }

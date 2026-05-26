@@ -159,7 +159,9 @@ extension Notification.Name {
 
     public func core(for launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) -> GhosttyEmbeddedSessionCore {
         if let existing = cores[launchConfiguration.sessionID] { return existing }
-        let created = GhosttyEmbeddedSessionCore(launchConfiguration: launchConfiguration, paths: paths)
+        let created = GhosttyEmbeddedSessionCore(
+            launchConfiguration: launchConfiguration, paths: paths,
+            onSessionClosed: { [weak self] closedCore in self?.unregisterClosedCore(closedCore) })
         cores[launchConfiguration.sessionID] = created
         return created
     }
@@ -182,6 +184,13 @@ extension Notification.Name {
     }
 
     public func terminateAll() { for sessionID in Array(cores.keys) { terminate(sessionID: sessionID) } }
+
+    private func unregisterClosedCore(_ core: GhosttyEmbeddedSessionCore) {
+        let sessionID = core.launchConfiguration.sessionID
+        guard cores[sessionID] === core else { return }
+        cores.removeValue(forKey: sessionID)
+        if hosts[sessionID]?.core === core { hosts.removeValue(forKey: sessionID) }
+    }
 }
 
 @MainActor public final class GhosttyEmbeddedSessionCore {
@@ -245,13 +254,15 @@ extension Notification.Name {
     private var inputOutputResyncWorkItem: DispatchWorkItem?
     private var lastCachedSessionSnapshot: GhosttyTerminalSnapshot?
     private var lastCachedSessionSnapshotText: String?
+    private let onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)?
 
     public init(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
-        requestSurfaceRefreshAction: (@MainActor () -> Void)? = nil
+        requestSurfaceRefreshAction: (@MainActor () -> Void)? = nil, onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)? = nil
     ) {
         self.launchConfiguration = launchConfiguration
         self.paths = paths
+        self.onSessionClosed = onSessionClosed
         controlQueue = DispatchQueue(label: "spaces.terminal.session-host.control.\(launchConfiguration.sessionID)")
         stateStreamQueue = DispatchQueue(label: "spaces.terminal.session-host.state-stream.\(launchConfiguration.sessionID)")
         sessionDriver = GhosttyEmbeddedTerminalSessionDriver(launchConfiguration: launchConfiguration)
@@ -267,6 +278,7 @@ extension Notification.Name {
         }
         rendererHostStorage.setOwnerClientResolver { [weak self] clientID in self?.isOwner(clientID: clientID) ?? false }
         rendererHostStorage.setInputActivityHandler { [weak self] in self?.handleOwnerInputActivity() }
+        terminalView.onSessionClosed = { [weak self] in self?.handleSessionClosed() }
     }
 
     public func startIfNeeded() throws {
@@ -339,6 +351,8 @@ extension Notification.Name {
         ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).first(where: { $0.mode == .owner })?.clientID
     }
 
+    private func hasActiveAttachments() -> Bool { !((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).isEmpty }
+
     private func activeLocalWindowClientID(excluding excludedClientID: String) -> String? {
         guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) else { return nil }
         let clientsByID = Dictionary(uniqueKeysWithValues: snapshot.clients.map { ($0.id, $0) })
@@ -358,6 +372,7 @@ extension Notification.Name {
         inputOutputResyncWorkItem = nil
         controlServer?.stop()
         controlServer = nil
+        try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
         started = false
         rendererHostStorage.terminateSession()
         try? outputHandle?.synchronize()
@@ -374,6 +389,12 @@ extension Notification.Name {
         broadcastCurrentState(reason: "terminated")
         stateStreamServer?.stop()
         stateStreamServer = nil
+        try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
+    }
+
+    private func handleSessionClosed() {
+        terminate()
+        onSessionClosed?(self)
     }
 
     public func childPID() -> Int32? { observedChildPID() }
@@ -606,10 +627,17 @@ extension Notification.Name {
 
     private func refreshRuntimeState(force: Bool) {
         let now = Date()
+        let foregroundPID = rendererHostStorage.foregroundPID()
+        if let foregroundPID {
+            lastKnownChildPID = foregroundPID
+        } else if started, let lastKnownChildPID, !hasActiveAttachments(), !Self.isProcessAlive(pid: lastKnownChildPID) {
+            handleSessionClosed()
+            return
+        }
         let state = TerminalSessionRuntimeState(
-            sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
-            state: .running, updatedAt: ISO8601DateFormatter().string(from: now), title: effectiveTitle, workingDirectory: effectiveWorkingDirectory,
-            columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows)
+            sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
+            childPID: foregroundPID ?? lastKnownChildPID, state: .running, updatedAt: ISO8601DateFormatter().string(from: now), title: effectiveTitle,
+            workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows)
         let shouldPersist = force || shouldPersistRuntimeState(state, now: now)
         guard shouldPersist else { return }
         let previousSignature = lastPersistedRuntimeState.map(runtimeStateSignature(for:))
@@ -837,6 +865,12 @@ extension Notification.Name {
         "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
     }
 
+    private static func isProcessAlive(pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
     private nonisolated func enqueueIncomingOutput(_ data: Data) {
         guard incomingOutputBuffer.append(data) else { return }
         Task { [weak self] in
@@ -935,6 +969,16 @@ extension Notification.Name {
         snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, source: String
     ) {
         if Self.remoteStateShouldUseCachedSessionSnapshot(reason: reason, ownerKind: ownerKind) {
+            let liveSessionScreenState = captureLiveSessionScreenState()
+            if Self.remoteScreenStateHasVisibleContent(snapshot: liveSessionScreenState.snapshot, snapshotText: liveSessionScreenState.snapshotText) {
+                return (snapshot: liveSessionScreenState.snapshot, snapshotText: liveSessionScreenState.snapshotText, source: "session")
+            }
+
+            let fallbackScreenState = remoteSnapshotStreamScreenState(runtimeState: runtimeState)
+            if Self.remoteScreenStateHasVisibleContent(snapshot: fallbackScreenState.snapshot, snapshotText: fallbackScreenState.snapshotText) {
+                return (snapshot: fallbackScreenState.snapshot, snapshotText: fallbackScreenState.snapshotText, source: "vt_stream")
+            }
+
             if Self.remoteScreenStateHasVisibleContent(snapshot: lastCachedSessionSnapshot, snapshotText: lastCachedSessionSnapshotText) {
                 return (snapshot: lastCachedSessionSnapshot, snapshotText: lastCachedSessionSnapshotText, source: "session_cached")
             }
@@ -951,14 +995,20 @@ extension Notification.Name {
         let isLiveRuntime = runtimeState?.state == .running || runtimeState?.state == .starting
         guard !isLiveRuntime else { return (snapshot: nil, snapshotText: nil, source: "session_empty") }
 
-        let fallbackSnapshot = remoteSnapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
-        let fallbackSnapshotText =
-            fallbackSnapshot == nil ? remoteSnapshotStream.snapshotText(columns: runtimeState?.columns, rows: runtimeState?.rows) : nil
-        if Self.remoteScreenStateHasVisibleContent(snapshot: fallbackSnapshot, snapshotText: fallbackSnapshotText) {
-            return (snapshot: fallbackSnapshot, snapshotText: fallbackSnapshotText, source: "vt_stream")
+        let fallbackScreenState = remoteSnapshotStreamScreenState(runtimeState: runtimeState)
+        if Self.remoteScreenStateHasVisibleContent(snapshot: fallbackScreenState.snapshot, snapshotText: fallbackScreenState.snapshotText) {
+            return (snapshot: fallbackScreenState.snapshot, snapshotText: fallbackScreenState.snapshotText, source: "vt_stream")
         }
 
         return (snapshot: nil, snapshotText: nil, source: "vt_stream_empty")
+    }
+
+    private func remoteSnapshotStreamScreenState(runtimeState: TerminalSessionRuntimeState?) -> (
+        snapshot: GhosttyTerminalSnapshot?, snapshotText: String?
+    ) {
+        let snapshot = remoteSnapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
+        let snapshotText = snapshot == nil ? remoteSnapshotStream.snapshotText(columns: runtimeState?.columns, rows: runtimeState?.rows) : nil
+        return (snapshot: snapshot, snapshotText: snapshotText)
     }
 
     private func captureLiveSessionScreenState() -> (snapshot: GhosttyTerminalSnapshot?, snapshotText: String?) {
@@ -1011,6 +1061,8 @@ extension Notification.Name {
     }
     func debugPersistRuntimeState(force: Bool = true) { refreshRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
+    func debugHandleSessionClosed() { handleSessionClosed() }
+    func debugMarkStartedForTesting() { started = true }
 
     private func trace(_ message: @autoclosure () -> String) { ghosttyEmbeddedSessionTrace(launchConfiguration.sessionID, message()) }
 
@@ -1131,6 +1183,8 @@ extension Notification.Name {
     func debugHandleIncomingOutput(_ data: Data) { core.debugHandleIncomingOutput(data) }
     func debugPersistRuntimeState(force: Bool = true) { core.debugPersistRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { core.debugSetLastKnownChildPID(pid) }
+    func debugHandleSessionClosed() { core.debugHandleSessionClosed() }
+    func debugMarkStartedForTesting() { core.debugMarkStartedForTesting() }
 }
 
 extension GhosttyEmbeddedSessionHost: TerminalGhosttySessionHosting {}

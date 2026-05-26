@@ -83,14 +83,9 @@ struct TerminalCommandCommand: ParsableCommand {
             throw WorkspaceError.invalidArgument(message: "Terminal backend '\(backend.rawValue)' is not available in this build.")
         }
         let context = CLIContext()
-        let sessionID = UUID().uuidString
-        let workingDirectory = context.normalizePath(cwd ?? context.currentDirectoryPath())
-        let resolvedShell = terminalShellPath(shell)
-        let resolvedTitle = title ?? terminalDefaultTitle(command: command, cwd: workingDirectory)
-        let createdAt = ISO8601DateFormatter().string(from: Date())
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: sessionID, backend: backend, lifetimePolicy: .whileAttached, title: resolvedTitle, workingDirectory: workingDirectory,
-            shell: resolvedShell, command: command, createdAt: createdAt)
+        let launchConfiguration = terminalCommandLaunchConfiguration(
+            sessionID: UUID().uuidString, backend: backend, command: command, title: title, cwd: cwd, shell: shell, context: context)
+        let sessionID = launchConfiguration.sessionID
         let session = try TerminalService.createSession(launchConfiguration)
 
         DistributedNotificationCenter.default().postNotificationName(
@@ -102,6 +97,18 @@ struct TerminalCommandCommand: ParsableCommand {
 
         print("Started terminal session \(session.id)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tcwd=\(session.workingDirectory)")
     }
+}
+
+func terminalCommandLaunchConfiguration(
+    sessionID: String, backend: TerminalSessionBackendKind, command: String?, title: String?, cwd: String?, shell: String?,
+    createdAt: String = ISO8601DateFormatter().string(from: Date()), context: CLIContext = CLIContext()
+) -> TerminalSessionLaunchConfiguration {
+    let workingDirectory = context.normalizePath(cwd ?? context.currentDirectoryPath())
+    let resolvedShell = terminalShellPath(shell)
+    let resolvedTitle = title ?? terminalDefaultTitle(command: command, cwd: workingDirectory)
+    return TerminalSessionLaunchConfiguration(
+        sessionID: sessionID, backend: backend, lifetimePolicy: .persistent, title: resolvedTitle, workingDirectory: workingDirectory,
+        shell: resolvedShell, command: command, createdAt: createdAt)
 }
 
 struct TerminalSendCommand: ParsableCommand {

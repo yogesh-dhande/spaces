@@ -139,6 +139,19 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(command.backend, .ghosttyEmbedded)
     }
 
+    func testTerminalCommandLaunchConfigurationUsesPersistentLifetime() throws {
+        let launchConfiguration = terminalCommandLaunchConfiguration(
+            sessionID: "session-cli", backend: .ghosttyEmbedded, command: "cat", title: "session", cwd: "/tmp", shell: "/bin/sh",
+            createdAt: "2026-05-26T00:00:00Z")
+
+        XCTAssertEqual(launchConfiguration.lifetimePolicy, .persistent)
+        XCTAssertEqual(launchConfiguration.sessionID, "session-cli")
+        XCTAssertEqual(launchConfiguration.command, "cat")
+        XCTAssertEqual(launchConfiguration.title, "session")
+        XCTAssertEqual(launchConfiguration.workingDirectory, "/tmp")
+        XCTAssertEqual(launchConfiguration.shell, "/bin/sh")
+    }
+
     func testTerminalSendParsesSessionAndText() throws {
         let command = try TerminalSendCommand.parse(["session-1", "hello", "--newline"])
 

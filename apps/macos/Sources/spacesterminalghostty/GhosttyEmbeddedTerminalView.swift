@@ -18,6 +18,7 @@ import spacesterminalcore
 
     public var onSurfaceReady: SurfaceReadyHandler?
     public var onActionEvent: (@MainActor (GhosttyActionEvent) -> Void)?
+    public var onSessionClosed: (@MainActor () -> Void)?
     public var onSurfaceCellSizeChanged: (@MainActor (Int, Int) -> Void)?
     public var onInputActivity: (@MainActor () -> Void)?
 
@@ -446,6 +447,7 @@ import spacesterminalcore
     func handleSurfaceClosed() {
         destroySurface()
         onSurfaceReady?(nil)
+        onSessionClosed?()
     }
 
     private func createSurfaceIfNeeded() {

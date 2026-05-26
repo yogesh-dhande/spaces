@@ -118,7 +118,13 @@ import spacesterminalghostty
     private func sessionCore(for launchConfiguration: TerminalSessionLaunchConfiguration) throws -> GhosttyEmbeddedSessionCore {
         if let existing = sessionCores[launchConfiguration.sessionID] { return existing }
         let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
-        let created = GhosttyEmbeddedSessionCore(launchConfiguration: launchConfiguration, paths: paths)
+        let created = GhosttyEmbeddedSessionCore(
+            launchConfiguration: launchConfiguration, paths: paths,
+            onSessionClosed: { [weak self] closedCore in
+                let sessionID = closedCore.launchConfiguration.sessionID
+                guard self?.sessionCores[sessionID] === closedCore else { return }
+                self?.sessionCores.removeValue(forKey: sessionID)
+            })
         sessionCores[launchConfiguration.sessionID] = created
         return created
     }

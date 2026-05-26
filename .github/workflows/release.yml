@@ -132,7 +132,8 @@ jobs:
         run: |
           scripts/codesign.sh \
             apps/macos/.build/apple/Products/Release/SpacesApp \
-            apps/macos/.build/apple/Products/Release/spaces
+            apps/macos/.build/apple/Products/Release/spaces \
+            apps/macos/.build/apple/Products/Release/SpacesTerminalService
 
       - name: Package DMG
         env:
@@ -141,6 +142,7 @@ jobs:
           scripts/create-dmg.sh \
             apps/macos/.build/apple/Products/Release/SpacesApp \
             apps/macos/.build/apple/Products/Release/spaces \
+            apps/macos/.build/apple/Products/Release/SpacesTerminalService \
             ${{ steps.version.outputs.version }}
           dmg_name="Spaces-${{ steps.version.outputs.version }}.dmg"
           echo "DMG_NAME=$dmg_name" >> "$GITHUB_ENV"
@@ -153,6 +155,7 @@ jobs:
           scripts/create-sparkle-archive.sh \
             apps/macos/.build/apple/Products/Release/SpacesApp \
             apps/macos/.build/apple/Products/Release/spaces \
+            apps/macos/.build/apple/Products/Release/SpacesTerminalService \
             ${{ steps.version.outputs.version }}
           zip_name="Spaces-${{ steps.version.outputs.version }}.zip"
           echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"

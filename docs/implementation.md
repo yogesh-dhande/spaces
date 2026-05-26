@@ -55,7 +55,7 @@ flowchart LR
 
 ### Terminal Session Slice
 - Built-in terminal ownership is currently split across two compatibility paths.
-- `spaces terminal command` creates sessions through the service. `spaces terminal list` reads live service summaries. `spaces terminal show` asks the app to open a native client window for an existing session ID. `send`, `key`, and `takeover` operate on the session control socket that the service owns.
+- `spaces terminal command` creates persistent sessions through the service. `spaces terminal list` reads live service summaries. `spaces terminal show` asks the app to open a native client window for an existing session ID. `send`, `key`, and `takeover` operate on the session control socket that the service owns.
 - Installed app bundles carry `SpacesTerminalService` next to the bundled `spaces` CLI in `Contents/Resources`, and the DMG installer copies both executables to the selected CLI install directory. `TerminalService` resolves the service from the override environment, next to the running CLI, from app-bundle resources, or from local SwiftPM build products.
 - Each session is addressed by a stable session ID and stored under `~/.spaces/terminal/sessions/<session-id>/`.
 - `metadata.json` stores launch inputs including backend and lifetime policy. `state.json` stores runtime state including backend, child PID, title, working directory, and last known columns and rows. `clients.json` and `attachments.json` store client identity plus owner or viewer attachment history. `control.sock` accepts local control-plane commands. `subscription.sock` carries service-published session state and Ghostty snapshots for daemon-owned client windows. `output.log` records terminal output for replay, history, and fallback recovery.
