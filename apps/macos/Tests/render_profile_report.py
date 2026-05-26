@@ -340,7 +340,7 @@ def render_report(rows: list[dict[str, str]], report_path: Path) -> None:
 <body>
   <main>
     <h1>Spaces Real-System Profiling</h1>
-    <p>Aggregated from clean and dirty worktree runs of <code>apps/macos/Tests/e2e_real_system.sh</code>. Dirty revisions are labeled as <code>HEAD+fingerprint</code>.</p>
+    <p>Aggregated from clean and dirty worktree runs of <code>apps/macos/Tests/e2e_macos_app.sh</code>. Dirty revisions are labeled as <code>HEAD+fingerprint</code>.</p>
     {''.join(sections) if sections else '<p>No profiling history recorded yet.</p>'}
   </main>
 </body>

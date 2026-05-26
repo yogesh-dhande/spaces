@@ -143,22 +143,13 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" ap
 
 For built-in terminal verification, keep exactly one `SpacesApp` process running for the chosen profile root. The current `ghostty-embedded` slice keeps live Ghostty rendering owner-only on both macOS and iOS. Opening a terminal window or mobile detail view auto-attempts takeover, live non-owner states show takeover or status UI only, and ended sessions may still show the final Ghostty render when it was persisted.
 
-For the headless mobile-shaped control proof of concept against the Ghostty-owner path:
+For maintained simulator E2E coverage of the mobile terminal path:
 
 ```bash
-python3 apps/macos/Tests/poc_mobile_terminal_client.py --start-app
+apps/macos/Tests/e2e_mobile.sh
 ```
 
-That flow launches an isolated `SpacesApp`, starts one `ghostty-embedded` session, exposes it through the first-party mobile bridge, pairs a first-party iPhone-shaped client, verifies non-owner input rejection at the control plane, closes the real macOS owner window, promotes the mobile client, sends text plus `Enter`, reopens the native owner window for the same session, and finally transfers ownership back to that reopened macOS owner.
-
-For the maintained E2E wrapper around that same flow:
-
-```bash
-apps/macos/Tests/e2e_terminal_mobile_client.sh
-```
-
-Use the shell wrapper when you want one command that exercises the full attach, takeover, owner-close, owner-reopen, send, and key path without remembering the Python invocation.
-Set `SPACES_MOBILE_E2E_UI_TEST_NAME=SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverAfterMacRetakeover` to run the iPad auto-takeover -> Mac retakeover -> iPad `Take Over` regression path.
+The mobile suite builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack, and then runs the selected scenarios with `test-without-building` against that shared stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, `--keep-root` to preserve the shared demo root, and `--port <port>` to pin the daemon bridge port. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again.
 
 The daemon-hosted mobile bridge is the current first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spaces mobile serve` remains available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spaces mobile request` so local scripts use the same TLS-PSK transport as the iOS app.
 
@@ -239,7 +230,7 @@ apps/macos/Tests/run_mobile_terminal_demo.sh
 ```
 
 The launcher expects the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds the repo-local macOS debug products, builds a fresh simulator `SpacesMobile.app` into a disposable DerivedData directory under the demo temp root, then installs that same app bundle on both the iPad and iPhone simulators. It provisions two live workspace terminal sessions before launching the mobile clients so list-navigation and second-session takeover flows can be reproduced without extra manual setup. It refuses to start if another `SpacesApp` instance or bridge listener is already running so the global hotkey and mobile port stay unambiguous, then reads the daemon bridge details through `spaces mobile status`. It prints the disposable temp root, PIDs, logs, screenshots, both terminal session IDs, the iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
-The same demo root also contains `mobile-terminal-performance.jsonl`, and the printed JSON includes its `performanceLogPath`. The standalone takeover wrappers consume that file directly when they assert one bootstrap epoch, first render timing, input-ready timing, and scrollback history seeding behavior.
+The same demo root also contains `mobile-terminal-performance.jsonl`, and the printed JSON includes its `performanceLogPath`. The mobile E2E suite consumes that file directly when it asserts one bootstrap epoch, first render timing, input-ready timing, and scrollback history seeding behavior.
 
 Useful overrides:
 - `SPACES_MOBILE_DEMO_KEEP_ROOT=1` keeps the temp root after shutdown for log inspection.
@@ -248,51 +239,24 @@ Useful overrides:
 - `SPACES_MOBILE_DEMO_APP_PATH=...` skips the scripted `xcodebuild` and installs an explicit `SpacesMobile.app` bundle.
 - `SPACES_MOBILE_DEMO_PORT=...` sets the daemon bridge port for that disposable profile.
 
-For the real standalone Codex takeover repro path on iPad, use the dedicated wrapper instead of driving the demo by hand:
+For targeted mobile E2E runs, use `--scenario`:
 
 ```bash
-apps/macos/Tests/e2e_terminal_mobile_codex_standalone.sh
+apps/macos/Tests/e2e_mobile.sh --scenario codex
+apps/macos/Tests/e2e_mobile.sh --scenario codex-resume-reopen
+apps/macos/Tests/e2e_mobile.sh --scenario roundtrip
+apps/macos/Tests/e2e_mobile.sh --scenario scrollback
+apps/macos/Tests/e2e_mobile.sh --scenario two-session
+apps/macos/Tests/e2e_mobile.sh --scenario ownership-guard
 ```
 
-That wrapper launches the disposable demo stack, starts real Codex in the Mac-owned terminal session, accepts the Codex trust prompt when needed, and then attaches the iPad UI test to the already-running standalone simulator app so takeover happens against the same `simctl`-launched runtime as the manual demo. On failure it preserves the demo root and tails the relevant macOS app, bridge, and UI test logs automatically.
+`codex` starts real Codex in a fresh Mac-owned terminal session, accepts the Codex trust prompt when needed, and verifies iPad takeover against the already-running simulator app. `codex-resume-reopen` runs `codex resume 019e380a-9def-7852-9834-74c67b2da894`, takes over on iPad, returns to the terminal list, and repeatedly reopens the same session. `roundtrip` drives the Mac/iPad/Mac/iPad/Mac ownership path with rendered-content assertions at each handoff. `scrollback` fills the Mac-owned terminal with long output, transfers ownership to iPad, scrolls away from bottom, runs an owner command while still scrolled up, and checks the owner epoch and prompt rendering. `two-session` takes over two fresh terminal sessions through list navigation. `ownership-guard` exercises the mobile bridge ownership rules without UI automation.
 
 Useful overrides:
-- `SPACES_MOBILE_CODEX_COMMAND='codex resume <thread-id>'` replaces the default `codex` startup command.
-- `SPACES_MOBILE_REOPEN_SAME_SESSION=1` makes the standalone iPad UI test go back to the list and reopen the same terminal repeatedly after takeover.
-
-For the resumed-Codex reopen regression on iPad, use the dedicated wrapper:
-
-```bash
-apps/macos/Tests/e2e_terminal_mobile_codex_resume_reopen_standalone.sh
-```
-
-That wrapper runs `codex resume 019e380a-9def-7852-9834-74c67b2da894` on the Mac-owned session, takes over on iPad, returns to the terminal list, and then reopens the same session repeatedly so the resumed-session owner path and the back-navigation relaunch path stay covered together.
+- `SPACES_MOBILE_CODEX_COMMAND='codex resume <thread-id>'` replaces the default `codex` startup command for the `codex` scenario.
+- `SPACES_MOBILE_CODEX_RESUME_THREAD_ID=<thread-id>` changes the thread used by `codex-resume-reopen`.
 
 When debugging iPad owner render dumps, keep the mobile live-output path snapshot-free after owner bootstrap. `GhosttyRemoteTerminalView` must not call `ghostty_session_export_snapshot` on its local renderer after applying live output, passive viewer open or reopen must not make the Mac host export a live session snapshot while a local Mac window owns the session, and mobile owner bootstrap must use the cached Ghostty session snapshot rather than the VT snapshot stream. The Mac host may refresh that cached session snapshot immediately before transferring ownership to a remote mobile owner, but it must not force a Ghostty surface refresh or synthesize a second visual path from transcript data. Use the bootstrap snapshot, screenshots, event logs, and history-seed performance events for E2E assertions.
-
-For the real standalone Mac/iPad/Mac/iPad/Mac ownership round trip with rendered-content assertions at each handoff, use:
-
-```bash
-apps/macos/Tests/e2e_terminal_mobile_roundtrip_standalone.sh
-```
-
-That wrapper launches the disposable demo stack, seeds terminal output on the Mac-owned session, drives two iPad-owned commands through the mobile app, retakes ownership on Mac, hands it back to iPad twice, and then finishes on Mac again. It preserves the demo root on failure so the render dumps, event log, screenshots, and UI test log stay available for triage.
-
-For the standalone long-output scrollback regression after iPad takeover, use:
-
-```bash
-apps/macos/Tests/e2e_terminal_mobile_scrollback_standalone.sh
-```
-
-That wrapper launches the same disposable demo stack, fills the Mac-owned terminal with long output, transfers ownership to the standalone iPad app, scrolls away from bottom, runs an owner command while still scrolled up, and then asserts that the first owner epoch stayed singular, the viewport remained off the bottom, and the owner render never produced a stray prompt-only `%` row.
-
-For the dedicated two-session iPad takeover regression, use:
-
-```bash
-apps/macos/Tests/e2e_terminal_mobile_two_session_standalone.sh
-```
-
-That wrapper launches the same two-session demo stack, takes over the primary terminal on iPad, alternates back through the list into the secondary terminal, and then repeats the reopen cycle once more so the multi-session dismissal and relaunch path stays covered.
 
 For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
 
@@ -411,7 +375,7 @@ Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.y
 Run the real-system GUI/CLI suite from the repository root with:
 
 ```bash
-apps/macos/Tests/e2e_real_system.sh
+apps/macos/Tests/e2e_macos_app.sh
 ```
 
 Before the suite launches its isolated app instance, it waits for desktop-global control. A timeout from that wait is an environment-contention result and should be retried without killing unrelated running Spaces instances.
@@ -419,7 +383,7 @@ Before the suite launches its isolated app instance, it waits for desktop-global
 To capture a product-demo video from the same suite, record the run with the native `ScreenCaptureKit` helper and optionally add short editing-friendly pauses between visible transitions:
 
 ```bash
-apps/macos/Tests/e2e_real_system.sh \
+apps/macos/Tests/e2e_macos_app.sh \
   --record-video /tmp/spaces-real-e2e.mp4 \
   --pause-transitions
 ```
@@ -429,7 +393,7 @@ The recorder follows the current main display. `--capture-device` remains accept
 To prepare the same fixture projects, localhost browser-session servers, and workspace records for manual exploration without running the assertions, use:
 
 ```bash
-apps/macos/Tests/e2e_real_system.sh --setup-fixtures-only
+apps/macos/Tests/e2e_macos_app.sh --setup-fixtures-only
 ```
 
 This suite is manual by design. It drives the real app, `spaces`, `yabai`, Chrome, and the built-in Spaces terminal in an interactive macOS session instead of XCTest.

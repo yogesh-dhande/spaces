@@ -212,7 +212,7 @@ require_file() {
 
 print_usage() {
   cat <<'EOF'
-Usage: apps/macos/Tests/e2e_real_system.sh [options]
+Usage: apps/macos/Tests/e2e_macos_app.sh [options]
 
 Options:
   --record-video PATH            Capture the full run to PATH with ScreenCaptureKit.
@@ -580,7 +580,7 @@ ensure_profile_spaces_owner() {
     "$ACTION_TIMEOUT_SECONDS" || fail "expected Spaces profile owner pid $expected_pid"
 }
 
-ensure_single_spaces_instance() { ensure_profile_spaces_owner "$1" }
+ensure_single_spaces_instance() { ensure_profile_spaces_owner "$1"; }
 
 launch_spaces() {
   log_step "launching Spaces with isolated HOME=$TMP_HOME"
@@ -1777,6 +1777,17 @@ wait_for_surface_snapshot_python_with_yabai() {
   wait_for_surface_snapshot_python_mode "include-yabai" "$@"
 }
 
+wait_for_spaces_front_window_title() {
+  local expected_title="$1"
+  wait_for_surface_snapshot_python \
+    "Spaces front window title: $expected_title" \
+    'expected_title = sys.argv[2]
+spaces = data.get("spaces") or {}
+ok = (spaces.get("frontWindowTitle") or "") == expected_title and not spaces.get("modalVisible")
+raise SystemExit(0 if ok else 1)' \
+    "$expected_title"
+}
+
 spaces_front_window_session_id() {
   local identifier
   identifier="$(spaces_front_window_identifier)"
@@ -2052,6 +2063,14 @@ on run argv
           set shouldClose to true
           exit repeat
         end if
+        repeat with fixturePort from 20000 to 20011
+          set portText to fixturePort as text
+          if tabURL starts with ("http://localhost:" & portText & "/") or tabURL starts with ("http://127.0.0.1:" & portText & "/") then
+            set shouldClose to true
+            exit repeat
+          end if
+        end repeat
+        if shouldClose then exit repeat
       end repeat
       if shouldClose then set end of doomedWindowIDs to (id of w)
     end repeat
@@ -2277,6 +2296,31 @@ on run argv
   end tell
 end run
 APPLESCRIPT
+}
+
+send_cycle_hotkey_with_ack() {
+  local direction="$1"
+  local hotkey=""
+  case "$direction" in
+    next) hotkey="next" ;;
+    previous) hotkey="previous" ;;
+    *) fail "unsupported cycle direction $direction" ;;
+  esac
+
+  local pattern="spaces: hotkey_debug handle id=[0-9]+ hotkey=${hotkey} "
+  local attempt=1
+  local attempts=3
+  while (( attempt <= attempts )); do
+    ensure_single_spaces_instance "$SPACES_PID"
+    send_cycle_hotkey "$direction"
+    if wait_for_app_log_pattern_optional "$pattern" >/dev/null; then
+      return 0
+    fi
+    log_debug "cycle hotkey '$direction' was not received on attempt $attempt; retrying"
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  fail "timed out waiting for cycle hotkey reception: direction=$direction"
 }
 
 record_metric_sample() {
@@ -3457,7 +3501,7 @@ measure_spaces_cycle_transition() {
   local cycle_line cycle_target cycle_elapsed_ms cycle_request_id cycle_focus_route_line cycle_focus_route_elapsed_ms=""
   local cycle_focus_observed_line cycle_focus_observed_elapsed_ms=""
   started_at="$(timestamp_ms)"
-  send_cycle_hotkey "$direction"
+  send_cycle_hotkey_with_ack "$direction"
   transition_pause "$transition_label"
   wait_for_app_log_pattern "spaces: perf metric=window_cycle workspace=.* target=.* success=1 .* direction=${direction}" >/dev/null
   cycle_line="$APP_LOG_LAST_MATCH"
@@ -3699,7 +3743,7 @@ PY
     transition_pause "$host refocus frontend terminal"
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single" "$spaces_terminal_focus_request_id" "$spaces_terminal_focus_log"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
-    wait_for_condition "spaces_front_window_title" "frontend"
+    wait_for_spaces_front_window_title "frontend"
     pass_case
 
     begin_case "$host: closing ad hoc Spaces terminal removes runtime row"
@@ -3801,7 +3845,7 @@ PY
     record_process_focus_metric "terminal_close_recover.cli_window_focus.process_tracked_tab" "frontend" "$host" "single" "$spaces_reopen_request_id" "$spaces_reopen_log"
     wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
-    wait_for_condition "spaces_front_window_title" "frontend"
+    wait_for_spaces_front_window_title "frontend"
     pass_case
 
   fi
@@ -3867,7 +3911,7 @@ PY
     frontend_focus_elapsed_ms="$(( $(timestamp_ms) - frontend_focus_started_at ))"
     record_metric_sample "spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab" "$frontend_focus_elapsed_ms" "$host" "single"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
-    wait_for_condition "spaces_front_window_title" "frontend"
+    wait_for_spaces_front_window_title "frontend"
     assert_shortcut_focus_surface_state
   elif [[ "$host" == "iterm2" ]]; then
     frontend_focus_elapsed_ms="$(( $(timestamp_ms) - frontend_focus_started_at ))"
@@ -3886,7 +3930,7 @@ PY
     send_spaces_window_shortcut_with_ack "$agent_shortcut_index"
     transition_pause "$host shortcut focus agent"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
-    wait_for_condition "spaces_front_window_title" "$MOCK_AGENT_LABEL"
+    wait_for_spaces_front_window_title "$MOCK_AGENT_LABEL"
     assert_shortcut_focus_surface_state
 
     ui_show_workspace_detail "$workspace_dir" "$workspace_title"
@@ -3937,7 +3981,7 @@ PY
     done
     [[ -n "$adhoc_session_id" ]] || fail "expected ad hoc terminal to open by shortcut"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
-    wait_for_condition "spaces_front_window_title" "$adhoc_name"
+    wait_for_spaces_front_window_title "$adhoc_name"
     assert_shortcut_focus_surface_state
   fi
   pass_case
@@ -3951,8 +3995,8 @@ PY
     wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
     run_spaces_logged /tmp/spaces-e2e-cycle-seed-frontend.log open frontend "$workspace_dir"
     transition_pause "$host seed frontend focus for cycling"
-    wait_for_condition "spaces_front_window_title" "frontend"
-    send_cycle_hotkey next
+    wait_for_spaces_front_window_title "frontend"
+    send_cycle_hotkey_with_ack next
     transition_pause "$host cycle next from terminal origin"
     wait_for_app_log_pattern 'spaces: perf metric=window_cycle workspace=.* target=.* success=1 .* direction=next' >/dev/null
     cycle_line="$APP_LOG_LAST_MATCH"
@@ -3970,13 +4014,13 @@ PY
     assert_cycle_focus_surface_state
     run_spaces_logged /tmp/spaces-e2e-cycle-reseed-frontend.log open frontend "$workspace_dir"
     transition_pause "$host reseed frontend focus after terminal-origin cycle"
-    wait_for_condition "spaces_front_window_title" "frontend"
+    wait_for_spaces_front_window_title "frontend"
     run_spaces_logged /tmp/spaces-e2e-cycle-seed-agent.log open "$MOCK_AGENT_LABEL" "$workspace_dir"
     transition_pause "$host seed agent focus for cycling"
-    wait_for_condition "spaces_front_window_title" "$MOCK_AGENT_LABEL"
+    wait_for_spaces_front_window_title "$MOCK_AGENT_LABEL"
     run_spaces_logged /tmp/spaces-e2e-cycle-seed-adhoc.log open "$adhoc_name" "$workspace_dir"
     transition_pause "$host seed ad hoc terminal focus for cycling"
-    wait_for_condition "spaces_front_window_title" "$adhoc_name"
+    wait_for_spaces_front_window_title "$adhoc_name"
     run_spaces_logged /tmp/spaces-e2e-cycle-seed-docs-final.log open docs "$workspace_dir"
     activate_google_chrome
     focus_yabai_window_if_present "$docs_window_id"
@@ -3987,11 +4031,11 @@ PY
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   local cycle_target
   if [[ "$host" == "iterm2" ]]; then
-    send_cycle_hotkey next
+    send_cycle_hotkey_with_ack next
     transition_pause "$host cycle next"
     wait_for_any_value "iterm_focused_session $frontend_window_id" "$frontend_session_id" "$backend_session_id"
   elif [[ "$host" == "ghostty" ]]; then
-    send_cycle_hotkey next
+    send_cycle_hotkey_with_ack next
     transition_pause "$host cycle next"
     wait_for_any_value "ghostty_focused_terminal" "$frontend_terminal_id" "$backend_terminal_id"
   else
@@ -4028,7 +4072,7 @@ PY
 
     run_spaces_logged /tmp/spaces-e2e-cycle-reseed-frontend-post-browser.log open frontend "$workspace_dir"
     transition_pause "$host reseed frontend focus after browser round trip"
-    wait_for_condition "spaces_front_window_title" "frontend"
+    wait_for_spaces_front_window_title "frontend"
 
     measure_spaces_cycle_transition \
       "$host" \
@@ -4093,7 +4137,7 @@ PY
 
     run_spaces_logged /tmp/spaces-e2e-cycle-reseed-agent-post-browser.log open "$MOCK_AGENT_LABEL" "$workspace_dir"
     transition_pause "$host reseed agent focus after browser round trip"
-    wait_for_condition "spaces_front_window_title" "$MOCK_AGENT_LABEL"
+    wait_for_spaces_front_window_title "$MOCK_AGENT_LABEL"
 
     measure_spaces_cycle_transition \
       "$host" \
@@ -4144,26 +4188,32 @@ PY
 
     sleep 1
     noisy_cycle_started_at="$(timestamp_ms)"
-    send_cycle_hotkey next
-    transition_pause "$host cycle next away from $HIGH_OUTPUT_PROCESS_NAME"
-    wait_for_app_log_pattern 'spaces: perf metric=window_cycle workspace=.* target=.* success=1 .* direction=next' >/dev/null
+    send_cycle_hotkey_with_ack previous
+    transition_pause "$host cycle previous away from $HIGH_OUTPUT_PROCESS_NAME"
+    wait_for_app_log_pattern 'spaces: perf metric=window_cycle workspace=.* target=.* success=1 .* direction=previous' >/dev/null
     cycle_line="$APP_LOG_LAST_MATCH"
     cycle_target="$(extract_perf_target "$cycle_line")"
     [[ "$cycle_target" != "process:${HIGH_OUTPUT_PROCESS_NAME}" ]] \
-      || fail "expected first cycle next from $HIGH_OUTPUT_PROCESS_NAME to leave current process target"
+      || fail "expected first cycle previous from $HIGH_OUTPUT_PROCESS_NAME to leave current process target"
     [[ "$cycle_target" != "terminal:${HIGH_OUTPUT_PROCESS_NAME}" ]] \
-      || fail "expected first cycle next from $HIGH_OUTPUT_PROCESS_NAME to leave current terminal target"
+      || fail "expected first cycle previous from $HIGH_OUTPUT_PROCESS_NAME to leave current terminal target"
     wait_for_cycle_target_focus "$workspace_dir" "$cycle_target" "$docs_window_id"
     assert_cycle_focus_surface_state
     noisy_cycle_elapsed_ms="$(( $(timestamp_ms) - noisy_cycle_started_at ))"
     record_metric_sample \
-      "process_high_output_tracked_tab.keyboard_cycle_next.any_tracked_target" \
+      "process_high_output_tracked_tab.keyboard_cycle_previous.any_tracked_target" \
       "$noisy_cycle_elapsed_ms" \
       "$host" \
       "single"
     assert_metric_not_above "$noisy_cycle_elapsed_ms" "$SPACES_CYCLE_LATENCY_BUDGET_MS" \
       "high-output process user-facing cycle latency"
     assert_spaces_cpu_not_above "spaces_app.cpu_after_high_output_cycle" "$SPACES_SUSTAINED_CPU_BUDGET_PCT" "$host" "single"
+    if [[ -n "$KNOWN_SPACES_NOISY_SESSION_ID" ]]; then
+      env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
+        "$MX_E2E_BIN" terminate-terminal-session "$KNOWN_SPACES_NOISY_SESSION_ID" \
+        >/tmp/spaces-e2e-terminate-high-output-session.json 2>>"$DEBUG_LOG" || true
+      KNOWN_SPACES_NOISY_SESSION_ID=""
+    fi
     pass_case
   fi
 
@@ -4336,7 +4386,7 @@ run_hotkey_visibility_profiling() {
     wait_for_spaces_frontmost_ready
     wait_for_condition "spaces_main_window_visible" "1"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
-    wait_for_condition "spaces_front_window_title" "frontend"
+    wait_for_spaces_front_window_title "frontend"
     wait_for_spaces_frontmost_ready
     send_spaces_toggle_hotkey_with_ack
     wait_for_condition "spaces_main_window_visible" "0"
@@ -4413,7 +4463,7 @@ run_hotkey_visibility_profiling() {
     transition_pause "$host seed frontend terminal focus for palette toggle assertions"
     record_process_focus_metric "terminal_toggle_palette.hotkey.process_tracked_tab" "frontend" "$host" "single" "$spaces_palette_focus_request_id" "$spaces_palette_focus_log"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
-    wait_for_condition "spaces_front_window_title" "frontend"
+    wait_for_spaces_front_window_title "frontend"
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_presented "1"
     wait_for_condition "spaces_command_palette_visible" "1"
@@ -4424,7 +4474,7 @@ run_hotkey_visibility_profiling() {
     wait_for_condition "spaces_command_palette_visible" "1"
     wait_for_condition "spaces_command_palette_key" "0"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
-    wait_for_condition "spaces_front_window_title" "frontend"
+    wait_for_spaces_front_window_title "frontend"
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_presented "1"
     wait_for_condition "spaces_command_palette_visible" "1"
@@ -4436,7 +4486,7 @@ run_hotkey_visibility_profiling() {
     wait_for_condition "spaces_command_palette_visible" "0"
     wait_for_condition "spaces_command_palette_key" "0"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
-    wait_for_condition "spaces_front_window_title" "frontend"
+    wait_for_spaces_front_window_title "frontend"
     pass_case
 
     # Repeated built-in hotkey timing loops live in the dedicated
@@ -4625,7 +4675,7 @@ PY
       'process:*' 'terminal:*'
   else
     primary_cycle_next_started_at="$(timestamp_ms)"
-    send_cycle_hotkey next
+    send_cycle_hotkey_with_ack next
     transition_pause "$host primary cycle next"
     log_debug "$host multi primary cycle next sent"
     if [[ "$host" == "iterm2" ]]; then
@@ -4655,7 +4705,7 @@ PY
       'browser:*'
   else
     primary_cycle_previous_started_at="$(timestamp_ms)"
-    send_cycle_hotkey previous
+    send_cycle_hotkey_with_ack previous
     transition_pause "$host primary cycle previous"
     log_debug "$host multi primary cycle previous sent"
     wait_for_condition "chrome_front_url" "$primary_docs_url"
@@ -4685,7 +4735,7 @@ PY
       'process:*' 'terminal:*'
   else
     secondary_cycle_next_started_at="$(timestamp_ms)"
-    send_cycle_hotkey next
+    send_cycle_hotkey_with_ack next
     transition_pause "$host secondary cycle next"
     log_debug "$host multi secondary cycle next sent"
     if [[ "$host" == "iterm2" ]]; then
@@ -4715,7 +4765,7 @@ PY
       'browser:*'
   else
     secondary_cycle_previous_started_at="$(timestamp_ms)"
-    send_cycle_hotkey previous
+    send_cycle_hotkey_with_ack previous
     transition_pause "$host secondary cycle previous"
     log_debug "$host multi secondary cycle previous sent"
     wait_for_condition "chrome_front_url" "$secondary_docs_url"

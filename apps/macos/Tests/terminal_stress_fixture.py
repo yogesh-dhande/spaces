@@ -28,7 +28,7 @@ PROMPT_COMMANDS = (
     "rg -n owner_first_input_ready apps/macos/Tests",
     "spaces terminal tail --lines 120 $SESSION_ID",
     "swift test --filter GhosttyEmbeddedSessionHostTests",
-    "sed -n '430,520p' apps/macos/Tests/e2e_terminal_mobile_scrollback_standalone.sh",
+    "apps/macos/Tests/e2e_mobile.sh --scenario scrollback",
 )
 TRANSCRIPT_ROLES = ("assistant", "tool", "stdout", "diff", "plan", "status")
 
