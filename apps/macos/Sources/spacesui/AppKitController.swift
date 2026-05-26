@@ -6156,7 +6156,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func reloadTapped() { reloadData() }
 
     @objc private func showMobileConnection() {
-        do { presentMobileConnectionPanel(try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService()) } catch { showError(error) }
+        presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService() }
+    }
+
+    private func presentMobileConnectionPanelOrShowError(_ loadResponse: () throws -> SpacesMobileBridgeControlResponse) {
+        do { presentMobileConnectionPanel(try loadResponse()) } catch {
+            if let unavailableResponse = mobileConnectionUnavailableResponse(for: error) {
+                presentMobileConnectionPanel(unavailableResponse)
+            } else {
+                showError(error)
+            }
+        }
+    }
+
+    private func mobileConnectionUnavailableResponse(for error: Error) -> SpacesMobileBridgeControlResponse? {
+        guard SpacesMobileBridgeControlClient.isControlEndpointUnavailable(error) else { return nil }
+        return SpacesMobileBridgeControlResponse(
+            ok: false,
+            message:
+                "Mobile bridge control is unavailable for this profile. Relaunch Spaces without the disabled bridge environment override, or use the standalone bridge from a terminal."
+        )
     }
 
     private func presentMobileConnectionPanel(_ response: SpacesMobileBridgeControlResponse) {
@@ -6268,6 +6287,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let openButton = actionButton(
             title: "Open Pairing Window", symbol: "qrcode", tooltip: "Open a five-minute mobile pairing window",
             action: #selector(openMobilePairingWindow), primary: true)
+        openButton.isEnabled = response.ok || response.status != nil
         let copyButton = actionButton(
             title: "Copy Link", symbol: "link", tooltip: "Copy the current pairing link", action: #selector(copyMobilePairingLink), primary: false)
         copyButton.isEnabled = pairingWindow != nil
@@ -6538,7 +6558,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     @objc private func openMobilePairingWindow() {
-        do { presentMobileConnectionPanel(try SpacesMobileBridgeControlClient.openPairingWindow()) } catch { showError(error) }
+        presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.openPairingWindow() }
     }
 
     @objc private func copyMobilePairingLink() {
@@ -6548,14 +6568,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func revokeMobileDevice(_ sender: NSButton) {
         guard let installationID = sender.identifier?.rawValue else { return }
-        do { presentMobileConnectionPanel(try SpacesMobileBridgeControlClient.revokeDevice(installationID: installationID)) } catch {
-            showError(error)
-        }
+        presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.revokeDevice(installationID: installationID) }
     }
 
-    @objc private func resetAllMobilePairings() {
-        do { presentMobileConnectionPanel(try SpacesMobileBridgeControlClient.resetAllPairings()) } catch { showError(error) }
-    }
+    @objc private func resetAllMobilePairings() { presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.resetAllPairings() } }
 
     private func qrImage(for value: String, size: CGFloat) -> NSImage? {
         let filter = CIFilter(name: "CIQRCodeGenerator")

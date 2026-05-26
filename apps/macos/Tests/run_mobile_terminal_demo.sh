@@ -80,7 +80,6 @@ stop_demo_workspace() {
     SPACES_DB_PATH="$spaces_db_path" \
     SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
-    SPACES_MOBILE_BRIDGE_DISABLED="1" \
     SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
     SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
     "$spacese2e" stop-workspace --workspace-dir "$project_dir" >/dev/null 2>&1 || true
@@ -122,7 +121,7 @@ stop_terminal_service() {
 }
 
 stop_mobile_bridge() {
-  if [[ -n "$bridge_pid" ]]; then
+  if [[ -n "$bridge_pid" && "$bridge_pid" != "$terminal_service_pid" ]]; then
     kill "$bridge_pid" >/dev/null 2>&1 || true
     wait "$bridge_pid" >/dev/null 2>&1 || true
     bridge_pid=""
@@ -343,59 +342,59 @@ raise SystemExit(f"bridge port not ready: {last_error}")
 PY
 }
 
-start_mobile_bridge() {
-  run_demo_env \
-    HOME="$temp_root/home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
-    SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
-    "$spaces_cli" mobile serve --host "$bridge_bind_host" --port "$bridge_port" --pairing-window-count 2 >"$bridge_log" 2>&1 &
-  bridge_pid=$!
-
-  local ready_deadline=$((SECONDS + 20))
-  while [[ $SECONDS -lt $ready_deadline ]]; do
-    if grep -q 'Spaces mobile bridge ready' "$bridge_log"; then
-      break
-    fi
-    if ! ps -p "$bridge_pid" >/dev/null 2>&1; then
-      echo "Mobile bridge exited before becoming ready." >&2
-      cat "$bridge_log" >&2 || true
-      exit 1
-    fi
-    sleep 0.2
-  done
-
-  if ! grep -q 'Spaces mobile bridge ready' "$bridge_log"; then
-    echo "Timed out waiting for mobile bridge readiness." >&2
+open_mobile_pairing_window() {
+  local window_json
+  if ! window_json="$(
+    run_demo_env \
+      HOME="$temp_root/home" \
+      SPACES_DB_PATH="$spaces_db_path" \
+      SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+      SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
+      SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
+      SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
+      "$spacese2e" open-mobile-pairing-window
+  )"; then
+    echo "Failed to open daemon mobile pairing window." >&2
     cat "$bridge_log" >&2 || true
     exit 1
   fi
 
   local parsed_status
   parsed_status="$(
-    python3 - "$bridge_log" <<'PY'
-import pathlib
-import re
+    python3 - "$window_json" <<'PY'
+import json
 import shlex
 import sys
-from urllib.parse import parse_qs, urlparse
 
-status_path = pathlib.Path(sys.argv[1])
-content = status_path.read_text(errors="replace")
-port_match = re.search(r"port=(\d+)", content)
-link_match = re.search(r"pairing_link=([^\t\n]+)", content)
-if not port_match or not link_match:
-    raise SystemExit(f"mobile serve did not include a port and pairing link: {status_path}")
-pairing_link = link_match.group(1)
-values = parse_qs(urlparse(pairing_link).query)
-print(f"bridge_port={shlex.quote(port_match.group(1))}")
-print(f"pairing_link={shlex.quote(pairing_link)}")
-print(f"pairing_code={shlex.quote(values['code'][0])}")
-print(f"pairing_nonce={shlex.quote(values['nonce'][0])}")
-print(f"transport_key={shlex.quote(values['psk'][0])}")
+payload = json.loads(sys.argv[1])
+print(f"bridge_port={shlex.quote(str(payload['port']))}")
+print(f"pairing_link={shlex.quote(payload['pairingLink'])}")
+print(f"pairing_code={shlex.quote(payload['pairingCode'])}")
+print(f"pairing_nonce={shlex.quote(payload['pairingNonce'])}")
+print(f"transport_key={shlex.quote(payload['transportKey'])}")
+print(f"expires_at={shlex.quote(payload['expiresAt'])}")
 PY
   )"
   eval "$parsed_status"
+  printf 'Spaces mobile pairing window\thost=%s\tport=%s\tpairing_link=%s\tpairing_code=%s\texpires_at=%s\n' \
+    "$bridge_bind_host" "$bridge_port" "$pairing_link" "$pairing_code" "$expires_at" >>"$bridge_log"
+}
+
+start_mobile_bridge() {
+  if ! run_demo_env \
+    HOME="$temp_root/home" \
+    SPACES_DB_PATH="$spaces_db_path" \
+    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+    SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
+    SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
+    SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
+    "$spaces_cli" mobile status >"$bridge_log" 2>&1; then
+    echo "Timed out waiting for daemon mobile bridge readiness." >&2
+    cat "$bridge_log" >&2 || true
+    exit 1
+  fi
+
+  open_mobile_pairing_window
 }
 
 discover_session_ids() {
@@ -447,7 +446,6 @@ open_demo_workspace_terminal() {
     SPACES_DB_PATH="$spaces_db_path" \
     SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
-    SPACES_MOBILE_BRIDGE_DISABLED="1" \
     SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
     SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
     "$spacese2e" open-workspace-terminal --workspace-dir "$project_dir"
@@ -470,46 +468,23 @@ print(str(uuid.uuid4()).upper())
 PY
 }
 
-pair_devices() {
-  local output_path="$1"
-  local ipad_installation_id="$2"
-  local iphone_installation_id="$3"
-  python3 - "$output_path" "$bridge_log" "$pairing_link" "$spaces_cli" "$bridge_host" "$transport_key" "$bundle_id" "$ipad_installation_id" "$iphone_installation_id" <<'PY'
+pair_device() {
+  local device_pairing_link="$1"
+  local installation_id="$2"
+  local device_name="$3"
+  python3 - "$device_pairing_link" "$spaces_cli" "$bridge_host" "$bundle_id" "$installation_id" "$device_name" <<'PY'
 import json
-import pathlib
-import re
 import subprocess
 import sys
-import time
 
 (
-    output_path,
-    bridge_log,
-    first_pairing_link,
+    pairing_link,
     spaces_cli,
     host,
-    transport_key,
     bundle_id,
-    ipad_installation_id,
-    iphone_installation_id,
+    installation_id,
+    device_name,
 ) = sys.argv[1:]
-bridge_log = pathlib.Path(bridge_log)
-
-def pairing_links():
-    text = bridge_log.read_text(errors="replace") if bridge_log.exists() else ""
-    links = re.findall(r"pairing_link=([^\t\n]+)", text)
-    if first_pairing_link and (not links or links[0] != first_pairing_link):
-        links.insert(0, first_pairing_link)
-    return links
-
-def wait_for_pairing_link(index):
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        links = pairing_links()
-        if len(links) > index:
-            return links[index]
-        time.sleep(0.1)
-    raise SystemExit(f"timed out waiting for pairing link {index + 1} in {bridge_log}")
 
 def send(pairing_link, request):
     completed = subprocess.run(
@@ -545,8 +520,21 @@ def pair(pairing_link, installation_id, device_name):
         raise SystemExit(f"pair failed for {device_name}: {response}")
     return response["issuedAuthToken"]
 
-ipad_token = pair(wait_for_pairing_link(0), ipad_installation_id, "iPad Pro 13-inch (M5)")
-iphone_token = pair(wait_for_pairing_link(1), iphone_installation_id, "iPhone 17 Pro")
+print(pair(pairing_link, installation_id, device_name))
+PY
+}
+
+write_pairing_json() {
+  local output_path="$1"
+  local ipad_installation_id="$2"
+  local ipad_token="$3"
+  local iphone_installation_id="$4"
+  local iphone_token="$5"
+  python3 - "$output_path" "$transport_key" "$ipad_installation_id" "$ipad_token" "$iphone_installation_id" "$iphone_token" <<'PY'
+import json
+import sys
+
+output_path, transport_key, ipad_installation_id, ipad_token, iphone_installation_id, iphone_token = sys.argv[1:]
 payload = {
     "ipad": {
         "installationID": ipad_installation_id,
@@ -680,7 +668,6 @@ export HOME=$(printf '%q' "$temp_root/home")
 export SPACES_DB_PATH=$(printf '%q' "$spaces_db_path")
 export SPACES_RUNTIME_DIR=$(printf '%q' "$spaces_runtime_dir")
 export SPACES_TERMINAL_SERVICE_EXECUTABLE=$(printf '%q' "$terminal_service")
-export SPACES_MOBILE_BRIDGE_DISABLED=1
 export SPACES_MOBILE_BRIDGE_HOST=$(printf '%q' "$bridge_bind_host")
 export SPACES_MOBILE_BRIDGE_PORT=$(printf '%q' "$bridge_port")
 export SPACES_MOBILE_PAIRING_LINK=$(printf '%q' "$pairing_link")
@@ -814,7 +801,6 @@ run_demo_env \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
-  SPACES_MOBILE_BRIDGE_DISABLED="1" \
   SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
   SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
   SPACES_GHOSTTYKIT_XCFRAMEWORK="$ghostty_xcframework" \
@@ -830,7 +816,6 @@ run_demo_env \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
-  SPACES_MOBILE_BRIDGE_DISABLED="1" \
   SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
   SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
   SPACES_PROJECT_DIR="$repo_root" \
@@ -899,6 +884,11 @@ fi
 start_mobile_bridge
 wait_for_bridge_port
 terminal_service_pid="$(discover_terminal_service_pid || true)"
+if [[ -z "$terminal_service_pid" ]]; then
+  echo "Failed to discover the terminal service process." >&2
+  exit 1
+fi
+bridge_pid="$terminal_service_pid"
 {
   echo "bind_host=$bridge_bind_host"
   echo "client_host=$bridge_host"
@@ -910,20 +900,12 @@ terminal_service_pid="$(discover_terminal_service_pid || true)"
 ipad_installation_id="$(generate_installation_id)"
 iphone_installation_id="$(generate_installation_id)"
 pairing_json="$temp_root/pairing.json"
-pair_devices "$pairing_json" "$ipad_installation_id" "$iphone_installation_id"
-
-ipad_token="$(python3 - "$pairing_json" <<'PY'
-import json
-import sys
-print(json.load(open(sys.argv[1]))["ipad"]["authToken"])
-PY
-)"
-iphone_token="$(python3 - "$pairing_json" <<'PY'
-import json
-import sys
-print(json.load(open(sys.argv[1]))["iphone"]["authToken"])
-PY
-)"
+ipad_pairing_link="$pairing_link"
+ipad_token="$(pair_device "$ipad_pairing_link" "$ipad_installation_id" "$ipad_name")"
+open_mobile_pairing_window
+iphone_pairing_link="$pairing_link"
+iphone_token="$(pair_device "$iphone_pairing_link" "$iphone_installation_id" "$iphone_name")"
+write_pairing_json "$pairing_json" "$ipad_installation_id" "$ipad_token" "$iphone_installation_id" "$iphone_token"
 
 write_simulator_settings "$ipad_udid" "$ipad_installation_id" "$ipad_token" "$ios_app_path"
 write_simulator_settings "$iphone_udid" "$iphone_installation_id" "$iphone_token" "$ios_app_path"

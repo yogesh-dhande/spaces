@@ -244,6 +244,8 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
             self.overview = overview
             connectionNotice = nil
             errorMessage = nil
+        } catch is CancellationError {
+            return
         } catch {
             if let recoveryMessage = SpacesMobileBridgeAuthentication.recoveryMessage(for: error) {
                 handleAuthenticationFailure(message: recoveryMessage)

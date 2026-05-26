@@ -95,6 +95,8 @@ let package = Package(
             dependencies: [
                 "workspacecore",
                 "systembridge",
+                "spacesmobilebridge",
+                "spacesmobilecore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ],
             path: "Sources/spacese2e"

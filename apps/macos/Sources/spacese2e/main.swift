@@ -2,6 +2,8 @@ import AppKit
 import ApplicationServices
 import ArgumentParser
 import Foundation
+import spacesmobilebridge
+import spacesmobilecore
 import spacesterminalcore
 import systembridge
 import workspacecore
@@ -21,7 +23,7 @@ struct MXE2ECommand: ParsableCommand {
             CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
             CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self,
             DumpTerminalSessionWindowStateCommand.self, StartTerminalSessionCommand.self, TerminateTerminalSessionCommand.self,
-            RecordScreenCommand.self, ScrollApplicationWindowCommand.self,
+            OpenMobilePairingWindowCommand.self, RecordScreenCommand.self, ScrollApplicationWindowCommand.self,
         ])
 }
 
@@ -189,6 +191,26 @@ private struct TerminateTerminalSessionCommand: ParsableCommand {
         guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session ID.") }
         try TerminalService.terminateSession(id: trimmedSessionID)
         try emitJSON(TerminatedTerminalSessionPayload(sessionID: trimmedSessionID, terminated: true))
+    }
+}
+
+private struct OpenMobilePairingWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "open-mobile-pairing-window")
+
+    @Option(name: .long) var timeoutSeconds: Double = 5
+
+    func run() throws {
+        _ = try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService(timeout: timeoutSeconds)
+        let response = try SpacesMobileBridgeControlClient.openPairingWindow(timeout: timeoutSeconds)
+        guard response.ok else { throw ValidationError(response.message) }
+        guard let status = response.status else { throw ValidationError("Mobile bridge response did not include address details.") }
+        guard let window = response.pairingWindow else { throw ValidationError("Mobile bridge response did not include a pairing window.") }
+        let link = try SpacesMobilePairingLink.parse(window.linkString)
+        try emitJSON(
+            MobilePairingWindowPayload(
+                host: status.host, port: status.port, bonjourServiceName: status.bonjourServiceName, pairingLink: window.linkString,
+                pairingCode: window.code, pairingNonce: window.nonce, transportKey: link.transportKey,
+                expiresAt: ISO8601DateFormatter().string(from: window.expiresAt), message: response.message))
     }
 }
 
@@ -968,6 +990,18 @@ private struct WorkspaceDumpPayload: Codable {
 private struct TerminatedTerminalSessionPayload: Codable {
     let sessionID: String
     let terminated: Bool
+}
+
+private struct MobilePairingWindowPayload: Codable {
+    let host: String
+    let port: Int
+    let bonjourServiceName: String
+    let pairingLink: String
+    let pairingCode: String
+    let pairingNonce: String
+    let transportKey: String
+    let expiresAt: String
+    let message: String
 }
 
 private struct WorkspaceSummaryPayload: Codable {
