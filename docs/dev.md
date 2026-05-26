@@ -89,7 +89,7 @@ git -C apps/macos/vendor/ghostty push origin HEAD:spaces
 git add apps/macos/vendor/ghostty
 ```
 
-PR checks run `apps/macos/scripts/setup_ghostty.sh --download-only --strict`, so a PR that points at a Ghostty SHA without a published `ghostty-artifacts-<sha>` release fails with an explicit setup error. The Ghostty Artifacts workflow runs on pushes and exits early when the matching release already exists. After the release is present, refresh local artifacts and run the normal verification pass:
+PR checks run `apps/macos/scripts/ensure_ghostty_artifacts.sh`, so existing `ghostty-artifacts-<sha>` releases are downloaded and validated before Swift verification starts. Same-repo PRs, manual PR-check runs, and pushes to `main` first run a non-cancelable trusted artifact publisher that builds from the pinned submodule and publishes a reusable release when the release is missing or incomplete; verification waits for that publisher and then downloads the artifact. Fork PRs build missing artifacts locally without publishing, and the main-push publisher creates the reusable release after merge. Trusted publish runs repair incomplete artifact releases by rebuilding and uploading the full asset set. After the release is present, refresh local artifacts and run the normal verification pass:
 
 ```bash
 git -C apps/macos/vendor/ghostty rev-parse HEAD
@@ -98,7 +98,7 @@ apps/macos/scripts/setup_ghostty.sh
 scripts/verify.sh
 ```
 
-Spaces app releases run `apps/macos/scripts/setup_ghostty.sh --build --strict`, so release builds consume the pinned submodule source instead of prebuilt PR artifacts. For uncommitted local Ghostty experiments, use `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty`; the generated manifest records the dirty source state and must not be used for PR or release workflows.
+Spaces app releases run `apps/macos/scripts/ensure_ghostty_artifacts.sh --publish-missing`, so release builds consume a valid prebuilt artifact release when available and build plus publish from the pinned submodule when the release is absent. For uncommitted local Ghostty experiments, use `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty`; the generated manifest records the dirty source state and must not be used for PR or release workflows.
 
 To validate the real in-process Ghostty owner renderer path in `SpacesApp`, launch the app normally with an isolated database root:
 

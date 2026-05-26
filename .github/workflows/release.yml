@@ -46,7 +46,9 @@ jobs:
           swift --version
 
       - name: Setup terminal build dependencies
-        run: apps/macos/scripts/setup_ghostty.sh --build --strict
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: apps/macos/scripts/ensure_ghostty_artifacts.sh --publish-missing
 
       - name: Resolve SwiftPM dependencies
         run: scripts/swiftpm.sh package resolve

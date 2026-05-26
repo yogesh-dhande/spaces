@@ -524,7 +524,7 @@ download_release_artifacts() {
         --pattern "libghostty-vt.tar.gz" \
         --pattern "manifest.json" \
         --pattern "SHA256SUMS"; then
-        die "missing Ghostty artifact release $release_tag in $ARTIFACT_REPO; run the Ghostty Artifacts workflow for submodule SHA $GHOSTTY_SHA"
+        die "missing Ghostty artifact release $release_tag in $ARTIFACT_REPO; use apps/macos/scripts/ensure_ghostty_artifacts.sh on a trusted workflow or build locally with --build"
     fi
 
     [[ -f "$tmp_dir/manifest.json" ]] || die "Ghostty artifact release $release_tag is missing manifest.json"

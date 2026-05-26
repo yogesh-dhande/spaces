@@ -25,8 +25,8 @@
 - The Ghostty fork is tracked as a git submodule at `apps/macos/vendor/ghostty` on the fork's `spaces` branch.
 - The submodule gitlink is the single source of truth for the Ghostty commit used by `GhosttyKit.xcframework` and `libghostty-vt`.
 - Edit Ghostty in `apps/macos/vendor/ghostty`, commit and push fork changes to the fork's `spaces` branch, then update the parent repo's submodule pointer in the normal Spaces pull request that depends on that Ghostty change.
-- PR checks consume Spaces-owned prebuilt artifacts from a GitHub release named `ghostty-artifacts-<full-ghostty-sha>` in this repo. The Ghostty Artifacts workflow runs on pushes and exits early when the matching release already exists.
-- Spaces app releases build Ghostty artifacts from the pinned submodule source before building the app.
+- PR checks and Spaces app releases consume Spaces-owned prebuilt artifacts from a GitHub release named `ghostty-artifacts-<full-ghostty-sha>` in this repo. Trusted same-repo PR, main-push, manual, and release workflows build from the pinned submodule and publish reusable artifacts when the matching release is missing or incomplete.
+- Fork PR checks build missing Ghostty artifacts locally without publishing reusable releases.
 - Local debugging may use `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty` for uncommitted Ghostty experiments, but Spaces PR and release workflows must use committed Ghostty fork work.
 
 ## Verification Rules
