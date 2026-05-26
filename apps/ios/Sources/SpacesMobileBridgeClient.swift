@@ -1,13 +1,13 @@
 import Darwin
 import Foundation
 import Network
-import UIKit
 import spacesmobilecore
 import spacesterminalcore
 
 enum SpacesMobileBridgeClientError: LocalizedError {
     case invalidEndpoint
     case requestFailed(String)
+    case transportAuthenticationFailed
     case missingOverview
     case streamFailed(String)
     case requestTimedOut
@@ -18,6 +18,8 @@ enum SpacesMobileBridgeClientError: LocalizedError {
             "The mobile bridge host or port is invalid."
         case .requestFailed(let message):
             message
+        case .transportAuthenticationFailed:
+            "The secure mobile bridge transport could not authenticate."
         case .missingOverview:
             "The mobile bridge did not return a workspace or terminal overview."
         case .streamFailed(let message):
@@ -43,12 +45,9 @@ struct SpacesMobileBridgeClient: Sendable {
         SpacesMobileBridgeCommandChannel(settings: settings, clientApp: clientAppIdentity)
     }
 
-    func pair(
-        pairingCode: String,
-        commandChannel: SpacesMobileBridgeCommandChannel? = nil
-    ) async throws -> String {
+    func pair(pairingLink: SpacesMobilePairingLink, commandChannel: SpacesMobileBridgeCommandChannel? = nil) async throws -> String {
         let response = try await sendRequest(
-            .init(command: "pair", pairingCode: pairingCode, clientApp: clientAppIdentity),
+            .init(command: "pair", pairingCode: pairingLink.code, pairingNonce: pairingLink.nonce, clientApp: clientAppIdentity),
             commandChannel: commandChannel
         )
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
@@ -207,13 +206,16 @@ struct SpacesMobileBridgeClient: Sendable {
         onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (Error?) -> Void
     ) throws -> SpacesMobileBridgeStreamHandle {
-        let connection = try makeConnection()
+        let endpoint = try makeConnection()
         let request = SpacesMobileBridgeRequest(
             command: "subscribe", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID, clientID: clientID
         )
         let queue = DispatchQueue(label: "spaces.mobile.bridge.stream.\(sessionID).\(clientID)")
-        StreamSubscription(connection: connection, request: request, onEvent: onEvent, onDisconnect: onDisconnect).start(on: queue)
-        return SpacesMobileBridgeStreamHandle { connection.cancel() }
+        StreamSubscription(
+            connection: endpoint.connection, host: endpoint.host, port: endpoint.port, request: request, onEvent: onEvent, onDisconnect: onDisconnect
+        )
+        .start(on: queue)
+        return SpacesMobileBridgeStreamHandle { endpoint.connection.cancel() }
     }
 
     private func sendRequest(_ request: SpacesMobileBridgeRequest, timeout: Duration = .seconds(3)) async throws -> SpacesMobileBridgeResponse {
@@ -239,11 +241,13 @@ struct SpacesMobileBridgeClient: Sendable {
         }
     }
 
-    private func makeConnection() throws -> NWConnection {
-        guard let port = NWEndpoint.Port(rawValue: UInt16(settings.port)), !settings.trimmedHost.isEmpty else {
+    private func makeConnection() throws -> (connection: NWConnection, host: String, port: NWEndpoint.Port) {
+        let host = settings.trimmedHost
+        guard let port = NWEndpoint.Port(rawValue: UInt16(settings.port)), !host.isEmpty else {
             throw SpacesMobileBridgeClientError.invalidEndpoint
         }
-        return NWConnection(host: NWEndpoint.Host(settings.trimmedHost), port: port, using: .tcp)
+        let parameters = try SpacesMobileBridgeTransport.parameters(transportKey: settings.transportKey, role: .client)
+        return (NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters), host, port)
     }
 
     private var clientAppIdentity: SpacesMobileClientApp {
@@ -251,7 +255,7 @@ struct SpacesMobileBridgeClient: Sendable {
             installationID: settings.installationID,
             bundleID: Bundle.main.bundleIdentifier ?? SpacesMobileFirstPartyPolicy.allowedBundleID,
             platform: "ios",
-            deviceName: UIDevice.current.name,
+            deviceName: ProcessInfo.processInfo.hostName,
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
         )
     }
@@ -261,22 +265,23 @@ struct SpacesMobileBridgeClient: Sendable {
 actor SpacesMobileBridgeCommandChannel {
     private let host: String
     private let port: Int
+    private let transportKey: String
     private let clientApp: SpacesMobileClientApp
     private let authToken: String?
-    private var socketFD: Int32 = -1
+    private let queue = DispatchQueue(label: "spaces.mobile.bridge.command")
+    private var connection: NWConnection?
 
     init(settings: SpacesMobileConnectionSettings, clientApp: SpacesMobileClientApp) {
         host = settings.trimmedHost
         port = settings.port
+        transportKey = settings.transportKey
         authToken = settings.trimmedAuthToken
         self.clientApp = clientApp
     }
 
     func close() {
-        guard socketFD >= 0 else { return }
-        shutdown(socketFD, SHUT_RDWR)
-        Darwin.close(socketFD)
-        socketFD = -1
+        connection?.cancel()
+        connection = nil
     }
 
     func send(request: SpacesMobileBridgeRequest, timeout: Duration) async throws -> SpacesMobileBridgeResponse {
@@ -287,6 +292,7 @@ actor SpacesMobileBridgeCommandChannel {
                 command: request.command,
                 authToken: authToken,
                 pairingCode: request.pairingCode,
+                pairingNonce: request.pairingNonce,
                 clientApp: request.clientApp ?? clientApp,
                 sessionID: request.sessionID,
                 clientID: request.clientID,
@@ -300,10 +306,10 @@ actor SpacesMobileBridgeCommandChannel {
                 appendNewline: request.appendNewline
             )
         }
-        let socketFD = try connectIfNeeded(timeout: timeout)
+        let connection = try await connectIfNeeded(timeout: timeout)
         do {
-            try Self.writeAll(data: encodeBridgeRequestLine(request), to: socketFD)
-            let responseData = try Self.readLine(from: socketFD)
+            try await Self.send(data: encodeBridgeRequestLine(request), on: connection, timeout: timeout)
+            let responseData = try await Self.readLine(from: connection, timeout: timeout)
             return try SpacesMobileBridgeCodec.decodeResponse(responseData)
         } catch {
             close()
@@ -311,112 +317,247 @@ actor SpacesMobileBridgeCommandChannel {
         }
     }
 
-    private func connectIfNeeded(timeout: Duration) throws -> Int32 {
-        if socketFD >= 0 {
-            try Self.applySocketTimeouts(socketFD, timeout: timeout)
-            return socketFD
+    private func connectIfNeeded(timeout: Duration) async throws -> NWConnection {
+        if let connection { return connection }
+        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw SpacesMobileBridgeClientError.invalidEndpoint }
+        let parameters = try SpacesMobileBridgeTransport.parameters(transportKey: transportKey, role: .client)
+        let createdConnection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
+        do {
+            try await SpacesMobileBridgeConnectionSupport.waitUntilReady(createdConnection, queue: queue, timeout: timeout)
+        } catch {
+            createdConnection.cancel()
+            if SpacesMobileBridgeConnectionSupport.isRequestTimedOut(error),
+                await SpacesMobileBridgeConnectionSupport.canOpenPlainTCPConnection(host: host, port: nwPort, timeout: .milliseconds(750))
+            {
+                throw SpacesMobileBridgeClientError.transportAuthenticationFailed
+            }
+            throw error
         }
+        connection = createdConnection
+        return createdConnection
+    }
 
-        var hints = addrinfo(
-            ai_flags: AI_NUMERICSERV,
-            ai_family: AF_UNSPEC,
-            ai_socktype: SOCK_STREAM,
-            ai_protocol: IPPROTO_TCP,
-            ai_addrlen: 0,
-            ai_canonname: nil,
-            ai_addr: nil,
-            ai_next: nil
-        )
-        let portString = String(port)
-        var addressInfo: UnsafeMutablePointer<addrinfo>?
-        let result = getaddrinfo(host, portString, &hints, &addressInfo)
-        guard result == 0, let firstAddress = addressInfo else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        defer { freeaddrinfo(firstAddress) }
-
-        var currentAddress: UnsafeMutablePointer<addrinfo>? = firstAddress
-        var lastError: Error = POSIXError(.ECONNREFUSED)
-        while let address = currentAddress {
-            let candidateFD = socket(address.pointee.ai_family, address.pointee.ai_socktype, address.pointee.ai_protocol)
-            if candidateFD >= 0 {
-                do {
-                    try Self.setNoSIGPIPE(candidateFD)
-                    try Self.applySocketTimeouts(candidateFD, timeout: timeout)
-                    let connectResult = Darwin.connect(candidateFD, address.pointee.ai_addr, address.pointee.ai_addrlen)
-                    if connectResult == 0 {
-                        socketFD = candidateFD
-                        return candidateFD
+    private static func send(data: Data, on connection: NWConnection, timeout: Duration) async throws {
+        try await SpacesMobileBridgeConnectionSupport.withTimeout(timeout) {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                let resume = OneShotContinuation(continuation)
+                connection.send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed { error in
+                    if let error {
+                        resume.resume(throwing: error)
+                    } else {
+                        resume.resume(returning: ())
                     }
-                    lastError = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-                } catch {
-                    lastError = error
+                })
+            }
+        }
+    }
+
+    private static func readLine(from connection: NWConnection, timeout: Duration) async throws -> Data {
+        try await SpacesMobileBridgeConnectionSupport.withTimeout(timeout) {
+            try await readLineAccumulating(from: connection, data: Data())
+        }
+    }
+
+    private static func readLineAccumulating(from connection: NWConnection, data: Data) async throws -> Data {
+        if let newlineIndex = data.firstIndex(of: 0x0A) {
+            return Data(data.prefix(upTo: newlineIndex))
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            let resume = OneShotContinuation(continuation)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
+                if let error {
+                    resume.resume(throwing: error)
+                    return
                 }
-                Darwin.close(candidateFD)
-            } else {
-                lastError = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-            }
-            currentAddress = address.pointee.ai_next
-        }
-        throw lastError
-    }
-
-    private static func applySocketTimeouts(_ socketFD: Int32, timeout: Duration) throws {
-        var timeValue = timeout.timeval
-        guard setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeValue, socklen_t(MemoryLayout<timeval>.size)) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        timeValue = timeout.timeval
-        guard setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, &timeValue, socklen_t(MemoryLayout<timeval>.size)) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-    }
-
-    private static func setNoSIGPIPE(_ socketFD: Int32) throws {
-        var yes: Int32 = 1
-        guard setsockopt(socketFD, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-    }
-
-    private static func writeAll(data: Data, to socketFD: Int32) throws {
-        try data.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else { return }
-            var bytesRemaining = rawBuffer.count
-            var offset = 0
-            while bytesRemaining > 0 {
-                let written = Darwin.write(socketFD, baseAddress.advanced(by: offset), bytesRemaining)
-                if written < 0 {
-                    if errno == EINTR { continue }
-                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                var nextData = data
+                if let content, !content.isEmpty { nextData.append(content) }
+                if let newlineIndex = nextData.firstIndex(of: 0x0A) {
+                    resume.resume(returning: Data(nextData.prefix(upTo: newlineIndex)))
+                    return
                 }
-                bytesRemaining -= written
-                offset += written
+                if isComplete {
+                    if nextData.isEmpty {
+                        resume.resume(throwing: SpacesMobileBridgeClientError.requestFailed("The mobile bridge connection was cancelled."))
+                    } else {
+                        resume.resume(returning: nextData)
+                    }
+                    return
+                }
+                Task {
+                    do {
+                        resume.resume(returning: try await readLineAccumulating(from: connection, data: nextData))
+                    } catch {
+                        resume.resume(throwing: error)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private enum SpacesMobileBridgeConnectionSupport {
+    static func waitUntilReady(_ connection: NWConnection, queue: DispatchQueue, timeout: Duration) async throws {
+        try await withTimeout(timeout) {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                let resume = OneShotContinuation(continuation)
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        resume.resume(returning: ())
+                    case .failed(let error):
+                        resume.resume(throwing: error)
+                    case .cancelled:
+                        resume.resume(throwing: SpacesMobileBridgeClientError.requestFailed("The mobile bridge connection was cancelled."))
+                    default:
+                        break
+                    }
+                }
+                connection.start(queue: queue)
             }
         }
     }
 
-    private static func readLine(from socketFD: Int32) throws -> Data {
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while true {
-            if let newlineIndex = data.firstIndex(of: 0x0A) {
-                let line = data.prefix(upTo: newlineIndex)
-                return Data(line)
-            }
-            let count = Darwin.read(socketFD, &buffer, buffer.count)
-            if count == 0 {
-                if data.isEmpty {
-                    throw SpacesMobileBridgeClientError.requestFailed("The mobile bridge connection was cancelled.")
-                }
-                return data
-            }
-            if count < 0 {
-                if errno == EINTR { continue }
-                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-            }
-            data.append(buffer, count: count)
+    static func canOpenPlainTCPConnection(host: String, port: NWEndpoint.Port, timeout: Duration) async -> Bool {
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
+        do {
+            try await waitUntilReady(connection, queue: DispatchQueue(label: "spaces.mobile.bridge.tcp-probe"), timeout: timeout)
+            connection.cancel()
+            return true
+        } catch {
+            connection.cancel()
+            return false
         }
+    }
+
+    static func isRequestTimedOut(_ error: Error) -> Bool {
+        if case SpacesMobileBridgeClientError.requestTimedOut = error { return true }
+        return false
+    }
+
+    static func pendingSecureConnectionTimeoutError(host: String, port: NWEndpoint.Port) async -> Error {
+        if await canOpenPlainTCPConnection(host: host, port: port, timeout: .milliseconds(750)) {
+            return SpacesMobileBridgeClientError.transportAuthenticationFailed
+        }
+        return SpacesMobileBridgeClientError.streamFailed("Timed out waiting for terminal state.")
+    }
+
+    static func withTimeout<T: Sendable>(_ timeout: Duration, operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        let timeoutState = TimeoutOperationHolder<T>()
+        return try await withTaskCancellationHandler {
+            if Task.isCancelled { throw CancellationError() }
+            return try await withCheckedThrowingContinuation { continuation in
+                let operationState = TimeoutOperation(continuation)
+                timeoutState.set(operationState)
+
+                let operationTask = Task {
+                    do {
+                        operationState.resume(returning: try await operation())
+                    } catch {
+                        operationState.resume(throwing: error)
+                    }
+                }
+                operationState.addTask(operationTask)
+
+                let timeoutTask = Task {
+                    do {
+                        try await Task.sleep(for: timeout)
+                    } catch {
+                        return
+                    }
+                    operationState.resume(throwing: SpacesMobileBridgeClientError.requestTimedOut)
+                }
+                operationState.addTask(timeoutTask)
+            }
+        } onCancel: {
+            timeoutState.cancel()
+        }
+    }
+}
+
+private final class TimeoutOperationHolder<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var operation: TimeoutOperation<T>?
+
+    func set(_ operation: TimeoutOperation<T>) {
+        lock.lock()
+        self.operation = operation
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        let operation = operation
+        self.operation = nil
+        lock.unlock()
+        operation?.resume(throwing: CancellationError())
+    }
+}
+
+private final class TimeoutOperation<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, any Error>?
+    private var tasks: [Task<Void, Never>] = []
+
+    init(_ continuation: CheckedContinuation<T, any Error>) {
+        self.continuation = continuation
+    }
+
+    func addTask(_ task: Task<Void, Never>) {
+        lock.lock()
+        let shouldCancel = continuation == nil
+        if !shouldCancel { tasks.append(task) }
+        lock.unlock()
+        if shouldCancel { task.cancel() }
+    }
+
+    func resume(returning value: T) {
+        finish { continuation in
+            continuation.resume(returning: value)
+        }
+    }
+
+    func resume(throwing error: any Error) {
+        finish { continuation in
+            continuation.resume(throwing: error)
+        }
+    }
+
+    private func finish(_ resume: (CheckedContinuation<T, any Error>) -> Void) {
+        lock.lock()
+        guard let continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        let tasks = tasks
+        self.tasks = []
+        lock.unlock()
+
+        for task in tasks { task.cancel() }
+        resume(continuation)
+    }
+}
+
+private final class OneShotContinuation<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, any Error>?
+
+    init(_ continuation: CheckedContinuation<T, any Error>) { self.continuation = continuation }
+
+    func resume(returning value: T) {
+        lock.lock()
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: value)
+    }
+
+    func resume(throwing error: any Error) {
+        lock.lock()
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(throwing: error)
     }
 }
 
@@ -442,19 +583,26 @@ private final class StreamSubscription: @unchecked Sendable {
     private static let initialEventTimeout: Duration = .seconds(3)
 
     private let connection: NWConnection
+    private let host: String
+    private let port: NWEndpoint.Port
     private let request: SpacesMobileBridgeRequest
     private let lifecycle: StreamLifecycle
     private let onEvent: @MainActor (GhosttyRemoteSessionStatePayload) -> Void
     private var buffer = Data()
     private var decodedState = false
+    private var connectionReady = false
 
     init(
         connection: NWConnection,
+        host: String,
+        port: NWEndpoint.Port,
         request: SpacesMobileBridgeRequest,
         onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (Error?) -> Void
     ) {
         self.connection = connection
+        self.host = host
+        self.port = port
         self.request = request
         self.onEvent = onEvent
         lifecycle = StreamLifecycle(onDisconnect: onDisconnect)
@@ -463,12 +611,30 @@ private final class StreamSubscription: @unchecked Sendable {
     func start(on queue: DispatchQueue) {
         queue.asyncAfter(deadline: .now() + Self.initialEventTimeout.timeInterval) { [weak self] in
             guard let self, !decodedState else { return }
-            lifecycle.finish(error: SpacesMobileBridgeClientError.streamFailed("Timed out waiting for terminal state."))
-            connection.cancel()
+            guard !connectionReady else {
+                lifecycle.finish(error: SpacesMobileBridgeClientError.streamFailed("Timed out waiting for terminal state."))
+                connection.cancel()
+                return
+            }
+            let host = host
+            let port = port
+            Task { [weak self] in
+                let error = await SpacesMobileBridgeConnectionSupport.pendingSecureConnectionTimeoutError(host: host, port: port)
+                queue.async { [weak self] in
+                    guard let self, !decodedState else { return }
+                    if connectionReady {
+                        lifecycle.finish(error: SpacesMobileBridgeClientError.streamFailed("Timed out waiting for terminal state."))
+                    } else {
+                        lifecycle.finish(error: error)
+                    }
+                    connection.cancel()
+                }
+            }
         }
         connection.stateUpdateHandler = { [self] state in
             switch state {
             case .ready:
+                connectionReady = true
                 sendInitialRequest()
             case .failed(let error):
                 lifecycle.finish(error: error)

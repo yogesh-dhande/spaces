@@ -184,6 +184,7 @@ payload = {
     "host": bridge_host,
     "port": bridge_port,
     "authToken": ipad_pairing["authToken"],
+    "transportKey": ipad_pairing["transportKey"],
     "installationID": ipad_pairing["installationID"],
     "renderDumpPath": str(demo_root / "roundtrip-standalone-ipad-render.json"),
     "eventLogPath": str(demo_root / "roundtrip-standalone-ipad-events.jsonl"),

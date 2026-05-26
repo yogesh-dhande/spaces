@@ -8,6 +8,7 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
     var host: String = defaultHost
     var port: Int = defaultPort
     var authToken: String = ""
+    var transportKey: String = ""
     var installationID: String = UUID().uuidString.uppercased()
 
     var trimmedHost: String { host.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -15,9 +16,13 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         let trimmed = authToken.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
+    var trimmedTransportKey: String? {
+        let trimmed = transportKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 
     var isValid: Bool { !trimmedHost.isEmpty && (1...65535).contains(port) }
-    var isPaired: Bool { trimmedAuthToken != nil }
+    var isPaired: Bool { trimmedAuthToken != nil && trimmedTransportKey != nil }
 
     static var defaultHost: String {
         SpacesMobileBridgeEndpointDefaults.loopbackHost
@@ -27,6 +32,7 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         case host
         case port
         case authToken
+        case transportKey
         case installationID
     }
 
@@ -37,6 +43,9 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         if migrated.port == Self.legacyDefaultPort {
             migrated.port = Self.defaultPort
         }
+        if migrated.trimmedTransportKey == nil {
+            migrated.authToken = ""
+        }
         return migrated
     }
 
@@ -45,6 +54,7 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         host = try container.decodeIfPresent(String.self, forKey: .host) ?? Self.defaultHost
         port = try container.decodeIfPresent(Int.self, forKey: .port) ?? Self.defaultPort
         authToken = try container.decodeIfPresent(String.self, forKey: .authToken) ?? ""
+        transportKey = try container.decodeIfPresent(String.self, forKey: .transportKey) ?? ""
         installationID = try container.decodeIfPresent(String.self, forKey: .installationID) ?? UUID().uuidString.uppercased()
     }
 
@@ -53,6 +63,7 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         try container.encode(host, forKey: .host)
         try container.encode(port, forKey: .port)
         try container.encode(authToken, forKey: .authToken)
+        try container.encode(transportKey, forKey: .transportKey)
         try container.encode(installationID, forKey: .installationID)
     }
 }

@@ -1,10 +1,11 @@
 import Foundation
 import XCTest
+import spacesmobilecore
 
 @testable import spacesmobilebridge
 
 final class SpacesMobileBridgeSettingsStoreTests: XCTestCase {
-    func testLoadOrCreatePersistsStableDefaultEndpointAndPairingCode() throws {
+    func testLoadOrCreatePersistsStableDefaultEndpointAndTransportKey() throws {
         try withTemporaryProfile { _ in
             let store = SpacesMobileBridgeSettingsStore()
 
@@ -14,25 +15,87 @@ final class SpacesMobileBridgeSettingsStoreTests: XCTestCase {
             XCTAssertEqual(created.host, SpacesMobileBridgeDefaults.host)
             XCTAssertEqual(created.port, SpacesMobileBridgeDefaults.port)
             XCTAssertEqual(reloaded, created)
-            XCTAssertEqual(created.pairingCode.count, 6)
+            XCTAssertFalse(created.transportKey.isEmpty)
+            XCTAssertNoThrow(try SpacesMobileBridgeTransport.decodeTransportKey(created.transportKey))
         }
     }
 
-    func testEnvironmentOverridesEndpointAndPairingCodeWithoutChangingStoredDefaults() throws {
+    func testEnvironmentOverridesEndpointAndTransportKeyWithoutChangingStoredDefaults() throws {
         try withTemporaryProfile { _ in
+            let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
             let environment = [
                 SpacesMobileBridgeDefaults.hostEnvironmentVariable: "127.0.0.1", SpacesMobileBridgeDefaults.portEnvironmentVariable: "51234",
-                SpacesMobileBridgeDefaults.pairingCodeEnvironmentVariable: "246810",
+                SpacesMobileBridgeDefaults.transportKeyEnvironmentVariable: transportKey,
             ]
             let overridden = try SpacesMobileBridgeSettingsStore(environment: environment).loadOrCreate()
             let stored = try SpacesMobileBridgeSettingsStore().loadOrCreate()
 
             XCTAssertEqual(overridden.host, "127.0.0.1")
             XCTAssertEqual(overridden.port, 51_234)
-            XCTAssertEqual(overridden.pairingCode, "246810")
+            XCTAssertEqual(overridden.transportKey, transportKey)
             XCTAssertEqual(stored.host, SpacesMobileBridgeDefaults.host)
             XCTAssertEqual(stored.port, SpacesMobileBridgeDefaults.port)
-            XCTAssertNotEqual(stored.pairingCode, "246810")
+            XCTAssertNotEqual(stored.transportKey, transportKey)
+        }
+    }
+
+    func testRotateTransportKeyPersistsNewKey() throws {
+        try withTemporaryProfile { _ in
+            let store = SpacesMobileBridgeSettingsStore()
+            let original = try store.loadOrCreate()
+            let rotated = try store.rotateTransportKey()
+
+            XCTAssertEqual(rotated.host, original.host)
+            XCTAssertEqual(rotated.port, original.port)
+            XCTAssertNotEqual(rotated.transportKey, original.transportKey)
+            XCTAssertEqual(try SpacesMobileBridgeSettingsStore().loadOrCreate(), rotated)
+        }
+    }
+
+    func testRotateTransportKeyDoesNotPersistEnvironmentEndpointOverrides() throws {
+        try withTemporaryProfile { _ in
+            let environment = [
+                SpacesMobileBridgeDefaults.hostEnvironmentVariable: "127.0.0.1", SpacesMobileBridgeDefaults.portEnvironmentVariable: "51234",
+            ]
+            let store = SpacesMobileBridgeSettingsStore(environment: environment)
+            let originalStored = try SpacesMobileBridgeSettingsStore().loadOrCreate()
+
+            let rotated = try store.rotateTransportKey()
+            let stored = try SpacesMobileBridgeSettingsStore().loadOrCreate()
+
+            XCTAssertEqual(rotated.host, "127.0.0.1")
+            XCTAssertEqual(rotated.port, 51_234)
+            XCTAssertEqual(stored.host, originalStored.host)
+            XCTAssertEqual(stored.port, originalStored.port)
+            XCTAssertNotEqual(stored.transportKey, originalStored.transportKey)
+        }
+    }
+
+    func testStableFallbackPortsAreDeterministicForProfile() throws {
+        try withTemporaryProfile { _ in
+            let store = SpacesMobileBridgeSettingsStore()
+
+            let first = try store.stableFallbackPorts(limit: 8)
+            let second = try SpacesMobileBridgeSettingsStore().stableFallbackPorts(limit: 8)
+
+            XCTAssertEqual(first, second)
+            XCTAssertEqual(Set(first).count, first.count)
+            XCTAssertTrue(
+                first.allSatisfy {
+                    $0 >= SpacesMobileBridgeSettingsStore.stableFallbackPortBase
+                        && $0 < SpacesMobileBridgeSettingsStore.stableFallbackPortBase + SpacesMobileBridgeSettingsStore.stableFallbackPortCount
+                })
+        }
+    }
+
+    func testUpdatePortPersistsStoredPort() throws {
+        try withTemporaryProfile { _ in
+            let store = SpacesMobileBridgeSettingsStore()
+
+            let updated = try store.updatePort(48_123)
+
+            XCTAssertEqual(updated.port, 48_123)
+            XCTAssertEqual(try SpacesMobileBridgeSettingsStore().loadOrCreate().port, 48_123)
         }
     }
 

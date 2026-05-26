@@ -5,20 +5,28 @@ struct ConnectionSettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var settings: SpacesMobileConnectionSettings
-    @State private var pairingCode = ""
+    @State private var pairingLinkText = ""
+    @State private var pendingPairingLink: SpacesMobilePairingLink?
+    @State private var isConfirmingPairing = false
     @State private var isPairing = false
     @State private var errorMessage: String?
     @State private var discovery = SpacesMobileBridgeDiscovery()
+    private let initialPairingLink: SpacesMobilePairingLink?
     let noticeMessage: String?
+    let onPairingLinkConsumed: () -> Void
     let onSave: (SpacesMobileConnectionSettings) -> Void
 
     init(
         initialSettings: SpacesMobileConnectionSettings,
+        initialPairingLink: SpacesMobilePairingLink? = nil,
         noticeMessage: String? = nil,
+        onPairingLinkConsumed: @escaping () -> Void = {},
         onSave: @escaping (SpacesMobileConnectionSettings) -> Void
     ) {
         _settings = State(initialValue: initialSettings)
+        self.initialPairingLink = initialPairingLink
         self.noticeMessage = noticeMessage
+        self.onPairingLinkConsumed = onPairingLinkConsumed
         self.onSave = onSave
     }
 
@@ -64,20 +72,17 @@ struct ConnectionSettingsView: View {
                     }
                 }
 
-                Section("Authentication") {
-                    LabeledContent("Bundle") {
-                        Text(SpacesMobileFirstPartyPolicy.allowedBundleID)
-                            .foregroundStyle(.secondary)
-                    }
+                Section("Pairing") {
                     LabeledContent("Status") {
                         Text(settings.isPaired ? "Paired" : "Not Paired")
                             .foregroundStyle(settings.isPaired ? .green : .secondary)
                     }
-                    SecureField("Pairing Code", text: $pairingCode)
+                    TextField("Paste Pairing Link", text: $pairingLinkText, axis: .vertical)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .lineLimit(2...4)
                     Button {
-                        Task { await pairDevice() }
+                        confirmPastedPairingLink()
                     } label: {
                         if isPairing {
                             ProgressView()
@@ -85,7 +90,7 @@ struct ConnectionSettingsView: View {
                             Text(settings.isPaired ? "Re-Pair This Device" : "Pair This Device")
                         }
                     }
-                    .disabled(!settings.isValid || pairingCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isPairing)
+                    .disabled(isPairing || pairingLinkText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                     if let noticeMessage {
                         Text(noticeMessage)
@@ -101,9 +106,7 @@ struct ConnectionSettingsView: View {
                 }
 
                 Section("Defaults") {
-                    Text(
-                        "Run `spaces mobile status` on your Mac for the pairing code. Spaces stores the issued device credential and reuses it automatically."
-                    )
+                    Text("Scan the QR code from the Mac app or paste the full pairing link. Nearby Macs can still be selected for the saved endpoint.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -121,8 +124,27 @@ struct ConnectionSettingsView: View {
                     .disabled(!settings.isValid)
                 }
             }
+            .confirmationDialog(
+                pendingPairingLink.map { "Pair with \($0.name)?" } ?? "Pair Device?",
+                isPresented: $isConfirmingPairing,
+                titleVisibility: .visible
+            ) {
+                Button("Pair") {
+                    guard let pendingPairingLink else { return }
+                    Task { await pairDevice(using: pendingPairingLink) }
+                }
+                Button("Cancel", role: .cancel) { pendingPairingLink = nil }
+            } message: {
+                if let pendingPairingLink {
+                    Text("\(pendingPairingLink.host):\(pendingPairingLink.port)")
+                }
+            }
             .task {
                 discovery.start()
+                applyIncomingPairingLink(initialPairingLink)
+            }
+            .onChange(of: initialPairingLink) { _, newValue in
+                applyIncomingPairingLink(newValue)
             }
             .onDisappear {
                 discovery.stop()
@@ -130,28 +152,50 @@ struct ConnectionSettingsView: View {
         }
     }
 
-    @MainActor private func pairDevice() async {
+    @MainActor private func applyIncomingPairingLink(_ pairingLink: SpacesMobilePairingLink?) {
+        guard let pairingLink else { return }
+        pairingLinkText = pairingLink.absoluteString
+        pendingPairingLink = pairingLink
+        errorMessage = nil
+        isConfirmingPairing = true
+        onPairingLinkConsumed()
+    }
+
+    @MainActor private func confirmPastedPairingLink() {
+        do {
+            pendingPairingLink = try SpacesMobilePairingLink.parse(pairingLinkText)
+            errorMessage = nil
+            isConfirmingPairing = true
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor private func pairDevice(using pairingLink: SpacesMobilePairingLink) async {
         guard !isPairing else { return }
         isPairing = true
         defer { isPairing = false }
         do {
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings)
+            var pairedSettings = settings
+            pairedSettings.host = pairingLink.host
+            pairedSettings.port = pairingLink.port
+            pairedSettings.transportKey = pairingLink.transportKey
+            let bridgeClient = SpacesMobileBridgeClient(settings: pairedSettings)
             let commandChannel = bridgeClient.makeCommandChannel()
             let issuedAuthToken: String
             do {
-                issuedAuthToken = try await bridgeClient.pair(
-                    pairingCode: pairingCode.trimmingCharacters(in: .whitespacesAndNewlines),
-                    commandChannel: commandChannel
-                )
+                issuedAuthToken = try await bridgeClient.pair(pairingLink: pairingLink, commandChannel: commandChannel)
             } catch {
                 await commandChannel.close()
                 throw error
             }
             await commandChannel.close()
-            settings.authToken = issuedAuthToken
-            pairingCode = ""
+            pairedSettings.authToken = issuedAuthToken
+            settings = pairedSettings
+            pairingLinkText = ""
+            pendingPairingLink = nil
             errorMessage = nil
-            onSave(settings)
+            onSave(pairedSettings)
             dismiss()
         } catch {
             errorMessage = error.localizedDescription

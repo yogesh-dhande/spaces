@@ -30,8 +30,13 @@ struct ContentView: View {
                     }
                 }
         }
-        .sheet(isPresented: connectionSettingsBinding) {
-            ConnectionSettingsView(initialSettings: model.settings, noticeMessage: model.connectionNotice) { settings in
+        .sheet(isPresented: connectionSettingsBinding, onDismiss: { model.clearPendingPairingLink() }) {
+            ConnectionSettingsView(
+                initialSettings: model.settings,
+                initialPairingLink: model.pendingPairingLink,
+                noticeMessage: model.connectionNotice,
+                onPairingLinkConsumed: { model.clearPendingPairingLink() }
+            ) { settings in
                 model.applyConnectionSettings(settings)
                 Task { await model.refresh() }
             }
@@ -71,6 +76,9 @@ struct ContentView: View {
                 try? await Task.sleep(for: .milliseconds(300))
                 model.handleAuthenticationFailure(message: message)
             }
+        }
+        .onOpenURL { url in
+            model.preparePairingLink(url)
         }
     }
 

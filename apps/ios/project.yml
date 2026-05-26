@@ -33,12 +33,8 @@ targets:
         "ARCHS[sdk=iphonesimulator*]": arm64
         "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         TARGETED_DEVICE_FAMILY: "1,2"
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Spaces
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Spaces connects to your Mac's first-party terminal bridge.
-        INFOPLIST_KEY_NSBonjourServices:
-          - _spaces-mobile._tcp.
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Info.plist
         DEVELOPMENT_ASSET_PATHS: ""
     dependencies:
       - package: SpacesPackage

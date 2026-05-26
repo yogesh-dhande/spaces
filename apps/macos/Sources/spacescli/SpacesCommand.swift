@@ -236,26 +236,37 @@ struct TerminalProxyCommand: ParsableCommand {
 struct MobileCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mobile", abstract: "Expose first-party workspace and terminal browsing for the iOS client.",
-        subcommands: [MobileStatusCommand.self, MobileServeCommand.self], defaultSubcommand: MobileStatusCommand.self)
+        subcommands: [MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self], defaultSubcommand: MobileStatusCommand.self)
 }
 
 struct MobileStatusCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "status", abstract: "Show the first-party mobile bridge address and pairing code.")
+    static let configuration = CommandConfiguration(commandName: "status", abstract: "Show the first-party mobile bridge address.")
 
-    func run() throws {
-        _ = try TerminalService.ensureRunning()
-        let status = try SpacesMobileBridgeSettingsStore().status()
-        print("Spaces mobile bridge")
-        print("port=\(status.port)")
-        print("pairing_code=\(status.pairingCode)")
-        print("bonjour=\(status.bonjourServiceName)\ttype=\(status.bonjourServiceType)")
-        if status.networkAddresses.isEmpty {
-            print("addresses=(none)")
-        } else {
-            print("addresses=\(status.networkAddresses.map { "\($0):\(status.port)" }.joined(separator: ","))")
-        }
-        print("iphone=Open Spaces on iPhone, choose \(status.bonjourServiceName) under Nearby Macs, then enter the pairing code.")
+    func run() throws { for line in try mobileStatusLines() { print(line) } }
+}
+
+func mobileStatusLines(
+    loadControlResponse: () throws -> SpacesMobileBridgeControlResponse = {
+        try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService()
     }
+) throws -> [String] {
+    let response = try loadControlResponse()
+    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+    guard let status = response.status else {
+        throw WorkspaceError.invalidArgument(message: "Mobile bridge status response did not include address details.")
+    }
+    return mobileStatusLines(status: status)
+}
+
+func mobileStatusLines(status: SpacesMobileBridgeStatus) -> [String] {
+    var lines = ["Spaces mobile bridge", "port=\(status.port)", "bonjour=\(status.bonjourServiceName)\ttype=\(status.bonjourServiceType)"]
+    if status.networkAddresses.isEmpty {
+        lines.append("addresses=(none)")
+    } else {
+        lines.append("addresses=\(status.networkAddresses.map { "\($0):\(status.port)" }.joined(separator: ","))")
+    }
+    lines.append("iphone=Open Mobile Connection in the Mac app to show a QR code or pairing link.")
+    return lines
 }
 
 struct MobileServeCommand: ParsableCommand {
@@ -264,22 +275,67 @@ struct MobileServeCommand: ParsableCommand {
     @Option(name: .long, help: "TCP host to bind. Defaults to all IPv4 interfaces for iPhone and simulator access.") var host =
         SpacesMobileBridgeDefaults.host
     @Option(name: .long, help: "TCP port to bind. Defaults to the stable first-party mobile bridge port.") var port = SpacesMobileBridgeDefaults.port
-    @Option(name: .long, help: "One-time pairing code accepted by the first-party iOS client. Defaults to a generated 6-digit code.") var pairingCode:
+    @Option(name: .long, help: "One-time pairing code accepted by the first-party iOS client. Defaults to a generated 8-digit code.") var pairingCode:
         String?
+    @Option(name: .long, help: "Number of one-time pairing windows to emit in standalone harness mode.") var pairingWindowCount = 1
 
     func run() throws {
+        guard pairingWindowCount > 0 else { throw ValidationError("--pairing-window-count must be greater than zero.") }
         let trimmedPairingCode = pairingCode?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedPairingCode =
-            if let trimmedPairingCode, !trimmedPairingCode.isEmpty { trimmedPairingCode } else { SpacesMobileBridgeServer.generatePairingCode() }
-        let server = try SpacesMobileBridgeServer(host: host, port: port, pairingCode: resolvedPairingCode)
+            if let trimmedPairingCode, !trimmedPairingCode.isEmpty { trimmedPairingCode } else {
+                SpacesMobilePairingCoordinator.generatePairingCode()
+            }
+        let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+        let pairingWindowEmitter = MobileServePairingWindowEmitter(
+            bindHost: host, totalWindowCount: pairingWindowCount, firstPairingCode: resolvedPairingCode)
+        let server = try SpacesMobileBridgeServer(host: host, port: port, transportKey: transportKey) { _ in
+            pairingWindowEmitter.openNextWindow(label: "Spaces mobile pairing window")
+        }
+        pairingWindowEmitter.server = server
         try server.start()
-        print(
-            "Spaces mobile bridge ready\thost=\(host)\tport=\(server.listeningPort)\tpairing_code=\(resolvedPairingCode)\tbundle=\(SpacesMobileFirstPartyPolicy.allowedBundleID)"
-        )
-        fflush(stdout)
+        pairingWindowEmitter.linkHost = mobileServePairingLinkHost(host: host)
+        pairingWindowEmitter.openNextWindow(label: "Spaces mobile bridge ready")
         withExtendedLifetime(server) { dispatchMain() }
     }
 }
+
+private final class MobileServePairingWindowEmitter: @unchecked Sendable {
+    weak var server: SpacesMobileBridgeServer?
+    var linkHost = SpacesMobileBridgeDefaults.loopbackHost
+
+    private let lock = NSLock()
+    private let bindHost: String
+    private let totalWindowCount: Int
+    private var emittedWindowCount = 0
+    private var nextPairingCode: String?
+
+    init(bindHost: String, totalWindowCount: Int, firstPairingCode: String) {
+        self.bindHost = bindHost
+        self.totalWindowCount = totalWindowCount
+        nextPairingCode = firstPairingCode
+    }
+
+    func openNextWindow(label: String) {
+        lock.lock()
+        guard emittedWindowCount < totalWindowCount, let server else {
+            lock.unlock()
+            return
+        }
+        emittedWindowCount += 1
+        let code = nextPairingCode ?? SpacesMobilePairingCoordinator.generatePairingCode()
+        nextPairingCode = nil
+        lock.unlock()
+
+        let window = server.openPairingWindow(host: linkHost, name: "Spaces Standalone", code: code)
+        print(
+            "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(ISO8601DateFormatter().string(from: window.expiresAt))\tbundle=\(SpacesMobileFirstPartyPolicy.allowedBundleID)"
+        )
+        fflush(stdout)
+    }
+}
+
+func mobileServePairingLinkHost(host: String) -> String { SpacesMobileBridgeNetworkInterfaces.pairingLinkHost(boundHost: host) }
 
 struct ImportCommand: ParsableCommand {
     static let configuration = CommandConfiguration(

@@ -1,105 +1,206 @@
 import Darwin
 import Dispatch
 import Foundation
+import Network
 import spacesmobilecore
 import spacesterminalcore
 import workspacecore
 
+protocol SpacesMobilePairingStoreProtocol: Sendable {
+    func issueToken(for clientApp: SpacesMobileClientApp) throws -> String
+    func listDevices() throws -> [SpacesMobilePairedDevice]
+    func revoke(installationID: String) throws
+    func removeAll() throws
+    func authorize(clientApp: SpacesMobileClientApp?, authToken: String?) throws
+    func validate(clientApp: SpacesMobileClientApp) throws
+}
+
+extension SpacesMobilePairingStore: SpacesMobilePairingStoreProtocol {}
+
 public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private struct StreamRelay {
+        let installationID: String
         let relaySocketFD: Int32
         let relayQueue: DispatchQueue
         let relaySource: DispatchSourceRead
         let heartbeatTimer: DispatchSourceTimer?
+        let connection: NWConnection
     }
 
     private final class RequestConnection: @unchecked Sendable {
-        private let clientFD: Int32
+        fileprivate let connection: NWConnection
         private let server: SpacesMobileBridgeServer
+        private let peerID: String
         private var buffer = Data()
-        private var shouldCloseClient = true
+        private var didSubscribe = false
+        private var didReceiveEOF = false
 
-        init(clientFD: Int32, server: SpacesMobileBridgeServer) {
-            self.clientFD = clientFD
+        init(connection: NWConnection, server: SpacesMobileBridgeServer) {
+            self.connection = connection
             self.server = server
+            peerID = String(describing: connection.endpoint)
         }
 
-        func run() {
-            defer {
-                server.trace("request_connection_close client_fd=\(clientFD) should_close=\(shouldCloseClient)")
-                if shouldCloseClient {
-                    shutdown(clientFD, SHUT_RDWR)
-                    close(clientFD)
+        func start(on queue: DispatchQueue) {
+            connection.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    self.server.trace("request_connection_ready peer=\(self.peerID)")
+                    self.receiveNext()
+                case .failed(let error):
+                    self.server.trace("request_connection_failed peer=\(self.peerID) error=\(error)")
+                    self.server.closeStreamRelay(connection: self.connection)
+                    self.server.closeRequestConnection(connection: self.connection)
+                    self.connection.cancel()
+                case .cancelled:
+                    self.server.trace("request_connection_cancelled peer=\(self.peerID)")
+                    self.server.closeStreamRelay(connection: self.connection)
+                    self.server.closeRequestConnection(connection: self.connection)
+                default: break
                 }
+            }
+            connection.start(queue: queue)
+        }
+
+        private func receiveNext() {
+            guard !didSubscribe else { return }
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] content, _, isComplete, error in
+                guard let self else { return }
+                if let content, !content.isEmpty { self.buffer.append(content) }
+                if let error {
+                    self.server.trace("request_receive_error peer=\(self.peerID) error=\(error)")
+                    self.connection.cancel()
+                    return
+                }
+                if isComplete { self.didReceiveEOF = true }
+                if !self.buffer.isEmpty || self.didReceiveEOF {
+                    self.processBufferedLines()
+                    return
+                }
+                self.receiveNext()
+            }
+        }
+
+        private func processBufferedLines() {
+            guard !didSubscribe else { return }
+            guard server.acceptingRequests else {
+                connection.cancel()
+                return
+            }
+            guard let newlineIndex = buffer.firstIndex(of: 0x0A) else {
+                if didReceiveEOF {
+                    if !buffer.isEmpty { server.trace("request_incomplete peer=\(peerID) bytes=\(buffer.count)") }
+                    connection.cancel()
+                } else {
+                    receiveNext()
+                }
+                return
+            }
+
+            let line = Data(buffer.prefix(upTo: newlineIndex))
+            buffer.removeSubrange(...newlineIndex)
+            guard !line.isEmpty else {
+                processBufferedLines()
+                return
             }
 
             do {
-                while let requestData = try readNextRequest() {
-                    let request = try SpacesMobileBridgeCodec.decodeRequest(requestData)
-                    server.trace(
-                        "request_received client_fd=\(clientFD) command=\(request.command) session=\(request.sessionID ?? "-") client=\(request.clientID ?? request.client?.id ?? "-")"
-                    )
-                    try server.authorize(request)
-                    guard request.command != "subscribe" else {
-                        server.trace("request_subscribe client_fd=\(clientFD) session=\(request.sessionID ?? "-")")
-                        try server.queue.sync { try server.handleSubscribeRequest(request, clientFD: clientFD) }
-                        shouldCloseClient = false
+                let request = try SpacesMobileBridgeCodec.decodeRequest(line)
+                server.trace(
+                    "request_received peer=\(peerID) command=\(request.command) session=\(request.sessionID ?? "-") client=\(request.clientID ?? request.client?.id ?? "-")"
+                )
+                try server.authorize(request)
+                guard request.command != "subscribe" else {
+                    didSubscribe = true
+                    try server.handleSubscribeRequest(request, connection: connection)
+                    return
+                }
+                let response = try server.handleRequest(request, peerID: peerID)
+                server.sendResponse(response, to: connection) { [weak self] error in
+                    guard let self else { return }
+                    if let error {
+                        self.server.trace("request_response_error peer=\(self.peerID) error=\(error)")
+                        self.connection.cancel()
                         return
                     }
-                    let response = try server.handleRequest(request)
-                    server.trace(
-                        "request_response client_fd=\(clientFD) command=\(request.command) ok=\(response.ok) message=\(response.message.replacingOccurrences(of: "\n", with: "\\n"))"
-                    )
-                    try server.writeResponse(response, to: clientFD)
+                    self.processBufferedLines()
                 }
             } catch {
-                server.trace("request_error client_fd=\(clientFD) error=\(String(describing: error).replacingOccurrences(of: "\n", with: "\\n"))")
-                let response = SpacesMobileBridgeResponse(ok: false, message: String(describing: error))
-                try? server.writeResponse(response, to: clientFD)
+                server.trace("request_error peer=\(peerID) error=\(String(describing: error).replacingOccurrences(of: "\n", with: "\\n"))")
+                let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                server.sendResponse(SpacesMobileBridgeResponse(ok: false, message: message), to: connection) { [weak self] _ in
+                    self?.connection.cancel()
+                }
             }
         }
+    }
 
-        private func readNextRequest() throws -> Data? {
-            while true {
-                if let newlineIndex = buffer.firstIndex(of: 0x0A) {
-                    let line = buffer.prefix(upTo: newlineIndex)
-                    buffer.removeSubrange(...newlineIndex)
-                    if line.isEmpty { continue }
-                    return Data(line)
-                }
+    private final class StartupSignal: @unchecked Sendable {
+        private let lock = NSLock()
+        private let semaphore = DispatchSemaphore(value: 0)
+        private var result: Result<Void, Error>?
 
-                var readBuffer = [UInt8](repeating: 0, count: 4096)
-                let count = read(clientFD, &readBuffer, readBuffer.count)
-                if count == 0 {
-                    if buffer.isEmpty { return nil }
-                    defer { buffer.removeAll(keepingCapacity: false) }
-                    return Data(buffer)
-                }
-                if count < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-                buffer.append(readBuffer, count: count)
-            }
+        func signal(_ result: Result<Void, Error>) {
+            lock.lock()
+            let shouldSignal = self.result == nil
+            if shouldSignal { self.result = result }
+            lock.unlock()
+            if shouldSignal { semaphore.signal() }
+        }
+
+        func wait(timeout: TimeInterval) -> Result<Void, Error> {
+            guard semaphore.wait(timeout: .now() + timeout) == .success else { return .failure(POSIXError(.ETIMEDOUT)) }
+            lock.lock()
+            let result = self.result ?? .failure(POSIXError(.EIO))
+            lock.unlock()
+            return result
         }
     }
 
     private let host: String
     private let port: Int
-    private let pairingCode: String
-    private let pairingStore: SpacesMobilePairingStore
+    private let transportKey: String
+    private let pairingCoordinator: SpacesMobilePairingCoordinator
+    private let pairingStore: any SpacesMobilePairingStoreProtocol
+    private let onPairingSucceeded: (@Sendable (SpacesMobileClientApp) -> Void)?
     private let queue: DispatchQueue
+    private let queueKey = DispatchSpecificKey<Void>()
     private let stateLock = NSLock()
     private let traceEnabled = ProcessInfo.processInfo.environment["SPACES_MOBILE_BRIDGE_TRACE"] == "1"
 
-    private var listenSocketFD: Int32 = -1
-    private var acceptSource: DispatchSourceRead?
-    private var streamRelays: [Int32: StreamRelay] = [:]
+    private var listener: NWListener?
+    private var requestConnections: [ObjectIdentifier: RequestConnection] = [:]
+    private var streamRelays: [ObjectIdentifier: StreamRelay] = [:]
     private var running = false
+    private var acceptingRequests = false
 
-    public init(host: String, port: Int, pairingCode: String, pairingStore: SpacesMobilePairingStore? = nil) throws {
+    public init(
+        host: String, port: Int, transportKey: String, pairingCoordinator: SpacesMobilePairingCoordinator = SpacesMobilePairingCoordinator(),
+        pairingStore: SpacesMobilePairingStore? = nil, onPairingSucceeded: (@Sendable (SpacesMobileClientApp) -> Void)? = nil
+    ) throws {
         self.host = host
         self.port = port
-        self.pairingCode = pairingCode
+        self.transportKey = transportKey
+        self.pairingCoordinator = pairingCoordinator
+        self.onPairingSucceeded = onPairingSucceeded
         if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesMobilePairingStore() }
         queue = DispatchQueue(label: "spaces.mobile.bridge")
+        queue.setSpecific(key: queueKey, value: ())
+    }
+
+    init(
+        host: String, port: Int, transportKey: String, pairingCoordinator: SpacesMobilePairingCoordinator = SpacesMobilePairingCoordinator(),
+        pairingStoreProtocol: any SpacesMobilePairingStoreProtocol, onPairingSucceeded: (@Sendable (SpacesMobileClientApp) -> Void)? = nil
+    ) {
+        self.host = host
+        self.port = port
+        self.transportKey = transportKey
+        self.pairingCoordinator = pairingCoordinator
+        self.pairingStore = pairingStoreProtocol
+        self.onPairingSucceeded = onPairingSucceeded
+        queue = DispatchQueue(label: "spaces.mobile.bridge")
+        queue.setSpecific(key: queueKey, value: ())
     }
 
     public private(set) var listeningPort: Int = 0
@@ -111,105 +212,124 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         return value
     }
 
-    public static func generatePairingCode() -> String { String(format: "%06d", Int.random(in: 0...999_999)) }
-
-    public func start() throws {
-        let socketFD = socket(AF_INET, SOCK_STREAM, 0)
-        guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-
-        var yes: Int32 = 1
-        setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
-        try setNoSIGPIPE(socketFD)
-
-        var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = in_port_t(UInt16(port).bigEndian)
-        guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
-            close(socketFD)
-            throw POSIXError(.EADDRNOTAVAIL)
-        }
-
-        let bindResult = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                bind(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard bindResult == 0 else {
-            let code = POSIXErrorCode(rawValue: errno) ?? .EIO
-            close(socketFD)
-            throw POSIXError(code)
-        }
-
-        guard listen(socketFD, 64) == 0 else {
-            let code = POSIXErrorCode(rawValue: errno) ?? .EIO
-            close(socketFD)
-            throw POSIXError(code)
-        }
-        try setNonBlocking(socketFD)
-
-        listeningPort = try Self.resolveListeningPort(socketFD: socketFD)
-        listenSocketFD = socketFD
-        let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
-        source.setEventHandler { [weak self] in self?.acceptReadyConnections() }
-        source.setCancelHandler { [weak self] in
-            guard let self else { return }
-            if self.listenSocketFD >= 0 { close(self.listenSocketFD) }
-            self.listenSocketFD = -1
-            self.setRunning(false)
-        }
-        acceptSource = source
-        source.resume()
-        setRunning(true)
+    var requestConnectionCountForTesting: Int {
+        if DispatchQueue.getSpecific(key: queueKey) != nil { return requestConnections.count }
+        return queue.sync { requestConnections.count }
     }
 
-    public func stop() {
-        queue.async {
-            for clientFD in Array(self.streamRelays.keys) { self.closeStreamRelay(clientFD: clientFD) }
-            self.acceptSource?.cancel()
-            self.acceptSource = nil
+    public func start(timeout: TimeInterval = 5) throws {
+        let nwPort = try Self.nwPort(port)
+        let parameters = try SpacesMobileBridgeTransport.parameters(transportKey: transportKey, role: .server)
+        if !SpacesMobileBridgeDefaults.isWildcardHost(host) {
+            parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: nwPort)
         }
-    }
 
-    private func acceptReadyConnections() {
-        while true {
-            let clientFD = accept(listenSocketFD, nil, nil)
-            if clientFD < 0 {
-                if errno == EWOULDBLOCK || errno == EAGAIN { return }
+        let createdListener = try NWListener(using: parameters, on: nwPort)
+        let startup = StartupSignal()
+
+        createdListener.newConnectionHandler = { [weak self] connection in
+            guard let self else {
+                connection.cancel()
                 return
             }
-            do {
-                trace("request_connection_accept client_fd=\(clientFD)")
-                try setNoSIGPIPE(clientFD)
-                try setBlocking(clientFD)
-                let requestQueue = DispatchQueue(label: "spaces.mobile.bridge.request.\(clientFD)")
-                requestQueue.async { [weak self] in
-                    guard let self else {
-                        shutdown(clientFD, SHUT_RDWR)
-                        close(clientFD)
-                        return
-                    }
-                    RequestConnection(clientFD: clientFD, server: self).run()
-                }
-            } catch {
-                trace(
-                    "request_connection_accept_error client_fd=\(clientFD) error=\(String(describing: error).replacingOccurrences(of: "\n", with: "\\n"))"
-                )
-                let response = SpacesMobileBridgeResponse(ok: false, message: String(describing: error))
-                try? writeResponse(response, to: clientFD)
-                shutdown(clientFD, SHUT_RDWR)
-                close(clientFD)
+            guard self.acceptingRequests else {
+                connection.cancel()
+                return
             }
+            self.trace("request_connection_accept peer=\(String(describing: connection.endpoint))")
+            let requestConnection = RequestConnection(connection: connection, server: self)
+            self.requestConnections[ObjectIdentifier(connection)] = requestConnection
+            requestConnection.start(on: self.queue)
+        }
+        createdListener.stateUpdateHandler = { [weak self, weak createdListener] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.listeningPort = Int(createdListener?.port?.rawValue ?? UInt16(self.port))
+                self.acceptingRequests = true
+                self.setRunning(true)
+                startup.signal(.success(()))
+            case .failed(let error):
+                self.acceptingRequests = false
+                self.setRunning(false)
+                startup.signal(.failure(error))
+            case .cancelled:
+                self.acceptingRequests = false
+                self.setRunning(false)
+            default: break
+            }
+        }
+        listener = createdListener
+        createdListener.start(queue: queue)
+
+        switch startup.wait(timeout: timeout) {
+        case .success: break
+        case .failure(let error):
+            createdListener.stateUpdateHandler = nil
+            createdListener.newConnectionHandler = nil
+            createdListener.cancel()
+            throw error
         }
     }
 
-    private func handleRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+    public func stop() { queue.async { self.stopOnQueue() } }
+
+    func listPairedDevices() throws -> [SpacesMobilePairedDevice] { try syncOnQueue { try self.pairingStore.listDevices() } }
+
+    func revokePairing(installationID: String) throws -> [SpacesMobilePairedDevice] {
+        try syncOnQueue {
+            try self.pairingStore.revoke(installationID: installationID)
+            self.closeStreamRelaysOnQueue(forInstallationID: installationID)
+            return try self.pairingStore.listDevices()
+        }
+    }
+
+    func resetPairingsAndStop() throws {
+        try syncOnQueue {
+            self.stopOnQueue()
+            try self.pairingStore.removeAll()
+        }
+    }
+
+    public func closeStreamRelays(forInstallationID installationID: String) {
+        let normalizedID = installationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedID.isEmpty else { return }
+
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            closeStreamRelaysOnQueue(forInstallationID: normalizedID)
+        } else {
+            queue.sync { self.closeStreamRelaysOnQueue(forInstallationID: normalizedID) }
+        }
+    }
+
+    public func openPairingWindow(host linkHost: String, name: String, duration: TimeInterval = SpacesMobilePairingCoordinator.defaultWindowDuration)
+        -> SpacesMobilePairingWindow
+    {
+        pairingCoordinator.openWindow(
+            host: linkHost, port: listeningPort > 0 ? listeningPort : port, transportKey: transportKey, name: name, duration: duration)
+    }
+
+    public func openPairingWindow(
+        host linkHost: String, name: String, duration: TimeInterval = SpacesMobilePairingCoordinator.defaultWindowDuration, code: String,
+        nonce: String? = nil
+    ) -> SpacesMobilePairingWindow {
+        pairingCoordinator.openWindow(
+            host: linkHost, port: listeningPort > 0 ? listeningPort : port, transportKey: transportKey, name: name, duration: duration, code: code,
+            nonce: nonce)
+    }
+
+    public func pairingWindowSnapshot() -> SpacesMobilePairingWindowSnapshot? { pairingCoordinator.snapshot() }
+
+    private func handleRequest(_ request: SpacesMobileBridgeRequest, peerID: String) throws -> SpacesMobileBridgeResponse {
         switch request.command {
         case "pair":
             guard let clientApp = request.clientApp else {
                 return SpacesMobileBridgeResponse(ok: false, message: SpacesMobilePairingError.missingClientApp.localizedDescription)
             }
-            let issuedToken = try pairingStore.issueToken(for: clientApp, pairingCode: request.pairingCode ?? "", expectedPairingCode: pairingCode)
+            try pairingStore.validate(clientApp: clientApp)
+            try pairingCoordinator.validate(code: request.pairingCode, nonce: request.pairingNonce, peerID: peerID)
+            let issuedToken = try pairingStore.issueToken(for: clientApp)
+            onPairingSucceeded?(clientApp)
             return SpacesMobileBridgeResponse(ok: true, message: "Paired iOS client.", issuedAuthToken: issuedToken)
         case "ping": return SpacesMobileBridgeResponse(ok: true, message: "pong")
         case "overview": return SpacesMobileBridgeResponse(ok: true, message: "Loaded mobile overview.", overview: try loadOverview())
@@ -272,30 +392,33 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         return SpacesMobileBridgeResponse(ok: true, message: "Loaded terminal state.", sessionState: payload)
     }
 
-    private func handleSubscribeRequest(_ request: SpacesMobileBridgeRequest, clientFD: Int32) throws {
+    private func handleSubscribeRequest(_ request: SpacesMobileBridgeRequest, connection: NWConnection) throws {
         guard let sessionID = request.sessionID else {
-            try writeResponse(SpacesMobileBridgeResponse(ok: false, message: "Missing session ID."), to: clientFD)
-            shutdown(clientFD, SHUT_RDWR)
-            close(clientFD)
+            sendResponse(SpacesMobileBridgeResponse(ok: false, message: "Missing session ID."), to: connection) { _ in connection.cancel() }
+            return
+        }
+        guard let installationID = request.clientApp?.installationID.trimmingCharacters(in: .whitespacesAndNewlines), !installationID.isEmpty else {
+            sendResponse(SpacesMobileBridgeResponse(ok: false, message: "Missing mobile installation ID."), to: connection) { _ in connection.cancel()
+            }
             return
         }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         guard FileManager.default.fileExists(atPath: paths.subscriptionSocketPath) else {
-            try writeResponse(
-                SpacesMobileBridgeResponse(ok: false, message: "Terminal session '\(sessionID)' has no live state stream."), to: clientFD)
-            shutdown(clientFD, SHUT_RDWR)
-            close(clientFD)
+            sendResponse(SpacesMobileBridgeResponse(ok: false, message: "Terminal session '\(sessionID)' has no live state stream."), to: connection)
+            { _ in connection.cancel() }
             return
         }
 
         let startedAt = Date()
         let relaySocketFD = try connectUnixSocket(path: paths.subscriptionSocketPath)
         try setNonBlocking(relaySocketFD)
-        try setNonBlocking(clientFD)
 
-        let relayQueue = DispatchQueue(label: "spaces.mobile.bridge.stream.\(sessionID).\(clientFD)")
+        let relayQueue = DispatchQueue(label: "spaces.mobile.bridge.stream.\(sessionID).\(ObjectIdentifier(connection))")
         let relaySource = DispatchSource.makeReadSource(fileDescriptor: relaySocketFD, queue: relayQueue)
-        relaySource.setEventHandler { [weak self] in self?.relayStateData(from: relaySocketFD, to: clientFD) }
+        relaySource.setEventHandler { [weak self, weak connection] in
+            guard let self, let connection else { return }
+            self.relayStateData(from: relaySocketFD, to: connection)
+        }
         relaySource.setCancelHandler { close(relaySocketFD) }
 
         let heartbeatTimer: DispatchSourceTimer?
@@ -311,8 +434,9 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             heartbeatTimer = nil
         }
 
-        streamRelays[clientFD] = StreamRelay(
-            relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource, heartbeatTimer: heartbeatTimer)
+        streamRelays[ObjectIdentifier(connection)] = StreamRelay(
+            installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource,
+            heartbeatTimer: heartbeatTimer, connection: connection)
 
         relaySource.resume()
         heartbeatTimer?.resume()
@@ -321,35 +445,75 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             "mobile_bridge_subscribe", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
     }
 
-    private func relayStateData(from relaySocketFD: Int32, to clientFD: Int32) {
+    private func relayStateData(from relaySocketFD: Int32, to connection: NWConnection) {
         var buffer = [UInt8](repeating: 0, count: 4096)
         while true {
             let count = read(relaySocketFD, &buffer, buffer.count)
             if count == 0 {
-                queue.async { [weak self] in self?.closeStreamRelay(clientFD: clientFD) }
+                queue.async { [weak self, weak connection] in
+                    guard let self, let connection else { return }
+                    self.closeStreamRelay(connection: connection)
+                }
                 return
             }
             if count < 0 {
                 if errno == EWOULDBLOCK || errno == EAGAIN { return }
-                queue.async { [weak self] in self?.closeStreamRelay(clientFD: clientFD) }
+                queue.async { [weak self, weak connection] in
+                    guard let self, let connection else { return }
+                    self.closeStreamRelay(connection: connection)
+                }
                 return
             }
             let data = Data(buffer.prefix(count))
-            if !Self.writeAll(data: data, to: clientFD) {
-                queue.async { [weak self] in self?.closeStreamRelay(clientFD: clientFD) }
-                return
-            }
+            connection.send(
+                content: data, contentContext: .defaultMessage, isComplete: false,
+                completion: .contentProcessed { [weak self] error in
+                    guard let error else { return }
+                    self?.trace("stream_relay_send_error error=\(error)")
+                    self?.queue.async { [weak self, weak connection] in
+                        guard let self, let connection else { return }
+                        self.closeStreamRelay(connection: connection)
+                    }
+                })
         }
     }
 
-    private func closeStreamRelay(clientFD: Int32) {
-        guard let relay = streamRelays.removeValue(forKey: clientFD) else { return }
-        trace("stream_relay_close client_fd=\(clientFD)")
+    private func closeStreamRelay(connection: NWConnection) {
+        guard let relay = streamRelays.removeValue(forKey: ObjectIdentifier(connection)) else { return }
+        trace("stream_relay_close peer=\(String(describing: connection.endpoint))")
         relay.heartbeatTimer?.cancel()
         relay.relaySource.cancel()
         shutdown(relay.relaySocketFD, SHUT_RDWR)
-        shutdown(clientFD, SHUT_RDWR)
-        close(clientFD)
+        connection.cancel()
+    }
+
+    private func closeRequestConnection(connection: NWConnection) {
+        requestConnections.removeValue(forKey: ObjectIdentifier(connection))
+        trace("request_connection_closed active=\(requestConnections.count)")
+    }
+
+    private func closeStreamRelaysOnQueue(forInstallationID installationID: String) {
+        let normalizedID = installationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedID.isEmpty else { return }
+        let connections = streamRelays.values.filter { $0.installationID == normalizedID }.map(\.connection)
+        for connection in connections { closeStreamRelay(connection: connection) }
+    }
+
+    private func stopOnQueue() {
+        acceptingRequests = false
+        for relay in Array(streamRelays.values) { closeStreamRelay(connection: relay.connection) }
+        for connection in Array(requestConnections.values.map(\.connection)) { connection.cancel() }
+        requestConnections.removeAll()
+        listener?.stateUpdateHandler = nil
+        listener?.newConnectionHandler = nil
+        listener?.cancel()
+        listener = nil
+        setRunning(false)
+    }
+
+    private func syncOnQueue<T>(_ work: () throws -> T) throws -> T {
+        if DispatchQueue.getSpecific(key: queueKey) != nil { return try work() }
+        return try queue.sync(execute: work)
     }
 
     private func connectUnixSocket(path: String) throws -> Int32 {
@@ -442,22 +606,18 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             transcriptTail: nil, outputByteCount: outputData?.count, outputData: outputData)
     }
 
-    private func writeResponse(_ response: SpacesMobileBridgeResponse, to fileDescriptor: Int32) throws {
-        var data = try SpacesMobileBridgeCodec.encodeResponse(response)
-        data.append(0x0A)
-        try writeAll(data: data, to: fileDescriptor)
+    private func sendResponse(_ response: SpacesMobileBridgeResponse, to connection: NWConnection, completion: @escaping @Sendable (Error?) -> Void) {
+        do {
+            var data = try SpacesMobileBridgeCodec.encodeResponse(response)
+            data.append(0x0A)
+            connection.send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed(completion))
+        } catch { completion(error) }
     }
 
     private func setNonBlocking(_ fileDescriptor: Int32) throws {
         let currentFlags = fcntl(fileDescriptor, F_GETFL)
         guard currentFlags >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         guard fcntl(fileDescriptor, F_SETFL, currentFlags | O_NONBLOCK) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-    }
-
-    private func setBlocking(_ fileDescriptor: Int32) throws {
-        let currentFlags = fcntl(fileDescriptor, F_GETFL)
-        guard currentFlags >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        guard fcntl(fileDescriptor, F_SETFL, currentFlags & ~O_NONBLOCK) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
     private func setNoSIGPIPE(_ fileDescriptor: Int32) throws {
@@ -467,51 +627,9 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         }
     }
 
-    private static func resolveListeningPort(socketFD: Int32) throws -> Int {
-        var address = sockaddr_in()
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let result = withUnsafeMutablePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in getsockname(socketFD, sockaddrPointer, &length) }
-        }
-        guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        return Int(UInt16(bigEndian: address.sin_port))
-    }
-
-    private func writeAll(data: Data, to fileDescriptor: Int32) throws {
-        try data.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else { return }
-            var bytesRemaining = rawBuffer.count
-            var offset = 0
-            while bytesRemaining > 0 {
-                let written = write(fileDescriptor, baseAddress.advanced(by: offset), bytesRemaining)
-                if written < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-                bytesRemaining -= written
-                offset += written
-            }
-        }
-    }
-
-    private static func writeAll(data: Data, to fileDescriptor: Int32) -> Bool {
-        do {
-            try data.withUnsafeBytes { rawBuffer in
-                guard let baseAddress = rawBuffer.baseAddress else { return }
-                var bytesRemaining = rawBuffer.count
-                var offset = 0
-                while bytesRemaining > 0 {
-                    let written = write(fileDescriptor, baseAddress.advanced(by: offset), bytesRemaining)
-                    if written < 0 {
-                        if errno == EWOULDBLOCK || errno == EAGAIN {
-                            Thread.sleep(forTimeInterval: 0.005)
-                            continue
-                        }
-                        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-                    }
-                    bytesRemaining -= written
-                    offset += written
-                }
-            }
-            return true
-        } catch { return false }
+    private static func nwPort(_ port: Int) throws -> NWEndpoint.Port {
+        guard (0...65_535).contains(port), let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw POSIXError(.EINVAL) }
+        return nwPort
     }
 
     private func trace(_ message: String) {
@@ -525,5 +643,4 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         running = value
         stateLock.unlock()
     }
-
 }

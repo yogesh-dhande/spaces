@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import socket
@@ -15,6 +16,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Callable
+from urllib.parse import parse_qs, urlparse
 
 
 def iso_now() -> str:
@@ -67,29 +69,48 @@ def acquire_terminal_harness_lock() -> Callable[[], None]:
     return release
 
 
-def send_tcp_control_request(host: str, port: int, request: dict) -> dict:
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.settimeout(5)
-    client.connect((host, port))
-    client.sendall(json.dumps(request).encode("utf-8") + b"\n")
-    client.shutdown(socket.SHUT_WR)
-    response = bytearray()
-    while True:
-        chunk = client.recv(4096)
-        if not chunk:
-            break
-        response.extend(chunk)
-    client.close()
-    return json.loads(response.decode("utf-8"))
+def send_tcp_control_request(spaces_cli: Path, host: str, port: int, transport_key: str, request: dict) -> dict:
+    completed = subprocess.run(
+        [
+            str(spaces_cli),
+            "mobile",
+            "request",
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--transport-key",
+            transport_key,
+            "--request-json",
+            json.dumps(request),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout)
 
 
-def connect_stream(host: str, port: int, request: dict) -> socket.socket:
-    stream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    stream.settimeout(10)
-    stream.connect((host, port))
-    stream.sendall(json.dumps(request).encode("utf-8") + b"\n")
-    stream.shutdown(socket.SHUT_WR)
-    return stream
+def connect_stream(spaces_cli: Path, host: str, port: int, transport_key: str, request: dict) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [
+            str(spaces_cli),
+            "mobile",
+            "request",
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--transport-key",
+            transport_key,
+            "--request-json",
+            json.dumps(request),
+            "--stream",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
 
 def wait_for_proxy_ready(process: subprocess.Popen[str], timeout: float = 10) -> tuple[str, int]:
@@ -104,7 +125,7 @@ def wait_for_proxy_ready(process: subprocess.Popen[str], timeout: float = 10) ->
     raise RuntimeError("Timed out waiting for mobile bridge to become ready.")
 
 
-def wait_for_proxy_ready_in_file(log_path: Path, timeout: float = 10) -> tuple[str, int]:
+def wait_for_proxy_ready_in_file(log_path: Path, timeout: float = 10) -> tuple[str, int, str, str, str, str]:
     deadline = time.time() + timeout
     last_size = 0
     while time.time() < deadline:
@@ -112,9 +133,18 @@ def wait_for_proxy_ready_in_file(log_path: Path, timeout: float = 10) -> tuple[s
             text = log_path.read_text(encoding="utf-8", errors="replace")
             if len(text) != last_size:
                 last_size = len(text)
-                match = re.search(r"host=([0-9.]+)\tport=(\d+)", text)
+                match = re.search(r"host=([0-9.]+)\tport=(\d+).*pairing_link=([^\t\n]+)", text)
                 if match:
-                    return match.group(1), int(match.group(2))
+                    pairing_link = match.group(3)
+                    values = parse_qs(urlparse(pairing_link).query)
+                    return (
+                        match.group(1),
+                        int(match.group(2)),
+                        pairing_link,
+                        values["psk"][0],
+                        values["code"][0],
+                        values["nonce"][0],
+                    )
         time.sleep(0.1)
     contents = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
     raise RuntimeError(f"Timed out waiting for mobile bridge to become ready. Log contents:\n{contents}")
@@ -132,42 +162,36 @@ def assert_process_alive(process: subprocess.Popen[str], label: str, stdout_path
     raise RuntimeError("\n\n".join(details))
 
 
-def wait_for_stream_condition(stream: socket.socket, predicate, timeout: float = 10) -> dict:
+def wait_for_stream_condition(stream: subprocess.Popen[str], predicate, timeout: float = 10) -> dict:
+    if stream.stdout is None:
+        raise RuntimeError("Stream stdout was not captured.")
     deadline = time.time() + timeout
-    buffer = bytearray()
     last_payload = None
     last_skipped_line = None
     while time.time() < deadline:
-        try:
-            chunk = stream.recv(65536)
-        except TimeoutError:
+        ready, _, _ = select.select([stream.stdout], [], [], max(0.0, deadline - time.time()))
+        if not ready:
             continue
-        if not chunk:
+        line = stream.stdout.readline()
+        if not line:
             break
-        buffer.extend(chunk)
-        while b"\n" in buffer:
-            line, _, remainder = buffer.partition(b"\n")
-            buffer[:] = remainder
-            line = line.strip()
-            if not line:
+        decoded = line.strip()
+        if not decoded:
+            continue
+        try:
+            payload = json.loads(decoded)
+        except json.JSONDecodeError:
+            if not decoded.startswith("{"):
+                last_skipped_line = decoded
                 continue
-            decoded = line.decode("utf-8", errors="replace").strip()
-            if not decoded:
-                continue
-            try:
-                payload = json.loads(decoded)
-            except json.JSONDecodeError:
-                if not decoded.startswith("{"):
-                    last_skipped_line = decoded
-                    continue
-                raise RuntimeError(
-                    "Received an invalid JSON terminal-state line.\n"
-                    f"LINE: {decoded}\n"
-                    f"LAST PAYLOAD: {json.dumps(last_payload or {}, indent=2)}"
-                )
-            last_payload = payload
-            if predicate(payload):
-                return payload
+            raise RuntimeError(
+                "Received an invalid JSON terminal-state line.\n"
+                f"LINE: {decoded}\n"
+                f"LAST PAYLOAD: {json.dumps(last_payload or {}, indent=2)}"
+            )
+        last_payload = payload
+        if predicate(payload):
+            return payload
     detail = f"Last payload: {json.dumps(last_payload or {}, indent=2)}"
     if last_skipped_line is not None:
         detail += f"\nLast skipped line: {last_skipped_line}"
@@ -398,6 +422,7 @@ def write_simulator_settings(
     bundle_id: str,
     host: str,
     port: int,
+    transport_key: str,
     installation_id: str,
     auth_token: str,
     ios_app_path: Path,
@@ -411,6 +436,7 @@ def write_simulator_settings(
     payload = {
         "host": host,
         "port": port,
+        "transportKey": transport_key,
         "authToken": auth_token,
         "installationID": installation_id,
     }
@@ -733,7 +759,6 @@ def main() -> int:
         control_socket = socket_path(temp_root, session_id, runtime_dir)
         session_output_log_path = terminal_sessions_root(temp_root, runtime_dir) / session_id / "output.log"
 
-        pairing_code = "246810"
         bridge_stdout_path = temp_root / "mobile-bridge.stdout.log"
         bridge_stderr_path = temp_root / "mobile-bridge.stderr.log"
         bridge_stdout_handle = bridge_stdout_path.open("w+", encoding="utf-8")
@@ -747,15 +772,13 @@ def main() -> int:
                 "127.0.0.1",
                 "--port",
                 "0",
-                "--pairing-code",
-                pairing_code,
             ],
             stdout=bridge_stdout_handle,
             stderr=bridge_stderr_handle,
             text=True,
             env=env | {"SPACES_MOBILE_BRIDGE_TRACE": "1"},
         )
-        bridge_host, bridge_port = wait_for_proxy_ready_in_file(bridge_stdout_path)
+        bridge_host, bridge_port, pairing_link, transport_key, pairing_code, pairing_nonce = wait_for_proxy_ready_in_file(bridge_stdout_path)
         assert_process_alive(bridge_process, "mobile bridge", bridge_stdout_path, bridge_stderr_path)
 
         client_app = {
@@ -766,7 +789,11 @@ def main() -> int:
             "appVersion": "1.0",
         }
         paired = send_tcp_control_request(
-            bridge_host, bridge_port, {"command": "pair", "pairingCode": pairing_code, "clientApp": client_app}
+            spaces_cli,
+            bridge_host,
+            bridge_port,
+            transport_key,
+            {"command": "pair", "pairingCode": pairing_code, "pairingNonce": pairing_nonce, "clientApp": client_app},
         )
         if not paired.get("ok"):
             raise RuntimeError(f"Pairing failed: {paired}")
@@ -776,7 +803,11 @@ def main() -> int:
 
         def send_request(request: dict) -> dict:
             return send_tcp_control_request(
-                bridge_host, bridge_port, {"authToken": auth_token, "clientApp": client_app, **request}
+                spaces_cli,
+                bridge_host,
+                bridge_port,
+                transport_key,
+                {"authToken": auth_token, "clientApp": client_app, **request},
             )
 
         def wait_for_session_state(session_id: str, predicate, timeout: float = 10) -> dict:
@@ -806,8 +837,10 @@ def main() -> int:
             raise RuntimeError(f"Attach failed: {response}")
 
         stream = connect_stream(
+            spaces_cli,
             bridge_host,
             bridge_port,
+            transport_key,
             {"authToken": auth_token, "clientApp": client_app, "command": "subscribe", "sessionID": session_id, "clientID": mobile_client["id"]},
         )
         wait_for_output_log_text(session_output_log_path, "ready", timeout=20)
@@ -1050,37 +1083,31 @@ def main() -> int:
             boot_simulator(ipad_udid)
             boot_simulator(iphone_udid)
 
+            paired_installation_id = client_app["installationID"]
+            pair_response = {"issuedAuthToken": auth_token}
+            iphone_pair_response = pair_response
             ipad_client_app = {
-                "installationID": str(uuid.uuid4()).upper(),
+                "installationID": paired_installation_id,
                 "bundleID": ios_bundle_id,
                 "platform": "ios",
                 "deviceName": "iPad Pro 13-inch (M5)",
                 "appVersion": "1.0",
             }
-            pair_response = send_tcp_control_request(
-                bridge_host, bridge_port, {"command": "pair", "pairingCode": pairing_code, "clientApp": ipad_client_app}
-            )
-            if not pair_response.get("ok") or not pair_response.get("issuedAuthToken"):
-                raise RuntimeError(f"Pairing failed for iPad simulator: {pair_response}")
 
             iphone_client_app = {
-                "installationID": str(uuid.uuid4()).upper(),
+                "installationID": paired_installation_id,
                 "bundleID": ios_bundle_id,
                 "platform": "ios",
                 "deviceName": "iPhone 17 Pro",
                 "appVersion": "1.0",
             }
-            iphone_pair_response = send_tcp_control_request(
-                bridge_host, bridge_port, {"command": "pair", "pairingCode": pairing_code, "clientApp": iphone_client_app}
-            )
-            if not iphone_pair_response.get("ok") or not iphone_pair_response.get("issuedAuthToken"):
-                raise RuntimeError(f"Pairing failed for iPhone simulator: {iphone_pair_response}")
 
             write_simulator_settings(
                 ipad_udid,
                 ios_bundle_id,
                 bridge_host,
                 bridge_port,
+                transport_key,
                 ipad_client_app["installationID"],
                 str(pair_response["issuedAuthToken"]),
                 ios_app_path,
@@ -1090,6 +1117,7 @@ def main() -> int:
                 ios_bundle_id,
                 bridge_host,
                 bridge_port,
+                transport_key,
                 iphone_client_app["installationID"],
                 str(iphone_pair_response["issuedAuthToken"]),
                 ios_app_path,
@@ -1156,15 +1184,19 @@ def main() -> int:
                     "clientID": owner_client_id,
                 }
                 sent = send_tcp_control_request(
+                    spaces_cli,
                     bridge_host,
                     bridge_port,
+                    transport_key,
                     request_base | {"command": "send", "text": command_text},
                 )
                 if not sent.get("ok"):
                     raise RuntimeError(f"iPad owner command send failed: {sent}")
                 pressed_enter = send_tcp_control_request(
+                    spaces_cli,
                     bridge_host,
                     bridge_port,
+                    transport_key,
                     request_base | {"command": "key", "key": "enter"},
                 )
                 if not pressed_enter.get("ok"):
@@ -1178,6 +1210,7 @@ def main() -> int:
                         "host": bridge_host,
                         "port": bridge_port,
                         "authToken": str(pair_response["issuedAuthToken"]),
+                        "transportKey": transport_key,
                         "installationID": ipad_client_app["installationID"],
                         "renderDumpPath": str(ipad_render_dump),
                         "eventLogPath": str(ipad_event_log),
@@ -1226,6 +1259,7 @@ def main() -> int:
                     {
                         "SPACES_MOBILE_TEST_HOST": bridge_host,
                         "SPACES_MOBILE_TEST_PORT": str(bridge_port),
+                        "SPACES_MOBILE_TEST_TRANSPORT_KEY": transport_key,
                         "SPACES_MOBILE_TEST_AUTH_TOKEN": str(pair_response["issuedAuthToken"]),
                         "SPACES_MOBILE_TEST_INSTALLATION_ID": ipad_client_app["installationID"],
                         "SPACES_MOBILE_E2E_TARGET_SESSION_ID": render_session_id,
@@ -1731,9 +1765,10 @@ def main() -> int:
         release_harness_lock()
         if stream is not None:
             try:
-                stream.close()
+                stream.terminate()
+                stream.wait(timeout=5)
             except Exception:
-                pass
+                stream.kill()
         if bridge_process is not None:
             bridge_process.terminate()
             try:

@@ -124,6 +124,7 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - Inputs should use subtle borders and a clear focus state tied to the accent color.
 - Use inset surfaces for code-like or multiline content.
 - Keep save and cancel actions close to the fields they affect.
+- Utility panels, such as Mobile Connection, should use compact sections with label/value rows, icon-led primary actions, and dense device rows; QR codes are shown as functional content rather than decorative artwork.
 
 ## Inline Editing
 - Prefer inline editing when the item being edited is already visible in a list or section.

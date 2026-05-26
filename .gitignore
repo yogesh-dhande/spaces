@@ -7,6 +7,10 @@ apps/web/.next
 .DS_Store
 *.log
 
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+
 # Firebase Hosting - generated files (deployed, not committed)
 apps/web/public/*
 !apps/web/public/media

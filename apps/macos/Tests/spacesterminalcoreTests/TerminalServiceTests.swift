@@ -35,6 +35,10 @@ import XCTest
             XCTAssertEqual(resolved.path, service.path)
         }
 
+        func testParseProcessIDsIgnoresWhitespaceAndInvalidLines() {
+            XCTAssertEqual(TerminalService.parseProcessIDs("123\n\nnot-a-pid\n456 789\n"), [123, 456, 789])
+        }
+
         private func makeTemporaryDirectory() throws -> URL {
             let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent(
                 "spaces-terminal-service-tests-\(UUID().uuidString)", isDirectory: true)

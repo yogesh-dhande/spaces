@@ -37,7 +37,8 @@
 		};
 /* End PBXContainerItemProxy section */
 
-/* Begin PBXFileReference section */
+	/* Begin PBXFileReference section */
+		0D7D0E7D0E7D0E7D0E7D0E7D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		160A1AE591A4376DA6C06AE7 /* SpacesMobileUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileUITests.swift; sourceTree = "<group>"; };
 		1C274F10D0826B130F984E6E /* SpacesMobileBridgeDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileBridgeDiscovery.swift; sourceTree = "<group>"; };
 		2A942269988694E66C1CA6F4 /* SpacesMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SpacesMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -150,6 +151,7 @@
 			isa = PBXGroup;
 			children = (
 				B0B57F94C61B24E0729B79F1 /* Assets.xcassets */,
+				0D7D0E7D0E7D0E7D0E7D0E7D /* Info.plist */,
 				A2CBFAA5B4DF490C0C86C859 /* apps */,
 				CB2D338B9B55AD82C84E6311 /* Packages */,
 				503B7623EC298940F0110912 /* Sources */,
@@ -501,13 +503,8 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = BEMDA62NB6;
 				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = Spaces;
-				INFOPLIST_KEY_NSBonjourServices = (
-					"_spaces-mobile._tcp.",
-				);
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Spaces connects to your Mac's first-party terminal bridge.";
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -530,13 +527,8 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = BEMDA62NB6;
 				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = Spaces;
-				INFOPLIST_KEY_NSBonjourServices = (
-					"_spaces-mobile._tcp.",
-				);
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Spaces connects to your Mac's first-party terminal bridge.";
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

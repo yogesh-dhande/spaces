@@ -311,6 +311,7 @@ payload = {
     "host": bridge_host,
     "port": bridge_port,
     "authToken": ipad_pairing["authToken"],
+    "transportKey": ipad_pairing["transportKey"],
     "installationID": ipad_pairing["installationID"],
     "renderDumpPath": str(demo_root / "codex-standalone-ipad-render.json"),
     "eventLogPath": str(demo_root / "codex-standalone-ipad-events.jsonl"),

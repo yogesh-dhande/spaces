@@ -1,98 +1,67 @@
+import Darwin
 import Dispatch
 import Foundation
+import spacesmobilecore
+import spacesterminalcore
 
-public struct TerminalServiceRequest: Codable, Sendable, Equatable {
-    public let command: String
-    public let launchConfiguration: TerminalSessionLaunchConfiguration?
-    public let sessionID: String?
-
-    public init(command: String, launchConfiguration: TerminalSessionLaunchConfiguration? = nil, sessionID: String? = nil) {
-        self.command = command
-        self.launchConfiguration = launchConfiguration
-        self.sessionID = sessionID
-    }
-}
-
-public struct TerminalServiceSessionSummary: Codable, Sendable, Equatable, Identifiable {
-    public let id: String
-    public let title: String
-    public let workingDirectory: String
-    public let backend: TerminalSessionBackendKind
-    public let lifetimePolicy: TerminalSessionLifetimePolicy
-    public let state: TerminalSessionState
-    public let servicePID: Int32
-    public let childPID: Int32?
-    public let controlSocketPath: String
-    public let outputPath: String
-
-    public init(
-        id: String, title: String, workingDirectory: String, backend: TerminalSessionBackendKind, lifetimePolicy: TerminalSessionLifetimePolicy,
-        state: TerminalSessionState, servicePID: Int32, childPID: Int32?, controlSocketPath: String, outputPath: String
-    ) {
-        self.id = id
-        self.title = title
-        self.workingDirectory = workingDirectory
-        self.backend = backend
-        self.lifetimePolicy = lifetimePolicy
-        self.state = state
-        self.servicePID = servicePID
-        self.childPID = childPID
-        self.controlSocketPath = controlSocketPath
-        self.outputPath = outputPath
-    }
-}
-
-public struct TerminalServiceResponse: Codable, Sendable, Equatable {
+public struct SpacesMobileBridgeControlResponse: Codable, Equatable, Sendable {
     public let ok: Bool
     public let message: String
-    public let session: TerminalServiceSessionSummary?
-    public let sessions: [TerminalServiceSessionSummary]?
-    public let servicePID: Int32?
+    public let status: SpacesMobileBridgeStatus?
+    public let pairingWindow: SpacesMobilePairingWindowSnapshot?
+    public let devices: [SpacesMobilePairedDevice]?
 
     public init(
-        ok: Bool, message: String, session: TerminalServiceSessionSummary? = nil, sessions: [TerminalServiceSessionSummary]? = nil,
-        servicePID: Int32? = nil
+        ok: Bool, message: String, status: SpacesMobileBridgeStatus? = nil, pairingWindow: SpacesMobilePairingWindowSnapshot? = nil,
+        devices: [SpacesMobilePairedDevice]? = nil
     ) {
         self.ok = ok
         self.message = message
-        self.session = session
-        self.sessions = sessions
-        self.servicePID = servicePID
+        self.status = status
+        self.pairingWindow = pairingWindow
+        self.devices = devices
     }
 }
 
-enum TerminalServiceCodec {
+struct SpacesMobileBridgeControlRequest: Codable, Equatable, Sendable {
+    let command: String
+    let installationID: String?
+}
+
+enum SpacesMobileBridgeControlCodec {
     private static let encoder = JSONEncoder()
     private static let decoder = JSONDecoder()
 
-    static func encodeRequest(_ request: TerminalServiceRequest) throws -> Data { try encoder.encode(request) }
-    static func decodeRequest(_ data: Data) throws -> TerminalServiceRequest { try decoder.decode(TerminalServiceRequest.self, from: data) }
-    static func encodeResponse(_ response: TerminalServiceResponse) throws -> Data { try encoder.encode(response) }
-    static func decodeResponse(_ data: Data) throws -> TerminalServiceResponse { try decoder.decode(TerminalServiceResponse.self, from: data) }
+    static func encodeRequest(_ request: SpacesMobileBridgeControlRequest) throws -> Data { try encoder.encode(request) }
+    static func decodeRequest(_ data: Data) throws -> SpacesMobileBridgeControlRequest {
+        try decoder.decode(SpacesMobileBridgeControlRequest.self, from: data)
+    }
+    static func encodeResponse(_ response: SpacesMobileBridgeControlResponse) throws -> Data { try encoder.encode(response) }
+    static func decodeResponse(_ data: Data) throws -> SpacesMobileBridgeControlResponse {
+        try decoder.decode(SpacesMobileBridgeControlResponse.self, from: data)
+    }
 }
 
-public final class TerminalServiceServer {
+final class SpacesMobileBridgeControlServer {
     private let socketPath: String
     private let queue: DispatchQueue
-    private let handleRequest: @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
+    private let handleRequest: @Sendable (SpacesMobileBridgeControlRequest) throws -> SpacesMobileBridgeControlResponse
     private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
 
-    public init(
-        socketPath: String, queue: DispatchQueue, handleRequest: @escaping @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
+    init(
+        socketPath: String, queue: DispatchQueue,
+        handleRequest: @escaping @Sendable (SpacesMobileBridgeControlRequest) throws -> SpacesMobileBridgeControlResponse
     ) {
         self.socketPath = socketPath
         self.queue = queue
         self.handleRequest = handleRequest
     }
 
-    public func start() throws {
+    func start() throws {
         try removeSocketIfPresent()
         let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-
-        var yes: Int32 = 1
-        setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
 
         var address = try makeSocketAddress(path: socketPath)
         let bindResult = withUnsafePointer(to: &address) { pointer in
@@ -127,7 +96,7 @@ public final class TerminalServiceServer {
         source.resume()
     }
 
-    public func stop() {
+    func stop() {
         acceptSource?.cancel()
         acceptSource = nil
     }
@@ -143,13 +112,13 @@ public final class TerminalServiceServer {
             do {
                 try setBlocking(clientFD)
                 let requestData = try Self.readAll(from: clientFD)
-                let request = try TerminalServiceCodec.decodeRequest(requestData)
+                let request = try SpacesMobileBridgeControlCodec.decodeRequest(requestData)
                 let response = try handleRequest(request)
-                let responseData = try TerminalServiceCodec.encodeResponse(response)
+                let responseData = try SpacesMobileBridgeControlCodec.encodeResponse(response)
                 try Self.writeAll(data: responseData, to: clientFD)
             } catch {
-                let fallback = TerminalServiceResponse(ok: false, message: String(describing: error))
-                if let data = try? TerminalServiceCodec.encodeResponse(fallback) { try? Self.writeAll(data: data, to: clientFD) }
+                let fallback = SpacesMobileBridgeControlResponse(ok: false, message: String(describing: error))
+                if let data = try? SpacesMobileBridgeControlCodec.encodeResponse(fallback) { try? Self.writeAll(data: data, to: clientFD) }
             }
 
             shutdown(clientFD, SHUT_RDWR)
@@ -212,13 +181,72 @@ public final class TerminalServiceServer {
     }
 }
 
-public enum TerminalServiceClient {
-    public static func send(request: TerminalServiceRequest, socketPath: String, timeout: TimeInterval = 5) throws -> TerminalServiceResponse {
+public enum SpacesMobileBridgeControlClient {
+    public static func statusEnsuringCurrentTerminalService(timeout: TimeInterval = 5) throws -> SpacesMobileBridgeControlResponse {
+        try statusEnsuringCurrentTerminalService(
+            timeout: timeout, ensureRunning: { try TerminalService.ensureRunning(timeout: $0) },
+            relaunch: { try TerminalService.relaunch(timeout: $0) }, status: { try status(timeout: $0) })
+    }
+
+    public static func status(timeout: TimeInterval = 5) throws -> SpacesMobileBridgeControlResponse {
+        try send(SpacesMobileBridgeControlRequest(command: "status", installationID: nil), timeout: timeout)
+    }
+
+    public static func openPairingWindow(timeout: TimeInterval = 5) throws -> SpacesMobileBridgeControlResponse {
+        try send(SpacesMobileBridgeControlRequest(command: "openPairingWindow", installationID: nil), timeout: timeout)
+    }
+
+    public static func listDevices(timeout: TimeInterval = 5) throws -> SpacesMobileBridgeControlResponse {
+        try send(SpacesMobileBridgeControlRequest(command: "listDevices", installationID: nil), timeout: timeout)
+    }
+
+    public static func revokeDevice(installationID: String, timeout: TimeInterval = 5) throws -> SpacesMobileBridgeControlResponse {
+        try send(SpacesMobileBridgeControlRequest(command: "revokeDevice", installationID: installationID), timeout: timeout)
+    }
+
+    public static func resetAllPairings(timeout: TimeInterval = 5) throws -> SpacesMobileBridgeControlResponse {
+        try send(SpacesMobileBridgeControlRequest(command: "resetAllPairings", installationID: nil), timeout: timeout)
+    }
+
+    public static func isControlEndpointUnavailable(_ error: Error) -> Bool {
+        if let posixError = error as? POSIXError { return isUnavailablePOSIXCode(posixError.code) }
+        let nsError = error as NSError
+        guard nsError.domain == NSPOSIXErrorDomain, let code = POSIXErrorCode(rawValue: Int32(nsError.code)) else { return false }
+        return isUnavailablePOSIXCode(code)
+    }
+
+    static func statusEnsuringCurrentTerminalService(
+        timeout: TimeInterval, ensureRunning: (TimeInterval) throws -> Bool, relaunch: (TimeInterval) throws -> Bool,
+        status: (TimeInterval) throws -> SpacesMobileBridgeControlResponse
+    ) throws -> SpacesMobileBridgeControlResponse {
+        _ = try ensureRunning(timeout)
+        do { return try status(timeout) } catch {
+            guard isControlEndpointUnavailable(error) else { throw error }
+            _ = try relaunch(timeout)
+            return try status(timeout)
+        }
+    }
+
+    static func socketPath(fileManager: FileManager = .default) throws -> String {
+        let root = try TerminalServicePaths.terminalRootDirectory(fileManager: fileManager)
+        let socketRoot = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent("spaces-terminal-sockets", isDirectory: true)
+        try fileManager.createDirectory(at: socketRoot, withIntermediateDirectories: true)
+        return socketRoot.appendingPathComponent("mobile-control-\(socketPathComponent(for: root.path)).sock", isDirectory: false).path
+    }
+
+    private static func isUnavailablePOSIXCode(_ code: POSIXErrorCode) -> Bool {
+        switch code {
+        case .ENOENT, .ECONNREFUSED, .ENOTSOCK: return true
+        default: return false
+        }
+    }
+
+    private static func send(_ request: SpacesMobileBridgeControlRequest, timeout: TimeInterval) throws -> SpacesMobileBridgeControlResponse {
         let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(socketFD) }
 
-        var address = try makeSocketAddress(path: socketPath)
+        var address = try makeSocketAddress(path: socketPath())
         let connectResult = withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
                 connect(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
@@ -230,12 +258,12 @@ public enum TerminalServiceClient {
         setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeValue, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, &timeValue, socklen_t(MemoryLayout<timeval>.size))
 
-        let payload = try TerminalServiceCodec.encodeRequest(request)
+        let payload = try SpacesMobileBridgeControlCodec.encodeRequest(request)
         try writeAll(data: payload, to: socketFD)
         shutdown(socketFD, SHUT_WR)
 
         let responseData = try readAll(from: socketFD)
-        return try TerminalServiceCodec.decodeResponse(responseData)
+        return try SpacesMobileBridgeControlCodec.decodeResponse(responseData)
     }
 
     private static func makeSocketAddress(path: String) throws -> sockaddr_un {
@@ -274,6 +302,12 @@ public enum TerminalServiceClient {
             data.append(buffer, count: count)
         }
         return data
+    }
+
+    private static func socketPathComponent(for rootPath: String) -> String {
+        var hash: UInt64 = 5381
+        for byte in rootPath.utf8 { hash = ((hash << 5) &+ hash) &+ UInt64(byte) }
+        return String(format: "%016llx", hash)
     }
 }
 

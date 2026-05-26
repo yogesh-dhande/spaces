@@ -14,12 +14,21 @@ public struct SpacesMobilePairedInstallation: Codable, Equatable {
     let lastUsedAt: String
 }
 
+public struct SpacesMobilePairedDevice: Codable, Equatable, Sendable, Identifiable {
+    public var id: String { installationID }
+    public let installationID: String
+    public let bundleID: String
+    public let platform: String
+    public let deviceName: String
+    public let appVersion: String?
+    public let createdAt: String
+    public let lastUsedAt: String
+}
+
 public enum SpacesMobilePairingError: LocalizedError {
     case unsupportedBundle(String)
     case missingClientApp
     case missingAuthToken
-    case missingPairingCode
-    case invalidPairingCode
     case invalidAuthToken
     case unpairedInstallation(String)
 
@@ -28,8 +37,6 @@ public enum SpacesMobilePairingError: LocalizedError {
         case .unsupportedBundle(let bundleID): "Unsupported mobile bundle '\(bundleID)'."
         case .missingClientApp: "Missing mobile client application identity."
         case .missingAuthToken: "Missing mobile auth token."
-        case .missingPairingCode: "Missing mobile pairing code."
-        case .invalidPairingCode: "The pairing code is invalid."
         case .invalidAuthToken: "The mobile auth token is invalid."
         case .unpairedInstallation(let installationID): "The mobile installation '\(installationID)' is not paired."
         }
@@ -46,11 +53,8 @@ public final class SpacesMobilePairingStore: @unchecked Sendable {
         pairingsPath = root.appendingPathComponent("mobile-pairings.json", isDirectory: false).path
     }
 
-    public func issueToken(for clientApp: SpacesMobileClientApp, pairingCode: String, expectedPairingCode: String) throws -> String {
+    public func issueToken(for clientApp: SpacesMobileClientApp) throws -> String {
         try validate(clientApp: clientApp)
-        let normalizedCode = pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedCode.isEmpty else { throw SpacesMobilePairingError.missingPairingCode }
-        guard normalizedCode == expectedPairingCode else { throw SpacesMobilePairingError.invalidPairingCode }
 
         let now = ISO8601DateFormatter().string(from: Date())
         let token = UUID().uuidString.uppercased()
@@ -67,6 +71,23 @@ public final class SpacesMobilePairingStore: @unchecked Sendable {
         try savePairings(pairings)
         return token
     }
+
+    public func listDevices() throws -> [SpacesMobilePairedDevice] {
+        try loadPairings().map { pairing in
+            SpacesMobilePairedDevice(
+                installationID: pairing.installationID, bundleID: pairing.bundleID, platform: pairing.platform, deviceName: pairing.deviceName,
+                appVersion: pairing.appVersion, createdAt: pairing.createdAt, lastUsedAt: pairing.lastUsedAt)
+        }
+    }
+
+    public func revoke(installationID: String) throws {
+        let normalizedID = installationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedID.isEmpty else { return }
+        let pairings = try loadPairings().filter { $0.installationID != normalizedID }
+        try savePairings(pairings)
+    }
+
+    public func removeAll() throws { try savePairings([]) }
 
     public func authorize(clientApp: SpacesMobileClientApp?, authToken: String?) throws {
         guard let clientApp else { throw SpacesMobilePairingError.missingClientApp }
@@ -90,7 +111,7 @@ public final class SpacesMobilePairingStore: @unchecked Sendable {
         try savePairings(pairings)
     }
 
-    private func validate(clientApp: SpacesMobileClientApp) throws {
+    public func validate(clientApp: SpacesMobileClientApp) throws {
         guard clientApp.bundleID == SpacesMobileFirstPartyPolicy.allowedBundleID else {
             throw SpacesMobilePairingError.unsupportedBundle(clientApp.bundleID)
         }

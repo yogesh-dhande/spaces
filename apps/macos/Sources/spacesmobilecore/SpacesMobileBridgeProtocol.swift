@@ -111,6 +111,7 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
     public let command: String
     public let authToken: String?
     public let pairingCode: String?
+    public let pairingNonce: String?
     public let clientApp: SpacesMobileClientApp?
     public let sessionID: String?
     public let clientID: String?
@@ -124,13 +125,15 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
     public let appendNewline: Bool
 
     public init(
-        command: String, authToken: String? = nil, pairingCode: String? = nil, clientApp: SpacesMobileClientApp? = nil, sessionID: String? = nil,
-        clientID: String? = nil, client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil, text: String? = nil,
-        key: String? = nil, columns: Int? = nil, rows: Int? = nil, includeOutputHistory: Bool = false, appendNewline: Bool = false
+        command: String, authToken: String? = nil, pairingCode: String? = nil, pairingNonce: String? = nil, clientApp: SpacesMobileClientApp? = nil,
+        sessionID: String? = nil, clientID: String? = nil, client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil,
+        text: String? = nil, key: String? = nil, columns: Int? = nil, rows: Int? = nil, includeOutputHistory: Bool = false,
+        appendNewline: Bool = false
     ) {
         self.command = command
         self.authToken = authToken
         self.pairingCode = pairingCode
+        self.pairingNonce = pairingNonce
         self.clientApp = clientApp
         self.sessionID = sessionID
         self.clientID = clientID
@@ -148,6 +151,7 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         case command
         case authToken
         case pairingCode
+        case pairingNonce
         case clientApp
         case sessionID
         case clientID
@@ -166,6 +170,7 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         command = try container.decode(String.self, forKey: .command)
         authToken = try container.decodeIfPresent(String.self, forKey: .authToken)
         pairingCode = try container.decodeIfPresent(String.self, forKey: .pairingCode)
+        pairingNonce = try container.decodeIfPresent(String.self, forKey: .pairingNonce)
         clientApp = try container.decodeIfPresent(SpacesMobileClientApp.self, forKey: .clientApp)
         sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
         clientID = try container.decodeIfPresent(String.self, forKey: .clientID)
@@ -184,6 +189,7 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         try container.encode(command, forKey: .command)
         try container.encodeIfPresent(authToken, forKey: .authToken)
         try container.encodeIfPresent(pairingCode, forKey: .pairingCode)
+        try container.encodeIfPresent(pairingNonce, forKey: .pairingNonce)
         try container.encodeIfPresent(clientApp, forKey: .clientApp)
         try container.encodeIfPresent(sessionID, forKey: .sessionID)
         try container.encodeIfPresent(clientID, forKey: .clientID)

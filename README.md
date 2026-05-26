@@ -42,7 +42,7 @@ spaces terminal key <session> ctrl+c      # send a named key or control chord
 spaces terminal tail <session> --lines 20 # read recent output
 spaces terminal show <session>            # open an owner-seeking window for a session
 spaces terminal takeover <session> <id>   # hand input ownership to another client
-spaces mobile status                      # show iPhone pairing details
+spaces mobile status                      # show iPhone bridge details
 ```
 
 Coding agents emit `spaces signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).
@@ -66,7 +66,7 @@ Coding agents emit `spaces signal` events from their terminals so the GUI knows 
 
 - [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
 - Built-in process and ad hoc terminals run inside the Spaces app through the built-in Spaces terminal runtime, so session lifetime, takeover, and `spaces terminal` controls share one session boundary.
-- The first-party iOS client discovers the Mac bridge advertised by the terminal service, pairs once, then browses live Spaces terminal sessions and auto-takes ownership when opening one for live rendering.
+- The first-party iOS client discovers the Mac bridge advertised by the terminal service, pairs through a Mac-approved QR/deep link, then browses live Spaces terminal sessions and auto-takes ownership when opening one for live rendering.
 - Browser sessions automate Google Chrome so you can quickly switch to view output without typing the URL or clicking through tabs.
 
 ## Requirements

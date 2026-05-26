@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import CoreImage
 import Foundation
 import Sparkle
 import spacesmobilebridge
@@ -223,6 +224,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var isDismissingCommandPalette = false
     private var pendingCommandPalettePresentation: PendingCommandPalettePresentation?
     private var commandPaletteMainWindowVisibility: Bool?
+    private var mobileConnectionPanel: NSPanel?
+    private var mobileConnectionTimer: Timer?
+    private var mobileConnectionPairingWindow: SpacesMobilePairingWindowSnapshot?
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private lazy var updaterController: SPUStandardUpdaterController? = {
@@ -479,6 +483,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         periodicSidebarMetadataRefreshTask?.cancel()
         deferredHotkeySelectionRefreshTask?.cancel()
         sidebarReloadTask?.cancel()
+        mobileConnectionTimer?.invalidate()
+        mobileConnectionTimer = nil
         teardownInlineWorkspaceOutsideClickMonitor()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
@@ -3620,6 +3626,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(pulseCard)
         constrainFormFieldToFillWidth(pulseCard, in: stack)
 
+        // --- Mobile section ---
+        let mobileCard = settingsMobileSection()
+        stack.addArrangedSubview(mobileCard)
+        constrainFormFieldToFillWidth(mobileCard, in: stack)
+
         // --- Keyboard shortcuts section ---
         let shortcutContainer = buildShortcutRowsContainer()
         let shortcutCard = formSectionCard(
@@ -3686,6 +3697,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         row.addArrangedSubview(labelStack)
         row.addArrangedSubview(control)
         return row
+    }
+
+    private func settingsMobileSection() -> NSView {
+        let response: SpacesMobileBridgeControlResponse? = { try? SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService(timeout: 2) }()
+        let devices = response?.devices ?? []
+        let resetButton = actionButton(
+            title: "Reset All Pairings", symbol: "trash", tooltip: "Remove all paired mobile devices and rotate the transport key",
+            action: #selector(resetAllMobilePairings), primary: false)
+        var rows: [NSView] = [
+            settingsSettingRow(
+                name: "Paired devices",
+                hint: response == nil ? "Mobile bridge status unavailable" : "\(devices.count) device\(devices.count == 1 ? "" : "s") paired",
+                control: resetButton)
+        ]
+        if !devices.isEmpty { rows.append(contentsOf: devices.map { mobileDeviceRow($0) }) }
+        return formSectionCard(icon: "iphone", title: "Mobile", contentViews: rows)
     }
 
     private func buildShortcutRowsContainer() -> NSView {
@@ -6129,38 +6156,428 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func reloadTapped() { reloadData() }
 
     @objc private func showMobileConnection() {
-        do {
-            _ = try TerminalService.ensureRunning()
-            let status = try SpacesMobileBridgeSettingsStore().status()
-            let addresses = status.networkAddresses.map { "\($0):\(status.port)" }
-            let firstAddress = addresses.first ?? "\(SpacesMobileBridgeDefaults.loopbackHost):\(status.port)"
-            let addressText = addresses.isEmpty ? "No LAN address detected" : addresses.joined(separator: "\n")
-            let message = """
-                Pairing code: \(status.pairingCode)
-                Port: \(status.port)
-                Bonjour: \(status.bonjourServiceName)
+        do { presentMobileConnectionPanel(try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService()) } catch { showError(error) }
+    }
 
-                Addresses:
-                \(addressText)
+    private func presentMobileConnectionPanel(_ response: SpacesMobileBridgeControlResponse) {
+        let pairingWindow = visibleMobilePairingWindow(for: response)
+        mobileConnectionPairingWindow = pairingWindow
+        let panel: NSPanel
+        if let existing = mobileConnectionPanel {
+            panel = existing
+        } else {
+            let created = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 540, height: 680), styleMask: [.titled, .closable, .utilityWindow], backing: .buffered,
+                defer: false)
+            created.title = "Mobile Connection"
+            created.isReleasedWhenClosed = false
+            created.minSize = NSSize(width: 500, height: 520)
+            created.center()
+            mobileConnectionPanel = created
+            panel = created
+        }
+        panel.contentView = buildMobileConnectionPanelContent(response: response, pairingWindow: pairingWindow)
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        startMobileConnectionTimer()
+    }
 
-                On iPhone, open Spaces, choose \(status.bonjourServiceName) under Nearby Macs, then enter the pairing code.
-                """
+    private func refreshVisibleMobileConnectionPanel(_ response: SpacesMobileBridgeControlResponse) {
+        guard let panel = mobileConnectionPanel, panel.isVisible else { return }
+        let pairingWindow = visibleMobilePairingWindow(for: response)
+        mobileConnectionPairingWindow = pairingWindow
+        panel.contentView = buildMobileConnectionPanelContent(response: response, pairingWindow: pairingWindow)
+    }
 
-            let alert = NSAlert()
-            alert.alertStyle = .informational
-            alert.messageText = "Mobile Connection"
-            alert.informativeText = message
-            alert.addButton(withTitle: "Done")
-            alert.addButton(withTitle: "Copy Pairing Code")
-            alert.addButton(withTitle: "Copy Address")
+    private func visibleMobilePairingWindow(for response: SpacesMobileBridgeControlResponse) -> SpacesMobilePairingWindowSnapshot? {
+        if let pairingWindow = response.pairingWindow, pairingWindow.expiresAt > Date() { return pairingWindow }
+        return nil
+    }
 
-            let response = alert.runModal()
-            if response == .alertSecondButtonReturn {
-                copyToPasteboard(status.pairingCode)
-            } else if response == .alertThirdButtonReturn {
-                copyToPasteboard(firstAddress)
+    private func buildMobileConnectionPanelContent(response: SpacesMobileBridgeControlResponse, pairingWindow: SpacesMobilePairingWindowSnapshot?)
+        -> NSView
+    {
+        let root = NSView()
+        root.translatesAutoresizingMaskIntoConstraints = false
+        root.wantsLayer = true
+        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = content
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(stack)
+
+        let title = NSTextField(labelWithString: "Mobile Connection")
+        title.font = .systemFont(ofSize: 21, weight: .semibold)
+        title.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        stack.addArrangedSubview(title)
+
+        if let status = response.status {
+            let addresses =
+                status.networkAddresses.isEmpty
+                ? ["\(SpacesMobileBridgeDefaults.loopbackHost):\(status.port)"] : status.networkAddresses.map { "\($0):\(status.port)" }
+            let endpointSection = mobilePanelSection(
+                icon: "network", title: "Endpoint",
+                rows: [
+                    mobilePanelKeyValueRow("Port", "\(status.port)"), mobilePanelKeyValueRow("Bonjour", status.bonjourServiceName),
+                    mobilePanelKeyValueRow("Addresses", addresses.joined(separator: "\n")),
+                ])
+            stack.addArrangedSubview(endpointSection)
+            constrainFormFieldToFillWidth(endpointSection, in: stack)
+        }
+
+        let pairingSection = mobilePairingSection(response: response, pairingWindow: pairingWindow)
+        stack.addArrangedSubview(pairingSection)
+        constrainFormFieldToFillWidth(pairingSection, in: stack)
+
+        let devicesSection = mobileDevicesSection(devices: response.devices ?? [])
+        stack.addArrangedSubview(devicesSection)
+        constrainFormFieldToFillWidth(devicesSection, in: stack)
+
+        root.addSubview(scroll)
+        let contentBottomFollowsStack = content.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: 24)
+        contentBottomFollowsStack.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: root.topAnchor), scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            content.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            content.bottomAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.bottomAnchor),
+            content.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -24), contentBottomFollowsStack,
+        ])
+        return root
+    }
+
+    private func mobilePairingSection(response: SpacesMobileBridgeControlResponse, pairingWindow: SpacesMobilePairingWindowSnapshot?) -> NSView {
+        let openButton = actionButton(
+            title: "Open Pairing Window", symbol: "qrcode", tooltip: "Open a five-minute mobile pairing window",
+            action: #selector(openMobilePairingWindow), primary: true)
+        let copyButton = actionButton(
+            title: "Copy Link", symbol: "link", tooltip: "Copy the current pairing link", action: #selector(copyMobilePairingLink), primary: false)
+        copyButton.isEnabled = pairingWindow != nil
+
+        let buttonRow = mobilePanelButtonRow([openButton, copyButton])
+
+        var rows: [NSView] = [mobilePanelKeyValueRow("Window", mobilePairingWindowStatus(pairingWindow)), buttonRow]
+        if !response.ok { rows.append(mobilePanelKeyValueRow("Status", response.message)) }
+        if let window = pairingWindow {
+            rows.append(mobileQRCodeView(link: window.linkString))
+            rows.append(mobilePanelKeyValueRow("Code", window.code))
+            rows.append(mobilePanelKeyValueRow("Expires", mobileCountdownText(expiresAt: window.expiresAt)))
+        }
+
+        return mobilePanelSection(icon: "iphone.gen3.radiowaves.left.and.right", title: "Pairing", rows: rows)
+    }
+
+    private func mobileQRCodeView(link: String) -> NSView {
+        let qrSize: CGFloat = 240
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let qrView = NSImageView()
+        qrView.image = qrImage(for: link, size: qrSize)
+        qrView.imageScaling = .scaleProportionallyUpOrDown
+        qrView.translatesAutoresizingMaskIntoConstraints = false
+        qrView.wantsLayer = true
+        qrView.layer?.backgroundColor = NSColor.white.cgColor
+        qrView.layer?.cornerRadius = 4
+        qrView.layer?.masksToBounds = true
+        container.addSubview(qrView)
+
+        NSLayoutConstraint.activate([
+            container.heightAnchor.constraint(equalToConstant: qrSize), qrView.widthAnchor.constraint(equalToConstant: qrSize),
+            qrView.heightAnchor.constraint(equalToConstant: qrSize), qrView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            qrView.topAnchor.constraint(equalTo: container.topAnchor), qrView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        return container
+    }
+
+    private func mobileDevicesSection(devices: [SpacesMobilePairedDevice]) -> NSView {
+        let resetButton = actionButton(
+            title: "Reset All Pairings", symbol: "trash", tooltip: "Remove all paired mobile devices and rotate the transport key",
+            action: #selector(resetAllMobilePairings), primary: false)
+
+        var rows: [NSView] = []
+        if devices.isEmpty {
+            let empty = helpTextLabel("No paired devices.")
+            rows.append(empty)
+        } else {
+            rows.append(contentsOf: devices.map { mobileDeviceRow($0) })
+        }
+        rows.append(mobilePanelButtonRow([resetButton]))
+        return mobilePanelSection(icon: "iphone", title: "Devices", rows: rows)
+    }
+
+    private func mobilePanelSection(icon: String, title: String, rows: [NSView]) -> NSView {
+        let section = NSView()
+        section.translatesAutoresizingMaskIntoConstraints = false
+        section.setContentHuggingPriority(.required, for: .vertical)
+        section.wantsLayer = true
+        section.layer?.backgroundColor = Theme.surface.cgColor
+        section.layer?.cornerRadius = 10
+        section.layer?.borderWidth = 1
+        section.layer?.borderColor = Theme.border.cgColor
+        section.layer?.masksToBounds = true
+
+        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let iconView = NSImageView()
+        if let image = NSImage(systemSymbolName: icon, accessibilityDescription: title) {
+            iconView.image = image.withSymbolConfiguration(.init(paletteColors: [accentColor]))
+        }
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.textColor = Theme.text
+
+        let header = NSStackView()
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 10
+        header.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+        header.addArrangedSubview(iconView)
+        header.addArrangedSubview(titleLabel)
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(header)
+        header.translatesAutoresizingMaskIntoConstraints = false
+        header.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        if !rows.isEmpty { stack.addArrangedSubview(mobilePanelDivider()) }
+        for (index, row) in rows.enumerated() {
+            let paddedRow = mobilePanelPaddedRow(row)
+            stack.addArrangedSubview(paddedRow)
+            paddedRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            if index < rows.count - 1 {
+                let divider = mobilePanelDivider(indent: 14)
+                stack.addArrangedSubview(divider)
+                divider.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             }
-        } catch { showError(error) }
+        }
+
+        section.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: section.leadingAnchor), stack.trailingAnchor.constraint(equalTo: section.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: section.topAnchor), stack.bottomAnchor.constraint(equalTo: section.bottomAnchor),
+        ])
+        return section
+    }
+
+    private func mobilePanelPaddedRow(_ view: NSView) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        view.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+            view.topAnchor.constraint(equalTo: container.topAnchor, constant: 9),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -9),
+        ])
+        return container
+    }
+
+    private func mobilePanelDivider(indent: CGFloat = 0) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        let divider = NSView()
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = Theme.border.cgColor
+        container.addSubview(divider)
+        NSLayoutConstraint.activate([
+            container.heightAnchor.constraint(equalToConstant: 1),
+            divider.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: indent),
+            divider.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -indent),
+            divider.topAnchor.constraint(equalTo: container.topAnchor), divider.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        return container
+    }
+
+    private func mobilePanelButtonRow(_ buttons: [NSButton]) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        for button in buttons {
+            button.setContentHuggingPriority(.required, for: .horizontal)
+            row.addArrangedSubview(button)
+        }
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        row.addArrangedSubview(spacer)
+        return row
+    }
+
+    private func mobilePanelKeyValueRow(_ key: String, _ value: String) -> NSView {
+        let keyLabel = NSTextField(labelWithString: key)
+        keyLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        keyLabel.textColor = .secondaryLabelColor
+        keyLabel.alignment = .right
+        keyLabel.translatesAutoresizingMaskIntoConstraints = false
+        keyLabel.widthAnchor.constraint(equalToConstant: 88).isActive = true
+        keyLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let valueLabel = NSTextField(wrappingLabelWithString: value)
+        valueLabel.font = .systemFont(ofSize: 12)
+        valueLabel.textColor = .labelColor
+        valueLabel.maximumNumberOfLines = 0
+        valueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .firstBaseline
+        row.spacing = 10
+        row.addArrangedSubview(keyLabel)
+        row.addArrangedSubview(valueLabel)
+        return row
+    }
+
+    private func mobileDeviceRow(_ device: SpacesMobilePairedDevice) -> NSView {
+        let titleLabel = NSTextField(labelWithString: device.deviceName)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.maximumNumberOfLines = 1
+
+        let platformText = [device.platform, device.appVersion].compactMap { value -> String? in
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        }.joined(separator: " ")
+        let detailPrefix = platformText.isEmpty ? "" : "\(platformText) - "
+        let detailLabel = NSTextField(labelWithString: "\(detailPrefix)Last used \(mobilePanelDateText(device.lastUsedAt))")
+        detailLabel.font = .systemFont(ofSize: 11)
+        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.lineBreakMode = .byTruncatingTail
+        detailLabel.maximumNumberOfLines = 1
+
+        let installationLabel = NSTextField(labelWithString: device.installationID)
+        installationLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        installationLabel.textColor = .tertiaryLabelColor
+        installationLabel.lineBreakMode = .byTruncatingMiddle
+        installationLabel.maximumNumberOfLines = 1
+
+        let textStack = NSStackView()
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.addArrangedSubview(titleLabel)
+        textStack.addArrangedSubview(detailLabel)
+        textStack.addArrangedSubview(installationLabel)
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let revokeButton = iconButton(symbol: "xmark.circle", tooltip: "Revoke this device", action: #selector(revokeMobileDevice(_:)))
+        revokeButton.identifier = NSUserInterfaceItemIdentifier(device.installationID)
+        revokeButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 12
+        row.addArrangedSubview(textStack)
+        row.addArrangedSubview(revokeButton)
+        return row
+    }
+
+    private func mobilePanelDateText(_ value: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        guard let date = formatter.date(from: value) else { return value }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func mobilePairingWindowStatus(_ window: SpacesMobilePairingWindowSnapshot?) -> String {
+        guard let window else { return "Closed" }
+        guard window.expiresAt > Date() else { return "Expired" }
+        return "Open"
+    }
+
+    private func mobileCountdownText(expiresAt: Date) -> String {
+        let remaining = max(Int(expiresAt.timeIntervalSince(Date()).rounded(.down)), 0)
+        let minutes = remaining / 60
+        let seconds = remaining % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func startMobileConnectionTimer() {
+        mobileConnectionTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            MainActor.assumeIsolated { self.refreshMobileConnectionPanelIfVisible() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        mobileConnectionTimer = timer
+    }
+
+    private func refreshMobileConnectionPanelIfVisible() {
+        guard mobileConnectionPanel?.isVisible == true else {
+            mobileConnectionTimer?.invalidate()
+            mobileConnectionTimer = nil
+            return
+        }
+        do { refreshVisibleMobileConnectionPanel(try SpacesMobileBridgeControlClient.status(timeout: 1)) } catch {}
+    }
+
+    @objc private func openMobilePairingWindow() {
+        do { presentMobileConnectionPanel(try SpacesMobileBridgeControlClient.openPairingWindow()) } catch { showError(error) }
+    }
+
+    @objc private func copyMobilePairingLink() {
+        guard let link = mobileConnectionPairingWindow?.linkString else { return }
+        copyToPasteboard(link)
+    }
+
+    @objc private func revokeMobileDevice(_ sender: NSButton) {
+        guard let installationID = sender.identifier?.rawValue else { return }
+        do { presentMobileConnectionPanel(try SpacesMobileBridgeControlClient.revokeDevice(installationID: installationID)) } catch {
+            showError(error)
+        }
+    }
+
+    @objc private func resetAllMobilePairings() {
+        do { presentMobileConnectionPanel(try SpacesMobileBridgeControlClient.resetAllPairings()) } catch { showError(error) }
+    }
+
+    private func qrImage(for value: String, size: CGFloat) -> NSImage? {
+        let filter = CIFilter(name: "CIQRCodeGenerator")
+        filter?.setValue(Data(value.utf8), forKey: "inputMessage")
+        filter?.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter?.outputImage else { return nil }
+        let quietZone: CGFloat = 16
+        let availableSize = max(size - (quietZone * 2), 1)
+        let scale = max(floor(availableSize / output.extent.width), 1)
+        let transformed = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        guard let cgImage = CIContext().createCGImage(transformed, from: transformed.extent) else { return nil }
+        let qrSize = transformed.extent.size
+        let image = NSImage(size: NSSize(width: size, height: size))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: image.size).fill()
+        NSGraphicsContext.current?.imageInterpolation = .none
+        NSImage(cgImage: cgImage, size: qrSize).draw(
+            in: NSRect(x: (size - qrSize.width) / 2, y: (size - qrSize.height) / 2, width: qrSize.width, height: qrSize.height),
+            from: NSRect(origin: .zero, size: qrSize), operation: .sourceOver, fraction: 1)
+        image.unlockFocus()
+        return image
     }
 
     @objc private func showSettings() {

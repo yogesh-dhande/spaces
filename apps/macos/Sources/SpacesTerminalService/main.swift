@@ -39,7 +39,13 @@ import spacesterminalghostty
 
     private func handle(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
         switch request.command {
-        case "ping": return TerminalServiceResponse(ok: true, message: "pong")
+        case "ping": return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid())
+        case "shutdown":
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(100))
+                NSApp.terminate(nil)
+            }
+            return TerminalServiceResponse(ok: true, message: "Terminal service is shutting down.", servicePID: getpid())
         case "create":
             guard let launchConfiguration = request.launchConfiguration else {
                 return TerminalServiceResponse(ok: false, message: "Missing terminal launch configuration.")

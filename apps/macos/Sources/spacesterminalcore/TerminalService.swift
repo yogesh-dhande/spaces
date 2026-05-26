@@ -3,8 +3,7 @@ import Foundation
 #if os(macOS)
     public enum TerminalService {
         public static func ping(timeout: TimeInterval = 2) throws {
-            let socketPath = try TerminalServicePaths.socketPath()
-            let response = try TerminalServiceClient.send(request: TerminalServiceRequest(command: "ping"), socketPath: socketPath, timeout: timeout)
+            let response = try pingResponse(timeout: timeout)
             guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
         }
 
@@ -86,6 +85,88 @@ import Foundation
                 "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                 success: false, detail: "launched=1 pid=\(process.processIdentifier)")
             throw TerminalServiceError.serviceStartupTimedOut(executableURL.path)
+        }
+
+        @discardableResult public static func relaunch(timeout: TimeInterval = 5) throws -> Bool {
+            let socketPath = try TerminalServicePaths.socketPath()
+            if FileManager.default.fileExists(atPath: socketPath) {
+                stopExistingService(socketPath: socketPath, timeout: min(max(timeout / 2, 0.5), 2))
+            }
+            try? FileManager.default.removeItem(atPath: socketPath)
+            return try ensureRunning(timeout: timeout)
+        }
+
+        private static func pingResponse(timeout: TimeInterval = 2) throws -> TerminalServiceResponse {
+            let socketPath = try TerminalServicePaths.socketPath()
+            return try TerminalServiceClient.send(request: TerminalServiceRequest(command: "ping"), socketPath: socketPath, timeout: timeout)
+        }
+
+        private static func stopExistingService(socketPath: String, timeout: TimeInterval) {
+            var candidatePIDs = Set<pid_t>()
+            if let response = try? pingResponse(timeout: min(timeout, 1)), let servicePID = response.servicePID {
+                candidatePIDs.insert(pid_t(servicePID))
+            }
+
+            if let response = try? TerminalServiceClient.send(
+                request: TerminalServiceRequest(command: "shutdown"), socketPath: socketPath, timeout: min(timeout, 1))
+            {
+                if let servicePID = response.servicePID { candidatePIDs.insert(pid_t(servicePID)) }
+                if response.ok, waitForServiceExit(socketPath: socketPath, candidatePIDs: candidatePIDs, timeout: timeout) { return }
+            }
+
+            if candidatePIDs.isEmpty { candidatePIDs.formUnion(serviceProcessIDsOwningSocket(socketPath)) }
+            terminateServiceProcesses(candidatePIDs, timeout: timeout)
+        }
+
+        private static func terminateServiceProcesses(_ pids: Set<pid_t>, timeout: TimeInterval) {
+            let targetPIDs = pids.filter { $0 > 0 && $0 != getpid() }
+            guard !targetPIDs.isEmpty else { return }
+
+            for pid in targetPIDs { kill(pid, SIGTERM) }
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if targetPIDs.allSatisfy({ !isProcessAlive(pid: Int($0)) }) { return }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            for pid in targetPIDs where isProcessAlive(pid: Int(pid)) { kill(pid, SIGKILL) }
+        }
+
+        private static func waitForServiceExit(socketPath: String, candidatePIDs: Set<pid_t>, timeout: TimeInterval) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                let livePIDs = candidatePIDs.filter { isProcessAlive(pid: Int($0)) }
+                let canPing = FileManager.default.fileExists(atPath: socketPath) && ((try? pingResponse(timeout: 0.2)) != nil)
+                if livePIDs.isEmpty && !canPing { return true }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            return false
+        }
+
+        private static func serviceProcessIDsOwningSocket(_ socketPath: String) -> Set<pid_t> {
+            let candidates = ["/usr/sbin/lsof", "/usr/bin/lsof"]
+            guard let executablePath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return [] }
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executablePath)
+            process.arguments = ["-t", "-U", socketPath]
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch { return [] }
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            guard process.terminationStatus == 0 else { return [] }
+            return parseProcessIDs(String(decoding: data, as: UTF8.self))
+        }
+
+        static func parseProcessIDs(_ output: String) -> Set<pid_t> {
+            let processIDs: [pid_t] = output.split(whereSeparator: \.isWhitespace).compactMap { token in
+                guard let processID = Int32(token, radix: 10) else { return nil }
+                return processID
+            }
+            return Set(processIDs)
         }
 
         private static func shouldUseXCTestCompatibilityBackend() -> Bool {

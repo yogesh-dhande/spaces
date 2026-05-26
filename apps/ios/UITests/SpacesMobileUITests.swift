@@ -30,6 +30,26 @@ final class SpacesMobileUITests: XCTestCase {
         try runTerminalTakeOverScenario()
     }
 
+    func testAttachedAppConfigurationDoesNotRequireTransportKey() throws {
+        let configURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: false)
+        defer { try? FileManager.default.removeItem(at: configURL) }
+        let payload: [String: Any] = [
+            "sessionID": "session-1",
+            "host": "127.0.0.1",
+            "port": 47_847,
+            "authToken": "token",
+            "installationID": "installation",
+            "attachToExistingApp": true,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        try data.write(to: configURL)
+
+        let configuration = try UITestConfiguration.load(environment: ["SPACES_MOBILE_UI_TEST_CONFIG_PATH": configURL.path])
+
+        XCTAssertTrue(configuration.attachToExistingApp)
+        XCTAssertEqual(configuration.transportKey, "")
+    }
+
     private func runTerminalTakeOverScenario() throws {
         let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
         let app = if configuration.attachToExistingApp {
@@ -44,6 +64,7 @@ final class SpacesMobileUITests: XCTestCase {
             app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
             app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
             app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
+            app.launchEnvironment["SPACES_MOBILE_TEST_TRANSPORT_KEY"] = configuration.transportKey
             app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
             app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
             if let renderDumpPath = configuration.renderDumpPath {
@@ -357,6 +378,7 @@ private struct UITestConfiguration: Decodable {
     let host: String
     let port: Int
     let authToken: String
+    let transportKey: String
     let installationID: String
     let renderDumpPath: String?
     let eventLogPath: String?
@@ -393,6 +415,7 @@ private struct UITestConfiguration: Decodable {
         case host
         case port
         case authToken
+        case transportKey
         case installationID
         case renderDumpPath
         case eventLogPath
@@ -426,11 +449,17 @@ private struct UITestConfiguration: Decodable {
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        attachToExistingApp = try container.decodeIfPresent(Bool.self, forKey: .attachToExistingApp) ?? false
         sessionID = try container.decode(String.self, forKey: .sessionID)
         secondarySessionID = try container.decodeIfPresent(String.self, forKey: .secondarySessionID)
         host = try container.decode(String.self, forKey: .host)
         port = try container.decode(Int.self, forKey: .port)
         authToken = try container.decode(String.self, forKey: .authToken)
+        if attachToExistingApp {
+            transportKey = try container.decodeIfPresent(String.self, forKey: .transportKey) ?? ""
+        } else {
+            transportKey = try container.decode(String.self, forKey: .transportKey)
+        }
         installationID = try container.decode(String.self, forKey: .installationID)
         renderDumpPath = try container.decodeIfPresent(String.self, forKey: .renderDumpPath)
         eventLogPath = try container.decodeIfPresent(String.self, forKey: .eventLogPath)
@@ -458,7 +487,6 @@ private struct UITestConfiguration: Decodable {
         postFinalMacRetakeoverScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postFinalMacRetakeoverScreenshotPath)
         finalScreenshotPath = try container.decodeIfPresent(String.self, forKey: .finalScreenshotPath)
         scrollbackSwipeCount = try container.decodeIfPresent(Int.self, forKey: .scrollbackSwipeCount) ?? 0
-        attachToExistingApp = try container.decodeIfPresent(Bool.self, forKey: .attachToExistingApp) ?? false
         bundleID = try container.decodeIfPresent(String.self, forKey: .bundleID) ?? Self.defaultBundleID
     }
 

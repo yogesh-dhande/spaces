@@ -11,10 +11,13 @@ terminal_service="${SPACES_TERMINAL_SERVICE_EXECUTABLE:-$repo_root/apps/macos/.b
 ghostty_xcframework="${SPACES_GHOSTTYKIT_XCFRAMEWORK:-$repo_root/apps/macos/.local/ghosttykit/GhosttyKit.xcframework}"
 ghostty_resources="${SPACES_GHOSTTY_RESOURCES_DIR:-$repo_root/apps/macos/.local/ghosttykit/Resources/ghostty}"
 
-pairing_code="${SPACES_MOBILE_DEMO_PAIRING_CODE:-246810}"
 bridge_bind_host="${SPACES_MOBILE_DEMO_BIND_HOST:-0.0.0.0}"
 bridge_host="${SPACES_MOBILE_DEMO_HOST:-127.0.0.1}"
 bridge_port="${SPACES_MOBILE_DEMO_PORT:-47847}"
+pairing_link=""
+pairing_code=""
+pairing_nonce=""
+transport_key=""
 workspace_title="${SPACES_MOBILE_DEMO_WORKSPACE_TITLE:-Spaces Demo}"
 ipad_name="${SPACES_MOBILE_DEMO_IPAD_NAME:-iPad Pro 13-inch (M5)}"
 iphone_name="${SPACES_MOBILE_DEMO_IPHONE_NAME:-iPhone 17 Pro}"
@@ -48,6 +51,7 @@ iphone_app_stderr_log=""
 manual_shell_path=""
 ipad_launch_pid=""
 iphone_launch_pid=""
+terminal_service_pid=""
 performance_log_path=""
 
 run_demo_env() {
@@ -76,9 +80,9 @@ stop_demo_workspace() {
     SPACES_DB_PATH="$spaces_db_path" \
     SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
+    SPACES_MOBILE_BRIDGE_DISABLED="1" \
     SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
     SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
-    SPACES_MOBILE_PAIRING_CODE="$pairing_code" \
     "$spacese2e" stop-workspace --workspace-dir "$project_dir" >/dev/null 2>&1 || true
 }
 
@@ -109,18 +113,25 @@ stop_terminal_service() {
   if [[ -z "$spaces_runtime_dir" ]]; then
     return
   fi
-  local service_pid="${bridge_pid:-}"
-  if [[ -z "$service_pid" || "$service_pid" == "$app_pid" ]]; then
-    service_pid="$(discover_terminal_service_pid || true)"
-  fi
+  local service_pid
+  service_pid="$(discover_terminal_service_pid || true)"
   if [[ -n "$service_pid" && "$service_pid" != "$app_pid" ]]; then
     kill "$service_pid" >/dev/null 2>&1 || true
     wait "$service_pid" >/dev/null 2>&1 || true
   fi
 }
 
+stop_mobile_bridge() {
+  if [[ -n "$bridge_pid" ]]; then
+    kill "$bridge_pid" >/dev/null 2>&1 || true
+    wait "$bridge_pid" >/dev/null 2>&1 || true
+    bridge_pid=""
+  fi
+}
+
 cleanup() {
   stop_demo_workspace
+  stop_mobile_bridge
   stop_terminal_service
   if [[ -n "$ipad_launch_pid" ]]; then
     kill "$ipad_launch_pid" >/dev/null 2>&1 || true
@@ -332,41 +343,59 @@ raise SystemExit(f"bridge port not ready: {last_error}")
 PY
 }
 
-refresh_mobile_bridge_status() {
+start_mobile_bridge() {
   run_demo_env \
     HOME="$temp_root/home" \
     SPACES_DB_PATH="$spaces_db_path" \
     SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
-    SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
-    SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
-    SPACES_MOBILE_PAIRING_CODE="$pairing_code" \
-    "$spaces_cli" mobile status >"$bridge_log"
+    "$spaces_cli" mobile serve --host "$bridge_bind_host" --port "$bridge_port" --pairing-window-count 2 >"$bridge_log" 2>&1 &
+  bridge_pid=$!
 
-  local parsed_status status_port status_pairing_code
+  local ready_deadline=$((SECONDS + 20))
+  while [[ $SECONDS -lt $ready_deadline ]]; do
+    if grep -q 'Spaces mobile bridge ready' "$bridge_log"; then
+      break
+    fi
+    if ! ps -p "$bridge_pid" >/dev/null 2>&1; then
+      echo "Mobile bridge exited before becoming ready." >&2
+      cat "$bridge_log" >&2 || true
+      exit 1
+    fi
+    sleep 0.2
+  done
+
+  if ! grep -q 'Spaces mobile bridge ready' "$bridge_log"; then
+    echo "Timed out waiting for mobile bridge readiness." >&2
+    cat "$bridge_log" >&2 || true
+    exit 1
+  fi
+
+  local parsed_status
   parsed_status="$(
     python3 - "$bridge_log" <<'PY'
 import pathlib
+import re
 import shlex
 import sys
+from urllib.parse import parse_qs, urlparse
 
 status_path = pathlib.Path(sys.argv[1])
-port = ""
-pairing_code = ""
-for line in status_path.read_text(errors="replace").splitlines():
-    if line.startswith("port="):
-        port = line.split("=", 1)[1].strip()
-    elif line.startswith("pairing_code="):
-        pairing_code = line.split("=", 1)[1].strip()
-if not port or not pairing_code:
-    raise SystemExit(f"mobile status did not include port and pairing code: {status_path}")
-print(f"status_port={shlex.quote(port)}")
-print(f"status_pairing_code={shlex.quote(pairing_code)}")
+content = status_path.read_text(errors="replace")
+port_match = re.search(r"port=(\d+)", content)
+link_match = re.search(r"pairing_link=([^\t\n]+)", content)
+if not port_match or not link_match:
+    raise SystemExit(f"mobile serve did not include a port and pairing link: {status_path}")
+pairing_link = link_match.group(1)
+values = parse_qs(urlparse(pairing_link).query)
+print(f"bridge_port={shlex.quote(port_match.group(1))}")
+print(f"pairing_link={shlex.quote(pairing_link)}")
+print(f"pairing_code={shlex.quote(values['code'][0])}")
+print(f"pairing_nonce={shlex.quote(values['nonce'][0])}")
+print(f"transport_key={shlex.quote(values['psk'][0])}")
 PY
   )"
   eval "$parsed_status"
-  bridge_port="$status_port"
-  pairing_code="$status_pairing_code"
 }
 
 discover_session_ids() {
@@ -418,9 +447,9 @@ open_demo_workspace_terminal() {
     SPACES_DB_PATH="$spaces_db_path" \
     SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
+    SPACES_MOBILE_BRIDGE_DISABLED="1" \
     SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
     SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
-    SPACES_MOBILE_PAIRING_CODE="$pairing_code" \
     "$spacese2e" open-workspace-terminal --workspace-dir "$project_dir"
 }
 
@@ -445,33 +474,65 @@ pair_devices() {
   local output_path="$1"
   local ipad_installation_id="$2"
   local iphone_installation_id="$3"
-  python3 - "$output_path" "$pairing_code" "$bridge_host" "$bridge_port" "$bundle_id" "$ipad_installation_id" "$iphone_installation_id" <<'PY'
+  python3 - "$output_path" "$bridge_log" "$pairing_link" "$spaces_cli" "$bridge_host" "$transport_key" "$bundle_id" "$ipad_installation_id" "$iphone_installation_id" <<'PY'
 import json
-import socket
+import pathlib
+import re
+import subprocess
 import sys
+import time
 
-output_path, pairing_code, host, port_text, bundle_id, ipad_installation_id, iphone_installation_id = sys.argv[1:]
-port = int(port_text)
+(
+    output_path,
+    bridge_log,
+    first_pairing_link,
+    spaces_cli,
+    host,
+    transport_key,
+    bundle_id,
+    ipad_installation_id,
+    iphone_installation_id,
+) = sys.argv[1:]
+bridge_log = pathlib.Path(bridge_log)
 
-def send(request):
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.settimeout(5)
-    client.connect((host, port))
-    client.sendall(json.dumps(request).encode("utf-8") + b"\n")
-    client.shutdown(socket.SHUT_WR)
-    response = bytearray()
-    while True:
-        chunk = client.recv(65536)
-        if not chunk:
-            break
-        response.extend(chunk)
-    client.close()
-    return json.loads(response.decode("utf-8"))
+def pairing_links():
+    text = bridge_log.read_text(errors="replace") if bridge_log.exists() else ""
+    links = re.findall(r"pairing_link=([^\t\n]+)", text)
+    if first_pairing_link and (not links or links[0] != first_pairing_link):
+        links.insert(0, first_pairing_link)
+    return links
 
-def pair(installation_id, device_name):
-    response = send({
+def wait_for_pairing_link(index):
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        links = pairing_links()
+        if len(links) > index:
+            return links[index]
+        time.sleep(0.1)
+    raise SystemExit(f"timed out waiting for pairing link {index + 1} in {bridge_log}")
+
+def send(pairing_link, request):
+    completed = subprocess.run(
+        [
+            spaces_cli,
+            "mobile",
+            "request",
+            "--pairing-link",
+            pairing_link,
+            "--host",
+            host,
+            "--request-json",
+            json.dumps(request),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+def pair(pairing_link, installation_id, device_name):
+    response = send(pairing_link, {
         "command": "pair",
-        "pairingCode": pairing_code,
         "clientApp": {
             "installationID": installation_id,
             "bundleID": bundle_id,
@@ -484,14 +545,18 @@ def pair(installation_id, device_name):
         raise SystemExit(f"pair failed for {device_name}: {response}")
     return response["issuedAuthToken"]
 
+ipad_token = pair(wait_for_pairing_link(0), ipad_installation_id, "iPad Pro 13-inch (M5)")
+iphone_token = pair(wait_for_pairing_link(1), iphone_installation_id, "iPhone 17 Pro")
 payload = {
     "ipad": {
         "installationID": ipad_installation_id,
-        "authToken": pair(ipad_installation_id, "iPad Pro 13-inch (M5)"),
+        "authToken": ipad_token,
+        "transportKey": transport_key,
     },
     "iphone": {
         "installationID": iphone_installation_id,
-        "authToken": pair(iphone_installation_id, "iPhone 17 Pro"),
+        "authToken": iphone_token,
+        "transportKey": transport_key,
     },
 }
 with open(output_path, "w") as handle:
@@ -509,14 +574,14 @@ write_simulator_settings() {
   xcrun simctl uninstall "$udid" "$bundle_id" >/dev/null 2>&1 || true
   xcrun simctl install "$udid" "$ios_app_path" >/dev/null
 
-  python3 - "$udid" "$bundle_id" "$bridge_host" "$bridge_port" "$installation_id" "$auth_token" <<'PY'
+  python3 - "$udid" "$bundle_id" "$bridge_host" "$bridge_port" "$transport_key" "$installation_id" "$auth_token" <<'PY'
 import json
 import pathlib
 import plistlib
 import subprocess
 import sys
 
-udid, bundle_id, host, port_text, installation_id, auth_token = sys.argv[1:]
+udid, bundle_id, host, port_text, transport_key, installation_id, auth_token = sys.argv[1:]
 port = int(port_text)
 container = subprocess.check_output(["xcrun", "simctl", "get_app_container", udid, bundle_id, "data"], text=True).strip()
 prefs_path = pathlib.Path(container) / "Library" / "Preferences" / f"{bundle_id}.plist"
@@ -524,6 +589,7 @@ prefs_path.parent.mkdir(parents=True, exist_ok=True)
 payload = {
     "host": host,
     "port": port,
+    "transportKey": transport_key,
     "authToken": auth_token,
     "installationID": installation_id,
 }
@@ -539,7 +605,7 @@ PY
 }
 
 print_summary() {
-  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$session_id" "$secondary_session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$performance_log_path" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_bind_host" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
+  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$terminal_service_pid" "$session_id" "$secondary_session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$performance_log_path" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_bind_host" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
 import json
 import sys
 
@@ -547,6 +613,7 @@ import sys
     root,
     app_pid,
     bridge_pid,
+    terminal_service_pid,
     session_id,
     secondary_session_id,
     db_path,
@@ -574,7 +641,7 @@ payload = {
     "root": root,
     "appPID": int(app_pid),
     "bridgePID": int(bridge_pid),
-    "terminalServicePID": int(bridge_pid),
+    "terminalServicePID": int(terminal_service_pid) if terminal_service_pid else None,
     "bridgeBindHost": bridge_bind_host,
     "bridgeHost": bridge_host,
     "bridgePort": int(bridge_port),
@@ -613,9 +680,11 @@ export HOME=$(printf '%q' "$temp_root/home")
 export SPACES_DB_PATH=$(printf '%q' "$spaces_db_path")
 export SPACES_RUNTIME_DIR=$(printf '%q' "$spaces_runtime_dir")
 export SPACES_TERMINAL_SERVICE_EXECUTABLE=$(printf '%q' "$terminal_service")
+export SPACES_MOBILE_BRIDGE_DISABLED=1
 export SPACES_MOBILE_BRIDGE_HOST=$(printf '%q' "$bridge_bind_host")
 export SPACES_MOBILE_BRIDGE_PORT=$(printf '%q' "$bridge_port")
-export SPACES_MOBILE_PAIRING_CODE=$(printf '%q' "$pairing_code")
+export SPACES_MOBILE_PAIRING_LINK=$(printf '%q' "$pairing_link")
+export SPACES_MOBILE_TRANSPORT_KEY=$(printf '%q' "$transport_key")
 export SPACES_DEMO_ROOT=$(printf '%q' "$temp_root")
 export SPACES_DEMO_SESSION_ID=$(printf '%q' "$session_id")
 export SPACES_DEMO_SECONDARY_SESSION_ID=$(printf '%q' "$secondary_session_id")
@@ -745,9 +814,9 @@ run_demo_env \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
+  SPACES_MOBILE_BRIDGE_DISABLED="1" \
   SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
   SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
-  SPACES_MOBILE_PAIRING_CODE="$pairing_code" \
   SPACES_GHOSTTYKIT_XCFRAMEWORK="$ghostty_xcframework" \
   SPACES_GHOSTTY_RESOURCES_DIR="$ghostty_resources" \
   SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
@@ -761,9 +830,9 @@ run_demo_env \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
+  SPACES_MOBILE_BRIDGE_DISABLED="1" \
   SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
   SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
-  SPACES_MOBILE_PAIRING_CODE="$pairing_code" \
   SPACES_PROJECT_DIR="$repo_root" \
   "$spacese2e" seed-fixture \
     --project-dir "$project_dir" \
@@ -827,16 +896,15 @@ if [[ -z "$secondary_session_id" ]]; then
   exit 1
 fi
 
-refresh_mobile_bridge_status
+start_mobile_bridge
 wait_for_bridge_port
-bridge_pid="$(discover_terminal_service_pid || true)"
-if [[ -z "$bridge_pid" ]]; then
-  bridge_pid="$app_pid"
-fi
+terminal_service_pid="$(discover_terminal_service_pid || true)"
 {
   echo "bind_host=$bridge_bind_host"
   echo "client_host=$bridge_host"
-  echo "terminal_service_pid=$bridge_pid"
+  echo "pairing_link=$pairing_link"
+  echo "bridge_pid=$bridge_pid"
+  echo "terminal_service_pid=$terminal_service_pid"
 } >>"$bridge_log"
 
 ipad_installation_id="$(generate_installation_id)"

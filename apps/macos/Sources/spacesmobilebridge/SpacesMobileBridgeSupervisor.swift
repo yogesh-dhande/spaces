@@ -8,6 +8,7 @@ import spacesmobilecore
 
     private var server: SpacesMobileBridgeServer?
     private var advertiser: SpacesMobileBridgeBonjourAdvertiser?
+    private var controlServer: SpacesMobileBridgeControlServer?
     private var restartTimer: Timer?
     private var isStopped = false
     private var lastFailureDescription: String?
@@ -24,6 +25,7 @@ import spacesmobilecore
     public func start() {
         guard !isDisabled else { return }
         isStopped = false
+        startControlServerIfNeeded()
         startRestartTimer()
         startBridgeIfNeeded()
     }
@@ -32,6 +34,8 @@ import spacesmobilecore
         isStopped = true
         restartTimer?.invalidate()
         restartTimer = nil
+        controlServer?.stop()
+        controlServer = nil
         advertiser?.stop()
         advertiser = nil
         server?.stop()
@@ -41,8 +45,8 @@ import spacesmobilecore
     public func status() throws -> SpacesMobileBridgeStatus {
         let status = try settingsStore.status()
         return SpacesMobileBridgeStatus(
-            host: status.host, port: server?.listeningPort ?? status.port, pairingCode: status.pairingCode,
-            bonjourServiceName: status.bonjourServiceName, bonjourServiceType: status.bonjourServiceType, networkAddresses: status.networkAddresses)
+            host: status.host, port: server?.listeningPort ?? status.port, bonjourServiceName: status.bonjourServiceName,
+            bonjourServiceType: status.bonjourServiceType, networkAddresses: status.networkAddresses)
     }
 
     private var isDisabled: Bool {
@@ -70,8 +74,7 @@ import spacesmobilecore
         guard !isStopped, server == nil else { return }
         do {
             let settings = try settingsStore.loadOrCreate()
-            let createdServer = try SpacesMobileBridgeServer(host: settings.host, port: settings.port, pairingCode: settings.pairingCode)
-            try createdServer.start()
+            let createdServer = try startBridgeServer(settings: settings)
             let serviceName = try SpacesMobileBridgeSettingsStore.bonjourServiceName()
             let createdAdvertiser = SpacesMobileBridgeBonjourAdvertiser(
                 serviceName: serviceName, port: createdServer.listeningPort,
@@ -88,6 +91,113 @@ import spacesmobilecore
                 lastFailureDescription = description
             }
         }
+    }
+
+    private func startBridgeServer(settings: SpacesMobileBridgeSettings) throws -> SpacesMobileBridgeServer {
+        do { return try startBridgeServer(host: settings.host, port: settings.port, transportKey: settings.transportKey) } catch {
+            guard settings.port != 0 else { throw error }
+            let configuredPortError = error
+            log("mobile bridge configured port \(settings.port) unavailable; retrying on a stable profile port")
+            var fallbackError = configuredPortError
+            for fallbackPort in try settingsStore.stableFallbackPorts() where fallbackPort != settings.port {
+                do {
+                    let fallbackServer = try startBridgeServer(host: settings.host, port: fallbackPort, transportKey: settings.transportKey)
+                    do { _ = try settingsStore.updatePort(fallbackPort) } catch {
+                        fallbackServer.stop()
+                        throw error
+                    }
+                    log("mobile bridge using stable fallback port \(fallbackPort)")
+                    return fallbackServer
+                } catch { fallbackError = error }
+            }
+            throw fallbackError
+        }
+    }
+
+    private func startBridgeServer(host: String, port: Int, transportKey: String) throws -> SpacesMobileBridgeServer {
+        let createdServer = try SpacesMobileBridgeServer(host: host, port: port, transportKey: transportKey)
+        do {
+            try createdServer.start()
+            return createdServer
+        } catch {
+            createdServer.stop()
+            throw error
+        }
+    }
+
+    private func startControlServerIfNeeded() {
+        guard controlServer == nil else { return }
+        do {
+            let socketPath = try SpacesMobileBridgeControlClient.socketPath()
+            let queue = DispatchQueue(label: "spaces.mobile.bridge.control")
+            let createdServer = SpacesMobileBridgeControlServer(socketPath: socketPath, queue: queue) { [weak self] request in
+                DispatchQueue.main.sync {
+                    MainActor.assumeIsolated {
+                        guard let self else {
+                            return SpacesMobileBridgeControlResponse(ok: false, message: "Mobile bridge supervisor is unavailable.")
+                        }
+                        return self.handleControlRequest(request)
+                    }
+                }
+            }
+            try createdServer.start()
+            controlServer = createdServer
+        } catch { log("mobile bridge control unavailable: \(String(describing: error))") }
+    }
+
+    private func handleControlRequest(_ request: SpacesMobileBridgeControlRequest) -> SpacesMobileBridgeControlResponse {
+        do {
+            switch request.command {
+            case "status":
+                return SpacesMobileBridgeControlResponse(
+                    ok: true, message: "Loaded mobile bridge status.", status: try status(), pairingWindow: server?.pairingWindowSnapshot(),
+                    devices: try pairedDevices())
+            case "openPairingWindow":
+                startBridgeIfNeeded()
+                guard let server else {
+                    return SpacesMobileBridgeControlResponse(ok: false, message: "Mobile bridge is not running.", status: try status())
+                }
+                let currentStatus = try status()
+                let window = server.openPairingWindow(host: pairingLinkHost(for: currentStatus), name: currentStatus.bonjourServiceName)
+                return SpacesMobileBridgeControlResponse(
+                    ok: true, message: "Opened mobile pairing window.", status: currentStatus,
+                    pairingWindow: SpacesMobilePairingWindowSnapshot(window: window), devices: try pairedDevices())
+            case "listDevices":
+                return SpacesMobileBridgeControlResponse(ok: true, message: "Loaded paired mobile devices.", devices: try pairedDevices())
+            case "revokeDevice":
+                guard let installationID = request.installationID else {
+                    return SpacesMobileBridgeControlResponse(ok: false, message: "Missing mobile installation ID.")
+                }
+                let devices = try revokePairing(installationID: installationID)
+                return SpacesMobileBridgeControlResponse(ok: true, message: "Revoked mobile device.", devices: devices)
+            case "resetAllPairings":
+                try resetPairings()
+                _ = try settingsStore.rotateTransportKey()
+                advertiser?.stop()
+                advertiser = nil
+                server = nil
+                return SpacesMobileBridgeControlResponse(ok: true, message: "Reset all mobile pairings.", devices: [])
+            default: return SpacesMobileBridgeControlResponse(ok: false, message: "Unsupported mobile bridge control command '\(request.command)'.")
+            }
+        } catch { return SpacesMobileBridgeControlResponse(ok: false, message: String(describing: error)) }
+    }
+
+    private func pairedDevices() throws -> [SpacesMobilePairedDevice] {
+        if let server { return try server.listPairedDevices() }
+        return try SpacesMobilePairingStore().listDevices()
+    }
+
+    private func revokePairing(installationID: String) throws -> [SpacesMobilePairedDevice] {
+        if let server { return try server.revokePairing(installationID: installationID) }
+        let store = try SpacesMobilePairingStore()
+        try store.revoke(installationID: installationID)
+        return try store.listDevices()
+    }
+
+    private func resetPairings() throws { if let server { try server.resetPairingsAndStop() } else { try SpacesMobilePairingStore().removeAll() } }
+
+    private func pairingLinkHost(for status: SpacesMobileBridgeStatus) -> String {
+        SpacesMobileBridgeNetworkInterfaces.pairingLinkHost(boundHost: status.host, networkAddresses: status.networkAddresses)
     }
 
     private func log(_ message: String) {

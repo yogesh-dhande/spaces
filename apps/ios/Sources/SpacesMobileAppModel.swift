@@ -38,6 +38,9 @@ private enum SpacesMobileSettingsStore {
         if let authToken = trimmed(environment["SPACES_MOBILE_TEST_AUTH_TOKEN"]) {
             resolved.authToken = authToken
         }
+        if let transportKey = trimmed(environment["SPACES_MOBILE_TEST_TRANSPORT_KEY"]) {
+            resolved.transportKey = transportKey
+        }
         if let installationID = trimmed(environment["SPACES_MOBILE_TEST_INSTALLATION_ID"]) {
             resolved.installationID = installationID
         }
@@ -191,6 +194,7 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
     var isLoading = false
     var isShowingConnectionSettings = false
     var connectionNotice: String?
+    var pendingPairingLink: SpacesMobilePairingLink?
     var errorMessage: String?
     @ObservationIgnored private var bridgeClient: SpacesMobileBridgeClient
     @ObservationIgnored private var commandChannel: SpacesMobileBridgeCommandChannel
@@ -257,10 +261,13 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
         SpacesMobileSettingsStore.save(settings)
         overview = nil
         connectionNotice = nil
+        pendingPairingLink = nil
         Task { await previousCommandChannel.close() }
     }
 
     func dismissError() { errorMessage = nil }
+
+    func clearPendingPairingLink() { pendingPairingLink = nil }
 
     func handleAuthenticationFailure(message: String) {
         let previousCommandChannel = commandChannel
@@ -270,9 +277,21 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
         SpacesMobileSettingsStore.save(settings)
         overview = nil
         connectionNotice = message
+        pendingPairingLink = nil
         errorMessage = nil
         isShowingConnectionSettings = true
         Task { await previousCommandChannel.close() }
+    }
+
+    func preparePairingLink(_ url: URL) {
+        do {
+            pendingPairingLink = try SpacesMobilePairingLink.parse(url)
+            connectionNotice = nil
+            errorMessage = nil
+            isShowingConnectionSettings = true
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func groupSort(_ lhs: SpacesMobileTerminalWorkspaceGroup, _ rhs: SpacesMobileTerminalWorkspaceGroup) -> Bool {
