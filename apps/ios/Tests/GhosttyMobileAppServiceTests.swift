@@ -299,7 +299,7 @@
             XCTAssertTrue(accessoryView.autoresizingMask.contains(.flexibleHeight))
 
             let labels = hostView.accessoryToolbarButtonAccessibilityLabelsForTesting
-            XCTAssertEqual(labels.scrollable, ["/", "~", "esc", "Control", "tab", "-", "_"])
+            XCTAssertEqual(labels.scrollable, ["tab", "/", "~", "|", "-", "_", "esc", "Control"])
             XCTAssertEqual(labels.pinned, ["Arrow key joystick", "Hide keyboard"])
 
             let phoneFrames = hostView.accessoryToolbarLayoutFramesForTesting(width: 320, userInterfaceIdiom: .phone)
@@ -338,14 +338,19 @@
             func acceptsRelease(x: CGFloat, y: CGFloat) -> Bool {
                 hostView.accessoryToolbarJoystickAcceptsReleaseForTesting(point: CGPoint(x: x, y: y), bounds: bounds)
             }
+            func acceptsActivation(x: CGFloat, y: CGFloat) -> Bool {
+                hostView.accessoryToolbarJoystickAcceptsActivationForTesting(point: CGPoint(x: x, y: y), bounds: bounds)
+            }
 
             XCTAssertNil(direction(x: bounds.midX, y: bounds.midY))
             XCTAssertEqual(direction(x: bounds.midX + 12, y: bounds.midY), "right")
             XCTAssertEqual(direction(x: bounds.midX - 12, y: bounds.midY), "left")
             XCTAssertEqual(direction(x: bounds.midX, y: bounds.midY - 12), "up")
             XCTAssertEqual(direction(x: bounds.midX, y: bounds.midY + 12), "down")
-            XCTAssertTrue(acceptsRelease(x: bounds.maxX + 49, y: bounds.midY))
-            XCTAssertFalse(acceptsRelease(x: bounds.maxX + 51, y: bounds.midY))
+            XCTAssertTrue(acceptsActivation(x: bounds.midX, y: bounds.minY - 11))
+            XCTAssertFalse(acceptsActivation(x: bounds.midX, y: bounds.minY - 13))
+            XCTAssertTrue(acceptsRelease(x: bounds.maxX + 99, y: bounds.midY))
+            XCTAssertFalse(acceptsRelease(x: bounds.maxX + 101, y: bounds.midY))
         }
 
         func testRemoteTerminalHostViewReplaysSnapshotIntoGhosttySession() throws {

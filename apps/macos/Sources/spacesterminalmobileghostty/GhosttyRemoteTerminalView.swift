@@ -659,16 +659,17 @@ import Foundation
                     contentStackView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor),
                 ])
 
+                addTextButton("tab") { [weak self] in self?.onKey("tab") }
                 addTextButton("/") { [weak self] in self?.onText("/") }
                 addTextButton("~") { [weak self] in self?.onText("~") }
+                addTextButton("|") { [weak self] in self?.onText("|") }
+                addTextButton("-") { [weak self] in self?.onText("-") }
+                addTextButton("_") { [weak self] in self?.onText("_") }
                 addTextButton("esc") { [weak self] in self?.onKey("esc") }
                 configureButton(controlButton, title: "ctrl")
                 controlButton.accessibilityLabel = "Control"
                 controlButton.addAction(UIAction { [weak self] _ in self?.onControl() }, for: .touchUpInside)
                 contentStackView.addArrangedSubview(controlButton)
-                addTextButton("tab") { [weak self] in self?.onKey("tab") }
-                addTextButton("-") { [weak self] in self?.onText("-") }
-                addTextButton("_") { [weak self] in self?.onText("_") }
                 configureButton(joystickButton, imageName: "arrow.up.and.down.and.arrow.left.and.right")
                 joystickButton.accessibilityIdentifier = "terminal.accessory.arrow-joystick"
                 joystickButton.accessibilityLabel = "Arrow key joystick"
@@ -808,10 +809,14 @@ import Foundation
         }
 
         private final class DirectionalPadButton: UIButton {
-            private static let releaseMargin: CGFloat = 50
+            private static let activationHorizontalMargin: CGFloat = 8
+            private static let activationVerticalMargin: CGFloat = 12
+            private static let releaseMargin: CGFloat = 100
             private static let centerDeadZone: CGFloat = 4
 
             var onDirection: ((String) -> Void)?
+
+            override func point(inside point: CGPoint, with event: UIEvent?) -> Bool { Self.acceptsActivation(at: point, in: bounds) }
 
             override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
                 isHighlighted = true
@@ -832,6 +837,10 @@ import Foundation
             }
 
             override func cancelTracking(with event: UIEvent?) { isHighlighted = false }
+
+            static func acceptsActivation(at point: CGPoint, in bounds: CGRect) -> Bool {
+                bounds.insetBy(dx: -activationHorizontalMargin, dy: -activationVerticalMargin).contains(point)
+            }
 
             static func acceptsRelease(at point: CGPoint, in bounds: CGRect) -> Bool {
                 bounds.insetBy(dx: -releaseMargin, dy: -releaseMargin).contains(point)
@@ -1315,6 +1324,10 @@ import Foundation
 
         func accessoryToolbarJoystickAcceptsReleaseForTesting(point: CGPoint, bounds: CGRect) -> Bool {
             DirectionalPadButton.acceptsRelease(at: point, in: bounds)
+        }
+
+        func accessoryToolbarJoystickAcceptsActivationForTesting(point: CGPoint, bounds: CGRect) -> Bool {
+            DirectionalPadButton.acceptsActivation(at: point, in: bounds)
         }
 
         private func exportedSnapshot(from session: ghostty_session_t) -> GhosttyTerminalSnapshot? {
