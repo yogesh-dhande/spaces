@@ -83,6 +83,81 @@ enum {
     SPACES_GHOSTTY_VT_FLAG_SPACER = 1 << 10,
 };
 
+static void *spaces_ghostty_vt_dlopen_path(const char *path) {
+    if (path == NULL || path[0] == '\0') return NULL;
+    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
+
+static void *spaces_ghostty_vt_dlopen_in_directory(const char *directory) {
+    if (directory == NULL || directory[0] == '\0') return NULL;
+    const char *names[] = {
+        "libghostty-vt.dylib",
+        "libghostty-vt.0.dylib",
+        "libghostty-vt.0.1.0.dylib",
+        NULL,
+    };
+
+    for (size_t i = 0; names[i] != NULL; i++) {
+        char candidate[PATH_MAX];
+        int written = snprintf(candidate, sizeof(candidate), "%s/%s", directory, names[i]);
+        if (written < 0 || (size_t)written >= sizeof(candidate)) continue;
+        void *handle = spaces_ghostty_vt_dlopen_path(candidate);
+        if (handle != NULL) return handle;
+    }
+
+    return NULL;
+}
+
+static bool spaces_ghostty_vt_parent_directory(char *path) {
+    if (path == NULL) return false;
+    size_t length = strlen(path);
+    while (length > 1 && path[length - 1] == '/') {
+        path[length - 1] = '\0';
+        length--;
+    }
+
+    char *slash = strrchr(path, '/');
+    if (slash == NULL) return false;
+    if (slash == path) {
+        path[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+    return true;
+}
+
+static void *spaces_ghostty_vt_dlopen_near_executable(void) {
+    uint32_t executable_path_size = 0;
+    _NSGetExecutablePath(NULL, &executable_path_size);
+    if (executable_path_size == 0) return NULL;
+
+    char *executable_path = (char *)malloc(executable_path_size);
+    if (executable_path == NULL) return NULL;
+    void *handle = NULL;
+
+    if (_NSGetExecutablePath(executable_path, &executable_path_size) == 0) {
+        char resolved_path[PATH_MAX];
+        const char *source_path = executable_path;
+        if (realpath(executable_path, resolved_path) != NULL) source_path = resolved_path;
+
+        char executable_directory[PATH_MAX];
+        int written = snprintf(executable_directory, sizeof(executable_directory), "%s", source_path);
+        if (written >= 0 && (size_t)written < sizeof(executable_directory) && spaces_ghostty_vt_parent_directory(executable_directory)) {
+            handle = spaces_ghostty_vt_dlopen_in_directory(executable_directory);
+            if (handle == NULL) {
+                char framework_directory[PATH_MAX];
+                written = snprintf(framework_directory, sizeof(framework_directory), "%s/../Frameworks", executable_directory);
+                if (written >= 0 && (size_t)written < sizeof(framework_directory)) {
+                    handle = spaces_ghostty_vt_dlopen_in_directory(framework_directory);
+                }
+            }
+        }
+    }
+
+    free(executable_path);
+    return handle;
+}
+
 static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     if (symbols == NULL) return false;
     memset(symbols, 0, sizeof(*symbols));
@@ -90,7 +165,11 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     void *handle = NULL;
     const char *env_path = getenv("SPACES_GHOSTTY_VT_DYLIB_PATH");
     if (env_path != NULL && env_path[0] != '\0') {
-        handle = dlopen(env_path, RTLD_NOW | RTLD_LOCAL);
+        handle = spaces_ghostty_vt_dlopen_path(env_path);
+    }
+
+    if (handle == NULL) {
+        handle = spaces_ghostty_vt_dlopen_near_executable();
     }
 
     if (handle == NULL) {

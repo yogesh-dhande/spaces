@@ -19,6 +19,7 @@ extension SpacesMobilePairingStore: SpacesMobilePairingStoreProtocol {}
 
 public final class SpacesMobileBridgeServer: @unchecked Sendable {
     static let maxHistorySeedOutputBytes = 2 * 1024 * 1024
+    private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "resize"]
 
     private struct StreamRelay {
         let installationID: String
@@ -357,6 +358,11 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
 
     private func handleTerminalControlRequest(_ request: SpacesMobileBridgeRequest, command: String) throws -> SpacesMobileBridgeResponse {
         guard let sessionID = request.sessionID else { return SpacesMobileBridgeResponse(ok: false, message: "Missing session ID.") }
+        let clientID = Self.normalizedClientID(from: request)
+        if Self.ownerGatedTerminalCommands.contains(command), clientID == nil {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing mobile client ID.")
+        }
+
         let startedAt = Date()
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
@@ -364,13 +370,18 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         }
 
         let terminalRequest = TerminalControlRequest(
-            command: command, text: request.text, key: request.key, clientID: request.clientID, client: request.client,
+            command: command, text: request.text, key: request.key, clientID: clientID, client: request.client,
             attachmentMode: request.attachmentMode, columns: request.columns, rows: request.rows, appendNewline: request.appendNewline)
         let response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath)
         TerminalPerformance.logMetric(
             "mobile_bridge_\(command)", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: response.ok)
         return SpacesMobileBridgeResponse(ok: response.ok, message: response.message)
+    }
+
+    private static func normalizedClientID(from request: SpacesMobileBridgeRequest) -> String? {
+        guard let clientID = request.clientID?.trimmingCharacters(in: .whitespacesAndNewlines), !clientID.isEmpty else { return nil }
+        return clientID
     }
 
     private func loadOverview() throws -> SpacesMobileOverviewPayload {

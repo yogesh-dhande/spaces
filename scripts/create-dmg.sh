@@ -54,6 +54,28 @@ emit_result() {
   printf 'PATH_HINT=%s\n' "${4:-}"
 }
 
+copy_ghostty_vt_dylibs() {
+  local copied=0
+  local source_dylib
+  for source_dylib in "$APP_PATH"/Contents/Frameworks/libghostty-vt*.dylib; do
+    [[ -e "$source_dylib" || -L "$source_dylib" ]] || continue
+    /bin/cp -P "$source_dylib" "$CLI_DIR/"
+    copied=1
+  done
+
+  if [[ "$copied" -eq 0 ]]; then
+    echo "Missing libghostty-vt dylibs in $APP_PATH/Contents/Frameworks" >&2
+    exit 1
+  fi
+
+  local installed_dylib
+  for installed_dylib in "$CLI_DIR"/libghostty-vt*.dylib; do
+    [[ -e "$installed_dylib" || -L "$installed_dylib" ]] || continue
+    /bin/chmod 755 "$installed_dylib" 2>/dev/null || true
+    /usr/bin/xattr -d com.apple.quarantine "$installed_dylib" 2>/dev/null || true
+  done
+}
+
 case "$MODE" in
   system)
     APP_PATH="/Applications/Spaces.app"
@@ -68,6 +90,7 @@ case "$MODE" in
     /bin/cp "$APP_PATH/Contents/Resources/SpacesTerminalService" "$SERVICE_PATH"
     /bin/chmod 755 "$CLI_PATH"
     /bin/chmod 755 "$SERVICE_PATH"
+    copy_ghostty_vt_dylibs
     /usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" 2>/dev/null || true
     /usr/bin/xattr -d com.apple.quarantine "$SERVICE_PATH" 2>/dev/null || true
     emit_result "$APP_PATH" "$CLI_PATH" "$SERVICE_PATH"
@@ -87,6 +110,7 @@ case "$MODE" in
     /bin/cp "$APP_PATH/Contents/Resources/SpacesTerminalService" "$SERVICE_PATH"
     /bin/chmod 755 "$CLI_PATH"
     /bin/chmod 755 "$SERVICE_PATH"
+    copy_ghostty_vt_dylibs
     /usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" 2>/dev/null || true
     /usr/bin/xattr -d com.apple.quarantine "$SERVICE_PATH" 2>/dev/null || true
     if [[ ":$PATH:" != *":$CLI_DIR:"* ]]; then

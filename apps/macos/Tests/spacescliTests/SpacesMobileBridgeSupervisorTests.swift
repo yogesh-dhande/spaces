@@ -110,6 +110,51 @@ import spacesterminalcore
         XCTAssertEqual(SpacesMobileBridgeNetworkInterfaces.pairingLinkHost(boundHost: "0.0.0.0", networkAddresses: addresses), "192.168.1.24")
     }
 
+    func testOwnerGatedTerminalCommandsRequireMobileClientID() async throws {
+        try await withTemporaryProfile { _ in
+            let sessionID = "session-owner-gated-\(UUID().uuidString)"
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+
+            let recorder = MobileBridgeTerminalControlRecorder()
+            let controlServer = TerminalControlServer(
+                socketPath: paths.controlSocketPath, queue: DispatchQueue(label: "spaces.mobile.bridge.owner-gated.test")
+            ) { request in
+                recorder.record(request)
+                return TerminalControlResponse(ok: true, message: "Forwarded terminal control request.")
+            }
+            try controlServer.start()
+            defer { controlServer.stop() }
+
+            let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+            let clientApp = SpacesMobileClientApp(
+                installationID: "INSTALLATION-OWNER-GATED", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let authToken = try SpacesMobilePairingStore().issueToken(for: clientApp)
+            let server = try SpacesMobileBridgeServer(host: SpacesMobileBridgeDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+
+            let rejectedRequests = [
+                SpacesMobileBridgeRequest(command: "send", authToken: authToken, clientApp: clientApp, sessionID: sessionID, text: "echo denied"),
+                SpacesMobileBridgeRequest(
+                    command: "send", authToken: authToken, clientApp: clientApp, sessionID: sessionID, clientID: "   ", text: "echo denied"),
+                SpacesMobileBridgeRequest(command: "key", authToken: authToken, clientApp: clientApp, sessionID: sessionID, key: "enter"),
+                SpacesMobileBridgeRequest(command: "resize", authToken: authToken, clientApp: clientApp, sessionID: sessionID, columns: 80, rows: 24),
+            ]
+
+            for request in rejectedRequests {
+                let response = try await Task.detached { try Self.sendBridgeRequest(request, port: server.listeningPort, transportKey: transportKey) }
+                    .value
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.message, "Missing mobile client ID.")
+            }
+
+            XCTAssertTrue(recorder.requests().isEmpty)
+        }
+    }
+
     func testStateHistorySeedReturnsFullReplayWhenOutputFitsBudget() async throws {
         try await withTemporaryProfile { _ in
             let sessionID = "session-history-full-\(UUID().uuidString)"
@@ -592,6 +637,24 @@ private final class MobileBridgeSupervisorTestResultBox: @unchecked Sendable {
         let response = storedResponse
         lock.unlock()
         return response
+    }
+}
+
+private final class MobileBridgeTerminalControlRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedRequests: [TerminalControlRequest] = []
+
+    func record(_ request: TerminalControlRequest) {
+        lock.lock()
+        storedRequests.append(request)
+        lock.unlock()
+    }
+
+    func requests() -> [TerminalControlRequest] {
+        lock.lock()
+        let requests = storedRequests
+        lock.unlock()
+        return requests
     }
 }
 

@@ -35,7 +35,7 @@
 	<true/>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_spaces-mobile._tcp.</string>
+		<string>_spaces-mobile._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Spaces connects to your Mac's first-party terminal bridge.</string>
