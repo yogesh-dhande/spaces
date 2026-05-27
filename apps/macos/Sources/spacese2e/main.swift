@@ -19,11 +19,12 @@ struct MXE2ECommand: ParsableCommand {
             OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self, RestartWorkspaceProcessCommand.self,
             LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
             StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
-            SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self,
-            CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
-            CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self,
-            DumpTerminalSessionWindowStateCommand.self, StartTerminalSessionCommand.self, TerminateTerminalSessionCommand.self,
-            OpenMobilePairingWindowCommand.self, RecordScreenCommand.self, ScrollApplicationWindowCommand.self,
+            ClearWorkspaceAgentWindowsCommand.self, SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self,
+            RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self, CycleWorkspaceWindowCommand.self,
+            FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self,
+            SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
+            StartTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, OpenMobilePairingWindowCommand.self, RecordScreenCommand.self,
+            ScrollApplicationWindowCommand.self,
         ])
 }
 
@@ -875,6 +876,22 @@ private struct ArchiveWorkspaceCommand: ParsableCommand {
     }
 }
 
+private struct ClearWorkspaceAgentWindowsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "clear-workspace-agent-windows")
+
+    @Option(name: .long) var workspaceDir: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        try orchestrator.store.deleteAgentWindows(workspaceID: workspace.id)
+        try emitJSON(["workspaceID": workspace.id, "cleared": "true"])
+    }
+}
+
 private struct SetWorkspaceStopScriptCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "set-workspace-stop-script")
 
@@ -961,6 +978,35 @@ private struct AddWorkspaceProcessCommand: ParsableCommand {
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.processes.removeAll { ($0.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == trimmedName }
             settings.processes.append(ProcessTemplate(name: trimmedName, command: trimmedCommand, executionMode: .shell))
+        }
+        guard let updated = try orchestrator.workspaceSettings(workspaceID: workspace.id) else {
+            throw ValidationError("Workspace settings missing at: \(normalizedWorkspaceDir)")
+        }
+        try emitJSON(
+            WorkspaceSettingsPayload(
+                stopScript: updated.stopScript, ports: updated.ports.map(\.name),
+                processes: updated.processes.map { .init(name: $0.name, command: $0.command) },
+                browserSessions: updated.browserSessions.map { .init(name: $0.name, url: $0.url) },
+                agentLaunchers: updated.agentLaunchers.map { .init(name: $0.name, command: $0.command) }))
+    }
+}
+
+private struct RemoveWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "remove-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var name: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw ValidationError("Missing process name.") }
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes.removeAll { ($0.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == trimmedName }
         }
         guard let updated = try orchestrator.workspaceSettings(workspaceID: workspace.id) else {
             throw ValidationError("Workspace settings missing at: \(normalizedWorkspaceDir)")

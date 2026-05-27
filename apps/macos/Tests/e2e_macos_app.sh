@@ -42,7 +42,7 @@ SPACES_SUSTAINED_CPU_BUDGET_PCT="${SPACES_SUSTAINED_CPU_BUDGET_PCT:-80}"
 SPACES_CPU_SAMPLE_COUNT="${SPACES_CPU_SAMPLE_COUNT:-6}"
 SPACES_CPU_SAMPLE_INTERVAL_SECONDS="${SPACES_CPU_SAMPLE_INTERVAL_SECONDS:-0.5}"
 HIGH_OUTPUT_PROCESS_NAME="${HIGH_OUTPUT_PROCESS_NAME:-noisy}"
-HIGH_OUTPUT_PROCESS_COMMAND="${HIGH_OUTPUT_PROCESS_COMMAND:-yes spaces-e2e-noisy}"
+HIGH_OUTPUT_PROCESS_COMMAND="${HIGH_OUTPUT_PROCESS_COMMAND:-}"
 
 TMP_PREFIX="${TMP_PREFIX:-/tmp/spaces-real-e2e}"
 TMP_ROOT="$(cd "$(mktemp -d "$TMP_PREFIX".XXXXXX)" && pwd -P)"
@@ -377,6 +377,7 @@ ensure_fixture_ports_free() {
 
 cleanup_existing_fixture_projects() {
   log_step "cleaning existing E2E fixture projects"
+  stop_stale_fixture_terminal_processes
   stop_stale_fixture_port_listeners
   "$MX_E2E_BIN" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-stop-fixtures-start.json || true
   close_fixture_chrome_windows
@@ -384,6 +385,12 @@ cleanup_existing_fixture_projects() {
   "$MX_E2E_BIN" cleanup-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-cleanup.json || true
   rm -rf "$TMP_PREFIX".* /private"$TMP_PREFIX".* 2>/dev/null || true
   ensure_fixture_ports_free
+}
+
+stop_stale_fixture_terminal_processes() {
+  pkill -TERM -f "$TMP_PREFIX" >/dev/null 2>&1 || true
+  sleep 0.5
+  pkill -KILL -f "$TMP_PREFIX" >/dev/null 2>&1 || true
 }
 
 reset_fixture_runtime() {
@@ -805,6 +812,13 @@ add_workspace_process() {
     "$MX_E2E_BIN" add-workspace-process --workspace-dir "$workspace_dir" --name "$process_name" --command "$process_command"
 }
 
+remove_workspace_process() {
+  local workspace_dir="$1"
+  local process_name="$2"
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
+    "$MX_E2E_BIN" remove-workspace-process --workspace-dir "$workspace_dir" --name "$process_name"
+}
+
 workspace_named_port() {
   local workspace_dir="$1"
   local port_name="$2"
@@ -941,6 +955,31 @@ PY
   printf '%s\n' "$script_path"
 }
 
+create_high_output_process_script() {
+  local project_dir="$1"
+  local script_path="$project_dir/.spaces-e2e-high-output"
+  python3 - "$script_path" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+script_path = sys.argv[1]
+content = """#!/usr/bin/env bash
+set -euo pipefail
+trap 'exit 0' TERM INT
+while true; do
+  for _ in {1..128}; do
+    printf 'spaces-e2e-noisy\\n'
+  done
+  sleep 0.05
+done
+"""
+Path(script_path).write_text(content)
+os.chmod(script_path, 0o755)
+PY
+  printf '%s\n' "$script_path"
+}
+
 set_workspace_agent_launcher() {
   local workspace_dir="$1"
   local launcher_name="$2"
@@ -952,6 +991,11 @@ set_workspace_agent_launcher() {
 clear_workspace_agent_launchers() {
   local workspace_dir="$1"
   "$MX_E2E_BIN" set-workspace-agent-launchers --workspace-dir "$workspace_dir" --clear >/tmp/spaces-e2e-agent-launcher-clear.json
+}
+
+clear_workspace_agent_windows() {
+  local workspace_dir="$1"
+  "$MX_E2E_BIN" clear-workspace-agent-windows --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-agent-windows-clear.json
 }
 
 json_get() {
@@ -3463,9 +3507,9 @@ raise SystemExit(0 if ok else 1)' \
     terminal:*|process:*|agent:*)
       local target_name target_session_id target_window_id
       target_name="$(extract_cycle_window_title "$cycle_target")"
-      target_session_id="$(known_spaces_terminal_session_id_for_name "$target_name")"
+      target_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "$target_name" "$TMP_ROOT/cycle-focus-target.json" || true)"
       if [[ -z "$target_session_id" ]]; then
-        target_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "$target_name" "$TMP_ROOT/cycle-focus-target.json" || true)"
+        target_session_id="$(known_spaces_terminal_session_id_for_name "$target_name")"
       fi
       if [[ -n "$target_session_id" ]]; then
         wait_for_spaces_terminal_frontmost_session "$target_session_id"
@@ -4162,7 +4206,11 @@ PY
   if [[ "$host" == "spaces" ]]; then
     begin_case "$host: high-output process focus and cycling stay responsive"
     ensure_single_spaces_instance "$SPACES_PID"
-    add_workspace_process "$workspace_dir" "$HIGH_OUTPUT_PROCESS_NAME" "$HIGH_OUTPUT_PROCESS_COMMAND" \
+    local high_output_process_command="${HIGH_OUTPUT_PROCESS_COMMAND:-}"
+    if [[ -z "$high_output_process_command" ]]; then
+      high_output_process_command="$(create_high_output_process_script "$workspace_dir")"
+    fi
+    add_workspace_process "$workspace_dir" "$HIGH_OUTPUT_PROCESS_NAME" "$high_output_process_command" \
       >/tmp/spaces-e2e-add-high-output-process.json
     local noisy_shortcut_index noisy_session_id noisy_focus_started_at noisy_cycle_started_at noisy_cycle_elapsed_ms
     noisy_shortcut_index="$(shortcut_index_for_name "$workspace_dir" "$HIGH_OUTPUT_PROCESS_NAME" || true)"
@@ -4214,6 +4262,16 @@ PY
         >/tmp/spaces-e2e-terminate-high-output-session.json 2>>"$DEBUG_LOG" || true
       KNOWN_SPACES_NOISY_SESSION_ID=""
     fi
+    remove_workspace_process "$workspace_dir" "$HIGH_OUTPUT_PROCESS_NAME" \
+      >/tmp/spaces-e2e-remove-high-output-process.json
+    if [[ -n "$KNOWN_SPACES_AGENT_SESSION_ID" ]]; then
+      env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
+        "$MX_E2E_BIN" terminate-terminal-session "$KNOWN_SPACES_AGENT_SESSION_ID" \
+        >/tmp/spaces-e2e-terminate-agent-session.json 2>>"$DEBUG_LOG" || true
+      KNOWN_SPACES_AGENT_SESSION_ID=""
+    fi
+    clear_workspace_agent_launchers "$workspace_dir"
+    clear_workspace_agent_windows "$workspace_dir"
     pass_case
   fi
 
@@ -4508,6 +4566,7 @@ run_multi_workspace_focus_and_cycle_assertions() {
   ensure_configured_terminal_host "$host"
   begin_case "$host: multi-workspace focus and cycle isolation"
   ensure_single_spaces_instance "$SPACES_PID"
+  clear_workspace_agent_launchers "$primary_workspace_dir"
   reset_fixture_runtime "$primary_workspace_dir"
   reset_fixture_runtime "$secondary_workspace_dir"
 
@@ -4651,16 +4710,11 @@ for window in data["windows"]:
 PY
 )"
 
-  if [[ "$host" == "spaces" ]]; then
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" focus-workspace-window-index --workspace-dir "$primary_workspace_dir" --index 1 >/tmp/spaces-e2e-multi-primary-focus.json
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" hide-main-window >/tmp/spaces-e2e-multi-primary-hide-main.json
-    activate_google_chrome
-    focus_yabai_window_if_present "$primary_docs_window_id"
-  else
-    run_spaces_logged /tmp/spaces-e2e-multi-primary-focus.log open docs "$primary_workspace_dir"
-  fi
+  run_spaces_logged /tmp/spaces-e2e-multi-primary-focus.log open docs "$primary_workspace_dir"
+  activate_google_chrome
   transition_pause "$host focus primary docs"
   log_debug "$host multi primary docs focus complete"
+  wait_for_condition "frontmost_app" "Google Chrome"
   wait_for_condition "chrome_front_url" "$primary_docs_url"
   local primary_cycle_next_started_at primary_cycle_previous_started_at secondary_cycle_next_started_at secondary_cycle_previous_started_at
   if [[ "$host" == "spaces" ]]; then
@@ -4712,16 +4766,11 @@ PY
     record_metric_sample "process_tracked_tab.keyboard_cycle_previous.browser_tracked_tab" "$(( $(timestamp_ms) - primary_cycle_previous_started_at ))" "$host" "primary"
   fi
 
-  if [[ "$host" == "spaces" ]]; then
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" focus-workspace-window-index --workspace-dir "$secondary_workspace_dir" --index 1 >/tmp/spaces-e2e-multi-secondary-focus.json
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" hide-main-window >/tmp/spaces-e2e-multi-secondary-hide-main.json
-    activate_google_chrome
-    focus_yabai_window_if_present "$secondary_docs_window_id"
-  else
-    run_spaces_logged /tmp/spaces-e2e-multi-secondary-focus.log open docs "$secondary_workspace_dir"
-  fi
+  run_spaces_logged /tmp/spaces-e2e-multi-secondary-focus.log open docs "$secondary_workspace_dir"
+  activate_google_chrome
   transition_pause "$host focus secondary docs"
   log_debug "$host multi secondary docs focus complete"
+  wait_for_condition "frontmost_app" "Google Chrome"
   wait_for_condition "chrome_front_url" "$secondary_docs_url"
   if [[ "$host" == "spaces" ]]; then
     measure_spaces_cycle_transition \
