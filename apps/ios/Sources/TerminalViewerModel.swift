@@ -238,6 +238,8 @@ private enum TerminalViewerRenderMode: String {
         guard !isBusy else { return }
         hasAttemptedAutomaticTakeover = true
         isBusy = true
+        hasConfirmedOwnerInputReadiness = false
+        isInputSurfaceReady = false
         defer { isBusy = false }
         trace("takeover_begin")
         do {
@@ -247,9 +249,7 @@ private enum TerminalViewerRenderMode: String {
                 timeout: Self.inputRequestTimeout
             )
             replaceCommandChannel()
-            isAwaitingTakeoverConfirmation = true
-            hasConfirmedOwnerInputReadiness = false
-            isInputSurfaceReady = false
+            isAwaitingTakeoverConfirmation = !isOwner
             errorMessage = nil
             trace("takeover_success")
         } catch {

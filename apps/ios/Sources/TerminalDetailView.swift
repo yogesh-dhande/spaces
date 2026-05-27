@@ -55,7 +55,7 @@ struct TerminalDetailView: View {
                             fallbackText: model.visibleText,
                             isVisible: model.shouldPresentLiveSurface,
                             acceptsInput: model.keepsTerminalInputSurfaceActive,
-                            isBusy: false,
+                            isBusy: model.isBusy,
                             onInputReadinessChanged: { ready in
                                 model.setInputSurfaceReady(ready)
                                 writeE2EEventIfNeeded(kind: "input_readiness", detail: ready ? "ready" : "pending")
