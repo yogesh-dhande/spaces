@@ -54,11 +54,42 @@ import Foundation
     public struct GhosttyRemoteTerminalOutputBatch: Equatable {
         public let id: String
         public let data: Data
+        public let outputEndByteOffset: Int?
 
-        public init(id: String, data: Data) {
+        public init(id: String, data: Data, outputEndByteOffset: Int? = nil) {
             self.id = id
             self.data = data
+            self.outputEndByteOffset = outputEndByteOffset
         }
+
+        public static func pendingOutputsNotCovered(by historySeed: Self, pendingOutputs: [Self]) -> [Self] {
+            pendingOutputsNotCovered(byHistorySeedEndOffset: historySeed.outputEndByteOffset, pendingOutputs: pendingOutputs)
+        }
+
+        public static func pendingOutputsNotCovered(byHistorySeedEndOffset historySeedEndOffset: Int?, pendingOutputs: [Self]) -> [Self] {
+            guard let historySeedEndOffset, !pendingOutputs.isEmpty else { return pendingOutputs }
+            return pendingOutputs.compactMap { pendingOutput in
+                guard let outputEndByteOffset = pendingOutput.outputEndByteOffset else { return pendingOutput }
+                guard outputEndByteOffset > historySeedEndOffset else { return nil }
+
+                let outputStartByteOffset = max(0, outputEndByteOffset - pendingOutput.data.count)
+                guard outputStartByteOffset < historySeedEndOffset else { return pendingOutput }
+
+                let coveredByteCount = historySeedEndOffset - outputStartByteOffset
+                guard coveredByteCount < pendingOutput.data.count else { return nil }
+                return Self(
+                    id: "\(pendingOutput.id)|after|\(historySeedEndOffset)", data: Data(pendingOutput.data.dropFirst(coveredByteCount)),
+                    outputEndByteOffset: outputEndByteOffset)
+            }
+        }
+
+        public static func appendingOutputNotCovered(_ pendingOutput: Self, to pendingOutputs: [Self], by historySeed: Self?) -> [Self] {
+            appendingOutputNotCovered(pendingOutput, to: pendingOutputs, byHistorySeedEndOffset: historySeed?.outputEndByteOffset)
+        }
+
+        public static func appendingOutputNotCovered(
+            _ pendingOutput: Self, to pendingOutputs: [Self], byHistorySeedEndOffset historySeedEndOffset: Int?
+        ) -> [Self] { pendingOutputs + pendingOutputsNotCovered(byHistorySeedEndOffset: historySeedEndOffset, pendingOutputs: [pendingOutput]) }
     }
 
     public struct GhosttyRemoteTerminalOwnerEpoch: Equatable {
@@ -66,16 +97,18 @@ import Foundation
         public let id: String
         public let bootstrapSnapshot: GhosttyTerminalSnapshot?
         public let historySeed: GhosttyRemoteTerminalOutputBatch?
+        public let historySeedEndByteOffset: Int?
         public let pendingOutputs: [GhosttyRemoteTerminalOutputBatch]
 
         public init(
             sessionID: String, id: String, bootstrapSnapshot: GhosttyTerminalSnapshot?, historySeed: GhosttyRemoteTerminalOutputBatch? = nil,
-            pendingOutputs: [GhosttyRemoteTerminalOutputBatch] = []
+            historySeedEndByteOffset: Int? = nil, pendingOutputs: [GhosttyRemoteTerminalOutputBatch] = []
         ) {
             self.sessionID = sessionID
             self.id = id
             self.bootstrapSnapshot = bootstrapSnapshot
             self.historySeed = historySeed
+            self.historySeedEndByteOffset = historySeedEndByteOffset ?? historySeed?.outputEndByteOffset
             self.pendingOutputs = pendingOutputs
         }
     }

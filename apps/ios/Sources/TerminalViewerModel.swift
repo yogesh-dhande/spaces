@@ -952,7 +952,8 @@ private enum TerminalViewerRenderMode: String {
             snapshotText: nil,
             transcriptTail: payload.transcriptTail,
             outputByteCount: payload.outputByteCount,
-            outputData: payload.outputData
+            outputData: payload.outputData,
+            outputEndByteOffset: payload.outputEndByteOffset
         )
     }
 
@@ -965,7 +966,7 @@ private enum TerminalViewerRenderMode: String {
         }
         let isOwnerAfterMerge = isOwner
         if isOwnerAfterMerge, let outputData = payload.outputData, !outputData.isEmpty, ownerRenderEpochState != nil, payload.reason != "initial" {
-            appendOwnerRenderOutput(data: outputData, token: payload.emittedAt)
+            appendOwnerRenderOutput(data: outputData, token: payload.emittedAt, outputEndByteOffset: payload.outputEndByteOffset)
         }
         if !isOwnerAfterMerge {
             if wasOwner, let latestState {
@@ -1006,6 +1007,7 @@ private enum TerminalViewerRenderMode: String {
             id: ownerRenderEpochState.id,
             bootstrapSnapshot: ownerRenderEpochState.bootstrapSnapshot,
             historySeed: ownerRenderEpochState.historySeed,
+            historySeedEndByteOffset: ownerRenderEpochState.historySeedEndByteOffset,
             pendingOutputs: Array(ownerRenderEpochState.pendingOutputs.dropFirst(appliedBatchIndex + 1))
         )
         self.ownerRenderEpochState = ownerRenderEpochState
@@ -1017,6 +1019,7 @@ private enum TerminalViewerRenderMode: String {
             sessionID: ownerRenderEpochState.sessionID,
             id: ownerRenderEpochState.id,
             bootstrapSnapshot: ownerRenderEpochState.bootstrapSnapshot,
+            historySeedEndByteOffset: ownerRenderEpochState.historySeedEndByteOffset,
             pendingOutputs: ownerRenderEpochState.pendingOutputs
         )
         self.ownerRenderEpochState = ownerRenderEpochState
@@ -1073,12 +1076,16 @@ private enum TerminalViewerRenderMode: String {
             guard self.isOwner, var currentEpoch = self.ownerRenderEpochState, currentEpoch.id == ownerRenderEpochState.id else { return }
             guard let outputData = fetchedState?.outputData, !outputData.isEmpty else { return }
             let historySeedID = "history|\(currentEpoch.id)"
+            let historySeed = GhosttyRemoteTerminalOutputBatch(
+                id: historySeedID, data: outputData, outputEndByteOffset: fetchedState?.outputEndByteOffset)
             currentEpoch = GhosttyRemoteTerminalOwnerEpoch(
                 sessionID: currentEpoch.sessionID,
                 id: currentEpoch.id,
                 bootstrapSnapshot: currentEpoch.bootstrapSnapshot,
-                historySeed: GhosttyRemoteTerminalOutputBatch(id: historySeedID, data: outputData),
-                pendingOutputs: currentEpoch.pendingOutputs
+                historySeed: historySeed,
+                historySeedEndByteOffset: historySeed.outputEndByteOffset,
+                pendingOutputs: GhosttyRemoteTerminalOutputBatch.pendingOutputsNotCovered(
+                    by: historySeed, pendingOutputs: currentEpoch.pendingOutputs)
             )
             self.ownerRenderEpochState = currentEpoch
             self.logPerformanceEvent(
@@ -1152,7 +1159,7 @@ private enum TerminalViewerRenderMode: String {
         let epochID = ownerRenderEpochID(for: payload)
         let historySeed: GhosttyRemoteTerminalOutputBatch? =
             if let outputData = payload.outputData, !outputData.isEmpty {
-                GhosttyRemoteTerminalOutputBatch(id: "history|\(epochID)", data: outputData)
+                GhosttyRemoteTerminalOutputBatch(id: "history|\(epochID)", data: outputData, outputEndByteOffset: payload.outputEndByteOffset)
             } else {
                 nil
             }
@@ -1161,6 +1168,7 @@ private enum TerminalViewerRenderMode: String {
             id: epochID,
             bootstrapSnapshot: bootstrapSnapshot,
             historySeed: historySeed,
+            historySeedEndByteOffset: historySeed?.outputEndByteOffset,
             pendingOutputs: []
         )
         trace(
@@ -1179,21 +1187,21 @@ private enum TerminalViewerRenderMode: String {
         requestHistorySeedIfNeeded()
     }
 
-    private func appendOwnerRenderOutput(data: Data, token: String) {
+    private func appendOwnerRenderOutput(data: Data, token: String, outputEndByteOffset: Int?) {
         guard var ownerRenderEpochState else { return }
-        let combinedHistorySeed: GhosttyRemoteTerminalOutputBatch? =
-            if let historySeed = ownerRenderEpochState.historySeed {
-                GhosttyRemoteTerminalOutputBatch(id: historySeed.id, data: historySeed.data + data)
-            } else {
-                nil
-            }
-        var pendingOutputs = ownerRenderEpochState.pendingOutputs
-        pendingOutputs.append(GhosttyRemoteTerminalOutputBatch(id: token, data: data))
+        let pendingOutput = GhosttyRemoteTerminalOutputBatch(id: token, data: data, outputEndByteOffset: outputEndByteOffset)
+        let pendingOutputs = GhosttyRemoteTerminalOutputBatch.appendingOutputNotCovered(
+            pendingOutput,
+            to: ownerRenderEpochState.pendingOutputs,
+            byHistorySeedEndOffset: ownerRenderEpochState.historySeedEndByteOffset
+        )
+        guard pendingOutputs != ownerRenderEpochState.pendingOutputs else { return }
         ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
             sessionID: ownerRenderEpochState.sessionID,
             id: ownerRenderEpochState.id,
             bootstrapSnapshot: ownerRenderEpochState.bootstrapSnapshot,
-            historySeed: combinedHistorySeed,
+            historySeed: ownerRenderEpochState.historySeed,
+            historySeedEndByteOffset: ownerRenderEpochState.historySeedEndByteOffset,
             pendingOutputs: pendingOutputs
         )
         self.ownerRenderEpochState = ownerRenderEpochState

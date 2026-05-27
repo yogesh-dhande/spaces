@@ -44,6 +44,125 @@
             XCTAssertEqual(viewport.rows, 40)
         }
 
+        func testPendingOutputReconciliationDropsBytesAtOrBeforeHistorySeedEnd() {
+            let historySeed = GhosttyRemoteTerminalOutputBatch(
+                id: "history",
+                data: Data("tail-window".utf8),
+                outputEndByteOffset: 100
+            )
+            let pendingOutputs = [
+                GhosttyRemoteTerminalOutputBatch(id: "before-tail", data: Data("old".utf8), outputEndByteOffset: 80),
+                GhosttyRemoteTerminalOutputBatch(id: "inside-tail", data: Data("tail".utf8), outputEndByteOffset: 98),
+                GhosttyRemoteTerminalOutputBatch(id: "after-tail", data: Data("new".utf8), outputEndByteOffset: 103),
+            ]
+
+            let reconciled = GhosttyRemoteTerminalOutputBatch.pendingOutputsNotCovered(
+                by: historySeed,
+                pendingOutputs: pendingOutputs
+            )
+
+            XCTAssertEqual(reconciled, [pendingOutputs[2]])
+        }
+
+        func testPendingOutputReconciliationKeepsOnlySuffixAfterHistorySeedEnd() {
+            let historySeed = GhosttyRemoteTerminalOutputBatch(
+                id: "history",
+                data: Data("tail-window".utf8),
+                outputEndByteOffset: 100
+            )
+            let pendingOutput = GhosttyRemoteTerminalOutputBatch(
+                id: "straddles-end",
+                data: Data("abcXYZ".utf8),
+                outputEndByteOffset: 103
+            )
+
+            let reconciled = GhosttyRemoteTerminalOutputBatch.pendingOutputsNotCovered(
+                by: historySeed,
+                pendingOutputs: [pendingOutput]
+            )
+
+            XCTAssertEqual(
+                reconciled,
+                [
+                    GhosttyRemoteTerminalOutputBatch(
+                        id: "straddles-end|after|100",
+                        data: Data("XYZ".utf8),
+                        outputEndByteOffset: 103
+                    )
+                ]
+            )
+        }
+
+        func testAppendingOutputAfterHistorySeedDropsCoveredBatch() {
+            let historySeed = GhosttyRemoteTerminalOutputBatch(
+                id: "history",
+                data: Data("tail-window".utf8),
+                outputEndByteOffset: 100
+            )
+            let existingPending = [
+                GhosttyRemoteTerminalOutputBatch(id: "after-seed", data: Data("new".utf8), outputEndByteOffset: 103)
+            ]
+            let coveredLateBatch = GhosttyRemoteTerminalOutputBatch(
+                id: "late-covered",
+                data: Data("old".utf8),
+                outputEndByteOffset: 98
+            )
+
+            let reconciled = GhosttyRemoteTerminalOutputBatch.appendingOutputNotCovered(
+                coveredLateBatch,
+                to: existingPending,
+                by: historySeed
+            )
+
+            XCTAssertEqual(reconciled, existingPending)
+        }
+
+        func testAppendingOutputAfterAppliedHistorySeedDropsCoveredBatch() {
+            let coveredLateBatch = GhosttyRemoteTerminalOutputBatch(
+                id: "late-covered",
+                data: Data("old".utf8),
+                outputEndByteOffset: 98
+            )
+
+            let reconciled = GhosttyRemoteTerminalOutputBatch.appendingOutputNotCovered(
+                coveredLateBatch,
+                to: [],
+                byHistorySeedEndOffset: 100
+            )
+
+            XCTAssertTrue(reconciled.isEmpty)
+        }
+
+        func testAppendingOutputAfterHistorySeedKeepsOnlyUncoveredSuffix() {
+            let historySeed = GhosttyRemoteTerminalOutputBatch(
+                id: "history",
+                data: Data("tail-window".utf8),
+                outputEndByteOffset: 100
+            )
+            let straddlingLateBatch = GhosttyRemoteTerminalOutputBatch(
+                id: "late-straddles",
+                data: Data("abcXYZ".utf8),
+                outputEndByteOffset: 103
+            )
+
+            let reconciled = GhosttyRemoteTerminalOutputBatch.appendingOutputNotCovered(
+                straddlingLateBatch,
+                to: [],
+                by: historySeed
+            )
+
+            XCTAssertEqual(
+                reconciled,
+                [
+                    GhosttyRemoteTerminalOutputBatch(
+                        id: "late-straddles|after|100",
+                        data: Data("XYZ".utf8),
+                        outputEndByteOffset: 103
+                    )
+                ]
+            )
+        }
+
         func testTouchScrollFingerDownMapsTowardOlderScrollback() {
             let delta = GhosttyRemoteTerminalScrollMapper.scrollDelta(
                 forPanDelta: CGPoint(x: 0, y: 12),

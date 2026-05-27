@@ -679,7 +679,8 @@ extension Notification.Name {
         do {
             let outputHandle = try ensureOutputHandle()
             try outputHandle.write(contentsOf: data)
-            postOutputDidChange(data: data)
+            let outputEndByteOffset = (try? outputHandle.seekToEnd()).map(Self.clampedInt)
+            postOutputDidChange(data: data, outputEndByteOffset: outputEndByteOffset)
             TerminalPerformance.logMetric(
                 "terminal_output_write", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(data.count)")
@@ -782,7 +783,7 @@ extension Notification.Name {
         broadcastCurrentState(reason: "runtime_state")
     }
 
-    private func postOutputDidChange(data: Data) {
+    private func postOutputDidChange(data: Data, outputEndByteOffset: Int?) {
         NotificationCenter.default.post(
             name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID, "byteCount": data.count])
         if pendingInputOutputResync || inputOutputResyncWorkItem != nil {
@@ -790,7 +791,7 @@ extension Notification.Name {
             scheduleInputOutputResync()
             return
         }
-        broadcastCurrentState(reason: "output", outputByteCount: data.count, outputData: data)
+        broadcastCurrentState(reason: "output", outputByteCount: data.count, outputData: data, outputEndByteOffset: outputEndByteOffset)
     }
 
     private func handleOwnerInputActivity() {
@@ -832,6 +833,11 @@ extension Notification.Name {
     }
 
     private func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
+
+    private static func clampedInt(_ value: UInt64) -> Int {
+        guard value <= UInt64(Int.max) else { return Int.max }
+        return Int(value)
+    }
 
     private static func normalizedSessionMetadataValue(_ value: String?) -> String? {
         guard let value else { return nil }
@@ -885,14 +891,16 @@ extension Notification.Name {
         }
     }
 
-    private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputData: Data? = nil) {
+    private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputData: Data? = nil, outputEndByteOffset: Int? = nil) {
         let startedAt = Date()
         let ownerClient = activeOwnerClient()
         let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason, ownerKind: ownerClient?.kind)
         trace(
             "broadcast_state_begin reason=\(reason) include_screen=\(includeScreenState ? 1 : 0) runtime=\(traceSize(observedSurfaceSize())) output_bytes=\(outputByteCount ?? 0)"
         )
-        guard let stateStreamServer, let payload = currentRemoteSessionState(reason: reason, outputByteCount: outputByteCount, outputData: outputData)
+        guard let stateStreamServer,
+            let payload = currentRemoteSessionState(
+                reason: reason, outputByteCount: outputByteCount, outputData: outputData, outputEndByteOffset: outputEndByteOffset)
         else { return }
         stateStreamServer.broadcast(payload)
         let payloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(payload).count) ?? 0
@@ -913,7 +921,9 @@ extension Notification.Name {
         )
     }
 
-    private func currentRemoteSessionState(reason: String, outputByteCount: Int?, outputData: Data? = nil) -> GhosttyRemoteSessionStatePayload? {
+    private func currentRemoteSessionState(reason: String, outputByteCount: Int?, outputData: Data? = nil, outputEndByteOffset: Int? = nil)
+        -> GhosttyRemoteSessionStatePayload?
+    {
         let runtimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastPersistedRuntimeState
         let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
         let ownerClient = activeOwnerClient()
@@ -951,7 +961,8 @@ extension Notification.Name {
                 sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
                 screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                 title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, snapshot: snapshot, snapshotText: snapshotText,
-                transcriptTail: transcriptTail, outputByteCount: outputByteCount ?? bootstrapOutputData?.count, outputData: bootstrapOutputData)
+                transcriptTail: transcriptTail, outputByteCount: outputByteCount ?? bootstrapOutputData?.count, outputData: bootstrapOutputData,
+                outputEndByteOffset: outputEndByteOffset)
         }
         let snapshot: GhosttyTerminalSnapshot? = nil
         let snapshotText: String? = nil
@@ -962,7 +973,7 @@ extension Notification.Name {
             sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
             screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, title: effectiveTitle,
             workingDirectory: effectiveWorkingDirectory, snapshot: snapshot, snapshotText: snapshotText, transcriptTail: transcriptTail,
-            outputByteCount: outputByteCount ?? bootstrapOutputData?.count, outputData: bootstrapOutputData)
+            outputByteCount: outputByteCount ?? bootstrapOutputData?.count, outputData: bootstrapOutputData, outputEndByteOffset: outputEndByteOffset)
     }
 
     private func resolveRemoteScreenState(runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?) -> (

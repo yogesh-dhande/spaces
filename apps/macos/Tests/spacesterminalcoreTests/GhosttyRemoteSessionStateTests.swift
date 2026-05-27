@@ -3,7 +3,7 @@ import XCTest
 import spacesterminalcore
 
 final class GhosttyRemoteSessionStateTests: XCTestCase {
-    func testMergedPayloadCarriesIncrementalOutputBytesEphemerally() {
+    func testMergedPayloadCarriesIncrementalOutputBytesEphemerally() throws {
         let initial = GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: "initial", emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
@@ -12,13 +12,16 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         let outputUpdate = GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: "output", emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 2, sessionStateFlags: 1,
             screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha", snapshot: nil,
-            snapshotText: nil, transcriptTail: nil, outputByteCount: 2, outputData: Data("ls".utf8))
+            snapshotText: nil, transcriptTail: nil, outputByteCount: 2, outputData: Data("ls".utf8), outputEndByteOffset: 42)
 
         let merged = initial.merged(with: outputUpdate)
         XCTAssertEqual(merged.snapshotText, "alpha")
         XCTAssertEqual(merged.snapshot?.columns, initial.snapshot?.columns)
         XCTAssertEqual(merged.outputByteCount, 2)
         XCTAssertEqual(merged.outputData, Data("ls".utf8))
+        XCTAssertEqual(merged.outputEndByteOffset, 42)
+        let decodedOutputUpdate = try GhosttyRemoteSessionStateCodec.decodeLine(try GhosttyRemoteSessionStateCodec.encodeLine(outputUpdate))
+        XCTAssertEqual(decodedOutputUpdate.outputEndByteOffset, 42)
 
         let metadataUpdate = GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: "attachment_state", emittedAt: "2026-05-20T00:00:02Z", sessionStateRevision: 2, sessionStateFlags: 1,
@@ -27,6 +30,7 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
 
         let metadataMerged = merged.merged(with: metadataUpdate)
         XCTAssertNil(metadataMerged.outputData)
+        XCTAssertNil(metadataMerged.outputEndByteOffset)
         XCTAssertEqual(metadataMerged.snapshotText, "alpha")
     }
 

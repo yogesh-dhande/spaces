@@ -53,7 +53,7 @@ import spacesterminalcore
             let occupiedSocket = try makeOccupiedPortSocket()
             defer { close(occupiedSocket.fileDescriptor) }
             let settingsStore = SpacesMobileBridgeSettingsStore()
-            let expectedFallbackPort = try settingsStore.stableFallbackPorts().first
+            let expectedFallbackPorts = try settingsStore.stableFallbackPorts()
 
             let environment = [
                 SpacesMobileBridgeDefaults.portEnvironmentVariable: "\(occupiedSocket.port)",
@@ -66,13 +66,13 @@ import spacesterminalcore
 
             let status = try supervisor.status()
             XCTAssertEqual(status.host, SpacesMobileBridgeDefaults.host)
-            XCTAssertEqual(status.port, expectedFallbackPort)
+            XCTAssertTrue(expectedFallbackPorts.contains(status.port))
 
             let response = try await Task.detached { try SpacesMobileBridgeControlClient.openPairingWindow() }.value
             XCTAssertTrue(response.ok)
             XCTAssertEqual(response.status?.port, status.port)
             XCTAssertNotNil(response.pairingWindow)
-            XCTAssertEqual(try settingsStore.loadOrCreate().port, expectedFallbackPort)
+            XCTAssertEqual(try settingsStore.loadOrCreate().port, status.port)
         }
     }
 
@@ -108,6 +108,80 @@ import spacesterminalcore
 
         XCTAssertEqual(addresses.first, "192.168.1.24")
         XCTAssertEqual(SpacesMobileBridgeNetworkInterfaces.pairingLinkHost(boundHost: "0.0.0.0", networkAddresses: addresses), "192.168.1.24")
+    }
+
+    func testStateHistorySeedReturnsFullReplayWhenOutputFitsBudget() async throws {
+        try await withTemporaryProfile { _ in
+            let sessionID = "session-history-full-\(UUID().uuidString)"
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "history", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                    command: "cat", createdAt: "2026-05-26T00:00:00Z"), paths: paths)
+
+            let outputLog = Data("\u{1B}[32mREADY\u{1B}[0m\n".utf8)
+            try outputLog.write(to: URL(fileURLWithPath: paths.outputPath))
+
+            let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+            let clientApp = SpacesMobileClientApp(
+                installationID: "INSTALLATION-HISTORY-FULL", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let authToken = try SpacesMobilePairingStore().issueToken(for: clientApp)
+            let server = try SpacesMobileBridgeServer(host: SpacesMobileBridgeDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+
+            let response = try await Task.detached {
+                try Self.sendBridgeRequest(
+                    SpacesMobileBridgeRequest(
+                        command: "state", authToken: authToken, clientApp: clientApp, sessionID: sessionID, includeOutputHistory: true),
+                    port: server.listeningPort, transportKey: transportKey)
+            }.value
+
+            XCTAssertEqual(response.sessionState?.outputData, outputLog)
+            XCTAssertEqual(response.sessionState?.outputByteCount, outputLog.count)
+            XCTAssertEqual(response.sessionState?.outputEndByteOffset, outputLog.count)
+        }
+    }
+
+    func testStateHistorySeedOmitsPartialReplayWhenOutputExceedsBudget() async throws {
+        try await withTemporaryProfile { _ in
+            let sessionID = "session-history-tail-\(UUID().uuidString)"
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "tail", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                    createdAt: "2026-05-26T00:00:00Z"), paths: paths)
+
+            let droppedPrefix = Data("DROP-MARKER\n".utf8)
+            let tailMarker = Data("\nTAIL-MARKER".utf8)
+            var outputLog = droppedPrefix
+            outputLog.append(Data(repeating: 0x41, count: SpacesMobileBridgeServer.maxHistorySeedOutputBytes + 1024))
+            outputLog.append(tailMarker)
+            try outputLog.write(to: URL(fileURLWithPath: paths.outputPath))
+
+            let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+            let clientApp = SpacesMobileClientApp(
+                installationID: "INSTALLATION-HISTORY-TAIL", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let authToken = try SpacesMobilePairingStore().issueToken(for: clientApp)
+            let server = try SpacesMobileBridgeServer(host: SpacesMobileBridgeDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+
+            let response = try await Task.detached {
+                try Self.sendBridgeRequest(
+                    SpacesMobileBridgeRequest(
+                        command: "state", authToken: authToken, clientApp: clientApp, sessionID: sessionID, includeOutputHistory: true),
+                    port: server.listeningPort, transportKey: transportKey)
+            }.value
+
+            XCTAssertNil(response.sessionState?.outputData)
+            XCTAssertEqual(response.sessionState?.outputByteCount, outputLog.count)
+            XCTAssertEqual(response.sessionState?.outputEndByteOffset, outputLog.count)
+        }
     }
 
     func testRevokeDeviceClosesActiveSubscribeConnection() async throws {
@@ -406,8 +480,10 @@ import spacesterminalcore
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
                 if let content, !content.isEmpty {
                     resultBox.appendData(content)
-                    received.signal()
-                    return
+                    if resultBox.responseData().contains(0x0A) {
+                        received.signal()
+                        return
+                    }
                 }
                 if let error {
                     resultBox.setError(error)

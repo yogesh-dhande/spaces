@@ -16,11 +16,13 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     public let transcriptTail: String?
     public let outputByteCount: Int?
     public let outputData: Data?
+    public let outputEndByteOffset: Int?
 
     public init(
         sessionID: String, reason: String, emittedAt: String, sessionStateRevision: UInt64?, sessionStateFlags: UInt32?, screenStateRevision: UInt64?,
         runtimeState: TerminalSessionRuntimeState?, attachmentSnapshot: TerminalSessionAttachmentSnapshot?, title: String, workingDirectory: String,
-        snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, transcriptTail: String?, outputByteCount: Int?, outputData: Data? = nil
+        snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, transcriptTail: String?, outputByteCount: Int?, outputData: Data? = nil,
+        outputEndByteOffset: Int? = nil
     ) {
         self.sessionID = sessionID
         self.reason = reason
@@ -37,6 +39,7 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
         self.transcriptTail = transcriptTail
         self.outputByteCount = outputByteCount
         self.outputData = outputData
+        self.outputEndByteOffset = outputEndByteOffset
     }
 
     public func merged(with update: Self) -> Self {
@@ -48,7 +51,8 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
             runtimeState: update.runtimeState ?? runtimeState, attachmentSnapshot: update.attachmentSnapshot ?? attachmentSnapshot,
             title: update.title, workingDirectory: update.workingDirectory, snapshot: update.snapshot ?? snapshot,
             snapshotText: update.snapshotText ?? (update.snapshot != nil ? nil : snapshotText),
-            transcriptTail: update.transcriptTail ?? transcriptTail, outputByteCount: update.outputByteCount, outputData: update.outputData)
+            transcriptTail: update.transcriptTail ?? transcriptTail, outputByteCount: update.outputByteCount, outputData: update.outputData,
+            outputEndByteOffset: update.outputEndByteOffset)
     }
 }
 

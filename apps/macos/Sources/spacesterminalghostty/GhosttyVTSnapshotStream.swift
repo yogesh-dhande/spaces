@@ -127,14 +127,17 @@ import spacesterminalcore
 
         do {
             try fileHandle.seek(toOffset: offset)
-            while true {
-                let chunk = try fileHandle.read(upToCount: Self.replayChunkSize) ?? Data()
-                if chunk.isEmpty { break }
+            var remainingBytes = fileSize - offset
+            while remainingBytes > 0 {
+                let readLength = Int(min(UInt64(Self.replayChunkSize), remainingBytes))
+                let chunk = try fileHandle.read(upToCount: readLength) ?? Data()
+                guard !chunk.isEmpty else { return false }
                 let wroteChunk = chunk.withUnsafeBytes { rawBuffer -> Bool in
                     guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return chunk.isEmpty }
                     return spaces_ghostty_vt_session_write(session, baseAddress, rawBuffer.count)
                 }
                 if !wroteChunk { return false }
+                remainingBytes -= UInt64(chunk.count)
             }
             return true
         } catch { return false }

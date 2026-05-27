@@ -89,10 +89,11 @@ Each live session also participates in a service-level control path:
 - `ghostty_session_export_snapshot` is the authoritative live owner export path for mobile takeover.
 - Each takeover creates one owner epoch on iOS. The epoch carries:
   - the bootstrap snapshot used for first paint
-  - optional deferred history seed data for scrollback
+  - optional deferred bounded raw-output history seed data for scrollback when the complete replay fits the transfer budget
   - incremental live output batches appended after bootstrap
-- iOS first paint and first input-ready are driven from the bootstrap snapshot plus incremental live output. Full transcript replay is deferred until the user scrolls away from the live bottom edge.
-- Ordinary resize reconciles viewport geometry inside the current owner epoch. It does not schedule another full bootstrap or another full transcript replay.
+- History seed responses and live output batches carry their ending `output.log` byte offset so iOS can keep only the live batches not covered by a sampled full-history replay, including batches delivered after the replay data has been applied and released.
+- iOS first paint and first input-ready are driven from the bootstrap snapshot plus incremental live output. Raw-output history replay is deferred until the user scrolls away from the live bottom edge, and oversized logs keep the bootstrap render instead of replaying a partial VT stream from the middle of `output.log`.
+- Ordinary resize reconciles viewport geometry inside the current owner epoch. It does not schedule another full bootstrap or another history replay.
 - If the current owner epoch becomes desynchronized after takeover, the bridge prefers one explicit refresh or resync request instead of an implicit bootstrap loop.
 - When `SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH` is set, the macOS host and the iOS client append structured JSONL events to that path. The standalone demo and standalone E2E wrappers set this automatically and preserve the file under the disposable demo root as `mobile-terminal-performance.jsonl`.
 
