@@ -1412,7 +1412,7 @@ public final class WorkspaceOrchestrator {
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         _ = terminateProcessForRestart(process)
-        terminateBuiltInTerminalSession(previousSessionID)
+        terminateBuiltInTerminalSession(for: process)
         let command = try spacesTerminalCommand(template: template, env: env, processShell: try store.appConfig().processShell)
         let session = try launchSpacesTerminalSession(
             title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner, backend: .ghosttyEmbedded,
@@ -4415,7 +4415,7 @@ public final class WorkspaceOrchestrator {
         for process in toStop {
             if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
             if isManagedTerminalApp(process.terminalApp) {
-                terminateBuiltInTerminalSession(process.terminalNativeID ?? process.terminalTrackingID)
+                terminateBuiltInTerminalSession(for: process)
                 if self.terminalHost(for: process.terminalApp) != TerminalHost.spaces { _ = try? closeTrackedItermTerminalContainer(process) }
             }
             try store.deleteRunningProcess(id: process.id)
@@ -5568,6 +5568,17 @@ public final class WorkspaceOrchestrator {
         builtInTerminalSessionTerminator(sessionID)
     }
 
+    private func builtInTerminalSessionID(for process: RunningProcessRecord) -> String? {
+        guard terminalHost(for: process.terminalApp) == .spaces else { return nil }
+        let sessionID = process.terminalNativeID ?? process.terminalTrackingID
+        guard let trimmed = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    private func terminateBuiltInTerminalSession(for process: RunningProcessRecord) {
+        terminateBuiltInTerminalSession(builtInTerminalSessionID(for: process))
+    }
+
     public func restartWorkspaceProcess(workspaceID: String, processID: String) throws {
         guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
         try restartProcessInTerminal(workspaceID: workspaceID, process: process)
@@ -5770,7 +5781,7 @@ public final class WorkspaceOrchestrator {
     private func stopRunningProcess(_ process: RunningProcessRecord, workspaceID: String) throws {
         let closedManagedTerminalWindowID: Int?
         if isManagedTerminalApp(process.terminalApp) {
-            terminateBuiltInTerminalSession(process.terminalNativeID ?? process.terminalTrackingID)
+            terminateBuiltInTerminalSession(for: process)
             if terminalHost(for: process.terminalApp) != .spaces { _ = try? closeTrackedItermTerminalContainer(process) }
             closedManagedTerminalWindowID = process.windowID
             if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
