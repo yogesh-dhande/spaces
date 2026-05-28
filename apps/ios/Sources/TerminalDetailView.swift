@@ -4,6 +4,10 @@ import spacesmobilecore
 
 struct TerminalDetailView: View {
     private static let chromeControlHeight: CGFloat = 48
+    /// The terminal surface is always dark regardless of the app's light/dark
+    /// appearance, so this uses the fixed brand dark background value
+    /// (`Theme.bg` dark = 15,21,23) rather than a dynamic token.
+    private static let surfaceBackground = Color(red: 15 / 255, green: 21 / 255, blue: 23 / 255)
 
     let session: SpacesMobileTerminalSessionSummary
     let settings: SpacesMobileConnectionSettings
@@ -85,7 +89,7 @@ struct TerminalDetailView: View {
                         .accessibilityIdentifier("terminal.surface")
                         .allowsHitTesting(model.shouldPresentLiveSurface)
                         .accessibilityHidden(!model.shouldPresentLiveSurface)
-                        .background(Color(red: 0.10, green: 0.12, blue: 0.15))
+                        .background(Self.surfaceBackground)
 
                         if !model.shouldPresentLiveSurface {
                             statusShell
@@ -102,7 +106,7 @@ struct TerminalDetailView: View {
                 errorBanner(errorMessage)
             }
         }
-        .background(Color(red: 0.10, green: 0.12, blue: 0.15).ignoresSafeArea())
+        .background(Self.surfaceBackground.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .task { model.start() }
         .task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }
@@ -149,40 +153,54 @@ struct TerminalDetailView: View {
 
             Spacer(minLength: 0)
 
+            // The Take Over action lives in the centered status view (mirroring the
+            // macOS viewer window), so the top chrome only carries owner state.
             Group {
                 if model.isOwner {
                     if model.isPreparingInput {
                         chromeActivityBadge(accessibilityLabel: "Preparing input")
                             .accessibilityIdentifier("terminal.ownerPreparing")
                     } else {
-                        chromeBadge("Owner")
-                            .accessibilityIdentifier("terminal.ownerBadge")
+                        // Ownership is obvious from the absence of the Take Over
+                        // button, so no visible tag is shown. An invisible marker
+                        // preserves the ownership signal for UI tests.
+                        ownerStateMarker
                     }
-                } else if model.isTakingOver || model.isConnecting {
-                    chromeProgressBadge("Taking over…")
-                        .accessibilityIdentifier("terminal.takingOver")
                 } else {
-                    chromeButton {
-                        Task { await model.takeOver() }
-                    } label: {
-                        Text("Take Over")
-                            .font(.headline.weight(.semibold))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                    }
-                    .disabled(model.isBusy)
-                    .accessibilityIdentifier("terminal.takeover")
+                    Color.clear.frame(width: 1, height: 1)
                 }
             }
+            .frame(minWidth: Self.chromeControlHeight, alignment: .trailing)
         }
         .frame(height: Self.chromeControlHeight)
-        .overlay(alignment: .center) {
-            if model.isConnecting {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(.white)
-            }
+    }
+
+    /// Brand-primary Take Over control (teal fill, dark ink) for viewers.
+    private var takeOverButton: some View {
+        Button {
+            Task { await model.takeOver() }
+        } label: {
+            Text("Take Over")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(Theme.primaryButtonText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .padding(.horizontal, 18)
+                .frame(height: Self.chromeControlHeight)
+                .background(Capsule().fill(Theme.primaryButtonFill))
         }
+        .disabled(model.isBusy)
+        .accessibilityIdentifier("terminal.takeover")
+    }
+
+    /// Zero-visual-footprint accessibility marker that preserves the ownership
+    /// signal used by UI tests now that the visible "Owner" tag is removed.
+    private var ownerStateMarker: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .accessibilityElement()
+            .accessibilityIdentifier("terminal.ownerBadge")
+            .accessibilityLabel("Owner")
     }
 
     private var statusShell: some View {
@@ -200,10 +218,14 @@ struct TerminalDetailView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 28)
                 .accessibilityIdentifier("terminal.statusText")
+            if !model.isOwner && !model.isTakingOver && !model.isConnecting {
+                takeOverButton
+                    .padding(.top, 4)
+            }
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(red: 0.10, green: 0.12, blue: 0.15))
+        .background(Self.surfaceBackground)
     }
 
     private func chromeButton<Label: View>(action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
@@ -218,41 +240,6 @@ struct TerminalDetailView: View {
                         .overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1))
                 )
         }
-    }
-
-    private func chromeBadge(_ text: String) -> some View {
-        Text(text)
-            .font(.headline.weight(.semibold))
-            .foregroundStyle(.white.opacity(0.9))
-            .lineLimit(1)
-            .minimumScaleFactor(0.75)
-            .padding(.horizontal, 18)
-            .frame(height: Self.chromeControlHeight)
-            .background(
-                Capsule()
-                    .fill(.black.opacity(0.18))
-                    .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 1))
-            )
-    }
-
-    private func chromeProgressBadge(_ text: String) -> some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-                .tint(.white.opacity(0.9))
-            Text(text)
-                .font(.headline.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.9))
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-        }
-        .padding(.horizontal, 16)
-        .frame(height: Self.chromeControlHeight)
-        .background(
-            Capsule()
-                .fill(.black.opacity(0.18))
-                .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 1))
-        )
     }
 
     private func chromeActivityBadge(accessibilityLabel: String) -> some View {

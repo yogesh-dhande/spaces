@@ -200,6 +200,12 @@ These are examples of how the general guidelines apply to important parts of the
 - The section controller owns transient form state; the host persists committed arrays through the orchestrator.
 - The current process, browser-session, coding-agent, port, and stop-script editors are examples of this pattern.
 
+## Cross-Platform (iOS)
+- The iOS companion app uses the same brand language as the macOS GUI: warm-neutral surfaces, restrained teal accenting, and the status-dot / type-icon-tile / chip / section-card vocabulary.
+- iOS mirrors the macOS `Theme` tokens as SwiftUI `Color`s in `apps/ios/Sources/Theme.swift`; the macOS `Theme` and `apps/web/app/globals.css` remain the source of truth, so token values are kept in sync rather than redefined independently.
+- Shared iOS row and section primitives live in `apps/ios/Sources/RowPrimitives.swift` (status dot, type-icon tile, metadata chip, section card/header, primary button). Extend those before introducing one-off iOS styles.
+- Terminal surfaces stay dark in both appearances, so the iOS terminal view uses a fixed brand-dark background and light-on-dark text rather than the appearance-adaptive tokens, which would otherwise flip with the app's light/dark mode.
+
 ## Implementation Guidance
 - Reuse `Theme` for color semantics and shared surface styling.
 - Reuse `ColoredBackgroundView` for token-backed surfaces that must track appearance changes.
@@ -223,5 +229,7 @@ These are examples of how the general guidelines apply to important parts of the
 - Theme tokens: `apps/macos/Sources/gui/Theme.swift`
 - Current AppKit integration: `apps/macos/Sources/gui/AppKitController.swift`
 - Section card examples: `ProcessesSection.swift`, `BrowserSessionsSection.swift`, `AgentLaunchersSection.swift`, `PortsSection.swift`, `StopScriptSection.swift`
+- iOS theme tokens: `apps/ios/Sources/Theme.swift`
+- iOS row/section primitives: `apps/ios/Sources/RowPrimitives.swift`
 
 When a new UI change does not fit these rules cleanly, update this guide in the same change rather than silently diverging.

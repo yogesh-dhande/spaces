@@ -446,7 +446,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.debugRendererSummary.contains("Renderer:"))
     }
 
-    @MainActor func testViewerWindowShowsTakeoverStatusWithMetadataVisible() throws {
+    @MainActor func testViewerWindowShowsSimplifiedTakeoverShell() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -477,17 +477,15 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             sessionID: "session-3", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in })
 
         XCTAssertEqual(controller.debugWindowTitle, "frontend (viewer)")
-        XCTAssertTrue(controller.debugState.contains("owner: Yogesh Mac"))
         XCTAssertFalse(controller.debugShowsTerminalSurface)
-        XCTAssertTrue(controller.debugShowsOutputFallback)
-        XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
         XCTAssertFalse(controller.debugShowsInlineControls)
         XCTAssertTrue(controller.debugShowsTakeoverButton)
-        XCTAssertTrue(controller.debugShowsTitleLabel)
-        XCTAssertTrue(controller.debugShowsSummaryLabel)
-        XCTAssertTrue(controller.debugShowsStateLabel)
-        XCTAssertTrue(controller.debugShowsRendererLabel)
-        XCTAssertTrue(controller.debugShowsHeader)
+        // The simplified viewer shell shows only a centered status message plus the
+        // Take Over button; the detail header and output body are hidden.
+        XCTAssertTrue(controller.debugShowsTakeoverMessage)
+        XCTAssertTrue(controller.debugTakeoverMessage.contains("Current owner"))
+        XCTAssertFalse(controller.debugShowsOutputFallback)
+        XCTAssertFalse(controller.debugShowsHeader)
     }
 
     @MainActor func testGhosttyViewerShowsTakeoverStatusWhenNotOwner() throws {
@@ -523,7 +521,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             detachClientAction: { _ in })
 
         XCTAssertFalse(controller.debugShowsTerminalSurface)
-        XCTAssertTrue(controller.debugShowsOutputFallback)
+        XCTAssertFalse(controller.debugShowsOutputFallback)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
         XCTAssertTrue(controller.debugRenderedOutput.contains("Live terminal rendering is limited to the active owner."))
         XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: Owner Mac"))
@@ -566,7 +564,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         controller.show()
 
         XCTAssertFalse(controller.debugShowsTerminalSurface)
-        XCTAssertTrue(controller.debugShowsOutputFallback)
+        XCTAssertFalse(controller.debugShowsOutputFallback)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
         XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: Owner Mac"))
     }
@@ -603,7 +601,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             detachClientAction: { _ in })
 
         XCTAssertFalse(controller.debugShowsTerminalSurface)
-        XCTAssertTrue(controller.debugShowsOutputFallback)
+        XCTAssertFalse(controller.debugShowsOutputFallback)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
         XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: Owner Mac"))
     }
@@ -713,7 +711,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(fakeHost.attachCount, initialAttachCount)
         XCTAssertTrue(fakeHost.didParkSurface)
         XCTAssertFalse(controller.debugShowsTerminalSurface)
-        XCTAssertTrue(controller.debugShowsOutputFallback)
+        XCTAssertFalse(controller.debugShowsOutputFallback)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
         XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: iPad"))
     }

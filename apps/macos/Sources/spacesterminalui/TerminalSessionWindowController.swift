@@ -72,6 +72,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private let interruptButton = NSButton(title: "Ctrl+C", target: nil, action: nil)
     private let newlineButton = NSButton(title: "Enter", target: nil, action: nil)
     private let takeoverButton = NSButton(title: "Take Over", target: nil, action: nil)
+    private let takeoverMessageLabel = NSTextField(labelWithString: "")
     private let inputRowStackView = NSStackView()
     private let actionButtonStackView = NSStackView()
     private let takeoverRowStackView = NSStackView()
@@ -89,6 +90,12 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var bodyTrailingConstraint: NSLayoutConstraint?
     private var takeoverLeadingConstraint: NSLayoutConstraint?
     private var takeoverTrailingConstraint: NSLayoutConstraint?
+    private var takeoverBottomConstraint: NSLayoutConstraint?
+    private var takeoverCenterYConstraint: NSLayoutConstraint?
+    /// When a non-owner is viewing an interactive session, the window collapses
+    /// to a centered message plus the Take Over button instead of the full
+    /// header/output detail stack.
+    private var isViewerTakeoverShellActive = false
     private let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse
     private let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
@@ -613,12 +620,23 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         inputRowStackView.addArrangedSubview(inputField)
         inputRowStackView.addArrangedSubview(actionButtonStackView)
 
+        takeoverMessageLabel.font = .systemFont(ofSize: 13)
+        takeoverMessageLabel.textColor = .secondaryLabelColor
+        takeoverMessageLabel.alignment = .center
+        takeoverMessageLabel.lineBreakMode = .byWordWrapping
+        takeoverMessageLabel.maximumNumberOfLines = 0
+        takeoverMessageLabel.translatesAutoresizingMaskIntoConstraints = false
+        takeoverMessageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        takeoverMessageLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 360).isActive = true
+
+        Self.applyBrandPrimaryStyle(to: takeoverButton, title: "Take Over")
+
         takeoverRowStackView.translatesAutoresizingMaskIntoConstraints = false
-        takeoverRowStackView.orientation = .horizontal
-        takeoverRowStackView.alignment = .centerY
-        takeoverRowStackView.spacing = 8
+        takeoverRowStackView.orientation = .vertical
+        takeoverRowStackView.alignment = .centerX
+        takeoverRowStackView.spacing = 14
+        takeoverRowStackView.addArrangedSubview(takeoverMessageLabel)
         takeoverRowStackView.addArrangedSubview(takeoverButton)
-        takeoverButton.widthAnchor.constraint(equalToConstant: 92).isActive = true
 
         takeoverContainerView.translatesAutoresizingMaskIntoConstraints = false
         takeoverContainerView.addSubview(takeoverRowStackView)
@@ -661,6 +679,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         bodyTrailingConstraint = bodyStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16)
         takeoverLeadingConstraint = takeoverContainerView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16)
         takeoverTrailingConstraint = takeoverContainerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16)
+        takeoverBottomConstraint = takeoverContainerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16)
+        takeoverCenterYConstraint = takeoverContainerView.centerYAnchor.constraint(equalTo: contentView.centerYAnchor)
 
         NSLayoutConstraint.activate([
             headerStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
@@ -668,8 +688,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             headerStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
 
             bodyLeadingConstraint!, bodyTrailingConstraint!, takeoverLeadingConstraint!, takeoverTrailingConstraint!,
-            takeoverContainerView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            takeoverContainerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
+            takeoverContainerView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor), takeoverBottomConstraint!,
         ])
 
         updateRendererVisibility()
@@ -865,7 +884,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             let viewportState = captureOutputViewportState()
             switch visibleRenderer {
             case .ghosttyTakeoverStatus:
-                updateOutputPlainText(currentGhosttyStatusMessage(isOwner: isOwner, runtimeState: runtimeState, ownerClient: currentOwnerClient))
+                let statusMessage = currentGhosttyStatusMessage(isOwner: isOwner, runtimeState: runtimeState, ownerClient: currentOwnerClient)
+                takeoverMessageLabel.stringValue = statusMessage
+                updateOutputPlainText(statusMessage)
                 restoreOutputViewportState(viewportState)
                 completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "takeover_status")
             case .ghosttyEndedFinalRender:
@@ -1098,6 +1119,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         let showsTakeoverShell = visibleRenderer == .ghosttyTakeoverStatus && backend == .ghosttyEmbedded
         takeoverContainerView.isHidden = !(showsTakeoverShell && !isOwner && isInteractive)
         takeoverRowStackView.isHidden = takeoverContainerView.isHidden
+        isViewerTakeoverShellActive = !takeoverContainerView.isHidden
+        takeoverMessageLabel.isHidden = !isViewerTakeoverShellActive
+        takeoverBottomConstraint?.isActive = !isViewerTakeoverShellActive
+        takeoverCenterYConstraint?.isActive = isViewerTakeoverShellActive
         inputField.isEnabled = usesInlineControls && isInteractive
         sendButton.isEnabled = usesInlineControls && isInteractive
         interruptButton.isEnabled = usesInlineControls && isInteractive
@@ -1118,6 +1143,19 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     }
 
     private func updateHeaderLayoutVisibility() {
+        // In the simplified viewer takeover shell, hide the detail header and the
+        // output body entirely so only the centered message and Take Over button show.
+        if isViewerTakeoverShellActive {
+            headerStackView.isHidden = true
+            bodyStackView.isHidden = true
+            outputScrollView.isHidden = true
+            bodyTopToHeaderConstraint?.isActive = false
+            bodyTopToContentConstraint?.isActive = true
+            bodyBottomToTakeoverConstraint?.isActive = false
+            bodyBottomToContentConstraint?.isActive = false
+            return
+        }
+        bodyStackView.isHidden = false
         let hasVisibleHeaderContent = [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel].contains {
             !$0.isHidden
         }
@@ -1126,6 +1164,26 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         bodyTopToContentConstraint?.isActive = !hasVisibleHeaderContent
         bodyBottomToTakeoverConstraint?.isActive = !takeoverContainerView.isHidden
         bodyBottomToContentConstraint?.isActive = takeoverContainerView.isHidden
+    }
+
+    /// Applies the Spaces brand primary-button look (bright-teal fill, dark ink) to a button.
+    /// The brand `Theme` lives in `spacesui`, which depends on this module, so the teal
+    /// values are mirrored locally to avoid a dependency cycle. They match
+    /// `Theme.primaryButtonFill` / `Theme.primaryButtonText` and are appearance-independent.
+    private static func applyBrandPrimaryStyle(to button: NSButton, title: String) {
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.backgroundColor = CGColor(srgbRed: 61 / 255, green: 198 / 255, blue: 184 / 255, alpha: 1)
+        button.layer?.cornerRadius = 6
+        button.layer?.masksToBounds = true
+        let ink = NSColor(srgbRed: 15 / 255, green: 21 / 255, blue: 23 / 255, alpha: 1)
+        button.contentTintColor = ink
+        button.attributedTitle = NSAttributedString(
+            string: title, attributes: [.foregroundColor: ink, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.heightAnchor.constraint(equalToConstant: 30), button.widthAnchor.constraint(greaterThanOrEqualToConstant: 120),
+        ])
     }
 
     private func assignPreferredFirstResponder() {
@@ -1470,6 +1528,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     var debugShowsSummaryLabel: Bool { !summaryLabel.isHidden }
     var debugShowsStateLabel: Bool { !stateLabel.isHidden }
     var debugShowsHeader: Bool { !headerStackView.isHidden }
+    var debugShowsTakeoverMessage: Bool { !takeoverMessageLabel.isHidden }
+    var debugTakeoverMessage: String { takeoverMessageLabel.stringValue }
     var debugInputStatus: String { inputStatusLabel.stringValue }
     var debugShowsInputStatus: Bool { !inputStatusLabel.isHidden }
     func debugSubmitInput() { submitInput() }

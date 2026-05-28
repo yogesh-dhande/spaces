@@ -11,7 +11,8 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             terminalHomeView
-                .navigationTitle("Terminals")
+                .navigationTitle("Spaces")
+                .tint(Theme.accent)
                 .toolbar {
                     toolbarContent
                 }
@@ -146,28 +147,42 @@ struct ContentView: View {
                     description: Text("Start a Spaces terminal on your Mac and refresh.")
                 )
             } else {
-                List {
-                    ForEach(model.terminalGroups) { group in
-                        Section {
-                            ForEach(group.sessions) { session in
-                                Button {
-                                    selectedSession = session
-                                } label: {
-                                    sessionRow(session)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityIdentifier("terminal.row.\(session.id)")
-                            }
-                        } header: {
-                            workspaceHeader(group)
+                ScrollView {
+                    LazyVStack(spacing: 14) {
+                        ForEach(model.terminalGroups) { group in
+                            workspaceCard(group)
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
                 }
                 .id(terminalListRefreshGeneration)
-                .listStyle(.insetGrouped)
+                .background(Theme.bg)
+                .scrollContentBackground(.hidden)
                 .refreshable {
                     await model.refresh()
                 }
+            }
+        }
+        .background(Theme.bg.ignoresSafeArea())
+    }
+
+    private func workspaceCard(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
+        VStack(spacing: 0) {
+            workspaceHeader(group)
+            ForEach(Array(group.sessions.enumerated()), id: \.element.id) { index, session in
+                if index == 0 {
+                    RowDivider(inset: 0)
+                } else {
+                    RowDivider()
+                }
+                Button {
+                    selectedSession = session
+                } label: {
+                    sessionRow(session)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("terminal.row.\(session.id)")
             }
         }
     }
@@ -199,53 +214,55 @@ struct ContentView: View {
     }
 
     private func workspaceHeader(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(group.projectName)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(group.workspaceTitle)
-                .font(.headline)
-                .foregroundStyle(.primary)
-            Text(group.workspaceDirectory)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(group.projectName.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.mutedSecondary)
+                    .tracking(0.4)
+                Text(group.workspaceTitle)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                Text(group.workspaceDirectory)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Theme.mutedSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+            Text("\(group.sessions.count)")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.muted)
         }
-        .textCase(nil)
+        .padding(.init(top: 12, leading: 14, bottom: 12, trailing: 14))
     }
 
     private func sessionRow(_ session: SpacesMobileTerminalSessionSummary) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Image(systemName: session.state == .running ? "terminal.fill" : "terminal")
-                    .foregroundStyle(session.state == .running ? Color.green : Color.secondary)
+        HStack(spacing: 10) {
+            StatusDot(kind: .init(session.state))
+            TypeIconTile(systemName: session.state == .running ? "terminal.fill" : "terminal")
+            VStack(alignment: .leading, spacing: 2) {
                 Text(session.title)
-                    .font(.headline)
-                Spacer()
-                Text(ownerLabel(for: session))
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                Text(session.workingDirectory)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.muted)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            Text(session.workingDirectory)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            HStack(spacing: 8) {
-                Text(session.state.rawValue)
-                Text(session.backend.rawValue)
+            Spacer(minLength: 8)
+            if session.state != .running {
+                MetaChip(text: session.state.rawValue)
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.mutedSecondary)
         }
+        .padding(.init(top: 9, leading: 14, bottom: 9, trailing: 14))
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 4)
         .contentShape(Rectangle())
-    }
-
-    private func ownerLabel(for session: SpacesMobileTerminalSessionSummary) -> String {
-        let ownerClientID = session.attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
-        return session.attachmentSnapshot.clients.first(where: { $0.id == ownerClientID })?.identity.label ?? "No owner"
     }
 }

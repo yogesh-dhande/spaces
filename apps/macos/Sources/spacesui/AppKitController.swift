@@ -237,7 +237,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var commandPaletteMainWindowVisibility: Bool?
     private var mobileConnectionPanel: NSPanel?
     private var mobileConnectionTimer: Timer?
-    private var mobileConnectionPairingWindow: SpacesMobilePairingWindowSnapshot?
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private lazy var updaterController: SPUStandardUpdaterController? = {
@@ -6289,7 +6288,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func presentMobileConnectionPanel(_ response: SpacesMobileBridgeControlResponse) {
         let pairingWindow = visibleMobilePairingWindow(for: response)
-        mobileConnectionPairingWindow = pairingWindow
         let panel: NSPanel
         if let existing = mobileConnectionPanel {
             panel = existing
@@ -6313,7 +6311,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func refreshVisibleMobileConnectionPanel(_ response: SpacesMobileBridgeControlResponse) {
         guard let panel = mobileConnectionPanel, panel.isVisible else { return }
         let pairingWindow = visibleMobilePairingWindow(for: response)
-        mobileConnectionPairingWindow = pairingWindow
         panel.contentView = buildMobileConnectionPanelContent(response: response, pairingWindow: pairingWindow)
     }
 
@@ -6343,27 +6340,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
+        stack.distribution = .fill
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
 
         let title = NSTextField(labelWithString: "Mobile Connection")
-        title.font = .systemFont(ofSize: 21, weight: .semibold)
+        title.font = .systemFont(ofSize: 17, weight: .semibold)
         title.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
         stack.addArrangedSubview(title)
-
-        if let status = response.status {
-            let addresses =
-                status.networkAddresses.isEmpty
-                ? ["\(SpacesMobileBridgeDefaults.loopbackHost):\(status.port)"] : status.networkAddresses.map { "\($0):\(status.port)" }
-            let endpointSection = mobilePanelSection(
-                icon: "network", title: "Endpoint",
-                rows: [
-                    mobilePanelKeyValueRow("Port", "\(status.port)"), mobilePanelKeyValueRow("Bonjour", status.bonjourServiceName),
-                    mobilePanelKeyValueRow("Addresses", addresses.joined(separator: "\n")),
-                ])
-            stack.addArrangedSubview(endpointSection)
-            constrainFormFieldToFillWidth(endpointSection, in: stack)
-        }
 
         let pairingSection = mobilePairingSection(response: response, pairingWindow: pairingWindow)
         stack.addArrangedSubview(pairingSection)
@@ -6372,6 +6356,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let devicesSection = mobileDevicesSection(devices: response.devices ?? [])
         stack.addArrangedSubview(devicesSection)
         constrainFormFieldToFillWidth(devicesSection, in: stack)
+
+        // Flexible trailing spacer absorbs any extra vertical space so the sections
+        // keep their natural height instead of one card stretching to fill the panel.
+        let bottomSpacer = NSView()
+        bottomSpacer.translatesAutoresizingMaskIntoConstraints = false
+        bottomSpacer.setContentHuggingPriority(.defaultLow, for: .vertical)
+        bottomSpacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        stack.addArrangedSubview(bottomSpacer)
+        constrainFormFieldToFillWidth(bottomSpacer, in: stack)
 
         root.addSubview(scroll)
         let contentBottomFollowsStack = content.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: 24)
@@ -6393,29 +6386,57 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func mobilePairingSection(response: SpacesMobileBridgeControlResponse, pairingWindow: SpacesMobilePairingWindowSnapshot?) -> NSView {
-        let openButton = actionButton(
-            title: "Open Pairing Window", symbol: "qrcode", tooltip: "Open a five-minute mobile pairing window",
-            action: #selector(openMobilePairingWindow), primary: true)
-        openButton.isEnabled = response.ok || response.status != nil
-        let copyButton = actionButton(
-            title: "Copy Link", symbol: "link", tooltip: "Copy the current pairing link", action: #selector(copyMobilePairingLink), primary: false)
-        copyButton.isEnabled = pairingWindow != nil
+        var rows: [NSView] = []
 
-        let buttonRow = mobilePanelButtonRow([openButton, copyButton])
-
-        var rows: [NSView] = [mobilePanelKeyValueRow("Window", mobilePairingWindowStatus(pairingWindow)), buttonRow]
-        if !response.ok { rows.append(mobilePanelKeyValueRow("Status", response.message)) }
-        if let window = pairingWindow {
+        if let window = pairingWindow, window.expiresAt > Date() {
+            rows.append(mobilePairingInstructionLabel("Scan this QR code with the Spaces app on your phone to pair it."))
             rows.append(mobileQRCodeView(link: window.linkString))
-            rows.append(mobilePanelKeyValueRow("Code", window.code))
-            rows.append(mobilePanelKeyValueRow("Expires", mobileCountdownText(expiresAt: window.expiresAt)))
+            rows.append(mobilePairingCodeRow(code: window.code, expiresAt: window.expiresAt))
+            let newCodeButton = actionButton(
+                title: "New Code", symbol: "arrow.clockwise", tooltip: "Replace the current code with a fresh one",
+                action: #selector(openMobilePairingWindow), primary: false)
+            rows.append(mobilePanelButtonRow([newCodeButton]))
+        } else {
+            rows.append(mobilePairingInstructionLabel("Start pairing to show a QR code you can scan with the Spaces app on your phone."))
+            let pairButton = actionButton(
+                title: "Pair a Device", symbol: "qrcode", tooltip: "Show a QR code to pair a phone", action: #selector(openMobilePairingWindow),
+                primary: true)
+            pairButton.isEnabled = response.ok || response.status != nil
+            rows.append(mobilePanelButtonRow([pairButton]))
+            if !response.ok { rows.append(helpTextLabel(response.message)) }
         }
 
-        return mobilePanelSection(icon: "iphone.gen3.radiowaves.left.and.right", title: "Pairing", rows: rows)
+        return mobilePanelSection(icon: "qrcode", title: "Pair a Device", rows: rows)
+    }
+
+    private func mobilePairingInstructionLabel(_ text: String) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = .secondaryLabelColor
+        label.maximumNumberOfLines = 0
+        return label
+    }
+
+    private func mobilePairingCodeRow(code: String, expiresAt: Date) -> NSView {
+        let codeLabel = NSTextField(labelWithString: code)
+        codeLabel.font = .monospacedSystemFont(ofSize: 15, weight: .medium)
+        codeLabel.textColor = Theme.text
+
+        let expiresLabel = NSTextField(labelWithString: "Expires in \(mobileCountdownText(expiresAt: expiresAt))")
+        expiresLabel.font = .systemFont(ofSize: 11)
+        expiresLabel.textColor = .secondaryLabelColor
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        stack.addArrangedSubview(codeLabel)
+        stack.addArrangedSubview(expiresLabel)
+        return stack
     }
 
     private func mobileQRCodeView(link: String) -> NSView {
-        let qrSize: CGFloat = 240
+        let qrSize: CGFloat = 200
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
 
@@ -6438,31 +6459,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func mobileDevicesSection(devices: [SpacesMobilePairedDevice]) -> NSView {
-        let resetButton = actionButton(
-            title: "Reset All Pairings", symbol: "trash", tooltip: "Remove all paired mobile devices and rotate the transport key",
-            action: #selector(resetAllMobilePairings), primary: false)
-
         var rows: [NSView] = []
         if devices.isEmpty {
-            let empty = helpTextLabel("No paired devices.")
-            rows.append(empty)
+            rows.append(helpTextLabel("No devices are paired yet."))
         } else {
             rows.append(contentsOf: devices.map { mobileDeviceRow($0) })
+            let resetButton = actionButton(
+                title: "Remove All", symbol: "trash", tooltip: "Remove all paired mobile devices and rotate the transport key",
+                action: #selector(resetAllMobilePairings), primary: false)
+            rows.append(mobilePanelButtonRow([resetButton]))
         }
-        rows.append(mobilePanelButtonRow([resetButton]))
-        return mobilePanelSection(icon: "iphone", title: "Devices", rows: rows)
+        return mobilePanelSection(icon: "iphone", title: "Paired Devices", rows: rows)
     }
 
     private func mobilePanelSection(icon: String, title: String, rows: [NSView]) -> NSView {
         let section = NSView()
         section.translatesAutoresizingMaskIntoConstraints = false
         section.setContentHuggingPriority(.required, for: .vertical)
-        section.wantsLayer = true
-        section.layer?.backgroundColor = Theme.surface.cgColor
-        section.layer?.cornerRadius = 10
-        section.layer?.borderWidth = 1
-        section.layer?.borderColor = Theme.border.cgColor
-        section.layer?.masksToBounds = true
 
         let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         let iconView = NSImageView()
@@ -6473,7 +6486,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
 
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.textColor = Theme.text
 
         let header = NSStackView()
@@ -6494,15 +6507,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         header.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
         if !rows.isEmpty { stack.addArrangedSubview(mobilePanelDivider()) }
-        for (index, row) in rows.enumerated() {
+        for row in rows {
             let paddedRow = mobilePanelPaddedRow(row)
             stack.addArrangedSubview(paddedRow)
             paddedRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-            if index < rows.count - 1 {
-                let divider = mobilePanelDivider(indent: 14)
-                stack.addArrangedSubview(divider)
-                divider.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-            }
         }
 
         section.addSubview(stack)
@@ -6559,30 +6567,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return row
     }
 
-    private func mobilePanelKeyValueRow(_ key: String, _ value: String) -> NSView {
-        let keyLabel = NSTextField(labelWithString: key)
-        keyLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        keyLabel.textColor = .secondaryLabelColor
-        keyLabel.alignment = .right
-        keyLabel.translatesAutoresizingMaskIntoConstraints = false
-        keyLabel.widthAnchor.constraint(equalToConstant: 88).isActive = true
-        keyLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        let valueLabel = NSTextField(wrappingLabelWithString: value)
-        valueLabel.font = .systemFont(ofSize: 12)
-        valueLabel.textColor = .labelColor
-        valueLabel.maximumNumberOfLines = 0
-        valueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .firstBaseline
-        row.spacing = 10
-        row.addArrangedSubview(keyLabel)
-        row.addArrangedSubview(valueLabel)
-        return row
-    }
-
     private func mobileDeviceRow(_ device: SpacesMobilePairedDevice) -> NSView {
         let titleLabel = NSTextField(labelWithString: device.deviceName)
         titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
@@ -6593,18 +6577,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let value, !value.isEmpty else { return nil }
             return value
         }.joined(separator: " ")
-        let detailPrefix = platformText.isEmpty ? "" : "\(platformText) - "
+        let detailPrefix = platformText.isEmpty ? "" : "\(platformText) · "
         let detailLabel = NSTextField(labelWithString: "\(detailPrefix)Last used \(mobilePanelDateText(device.lastUsedAt))")
         detailLabel.font = .systemFont(ofSize: 11)
         detailLabel.textColor = .secondaryLabelColor
         detailLabel.lineBreakMode = .byTruncatingTail
         detailLabel.maximumNumberOfLines = 1
-
-        let installationLabel = NSTextField(labelWithString: device.installationID)
-        installationLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
-        installationLabel.textColor = .tertiaryLabelColor
-        installationLabel.lineBreakMode = .byTruncatingMiddle
-        installationLabel.maximumNumberOfLines = 1
 
         let textStack = NSStackView()
         textStack.orientation = .vertical
@@ -6612,10 +6590,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         textStack.spacing = 2
         textStack.addArrangedSubview(titleLabel)
         textStack.addArrangedSubview(detailLabel)
-        textStack.addArrangedSubview(installationLabel)
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let revokeButton = iconButton(symbol: "xmark.circle", tooltip: "Revoke this device", action: #selector(revokeMobileDevice(_:)))
+        let revokeButton = iconButton(symbol: "xmark.circle", tooltip: "Remove this device", action: #selector(revokeMobileDevice(_:)))
         revokeButton.identifier = NSUserInterfaceItemIdentifier(device.installationID)
         revokeButton.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -6632,12 +6609,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let formatter = ISO8601DateFormatter()
         guard let date = formatter.date(from: value) else { return value }
         return date.formatted(date: .abbreviated, time: .shortened)
-    }
-
-    private func mobilePairingWindowStatus(_ window: SpacesMobilePairingWindowSnapshot?) -> String {
-        guard let window else { return "Closed" }
-        guard window.expiresAt > Date() else { return "Expired" }
-        return "Open"
     }
 
     private func mobileCountdownText(expiresAt: Date) -> String {
@@ -6668,11 +6639,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func openMobilePairingWindow() {
         presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.openPairingWindow() }
-    }
-
-    @objc private func copyMobilePairingLink() {
-        guard let link = mobileConnectionPairingWindow?.linkString else { return }
-        copyToPasteboard(link)
     }
 
     @objc private func revokeMobileDevice(_ sender: NSButton) {
