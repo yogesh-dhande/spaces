@@ -60,7 +60,7 @@ extension Notification.Name {
 
     func setInputActivityHandler(_ handler: (@MainActor () -> Void)?) { terminalView.onInputActivity = handler }
 
-    func ensureHostingWindowForSurface() { terminalView.ensureHostingWindowForSurface() }
+    func ensureHostingWindowForSurface() throws { try terminalView.ensureHostingWindowForSurface() }
 
     func requestSurfaceRefresh() { terminalView.requestSurfaceRefresh() }
 
@@ -290,7 +290,7 @@ extension Notification.Name {
             try ensureOutputHandle()
             rendererHostStorage.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
             rendererHostStorage.setInputActivityHandler { [weak self] in self?.handleOwnerInputActivity() }
-            rendererHostStorage.ensureHostingWindowForSurface()
+            try rendererHostStorage.ensureHostingWindowForSurface()
             try startControlServer()
             try startStateStreamServer()
             startRuntimeStateTimer()
@@ -1033,25 +1033,15 @@ extension Notification.Name {
     }
 
     static func remoteStateShouldIncludeScreenState(reason: String, ownerKind: TerminalClientKind? = nil) -> Bool {
-        switch reason {
-        case "initial": ownerKind == .remoteViewer
-        case "terminated": true
-        case "input", "input_output": ownerKind != .remoteViewer
-        default: false
-        }
+        TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: reason, ownerKind: ownerKind)
     }
 
     static func remoteStateShouldUseCachedSessionSnapshot(reason: String, ownerKind: TerminalClientKind? = nil) -> Bool {
-        reason == "initial" && ownerKind == .remoteViewer
+        TerminalRemoteSessionStatePolicy.shouldUseCachedSessionSnapshot(reason: reason, ownerKind: ownerKind)
     }
 
     static func remoteScreenStateHasVisibleContent(snapshot: GhosttyTerminalSnapshot?, snapshotText: String?) -> Bool {
-        if let snapshot {
-            let text = GhosttyTerminalSnapshotLayout.plainText(for: snapshot)
-            if text.contains(where: { !$0.isWhitespace && !$0.isNewline }) { return true }
-        }
-        guard let snapshotText else { return false }
-        return snapshotText.contains(where: { !$0.isWhitespace && !$0.isNewline })
+        TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: snapshot, snapshotText: snapshotText)
     }
 
     private static func remoteStateShouldIncludeTranscriptTail(reason: String, runtimeState: TerminalSessionRuntimeState?) -> Bool {

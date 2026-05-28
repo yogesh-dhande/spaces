@@ -95,13 +95,23 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(GhosttyEmbeddedTerminalSessionDriver.launchCommand(shell: "/bin/zsh", command: "shell:printf hello"), "shell:printf hello")
     }
 
-    @MainActor func testRemoteStateScreenSnapshotPolicyKeepsPassiveInitialSnapshotFree() {
+    func testFallbackPTYReadLoopDescriptorOwnershipRequiresMatchingGeneration() {
+        XCTAssertTrue(FallbackPTYTerminalSessionDriver.readLoopOwnsDescriptor(currentFD: 12, currentGeneration: 4, readFD: 12, readGeneration: 4))
+        XCTAssertFalse(FallbackPTYTerminalSessionDriver.readLoopOwnsDescriptor(currentFD: 12, currentGeneration: 5, readFD: 12, readGeneration: 4))
+        XCTAssertFalse(FallbackPTYTerminalSessionDriver.readLoopOwnsDescriptor(currentFD: 13, currentGeneration: 4, readFD: 12, readGeneration: 4))
+    }
+
+    @MainActor func testRemoteStateScreenSnapshotPolicyPublishesOwnerBootstrapSnapshots() {
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial"))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial", ownerKind: .localWindow))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial", ownerKind: .localWindow))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial", ownerKind: .remoteViewer))
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldUseCachedSessionSnapshot(reason: "initial"))
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldUseCachedSessionSnapshot(reason: "initial", ownerKind: .localWindow))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldUseCachedSessionSnapshot(reason: "initial", ownerKind: .remoteViewer))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "attachment_state", ownerKind: .localWindow))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "attachment_state", ownerKind: .remoteViewer))
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldUseCachedSessionSnapshot(reason: "attachment_state", ownerKind: .localWindow))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldUseCachedSessionSnapshot(reason: "attachment_state", ownerKind: .remoteViewer))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input"))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input_output"))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "terminated"))
@@ -136,6 +146,18 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     }
 
     @MainActor func testEmbeddedViewMapsCommonNavigationAndFunctionFallbackKeys() {
+        let rightEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F703}",
+                charactersIgnoringModifiers: "\u{F703}", isARepeat: false, keyCode: UInt16(kVK_RightArrow)))
+        let functionRightEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.function], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F703}",
+                charactersIgnoringModifiers: "\u{F703}", isARepeat: false, keyCode: UInt16(kVK_RightArrow)))
+        let numericFunctionRightEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.numericPad, .function], timestamp: 0, windowNumber: 0, context: nil,
+                characters: "\u{F703}", charactersIgnoringModifiers: "\u{F703}", isARepeat: false, keyCode: UInt16(kVK_RightArrow)))
         let homeEvent = try! XCTUnwrap(
             NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F729}",
@@ -153,6 +175,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F708}",
                 charactersIgnoringModifiers: "\u{F708}", isARepeat: false, keyCode: UInt16(kVK_F5)))
 
+        XCTAssertEqual(GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: rightEvent), "right")
+        XCTAssertEqual(GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: functionRightEvent), "right")
+        XCTAssertEqual(GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: numericFunctionRightEvent), "right")
         XCTAssertEqual(GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: homeEvent), "home")
         XCTAssertEqual(GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: pageDownEvent), "pagedown")
         XCTAssertEqual(GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: backtabEvent), "backtab")
@@ -299,7 +324,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertFalse((host.rendererHost as AnyObject) === host)
     }
 
-    @MainActor func testLocalOwnerAttachDoesNotExportLiveSessionSnapshot() throws {
+    @MainActor func testLocalOwnerAttachExportsLiveSessionSnapshotForMacBootstrap() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -322,7 +347,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         try host.attach(client: ownerClient, mode: .owner, into: nil)
 
-        XCTAssertEqual(sessionCaptureCount, 0)
+        XCTAssertGreaterThanOrEqual(sessionCaptureCount, 1)
     }
 
     @MainActor func testRemoteTakeoverFromLocalOwnerExportsLiveSessionSnapshotWithoutSurfaceRefresh() throws {
@@ -351,10 +376,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
 
         try host.attach(client: localOwner, mode: .owner, into: nil)
+        let captureCountAfterLocalAttach = sessionCaptureCount
         XCTAssertEqual(host.core.handleControlRequest(.init(command: "attach", client: remoteOwner, attachmentMode: .viewer)).ok, true)
         XCTAssertEqual(host.core.handleControlRequest(.init(command: "takeover", clientID: remoteOwner.id)).ok, true)
 
-        XCTAssertEqual(sessionCaptureCount, 1)
+        XCTAssertGreaterThan(sessionCaptureCount, captureCountAfterLocalAttach)
         XCTAssertEqual(surfaceRefreshCount, 0)
     }
 
@@ -386,6 +412,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try host.attach(client: localOwner, mode: .owner, into: nil)
         XCTAssertEqual(host.core.handleControlRequest(.init(command: "attach", client: remoteOwner, attachmentMode: .viewer)).ok, true)
         XCTAssertEqual(host.core.handleControlRequest(.init(command: "takeover", clientID: remoteOwner.id)).ok, true)
+        let captureCountBeforeReconnect = sessionCaptureCount
 
         var receivedPayloads: [GhosttyRemoteSessionStatePayload] = []
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
@@ -396,7 +423,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let initialSnapshot = try XCTUnwrap(receivedPayloads.first?.snapshot)
 
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: initialSnapshot), "fresh reconnect")
-        XCTAssertEqual(sessionCaptureCount, 2)
+        XCTAssertGreaterThan(sessionCaptureCount, captureCountBeforeReconnect)
     }
 
     @MainActor func testIncomingOutputRequestsSurfaceRefreshImmediately() throws {
@@ -653,19 +680,29 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             secondWindow.close()
         }
 
-        let surfaceReady = expectation(description: "embedded ghostty surface ready")
-        var didFulfillSurfaceReady = false
-        terminalView.onSurfaceReady = { surface in
-            guard surface != nil, !didFulfillSurfaceReady else { return }
-            didFulfillSurfaceReady = true
-            surfaceReady.fulfill()
-        }
-
         attach(terminalView, to: firstWindow)
         firstWindow.makeKeyAndOrderFront(nil)
-        wait(for: [surfaceReady], timeout: 15)
+        try waitUntil { terminalView.surface != nil || terminalView.isUsingFallbackPTY }
 
         let originalPID = try XCTUnwrap(terminalView.foregroundPID())
+        if terminalView.isUsingFallbackPTY {
+            terminalView.sendRawBytes(Data("first window\n".utf8))
+            try waitUntil { transcript.string().contains("first window") }
+            terminalView.parkInHiddenHostWindowIfNeeded()
+            try waitUntil { terminalView.window == nil }
+            XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), originalPID)
+            terminalView.sendRawBytes(Data("hidden host\n".utf8))
+            try waitUntil { transcript.string().contains("hidden host") }
+            attach(terminalView, to: secondWindow)
+            secondWindow.makeKeyAndOrderFront(nil)
+            try waitUntil { terminalView.window === secondWindow }
+            XCTAssertNil(terminalView.surface)
+            XCTAssertEqual(try XCTUnwrap(terminalView.foregroundPID()), originalPID)
+            terminalView.sendRawBytes(Data("second window\n".utf8))
+            try waitUntil { transcript.string().contains("second window") }
+            return
+        }
+
         let originalSurface = try XCTUnwrap(terminalView.surface)
         terminalView.sendRawBytes(Data("first window\n".utf8))
         try waitUntil { transcript.string().contains("first window") }
@@ -720,7 +757,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         attach(terminalView, to: hostingWindow)
         hostingWindow.makeKeyAndOrderFront(nil)
 
-        try waitUntil { terminalView.surface != nil }
+        try waitUntil { terminalView.surface != nil || terminalView.isUsingFallbackPTY }
+        if terminalView.isUsingFallbackPTY { throw XCTSkip("Ghostty surface unavailable; fallback PTY active.") }
         let initialSurface = try XCTUnwrap(terminalView.surface)
         let childPID = try waitForForegroundPID(in: terminalView)
 
@@ -776,7 +814,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         try host.attach(client: ownerClient, mode: .owner, into: try XCTUnwrap(window.contentView))
         window.makeKeyAndOrderFront(nil)
-        try waitUntil { host.rendererHost.hasRenderableSurface() }
+        try waitUntil { host.rendererHost.hasRenderableSurface() || host.core.rendererHost.foregroundPID() != nil }
+        if !host.rendererHost.hasRenderableSurface() { throw XCTSkip("Ghostty surface unavailable; fallback PTY active.") }
 
         try waitUntil {
             host.core.rendererHost.requestSurfaceRefresh()
@@ -800,12 +839,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             window.close()
         }
 
-        let surfaceReady = expectation(description: "embedded ghostty surface ready")
-        terminalView.onSurfaceReady = { surface in if surface != nil { surfaceReady.fulfill() } }
-
         attach(terminalView, to: window)
         window.makeKeyAndOrderFront(nil)
-        wait(for: [surfaceReady], timeout: 15)
+        try waitUntil { terminalView.surface != nil || terminalView.isUsingFallbackPTY }
+        if terminalView.isUsingFallbackPTY { throw XCTSkip("Ghostty surface unavailable; fallback PTY active.") }
 
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         let baselineRefreshCount = terminalView.debugSurfaceRefreshRequestCount

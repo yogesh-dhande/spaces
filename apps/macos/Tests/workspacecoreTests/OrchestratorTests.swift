@@ -1685,6 +1685,7 @@ final class OrchestratorTests: XCTestCase {
         let launchedConfigurationSnapshot = launchedConfigurations.snapshot()
         XCTAssertEqual(launchedConfigurationSnapshot.count, 1)
         XCTAssertEqual(launchedConfigurationSnapshot.first?.workingDirectory, workspace.dir)
+        XCTAssertEqual(launchedConfigurationSnapshot.first?.lifetimePolicy, .persistent)
         XCTAssertEqual(openCapture.modes, [.owner])
         let terminalWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
         XCTAssertEqual(terminalWindow.app, TerminalHost.spaces.appName)

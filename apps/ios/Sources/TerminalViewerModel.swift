@@ -65,7 +65,7 @@ private enum TerminalViewerRenderMode: String {
     private var reconnectTask: Task<Void, Never>?
     private var bufferedInputText = ""
     private var bufferedInputFlushTask: Task<Void, Never>?
-    private var pendingInputSendTask: Task<Void, Never>?
+    private let inputSendQueue = TerminalInputSerialQueue()
     private var ownershipSynchronizationTask: Task<Void, Never>?
     private var historySeedTask: Task<Void, Never>?
     private var viewportSize: (columns: Int, rows: Int)?
@@ -201,8 +201,7 @@ private enum TerminalViewerRenderMode: String {
         reconnectTask = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
-        pendingInputSendTask?.cancel()
-        pendingInputSendTask = nil
+        inputSendQueue.cancelAll()
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = nil
         historySeedTask?.cancel()
@@ -377,9 +376,7 @@ private enum TerminalViewerRenderMode: String {
         detail: String,
         _ request: @escaping @Sendable () async throws -> Void
     ) {
-        let previousTask = pendingInputSendTask
-        pendingInputSendTask = Task { [weak self] in
-            _ = await previousTask?.result
+        inputSendQueue.enqueue(priority: .userInitiated) { [weak self] in
             guard let self, !Task.isCancelled else { return }
             do {
                 await MainActor.run {
@@ -824,8 +821,7 @@ private enum TerminalViewerRenderMode: String {
     }
 
     private func hasUsableOwnerBootstrapState(_ payload: GhosttyRemoteSessionStatePayload?) -> Bool {
-        guard let payload else { return false }
-        return payload.snapshot != nil
+        TerminalRemoteSessionStatePolicy.hasUsableOwnerBootstrapState(payload)
     }
 
     private func unavailableMessage(for error: Error) -> String? {
@@ -847,8 +843,7 @@ private enum TerminalViewerRenderMode: String {
         reconnectTask = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
-        pendingInputSendTask?.cancel()
-        pendingInputSendTask = nil
+        inputSendQueue.cancelAll()
         bufferedInputText = ""
         hasAttachedToSession = false
         hasConfirmedOwnerInputReadiness = false

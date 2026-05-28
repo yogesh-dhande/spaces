@@ -36,13 +36,13 @@ Each live session also participates in a service-level control path:
 - `GhosttyEmbeddedSessionHost` is the current service-owned runtime for `ghostty-embedded`.
 - It owns one live libghostty-backed session, writes `output.log`, refreshes `state.json`, enforces owner-only input or resize, and expires stale remote leases.
 - It also preserves live metadata such as title, working directory, and child PID so attached clients can reopen a session without restarting the shell.
-- Ad hoc sessions can use `.whileAttached` lifetime policy, which allows the service to reap them once the final live attachment detaches or expires.
+- App-created ad hoc workspace terminals use persistent service-owned sessions so they survive app quit. The `.whileAttached` lifetime policy remains available for callers that intentionally want service reaping after the final live attachment detaches or expires.
 - If the service restarts and finds a session left in `starting` or `running` by a dead service PID, it marks that session failed and removes the stale `control.sock`.
 
-## App-Owned Runtime
-- `GhosttyEmbeddedSessionRegistry` keeps app-owned `GhosttyEmbeddedSessionHost` instances keyed by session ID.
-- `WorkspaceOrchestrator` uses a process-wide launcher override inside `SpacesApp` so app-created built-in sessions start through that registry even when the launch originates from detached background work.
-- `SpacesApp` terminates those app-owned hosts on app shutdown and uses the same session ID to reopen owner windows onto the same live host while the app remains running.
+## In-Process Runtime
+- `GhosttyEmbeddedSessionRegistry` remains available for tests and legacy in-process sessions keyed by session ID.
+- Normal built-in Spaces terminals are service-owned, so `SpacesApp` windows attach to sessions through the service control socket and can reconnect after app quit or relaunch.
+- App shutdown does not terminate service-owned terminal sessions. The quit prompt offers a destructive stop-all option for users who want to end every live service session before quitting.
 
 ## First-Party Clients
 - `spaces terminal command` creates sessions through `SpacesTerminalService`.
@@ -51,12 +51,11 @@ Each live session also participates in a service-level control path:
 - `spaces terminal send`, `key`, and `takeover` still operate on the per-session control socket that the service owns.
 - `SpacesTerminalService` publishes the first-party TLS-PSK bridge consumed by the iOS client. `spaces mobile status` starts the service if needed and prints address details, while `spaces mobile serve` remains available for standalone harnesses and opens an ephemeral pairing window.
 - `SpacesMobile` discovers the bridge through Bonjour or accepts manual host entry, keeps one selected terminal detail at a time, auto-attempts takeover for the opened session, and renders the owner path through a local iOS Ghostty surface seeded from the exported live snapshot plus streamed live output.
-- Workspace process launch, built-in coding-agent launch, and app-opened workspace terminals use the local app-owned live Ghostty path when they are launched from `SpacesApp`.
-- CLI-managed workspace launches still use the daemon-owned compatibility path.
+- Workspace process launch, built-in coding-agent launch, app-opened workspace terminals, CLI-created sessions, and mobile-visible sessions use the service-owned path.
 
 ## macOS Window Behavior
-- `SpacesApp` reuses an in-process `GhosttyEmbeddedSessionHost` when the target session already exists in `GhosttyEmbeddedSessionRegistry`.
-- If no in-process host exists for that session ID, `SpacesApp` falls back to `RemoteGhosttySessionHost` and subscribes to the daemon-owned session state stream for owner handoff compatibility, metadata updates, and ended-session final renders.
+- `SpacesApp` uses `RemoteGhosttySessionHost` for service-owned sessions and subscribes to the daemon-owned session state stream for owner handoff compatibility, metadata updates, and ended-session final renders.
+- If a legacy in-process host already exists for a session ID, `SpacesApp` can still reuse that host instead of creating a remote host.
 - `TerminalSessionWindowController` attaches a local owner or viewer client record to the daemon-owned session, keeps window reuse keyed by stable session ID, mounts a live Ghostty surface only for the active owner, and otherwise shows takeover or terminal-ended status shells.
 - The embedded Ghostty owner view can rebind a live surface to a replacement AppKit host view without restarting the underlying terminal session, which is the current fork-level bridge toward detachable renderers.
 - The current macOS daemon client path uses the service live snapshot export for owner bootstrap and ended-session final renders, with `output.log` replay through `libghostty-vt` retained for transcript history, `spaces terminal tail`, and explicit no-live-session fallback recovery.

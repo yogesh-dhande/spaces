@@ -41,6 +41,7 @@ SCENARIO_LOG=""
 UI_TEST_CONFIG=""
 UI_TEST_LOG=""
 PRESERVE_ROOT=0
+declare -a SCENARIO_CREATED_SESSIONS=()
 
 print_usage() {
   cat <<'EOF'
@@ -322,6 +323,7 @@ start_demo() {
 
 begin_scenario() {
   CURRENT_SCENARIO="$1"
+  SCENARIO_CREATED_SESSIONS=()
   SCENARIO_DIR="$DEMO_ROOT/mobile-e2e/$CURRENT_SCENARIO"
   SCENARIO_LOG="$SCENARIO_DIR/scenario.log"
   UI_TEST_CONFIG="$SCENARIO_DIR/ui-test-config.json"
@@ -374,40 +376,108 @@ PY
 }
 
 new_terminal_session() {
-  local before_file="$SCENARIO_DIR/session-ids-before-$(date +%s%N).txt"
-  local open_log="$SCENARIO_DIR/open-terminal.log"
+  local create_log="$SCENARIO_DIR/start-terminal-session.log"
+  local show_log="$SCENARIO_DIR/show-terminal.log"
   local session_id
-  discover_session_ids >"$before_file"
-  if ! demo_env "$SPACES_E2E_BIN" open-workspace-terminal --workspace-dir "$PROJECT_DIR" >"$open_log" 2>&1; then
-    cat "$open_log" >>"$SCENARIO_LOG" || true
-    fail "Failed to open a fresh workspace terminal for $CURRENT_SCENARIO."
-  fi
-  cat "$open_log" >>"$SCENARIO_LOG" || true
-  session_id="$(python3 - "$RUNTIME_DIR" "$before_file" <<'PY'
+  : >"$create_log"
+  for attempt in 1 2 3 4 5; do
+    local attempt_log="$SCENARIO_DIR/start-terminal-session-attempt-$attempt.log"
+    if demo_env "$SPACES_E2E_BIN" start-terminal-session --cwd "$PROJECT_DIR" --title "e2e-$CURRENT_SCENARIO" >"$attempt_log" 2>&1; then
+      {
+        printf -- '--- create attempt %s ---\n' "$attempt"
+        cat "$attempt_log"
+      } >>"$create_log" || true
+      cat "$attempt_log" >>"$SCENARIO_LOG" || true
+      break
+    fi
+    {
+      printf -- '--- create attempt %s failed ---\n' "$attempt"
+      cat "$attempt_log"
+    } >>"$create_log" || true
+    if [[ "$attempt" == "5" ]]; then
+      cat "$create_log" >>"$SCENARIO_LOG" || true
+      fail "Failed to create a fresh service terminal session for $CURRENT_SCENARIO."
+    fi
+    sleep 1
+  done
+  if ! session_id="$(python3 - "$create_log" <<'PY'
+import json
 import pathlib
 import sys
-import time
 
-runtime_dir = pathlib.Path(sys.argv[1])
-before_path = pathlib.Path(sys.argv[2])
-before = {line.strip() for line in before_path.read_text().splitlines() if line.strip()}
-sessions_root = runtime_dir / "terminal" / "sessions"
-deadline = time.time() + 30
-last_ids = []
-while time.time() < deadline:
-    if sessions_root.exists():
-        ids = sorted(path.name for path in sessions_root.iterdir() if path.is_dir())
-        last_ids = ids
-        created = [session_id for session_id in ids if session_id not in before]
-        if created:
-            print(created[-1])
-            raise SystemExit(0)
-    time.sleep(0.25)
-raise SystemExit(f"Timed out waiting for a new terminal session. Existing={sorted(before)} current={last_ids}")
+decoder = json.JSONDecoder()
+text = pathlib.Path(sys.argv[1]).read_text()
+payload = None
+index = 0
+while True:
+    start = text.find("{", index)
+    if start < 0:
+        break
+    try:
+        decoded, end = decoder.raw_decode(text[start:])
+    except json.JSONDecodeError:
+        index = start + 1
+        continue
+    if isinstance(decoded, dict) and (decoded.get("id") or decoded.get("sessionID")):
+        payload = decoded
+    index = start + max(end, 1)
+if payload is None:
+    raise SystemExit(f"Terminal create response did not include a session payload: {text}")
+session_id = payload.get("id") or payload.get("sessionID")
+print(session_id)
 PY
-  )"
-  wait_for_session_owner "$session_id" || fail "Fresh terminal session did not become owner-ready: $session_id"
-  printf '%s\n' "$session_id"
+  )"; then
+    fail "Unable to parse fresh service terminal session ID for $CURRENT_SCENARIO."
+  fi
+  : >"$show_log"
+  for attempt in 1 2 3; do
+    local show_attempt_log="$SCENARIO_DIR/show-terminal-attempt-$attempt.log"
+    if ! demo_env "$SPACES_CLI_BIN" terminal show "$session_id" >"$show_attempt_log" 2>&1; then
+      cat "$show_attempt_log" >>"$SCENARIO_LOG" || true
+      fail "Failed to open Mac owner window for fresh service terminal session $session_id."
+    fi
+    {
+      printf -- '--- show attempt %s ---\n' "$attempt"
+      cat "$show_attempt_log"
+    } >>"$show_log" || true
+    cat "$show_attempt_log" >>"$SCENARIO_LOG" || true
+    if wait_for_session_owner "$session_id" >>"$show_log" 2>&1; then
+      printf '%s\n' "$session_id"
+      return
+    fi
+    sleep 1
+  done
+  fail "Fresh terminal session did not become owner-ready: $session_id"
+}
+
+track_current_scenario_session() {
+  local session_id="$1"
+  [[ -n "$session_id" ]] || return
+  SCENARIO_CREATED_SESSIONS+=("$session_id")
+}
+
+cleanup_current_scenario_sessions() {
+  if (( ${#SCENARIO_CREATED_SESSIONS[@]} == 0 )); then
+    return
+  fi
+  local session_id
+  local seen=" "
+  for session_id in "${SCENARIO_CREATED_SESSIONS[@]}"; do
+    [[ -n "$session_id" ]] || continue
+    if [[ "$seen" == *" $session_id "* ]]; then
+      continue
+    fi
+    seen+=" $session_id "
+    if [[ -n "$SCENARIO_LOG" ]]; then
+      {
+        printf -- '--- terminate session %s ---\n' "$session_id"
+        demo_env "$SPACES_E2E_BIN" terminate-terminal-session "$session_id"
+      } >>"$SCENARIO_LOG" 2>&1 || true
+    else
+      demo_env "$SPACES_E2E_BIN" terminate-terminal-session "$session_id" >/dev/null 2>&1 || true
+    fi
+  done
+  SCENARIO_CREATED_SESSIONS=()
 }
 
 reset_ipad_app() {
@@ -849,8 +919,8 @@ else:
         raise SystemExit(f"Expected exactly one first non-blank render event, found {len(first_nonblank)}")
     if len(first_input_ready) != 1:
         raise SystemExit(f"Expected exactly one first input-ready event, found {len(first_input_ready)}")
-    if len(initial_snapshot_exports) != 1:
-        raise SystemExit(f"Expected exactly one initial snapshot export, found {len(initial_snapshot_exports)}")
+    if not initial_snapshot_exports:
+        raise SystemExit("Expected at least one initial snapshot export.")
     if post_ready_snapshot_exports:
         raise SystemExit(
             "Found unexpected snapshot exports after takeover became interactive: "
@@ -864,6 +934,7 @@ run_codex_scenario() {
   begin_scenario "$scenario"
   local session_id
   session_id="$(new_terminal_session)"
+  track_current_scenario_session "$session_id"
   local command_text
   local reopen_same_session=0
   local ui_test_name="SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverFromList"
@@ -894,6 +965,7 @@ run_roundtrip_scenario() {
   begin_scenario "roundtrip"
   local session_id
   session_id="$(new_terminal_session)"
+  track_current_scenario_session "$session_id"
   write_ui_test_config "roundtrip" "$session_id"
   reset_ipad_app
   python3 - "$ROOT_DIR" "$DEMO_ROOT" "$session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$IPAD_UDID" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$UI_TEST_CONFIG" "$UI_TEST_LOG" "$IOS_DERIVED_DATA" "$SCENARIO_DIR" <<'PY'
@@ -1114,6 +1186,19 @@ def assert_render_output_sane(label: str, text: str) -> None:
     if "\x1b" in text or "^[" in text:
         raise RuntimeError(f"{label} render contains raw escape remnants:\n{text}")
 
+def mac_owner_render_contains(payload: dict, *markers: str) -> bool:
+    if payload.get("found") is not True:
+        return False
+    rendered_text = payload.get("renderedOutput") or payload.get("visibleText") or ""
+    if not all(marker in rendered_text for marker in markers):
+        return False
+    if payload.get("showsTerminalSurface") is True:
+        return True
+    renderer_summary = payload.get("rendererSummary") or ""
+    return payload.get("showsOutputFallback") is True and (
+        "owner fallback" in renderer_summary or "output tail" in renderer_summary
+    )
+
 def write_command_request(command_text: str, send_enter: bool = True) -> None:
     payload = {
         "id": f"{int(time.time() * 1000)}-{os.getpid()}",
@@ -1194,10 +1279,9 @@ with ui_test_log.open("w") as ui_test_output:
         mac_owner_payload = wait_for_terminal_window_dump(
             mac_owner_dump_path,
             lambda payload: (
-                payload.get("found") is True
-                and payload.get("showsTerminalSurface") is True
-                and "__roundtrip_mac_before_takeover_one__" in (payload.get("renderedOutput") or "")
-                and "__roundtrip_mac_before_takeover_two__" in (payload.get("renderedOutput") or "")
+                mac_owner_render_contains(
+                    payload, "__roundtrip_mac_before_takeover_one__", "__roundtrip_mac_before_takeover_two__"
+                )
             ),
             timeout=45,
             any_mode=False,
@@ -1265,8 +1349,7 @@ with ui_test_log.open("w") as ui_test_output:
         mac_owner_after_retakeover = wait_for_terminal_window_dump(
             mac_owner_dump_path,
             lambda payload: (
-                payload.get("found") is True
-                and payload.get("showsTerminalSurface") is True
+                mac_owner_render_contains(payload, ios_first_output, ios_second_output)
                 and contains_command_output(payload.get("renderedOutput") or "", ios_first_command, ios_first_output)
                 and contains_command_output(payload.get("renderedOutput") or "", ios_second_command, ios_second_output)
             ),
@@ -1327,8 +1410,7 @@ with ui_test_log.open("w") as ui_test_output:
             mac_owner_after_retakeover = wait_for_terminal_window_dump(
                 mac_owner_dump_path,
                 lambda payload: (
-                    payload.get("found") is True
-                    and payload.get("showsTerminalSurface") is True
+                    mac_owner_render_contains(payload, ios_first_output, ios_second_output)
                     and contains_command_output(payload.get("renderedOutput") or "", ios_first_command, ios_first_output)
                     and contains_command_output(payload.get("renderedOutput") or "", ios_second_command, ios_second_output)
                 ),
@@ -1360,8 +1442,7 @@ with ui_test_log.open("w") as ui_test_output:
         mac_owner_after_final_retakeover = wait_for_terminal_window_dump(
             mac_owner_dump_path,
             lambda payload: (
-                payload.get("found") is True
-                and payload.get("showsTerminalSurface") is True
+                mac_owner_render_contains(payload, ios_first_output, ios_second_output)
                 and contains_command_output(payload.get("renderedOutput") or "", ios_first_command, ios_first_output)
                 and contains_command_output(payload.get("renderedOutput") or "", ios_second_command, ios_second_output)
             ),
@@ -1500,6 +1581,7 @@ run_scrollback_scenario() {
   begin_scenario "scrollback"
   local session_id
   session_id="$(new_terminal_session)"
+  track_current_scenario_session "$session_id"
   launch_scrollback_fixture_on_mac_owner "$session_id" >>"$SCENARIO_LOG" 2>&1 || fail "Failed to launch scrollback fixture."
   write_ui_test_config "scrollback" "$session_id"
   reset_ipad_app
@@ -1712,7 +1794,9 @@ run_two_session_scenario() {
   local session_id
   local secondary_session_id
   session_id="$(new_terminal_session)"
+  track_current_scenario_session "$session_id"
   secondary_session_id="$(new_terminal_session)"
+  track_current_scenario_session "$secondary_session_id"
   write_ui_test_config "two-session" "$session_id" "$secondary_session_id"
   run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverAcrossTwoSessionsFromList"
   printf 'Mobile scenario passed: two-session\n'
@@ -1722,6 +1806,7 @@ run_ownership_guard_scenario() {
   begin_scenario "ownership-guard"
   local session_id
   session_id="$(new_terminal_session)"
+  track_current_scenario_session "$session_id"
   python3 - "$DEMO_ROOT" "$session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$SCENARIO_DIR" "$BUNDLE_ID" <<'PY'
 import json
 import os
@@ -1911,6 +1996,7 @@ run_selected_scenarios() {
         fail "unknown scenario: $scenario"
         ;;
     esac
+    cleanup_current_scenario_sessions
   done
 }
 

@@ -26,6 +26,8 @@ final class TerminalKeyInputTests: XCTestCase {
 
     func testCtrlChordEncodesControlByte() {
         XCTAssertEqual(TerminalKeyInput.bytes(for: "ctrl+c"), [0x03])
+        XCTAssertEqual(TerminalKeyInput.bytes(for: "ctrl+u"), [0x15])
+        XCTAssertEqual(TerminalKeyInput.bytes(for: "ctrl+w"), [0x17])
         XCTAssertEqual(TerminalKeyInput.bytes(for: "ctrl-z"), [0x1A])
     }
 

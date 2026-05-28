@@ -27,7 +27,7 @@ import spacesterminalcore
                 statusCount += 1
                 if statusCount == 1 { throw POSIXError(.ENOENT) }
                 return SpacesMobileBridgeControlResponse(ok: true, message: "Loaded mobile bridge status.")
-            })
+            }, hasLiveTerminalSessions: { false })
 
         XCTAssertTrue(response.ok)
         XCTAssertEqual(ensureCount, 1)
@@ -44,7 +44,20 @@ import spacesterminalcore
                 relaunch: { _ in
                     relaunchCount += 1
                     return true
-                }, status: { _ in throw POSIXError(.EACCES) }))
+                }, status: { _ in throw POSIXError(.EACCES) }, hasLiveTerminalSessions: { false }))
+        XCTAssertEqual(relaunchCount, 0)
+    }
+
+    func testControlStatusDoesNotRelaunchTerminalServiceWhenSessionsAreLive() throws {
+        var relaunchCount = 0
+
+        XCTAssertThrowsError(
+            try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService(
+                timeout: 1, ensureRunning: { _ in false },
+                relaunch: { _ in
+                    relaunchCount += 1
+                    return true
+                }, status: { _ in throw POSIXError(.ENOENT) }, hasLiveTerminalSessions: { true }))
         XCTAssertEqual(relaunchCount, 0)
     }
 

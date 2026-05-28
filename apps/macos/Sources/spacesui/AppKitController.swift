@@ -145,6 +145,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case workspace(String)
     }
 
+    enum TerminalQuitPolicy: Equatable, Sendable {
+        case quitImmediately
+        case promptForLiveSessions(count: Int)
+    }
+
+    enum TerminalQuitDialogChoice: Equatable, Sendable {
+        case keepRunning
+        case stopAll
+        case cancel
+    }
+
     private struct HotkeyPerfContext {
         let startedAt: Date
         let appWasActive: Bool
@@ -298,6 +309,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var recentCommandPaletteFocusIdentities: [String] = []
     private var terminalSessionWindowControllers: [String: TerminalSessionWindowController] = [:]
     private var lastFocusedBuiltInTerminalSessionID: String?
+    private var keepsTerminalSessionsRunningDuringTermination = false
     private var appToggleReturnTerminalSessionID: String?
     private var appToggleReturnApplicationProcessID: pid_t?
     private var commandPaletteReturnTerminalSessionID: String?
@@ -335,6 +347,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     enum ExternalWindowAction: Sendable {
         case focus(hidesApp: Bool)
         case open(hidesApp: Bool)
+    }
+
+    private struct OpenWorkspaceTerminalSnapshotResult: Sendable {
+        let sessionID: String
+        let action: ExternalWindowAction
     }
 
     private enum WindowShortcutExecutionOutcome: Sendable {
@@ -430,7 +447,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupAppActivationObservers()
         setupWorkspaceApplicationObservers()
         setupTerminalAttachmentStateObserver()
-        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(Self.launchLocalBuiltInTerminalSession)
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(Self.terminateBuiltInTerminalSession)
         logStartupProfile("ipc_observers_ready")
         Self.scheduleAfterNextRunLoopTurn { [weak self] in
@@ -443,6 +459,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 self.ensureMainWindowVisibleOnLaunch()
             }
         }
+        prewarmTerminalServiceAfterStartup()
         Task { @MainActor in WorkspaceOrchestrator.prepareUserNotificationAuthorization() }
     }
 
@@ -468,13 +485,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             builtInTerminalWindowCloser: { [weak self] sessionID in
                 Self.dispatchBuiltInTerminalWindowActionOnMainThread { self?.closeTerminalSessionWindows(sessionID: sessionID) }
             }, builtInTerminalSessionTerminator: Self.terminateBuiltInTerminalSession,
-            builtInTerminalSessionLauncher: Self.launchLocalBuiltInTerminalSession)
+            builtInTerminalSessionLauncher: Self.launchServiceBuiltInTerminalSession)
     }
 
     nonisolated static func dispatchBuiltInTerminalWindowActionOnMainThread(
         isMainThread: Bool = Thread.isMainThread,
         scheduler: (@escaping @MainActor () -> Void) -> Void = { action in Task { @MainActor in action() } }, action: @escaping @MainActor () -> Void
     ) { if isMainThread { MainActor.assumeIsolated { action() } } else { scheduler(action) } }
+
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let liveSessions = Self.liveBuiltInTerminalSessions()
+        switch Self.terminalQuitPolicy(liveTerminalSessionCount: liveSessions.count) {
+        case .quitImmediately:
+            keepsTerminalSessionsRunningDuringTermination = true
+            return .terminateNow
+        case .promptForLiveSessions:
+            switch presentTerminalQuitDialog(liveSessionCount: liveSessions.count) {
+            case .keepRunning:
+                keepsTerminalSessionsRunningDuringTermination = true
+                return .terminateNow
+            case .stopAll:
+                keepsTerminalSessionsRunningDuringTermination = false
+                let stoppedCount = Self.stopAllBuiltInTerminalSessions(liveSessions: liveSessions)
+                guard stoppedCount == liveSessions.count else {
+                    showError(WorkspaceError.invalidArgument(message: "Unable to stop all terminal sessions before quitting."))
+                    return .terminateCancel
+                }
+                GhosttyEmbeddedSessionRegistry.shared.terminateAll()
+                return .terminateNow
+            case .cancel: return .terminateCancel
+            }
+        }
+    }
 
     public func applicationWillTerminate(_ notification: Notification) {
         periodicWorkspaceRefreshTask?.cancel()
@@ -569,7 +611,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         commandPalettePanel?.close()
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil)
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(nil)
-        GhosttyEmbeddedSessionRegistry.shared.terminateAll()
         releaseLaunchLeases()
     }
 
@@ -957,8 +998,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return ownerAttachment.clientID
     }
 
-    static func shouldTerminateAdHocBuiltInTerminalSession(paths: TerminalSessionPaths?, isConfiguredProcessSession: Bool, now: Date = Date()) -> Bool
-    {
+    nonisolated static func shouldTerminateAdHocBuiltInTerminalSession(
+        paths: TerminalSessionPaths?, isConfiguredProcessSession: Bool, isAppTerminatingAndKeepingSessions: Bool = false, now: Date = Date()
+    ) -> Bool {
+        guard !isAppTerminatingAndKeepingSessions else { return false }
         guard !isConfiguredProcessSession, let paths, let activeAttachments = try? TerminalSessionPersistence.liveAttachments(paths: paths, now: now)
         else { return false }
         return activeAttachments.isEmpty
@@ -978,9 +1021,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
         }
         let paths = try? TerminalSessionPaths.forSession(id: sessionID)
-        guard Self.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: isConfiguredProcessSession, now: now) else {
-            return
-        }
+        guard
+            Self.shouldTerminateAdHocBuiltInTerminalSession(
+                paths: paths, isConfiguredProcessSession: isConfiguredProcessSession,
+                isAppTerminatingAndKeepingSessions: keepsTerminalSessionsRunningDuringTermination, now: now)
+        else { return }
         if !Self.terminateLocalBuiltInTerminalSessionIfPresent(sessionID: sessionID) { try? TerminalService.terminateSession(id: sessionID) }
         if (try? orchestrator.removeAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
     }
@@ -1240,6 +1285,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    nonisolated static func launchServiceBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
+        -> TerminalServiceSessionSummary
+    { try appBuiltInTerminalSessionLauncher()(launchConfiguration) }
+
+    nonisolated static func appBuiltInTerminalSessionLauncher(
+        createSession: @escaping @Sendable (TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary = {
+            try TerminalService.createSession($0)
+        }
+    ) -> WorkspaceOrchestrator.BuiltInTerminalSessionLauncher { { launchConfiguration in try createSession(launchConfiguration) } }
+
     nonisolated static func terminateLocalBuiltInTerminalSessionIfPresent(sessionID: String) -> Bool {
         (try? performBuiltInTerminalSessionWorkOnMainThread {
             guard GhosttyEmbeddedSessionRegistry.shared.existingCore(sessionID: sessionID) != nil else { return false }
@@ -1277,6 +1332,60 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             throw WorkspaceError.invalidArgument(message: "Built-in terminal main-thread work did not return a result.")
         }
         return try result.get()
+    }
+
+    nonisolated static func terminalQuitPolicy(liveTerminalSessionCount: Int) -> TerminalQuitPolicy {
+        liveTerminalSessionCount > 0 ? .promptForLiveSessions(count: liveTerminalSessionCount) : .quitImmediately
+    }
+
+    nonisolated static func liveBuiltInTerminalSessions(listSessions: () throws -> [TerminalServiceSessionSummary] = TerminalService.listSessions)
+        -> [TerminalServiceSessionSummary]
+    { (try? listSessions()) ?? [] }
+
+    @discardableResult nonisolated static func stopAllBuiltInTerminalSessions(
+        liveSessions: [TerminalServiceSessionSummary], terminateSession: (String) throws -> Void = { try TerminalService.terminateSession(id: $0) }
+    ) -> Int {
+        var stoppedCount = 0
+        for session in liveSessions {
+            do {
+                try terminateSession(session.id)
+                stoppedCount += 1
+            } catch { fputs("spaces: failed to stop terminal session \(session.id): \(error)\n", stderr) }
+        }
+        return stoppedCount
+    }
+
+    private func presentTerminalQuitDialog(liveSessionCount: Int) -> TerminalQuitDialogChoice {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Quit Spaces?"
+        let sessionWord = liveSessionCount == 1 ? "terminal session is" : "terminal sessions are"
+        alert.informativeText =
+            "\(liveSessionCount) \(sessionWord) still running. Quit and keep them running, stop all terminal sessions before quitting, or cancel."
+
+        let keepButton = alert.addButton(withTitle: "Quit and Keep Running")
+        keepButton.keyEquivalent = "\r"
+        keepButton.keyEquivalentModifierMask = []
+        alert.addButton(withTitle: "Stop All and Quit")
+        let cancelButton = alert.addButton(withTitle: "Cancel")
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.keyEquivalentModifierMask = []
+
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn: return .keepRunning
+        case .alertSecondButtonReturn: return .stopAll
+        default: return .cancel
+        }
+    }
+
+    private func prewarmTerminalServiceAfterStartup() {
+        Task.detached(priority: .utility) {
+            do {
+                _ = try TerminalService.ensureRunning(timeout: 5)
+                Task { @MainActor [weak self] in self?.logStartupProfile("terminal_service_prewarmed") }
+            } catch { if Self.hotkeyDebugEnabled() { fputs("spaces: terminal service prewarm failed: \(error)\n", stderr) } }
+        }
     }
 
     nonisolated private static func startupProfileEnabled() -> Bool { ProcessInfo.processInfo.environment["SPACES_STARTUP_PROFILE"] == "1" }
@@ -1452,14 +1561,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated private static func openWorkspaceTerminalSnapshot(workspaceID: String) async -> Result<ExternalWindowAction, Error> {
+    nonisolated private static func openWorkspaceTerminalSnapshot(workspaceID: String) async -> Result<OpenWorkspaceTerminalSnapshotResult, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
                 let db = try DatabaseLocator.defaultPath()
                 let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                try orchestrator.openWorkspaceTerminal(workspaceID: workspaceID)
-                return .success(.open(hidesApp: false))
+                let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowOpener: { _, _ in })
+                let sessionID = try orchestrator.openWorkspaceTerminal(workspaceID: workspaceID)
+                return .success(.init(sessionID: sessionID, action: .open(hidesApp: false)))
             } catch { return .failure(error) }
         }.value
     }
@@ -7336,12 +7445,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let result = await Self.openWorkspaceTerminalSnapshot(workspaceID: workspaceID)
             let elapsedMS = windowShortcutElapsedMS(since: startedAt)
             switch result {
-            case .success(let action):
+            case .success(let result):
                 logPerfMetric(
                     "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: true,
                     detail: "route=\(route.rawValue)")
+                openTerminalSessionWindow(sessionID: result.sessionID, mode: .owner)
                 reloadData()
-                hideAfterSuccessfulExternalWindowAction(action)
+                hideAfterSuccessfulExternalWindowAction(result.action)
             case .failure(let error):
                 logPerfMetric(
                     "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,

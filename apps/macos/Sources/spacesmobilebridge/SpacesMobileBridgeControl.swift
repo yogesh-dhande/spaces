@@ -217,11 +217,13 @@ public enum SpacesMobileBridgeControlClient {
 
     static func statusEnsuringCurrentTerminalService(
         timeout: TimeInterval, ensureRunning: (TimeInterval) throws -> Bool, relaunch: (TimeInterval) throws -> Bool,
-        status: (TimeInterval) throws -> SpacesMobileBridgeControlResponse
+        status: (TimeInterval) throws -> SpacesMobileBridgeControlResponse,
+        hasLiveTerminalSessions: () throws -> Bool = { !((try? TerminalService.listSessions()) ?? []).isEmpty }
     ) throws -> SpacesMobileBridgeControlResponse {
         _ = try ensureRunning(timeout)
         do { return try status(timeout) } catch {
             guard isControlEndpointUnavailable(error) else { throw error }
+            if (try? hasLiveTerminalSessions()) == true { throw error }
             _ = try relaunch(timeout)
             return try status(timeout)
         }

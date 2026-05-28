@@ -15,6 +15,8 @@ import spacesterminalcore
     private var lastRequestedViewportSize: (columns: Int, rows: Int)?
     private var pendingViewportResizeSize: (columns: Int, rows: Int)?
     private var pendingViewportResizeTask: Task<Void, Never>?
+    private let inputQueue = TerminalInputSerialQueue()
+    private var cachedReplayHistorySeed: (byteCount: Int, data: Data)?
 
     public init(launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) {
         self.launchConfiguration = launchConfiguration
@@ -27,6 +29,7 @@ import spacesterminalcore
     deinit {
         stateStreamClient?.stop()
         pendingViewportResizeTask?.cancel()
+        inputQueue.cancelAll()
     }
 
     public func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
@@ -36,6 +39,11 @@ import spacesterminalcore
             pendingViewportResizeTask?.cancel()
             pendingViewportResizeTask = nil
             pendingViewportResizeSize = nil
+        } else {
+            pendingViewportResizeTask?.cancel()
+            pendingViewportResizeTask = nil
+            pendingViewportResizeSize = nil
+            lastRequestedViewportSize = nil
         }
         terminalView.acceptsTerminalInput = mode == .owner
         terminalView.onSendText = { [weak self] text in self?.sendRemoteInput(text) }
@@ -58,7 +66,9 @@ import spacesterminalcore
             container.layoutSubtreeIfNeeded()
         }
         terminalView.update(
-            snapshot: currentSnapshotForReplayUpdate(), replayStateKey: currentReplayStateKey(), outputData: nil, outputEventToken: nil)
+            snapshot: currentSnapshotForReplayUpdate(), replayStateKey: currentReplayStateKey(), historySeed: currentReplayHistorySeed(),
+            outputData: nil, outputEventToken: nil)
+        if mode == .owner { sendCurrentViewportResizeIfNeeded(force: true) }
     }
 
     public func parkSurfaceInHiddenHostWindow() { terminalView.parkInHiddenHostWindowIfNeeded() }
@@ -94,8 +104,9 @@ import spacesterminalcore
 
     public func snapshotText() -> String? {
         ensureStateStreamStartedIfNeeded()
+        if let outputLogSnapshotText = currentOutputLogSnapshotText() { return outputLogSnapshotText }
         if let transcriptTail = currentTranscriptTail(), !transcriptTail.isEmpty { return transcriptTail }
-        if let snapshotText = latestState?.snapshotText { return snapshotText }
+        if let snapshotText = latestSnapshotTextIfCompatible() { return snapshotText }
         if let snapshotText = terminalView.snapshotText(), !snapshotText.isEmpty { return snapshotText }
         if let snapshot = currentSnapshot() { return GhosttyTerminalSnapshotRenderer.render(snapshot).string }
         let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
@@ -155,8 +166,9 @@ import spacesterminalcore
         latestState = latestState?.merged(with: payload) ?? payload
         lastSubscriptionAttemptAt = nil
         terminalView.update(
-            snapshot: currentSnapshotForReplayUpdate(), replayStateKey: currentReplayStateKey(), outputData: payload.outputData,
-            outputEventToken: payload.outputData == nil ? nil : payload.emittedAt)
+            snapshot: currentSnapshotForReplayUpdate(), replayStateKey: currentReplayStateKey(), historySeed: currentReplayHistorySeed(),
+            outputData: payload.outputData, outputEventToken: payload.outputData == nil ? nil : payload.emittedAt)
+        if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
         let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
         TerminalPerformance.logMetric(
             "terminal_remote_state_receive", target: "session=\(payload.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
@@ -186,23 +198,58 @@ import spacesterminalcore
     }
 
     private func currentSnapshot() -> GhosttyTerminalSnapshot? {
-        if let snapshot = latestState?.snapshot { return snapshot }
+        if let snapshot = latestState?.snapshot,
+            Self.shouldUseLiveSnapshot(snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
+        {
+            return snapshot
+        }
         let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         return snapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
     }
 
     private func currentSnapshotForReplayUpdate() -> GhosttyTerminalSnapshot? {
-        if let snapshot = latestState?.snapshot { return snapshot }
+        if let snapshot = latestState?.snapshot,
+            Self.shouldUseLiveSnapshot(snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
+        {
+            return snapshot
+        }
         guard !terminalView.hasReplaySurfaceContent else { return nil }
         let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         return snapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
     }
 
+    private func currentReplayHistorySeed() -> (id: String, data: Data)? {
+        guard let history = TerminalReplayOutputHistory.load(path: paths.outputPath) else { return nil }
+        guard let data = history.data, !data.isEmpty else { return nil }
+        if cachedReplayHistorySeed?.byteCount != history.totalByteCount || cachedReplayHistorySeed?.data.count != data.count {
+            cachedReplayHistorySeed = (history.totalByteCount, data)
+        }
+        guard let cachedReplayHistorySeed else { return nil }
+        return ("history|\(cachedReplayHistorySeed.byteCount)", cachedReplayHistorySeed.data)
+    }
+
     private func currentTranscriptTail() -> String? {
         if terminalView.hasReplaySurfaceContent, let snapshotText = terminalView.snapshotText(), !snapshotText.isEmpty { return snapshotText }
         if let transcriptTail = latestState?.transcriptTail, !transcriptTail.isEmpty { return transcriptTail }
-        if let snapshotText = latestState?.snapshotText, !snapshotText.isEmpty { return snapshotText }
+        if let snapshotText = latestSnapshotTextIfCompatible(), !snapshotText.isEmpty { return snapshotText }
         return nil
+    }
+
+    private func latestSnapshotTextIfCompatible() -> String? {
+        guard let snapshotText = latestState?.snapshotText, !snapshotText.isEmpty else { return nil }
+        if let snapshot = latestState?.snapshot,
+            !Self.shouldUseLiveSnapshot(snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
+        {
+            return nil
+        }
+        return snapshotText
+    }
+
+    private func currentOutputLogSnapshotText() -> String? {
+        let runtimeState = latestState?.runtimeState ?? (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
+        guard let snapshotText = snapshotStream.snapshotText(columns: runtimeState?.columns, rows: runtimeState?.rows) else { return nil }
+        guard TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: nil, snapshotText: snapshotText) else { return nil }
+        return snapshotText
     }
 
     private func currentReplayStateKey() -> String {
@@ -216,25 +263,37 @@ import spacesterminalcore
 
     private func sendRemoteInput(_ text: String) {
         guard let client = attachedClient else { return }
-        do {
+        let socketPath = paths.controlSocketPath
+        let clientID = client.id
+        inputQueue.enqueue(priority: .userInitiated) {
             _ = try TerminalControlClient.send(
-                request: TerminalControlRequest(command: "send", text: text, clientID: client.id), socketPath: paths.controlSocketPath)
-        } catch {}
+                request: TerminalControlRequest(command: "send", text: text, clientID: clientID), socketPath: socketPath)
+        }
     }
 
     private func sendRemoteKey(_ key: String) {
         guard let client = attachedClient else { return }
-        do {
-            _ = try TerminalControlClient.send(
-                request: TerminalControlRequest(command: "key", key: key, clientID: client.id), socketPath: paths.controlSocketPath)
-        } catch {}
+        let socketPath = paths.controlSocketPath
+        let clientID = client.id
+        inputQueue.enqueue(priority: .userInitiated) {
+            _ = try TerminalControlClient.send(request: TerminalControlRequest(command: "key", key: key, clientID: clientID), socketPath: socketPath)
+        }
     }
 
-    private func handleViewportSizeChange(columns: Int, rows: Int) {
+    private func sendCurrentViewportResizeIfNeeded(force: Bool) {
+        guard attachedMode == .owner, let size = terminalView.surfaceCellSize() else { return }
+        handleViewportSizeChange(columns: size.columns, rows: size.rows, force: force)
+    }
+
+    private func handleViewportSizeChange(columns: Int, rows: Int, force: Bool = false) {
         guard attachedMode == .owner, let client = attachedClient else { return }
         let requestedSize: (columns: Int, rows: Int) = (columns, rows)
-        if let lastRequestedViewportSize, lastRequestedViewportSize == requestedSize { return }
-        if let pendingViewportResizeSize, pendingViewportResizeSize == requestedSize { return }
+        let runtimeSize = latestState?.runtimeState.map { runtimeState in (columns: runtimeState.columns ?? 0, rows: runtimeState.rows ?? 0) }
+        guard
+            Self.shouldSendViewportResize(
+                requestedSize: requestedSize, lastRequestedSize: lastRequestedViewportSize, pendingSize: pendingViewportResizeSize,
+                runtimeSize: runtimeSize, force: force)
+        else { return }
         pendingViewportResizeTask?.cancel()
         pendingViewportResizeSize = requestedSize
         let socketPath = paths.controlSocketPath
@@ -252,5 +311,32 @@ import spacesterminalcore
                 request: TerminalControlRequest(command: "resize", clientID: clientID, columns: columns, rows: rows), socketPath: socketPath)
             await finishResizeRequest(response?.ok == true)
         }
+    }
+
+    nonisolated static func snapshot(_ snapshot: GhosttyTerminalSnapshot, matches runtimeState: TerminalSessionRuntimeState?) -> Bool {
+        guard let runtimeState else { return true }
+        guard let columns = runtimeState.columns, let rows = runtimeState.rows, columns > 0, rows > 0 else { return true }
+        return snapshot.columns == columns && snapshot.rows == rows
+    }
+
+    nonisolated static func shouldUseLiveSnapshot(_ snapshot: GhosttyTerminalSnapshot, runtimeState: TerminalSessionRuntimeState?, reason: String?)
+        -> Bool
+    {
+        guard reason == TerminalRemoteSessionStateReason.resize else { return true }
+        return Self.snapshot(snapshot, matches: runtimeState)
+    }
+
+    nonisolated static func shouldSendViewportResize(
+        requestedSize: (columns: Int, rows: Int), lastRequestedSize: (columns: Int, rows: Int)?, pendingSize: (columns: Int, rows: Int)?,
+        runtimeSize: (columns: Int, rows: Int)?, force: Bool
+    ) -> Bool {
+        guard requestedSize.columns > 0, requestedSize.rows > 0 else { return false }
+        let hasMatchingPendingSize = pendingSize?.columns == requestedSize.columns && pendingSize?.rows == requestedSize.rows
+        let hasMatchingRuntimeSize = runtimeSize?.columns == requestedSize.columns && runtimeSize?.rows == requestedSize.rows
+        let hasMatchingLastRequestedSize = lastRequestedSize?.columns == requestedSize.columns && lastRequestedSize?.rows == requestedSize.rows
+        if hasMatchingPendingSize, !force { return false }
+        if hasMatchingRuntimeSize, hasMatchingLastRequestedSize { return false }
+        if hasMatchingLastRequestedSize, runtimeSize == nil, !force { return false }
+        return true
     }
 }

@@ -1524,7 +1524,7 @@ public final class WorkspaceOrchestrator {
         try EditorLauncher.open(editor: editor, directory: workspace.dir)
     }
 
-    public func openWorkspaceTerminal(workspaceID: String) throws {
+    @discardableResult public func openWorkspaceTerminal(workspaceID: String) throws -> String {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         let terminalHost = try configuredTerminalHost()
@@ -1535,7 +1535,7 @@ public final class WorkspaceOrchestrator {
         let generatedTitle = try generatedAdHocTerminalWindowName(workspaceID: workspace.id)
         let command = commandPrefixedWithShellEnvironment(interactiveShellCommand(cwd: workspace.dir), env: env)
         let session = try launchSpacesTerminalSession(
-            title: generatedTitle, workingDirectory: workspace.dir, command: command, showMode: .owner, lifetimePolicy: .whileAttached)
+            title: generatedTitle, workingDirectory: workspace.dir, command: command, showMode: .owner, lifetimePolicy: .persistent)
         let existing = try store.windows(workspaceID: workspace.id)
         let nextOrder = Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200)
         try store.upsert(
@@ -1547,6 +1547,7 @@ public final class WorkspaceOrchestrator {
             let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
             try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
         }
+        return session.sessionID
     }
 
     public func focusWorkspace(workspaceID: String) throws {

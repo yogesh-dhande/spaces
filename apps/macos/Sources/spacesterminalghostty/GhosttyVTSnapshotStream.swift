@@ -132,8 +132,9 @@ import spacesterminalcore
                 let readLength = Int(min(UInt64(Self.replayChunkSize), remainingBytes))
                 let chunk = try fileHandle.read(upToCount: readLength) ?? Data()
                 guard !chunk.isEmpty else { return false }
-                let wroteChunk = chunk.withUnsafeBytes { rawBuffer -> Bool in
-                    guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return chunk.isEmpty }
+                let renderChunk = TerminalReplayOutputSanitizer.renderableOutputData(from: chunk)
+                let wroteChunk = renderChunk.withUnsafeBytes { rawBuffer -> Bool in
+                    guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return renderChunk.isEmpty }
                     return spaces_ghostty_vt_session_write(session, baseAddress, rawBuffer.count)
                 }
                 if !wroteChunk { return false }

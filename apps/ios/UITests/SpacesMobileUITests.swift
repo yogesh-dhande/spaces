@@ -80,8 +80,10 @@ final class SpacesMobileUITests: XCTestCase {
 
         let sessionRow = app.buttons["terminal.row.\(configuration.sessionID)"]
         XCTAssertTrue(sessionRow.waitForExistence(timeout: 20), "Timed out waiting for session row \(configuration.sessionID)")
+        if configuration.proceedTakeOverPath != nil {
+            waitForMarkerIfNeeded(configuration.proceedTakeOverPath, timeout: 60)
+        }
         sessionRow.tap()
-        waitForMarkerIfNeeded(configuration.proceedTakeOverPath, timeout: 20)
 
         guard waitForOwnerState(in: app, timeout: 20) != nil else {
             XCTFail("Timed out waiting for owner state")

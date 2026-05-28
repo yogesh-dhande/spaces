@@ -363,6 +363,32 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: preparing owner surface")
     }
 
+    @MainActor func testGhosttyOwnerShowsSnapshotFallbackWhenSurfaceIsUnavailable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-snapshot-fallback", title: "session title", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-snapshot-fallback", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.hasSurface = false
+        host.snapshotValue = ghosttySnapshot(text: "owner snapshot")
+        host.snapshotTextValue = "owner snapshot"
+        let controller = makeGhosttyController(sessionID: "session-snapshot-fallback", paths: paths, host: host)
+
+        XCTAssertFalse(controller.debugShowsTerminalSurface)
+        XCTAssertTrue(controller.debugShowsOutputFallback)
+        XCTAssertEqual(normalizedRenderedOutput(controller.debugRenderedOutput), "owner snapshot")
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty snapshot (owner fallback)")
+    }
+
     @MainActor func testControllerUpgradesFromFallbackBackendOnceGhosttyMetadataAppears() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

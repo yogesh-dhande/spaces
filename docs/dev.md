@@ -110,14 +110,14 @@ pkill -x SpacesApp 2>/dev/null || true
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
 ```
 
-When the app launches built-in Spaces terminals itself, owner windows use the live `GhosttyEmbeddedSessionRegistry` path automatically instead of the daemon replay bridge. Use the normal app flows:
+When the app launches built-in Spaces terminals itself, `SpacesTerminalService` owns the session and native owner windows attach through the service control socket. Use the normal app flows:
 - Open a workspace terminal from the workspace detail pane.
 - Launch a workspace process while the configured terminal host is `Spaces`.
 - Launch a coding agent from the workspace detail pane.
 
-Close one of those owner windows and reopen it from the app. The shell or long-running process should stay attached to the same local Ghostty session without restarting.
-CLI-created sessions such as `spaces terminal command` and CLI-managed `spaces start` use the daemon-owned snapshot-stream path. The service publishes live Ghostty snapshots to native client windows over the per-session subscription socket, while `output.log` remains the transcript fallback and `spaces terminal tail` source.
-For scripted real-system checks against the running app, `spacese2e` exposes `open-workspace-terminal`, `run-workspace-process`, and `launch-workspace-agent` so the manual harness can exercise the same app-owned launch path without accessibility scripting.
+Close one of those owner windows and reopen it from the app. Quit and relaunch `SpacesApp`, then reopen the same session from the app. The shell or long-running process should stay attached to the same service-owned Ghostty session without restarting.
+CLI-created sessions such as `spaces terminal command` and CLI-managed `spaces start` use the same daemon-owned snapshot-stream path. The service publishes live Ghostty snapshots to native client windows over the per-session subscription socket, while `output.log` remains the transcript fallback and `spaces terminal tail` source.
+For scripted real-system checks against the running app, `spacese2e` exposes `open-workspace-terminal`, `run-workspace-process`, and `launch-workspace-agent` so the manual harness can exercise the same app launch path without accessibility scripting.
 
 To verify the embedded Ghostty backend on an isolated database root:
 
@@ -256,7 +256,7 @@ Useful overrides:
 - `SPACES_MOBILE_CODEX_COMMAND='codex resume <thread-id>'` replaces the default `codex` startup command for the `codex` scenario.
 - `SPACES_MOBILE_CODEX_RESUME_THREAD_ID=<thread-id>` changes the thread used by `codex-resume-reopen`.
 
-When debugging iPad owner render dumps, keep the mobile live-output path snapshot-free after owner bootstrap. `GhosttyRemoteTerminalView` must not call `ghostty_session_export_snapshot` on its local renderer after applying live output, passive viewer open or reopen must not make the Mac host export a live session snapshot while a local Mac window owns the session, and mobile owner bootstrap must use the cached Ghostty session snapshot rather than the VT snapshot stream. The Mac host may refresh that cached session snapshot immediately before transferring ownership to a remote mobile owner, but it must not force a Ghostty surface refresh or synthesize a second visual path from transcript data. Use the bootstrap snapshot, screenshots, event logs, and history-seed performance events for E2E assertions.
+When debugging iPad owner render dumps, keep the mobile live-output path snapshot-free after owner bootstrap. `GhosttyRemoteTerminalView` must not call `ghostty_session_export_snapshot` on its local renderer after applying live output, mobile owner bootstrap must use the cached Ghostty session snapshot rather than the VT snapshot stream, and macOS owner attach or takeover must use the same service-published snapshot policy instead of relying on transcript replay for first paint. The Mac host may refresh the cached handoff snapshot immediately before transferring ownership to a remote mobile owner, but it must not force a Ghostty surface refresh or synthesize a second visual path from transcript data. Use the bootstrap snapshot, screenshots, event logs, and history-seed performance events for E2E assertions.
 
 For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
 

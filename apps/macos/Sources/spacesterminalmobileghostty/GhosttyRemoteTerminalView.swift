@@ -219,8 +219,6 @@ import Foundation
         private static let defaultFontSize: Float = 11
         private static let contentInsets = GhosttyRemoteTerminalViewport.contentInsets
         private static let sessionResetSequence = Data("\u{001B}c".utf8)
-        private static let promptEOLMarkStartSequence = Data("\u{001B}[1m\u{001B}[7m%".utf8)
-        private static let promptEOLMarkEndSequence = Data("\r \r\r\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J".utf8)
         private var session: ghostty_session_t?
         private var retainedSessionStandardInputWriteDescriptor: Int32?
         private var activeOwnerEpoch: GhosttyRemoteTerminalOwnerEpoch?
@@ -1512,21 +1510,6 @@ import Foundation
             return true
         }
 
-        private func strippedPromptEOLMarkArtifacts(from outputData: Data) -> Data {
-            var sanitized = Data()
-            var searchStart = outputData.startIndex
-            while searchStart < outputData.endIndex, let startRange = outputData[searchStart...].range(of: Self.promptEOLMarkStartSequence) {
-                sanitized.append(outputData[searchStart..<startRange.lowerBound])
-                guard let endRange = outputData[startRange.lowerBound...].range(of: Self.promptEOLMarkEndSequence) else {
-                    sanitized.append(outputData[startRange.lowerBound...])
-                    return sanitized
-                }
-                searchStart = endRange.upperBound
-            }
-            if searchStart < outputData.endIndex { sanitized.append(outputData[searchStart...]) }
-            return sanitized
-        }
-
         private func resetSessionForFreshRender(into session: ghostty_session_t, preserveRenderedText: Bool) {
             ghosttyRemoteTerminalTrace("reset_session_for_fresh_render")
             Self.sessionResetSequence.withUnsafeBytes { rawBuffer in
@@ -1540,20 +1523,7 @@ import Foundation
             lastStaticRenderPixelSize = .zero
         }
 
-        private func renderableOutputData(from outputData: Data) -> Data { normalizeBareLineFeeds(strippedPromptEOLMarkArtifacts(from: outputData)) }
-
-        private func normalizeBareLineFeeds(_ data: Data) -> Data {
-            guard data.contains(0x0A) else { return data }
-            var normalized = Data()
-            normalized.reserveCapacity(data.count)
-            var previousByte: UInt8?
-            for byte in data {
-                if byte == 0x0A, previousByte != 0x0D { normalized.append(0x0D) }
-                normalized.append(byte)
-                previousByte = byte
-            }
-            return normalized
-        }
+        private func renderableOutputData(from outputData: Data) -> Data { TerminalReplayOutputSanitizer.renderableOutputData(from: outputData) }
 
         private func emitRenderedTextIfNeeded() {
             guard let onRenderedTextChanged else {

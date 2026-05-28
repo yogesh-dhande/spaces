@@ -337,6 +337,7 @@ import spacesterminalcore
 
     public func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { sessionDriver.setOutputHandler(handler) }
     public func setFocused(_ focused: Bool) { setSurfaceFocus(focused) }
+    var isUsingFallbackPTY: Bool { sessionDriver.isUsingFallbackPTY }
     public func snapshot() -> GhosttyTerminalSnapshot? { GhosttyTerminalSnapshotCapture.captureFromSurface(surface) }
     public func snapshotText() -> String? { GhosttyTerminalSnapshotCapture.captureText(from: surface) }
     public func sessionSnapshot() -> GhosttyTerminalSnapshot? { sessionDriver.snapshot() }
@@ -377,6 +378,7 @@ import spacesterminalcore
 
     private func rebindSurfaceHostIfNeeded() {
         guard let window else { return }
+        guard !sessionDriver.isUsingFallbackPTY else { return }
         let windowNumber = window.windowNumber
         guard boundSurfaceWindowNumber != windowNumber else { return }
 
@@ -403,9 +405,9 @@ import spacesterminalcore
         sessionDriver.requestSurfaceRefresh()
     }
 
-    public func ensureHostingWindowForSurface() {
+    public func ensureHostingWindowForSurface() throws {
         if window == nil {
-            if desiredAttachmentMode == .owner { try? sessionDriver.startIfNeeded() }
+            if desiredAttachmentMode == .owner { try sessionDriver.startIfNeeded() }
             return
         }
         createSurfaceIfNeeded()
@@ -465,6 +467,21 @@ import spacesterminalcore
 
         do {
             try sessionDriver.startIfNeeded()
+            guard !sessionDriver.isUsingFallbackPTY else {
+                isSurfaceAttached = false
+                surfaceCreationRetryWorkItem?.cancel()
+                surfaceCreationRetryWorkItem = nil
+                nextSurfaceCreationRetryAt = nil
+                lastSurfaceCreationFailureMessage = nil
+                lastGeometry = nil
+                lastFocused = nil
+                lastOccluded = nil
+                TerminalPerformance.logMetric(
+                    "terminal_surface_create", target: "session=\(launchConfiguration.sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "fallback_pty=1")
+                onSurfaceReady?(nil)
+                return
+            }
             if renderer == nil {
                 var initialHost = makeSurfaceHost(for: surfaceHostView)
                 renderer = ghostty_renderer_new(&initialHost)
@@ -676,30 +693,32 @@ import spacesterminalcore
 
     static func rawKeyFallbackSpecifier(for event: NSEvent) -> String? {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let navigationFlags = flags.subtracting([.numericPad, .function])
+        let functionFlags = flags.subtracting(.function)
         switch Int(event.keyCode) {
-        case kVK_UpArrow where flags.isSubset(of: [.numericPad]): return "up"
-        case kVK_DownArrow where flags.isSubset(of: [.numericPad]): return "down"
-        case kVK_LeftArrow where flags.isSubset(of: [.numericPad]): return "left"
-        case kVK_RightArrow where flags.isSubset(of: [.numericPad]): return "right"
-        case kVK_Home where flags.isSubset(of: [.numericPad]): return "home"
-        case kVK_End where flags.isSubset(of: [.numericPad]): return "end"
-        case kVK_PageUp where flags.isSubset(of: [.numericPad]): return "pageup"
-        case kVK_PageDown where flags.isSubset(of: [.numericPad]): return "pagedown"
-        case kVK_ForwardDelete where flags.isSubset(of: [.numericPad]): return "forwarddelete"
-        case kVK_Help where flags.isSubset(of: [.numericPad]): return "insert"
+        case kVK_UpArrow where navigationFlags.isEmpty: return "up"
+        case kVK_DownArrow where navigationFlags.isEmpty: return "down"
+        case kVK_LeftArrow where navigationFlags.isEmpty: return "left"
+        case kVK_RightArrow where navigationFlags.isEmpty: return "right"
+        case kVK_Home where navigationFlags.isEmpty: return "home"
+        case kVK_End where navigationFlags.isEmpty: return "end"
+        case kVK_PageUp where navigationFlags.isEmpty: return "pageup"
+        case kVK_PageDown where navigationFlags.isEmpty: return "pagedown"
+        case kVK_ForwardDelete where navigationFlags.isEmpty: return "forwarddelete"
+        case kVK_Help where navigationFlags.isEmpty: return "insert"
         case kVK_Tab where flags == [.shift]: return "backtab"
-        case kVK_F1 where flags.isEmpty: return "f1"
-        case kVK_F2 where flags.isEmpty: return "f2"
-        case kVK_F3 where flags.isEmpty: return "f3"
-        case kVK_F4 where flags.isEmpty: return "f4"
-        case kVK_F5 where flags.isEmpty: return "f5"
-        case kVK_F6 where flags.isEmpty: return "f6"
-        case kVK_F7 where flags.isEmpty: return "f7"
-        case kVK_F8 where flags.isEmpty: return "f8"
-        case kVK_F9 where flags.isEmpty: return "f9"
-        case kVK_F10 where flags.isEmpty: return "f10"
-        case kVK_F11 where flags.isEmpty: return "f11"
-        case kVK_F12 where flags.isEmpty: return "f12"
+        case kVK_F1 where functionFlags.isEmpty: return "f1"
+        case kVK_F2 where functionFlags.isEmpty: return "f2"
+        case kVK_F3 where functionFlags.isEmpty: return "f3"
+        case kVK_F4 where functionFlags.isEmpty: return "f4"
+        case kVK_F5 where functionFlags.isEmpty: return "f5"
+        case kVK_F6 where functionFlags.isEmpty: return "f6"
+        case kVK_F7 where functionFlags.isEmpty: return "f7"
+        case kVK_F8 where functionFlags.isEmpty: return "f8"
+        case kVK_F9 where functionFlags.isEmpty: return "f9"
+        case kVK_F10 where functionFlags.isEmpty: return "f10"
+        case kVK_F11 where functionFlags.isEmpty: return "f11"
+        case kVK_F12 where functionFlags.isEmpty: return "f12"
         default: return nil
         }
     }

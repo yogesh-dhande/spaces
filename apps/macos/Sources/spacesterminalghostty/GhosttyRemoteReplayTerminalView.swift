@@ -23,7 +23,8 @@ import spacesterminalcore
         let height: UInt32
     }
 
-    private static let carrierCommand = "direct:/bin/cat"
+    private static let carrierCommand = "shell:stty -echo -icanon min 1 time 0; exec cat >/dev/null"
+    private static let sessionResetSequence = Data("\u{1B}c".utf8)
 
     private let launchConfiguration: TerminalSessionLaunchConfiguration
     private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
@@ -46,6 +47,7 @@ import spacesterminalcore
     private var lastViewportSnapshot: GhosttyTerminalSnapshot?
     private var lastReplayPixelSize: PixelSize?
     private var lastReplayStateKey: String?
+    private var lastAppliedHistorySeedID: String?
     private var lastAppliedOutputEventToken: String?
     private var lastRenderedText: String?
 
@@ -56,7 +58,8 @@ import spacesterminalcore
 
     init(launchConfiguration: TerminalSessionLaunchConfiguration) {
         self.launchConfiguration = launchConfiguration
-        sessionDriver = GhosttyEmbeddedTerminalSessionDriver(launchConfiguration: Self.replayLaunchConfiguration(from: launchConfiguration))
+        sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
+            launchConfiguration: Self.replayLaunchConfiguration(from: launchConfiguration), allowsPTYFallback: false)
         super.init(frame: .zero)
         wantsLayer = true
         installSurfaceHostView(surfaceHostView)
@@ -142,48 +145,24 @@ import spacesterminalcore
 
     override func mouseDown(with event: NSEvent) {
         focusWindow()
-        _ = sendMousePosition(for: event)
-        _ = sendMouseButton(event: event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_LEFT)
-        requestSurfaceRefresh()
+        super.mouseDown(with: event)
     }
 
-    override func mouseUp(with event: NSEvent) {
-        _ = sendMousePosition(for: event)
-        _ = sendMouseButton(event: event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT)
-        requestSurfaceRefresh()
-    }
+    override func mouseUp(with event: NSEvent) { super.mouseUp(with: event) }
 
     override func rightMouseDown(with event: NSEvent) {
         focusWindow()
-        _ = sendMousePosition(for: event)
-        if sendMouseButton(event: event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_RIGHT) {
-            requestSurfaceRefresh()
-            return
-        }
         super.rightMouseDown(with: event)
     }
 
-    override func rightMouseUp(with event: NSEvent) {
-        _ = sendMousePosition(for: event)
-        if sendMouseButton(event: event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_RIGHT) {
-            requestSurfaceRefresh()
-            return
-        }
-        super.rightMouseUp(with: event)
-    }
+    override func rightMouseUp(with event: NSEvent) { super.rightMouseUp(with: event) }
 
     override func otherMouseDown(with event: NSEvent) {
         focusWindow()
-        _ = sendMousePosition(for: event)
-        _ = sendMouseButton(event: event, state: GHOSTTY_MOUSE_PRESS, button: mouseButton(for: event))
-        requestSurfaceRefresh()
+        super.otherMouseDown(with: event)
     }
 
-    override func otherMouseUp(with event: NSEvent) {
-        _ = sendMousePosition(for: event)
-        _ = sendMouseButton(event: event, state: GHOSTTY_MOUSE_RELEASE, button: mouseButton(for: event))
-        requestSurfaceRefresh()
-    }
+    override func otherMouseUp(with event: NSEvent) { super.otherMouseUp(with: event) }
 
     override func mouseMoved(with event: NSEvent) {
         if sendMousePosition(for: event) {
@@ -193,29 +172,11 @@ import spacesterminalcore
         super.mouseMoved(with: event)
     }
 
-    override func mouseDragged(with event: NSEvent) {
-        if sendMousePosition(for: event) {
-            requestSurfaceRefresh()
-            return
-        }
-        super.mouseDragged(with: event)
-    }
+    override func mouseDragged(with event: NSEvent) { super.mouseDragged(with: event) }
 
-    override func rightMouseDragged(with event: NSEvent) {
-        if sendMousePosition(for: event) {
-            requestSurfaceRefresh()
-            return
-        }
-        super.rightMouseDragged(with: event)
-    }
+    override func rightMouseDragged(with event: NSEvent) { super.rightMouseDragged(with: event) }
 
-    override func otherMouseDragged(with event: NSEvent) {
-        if sendMousePosition(for: event) {
-            requestSurfaceRefresh()
-            return
-        }
-        super.otherMouseDragged(with: event)
-    }
+    override func otherMouseDragged(with event: NSEvent) { super.otherMouseDragged(with: event) }
 
     override func scrollWheel(with event: NSEvent) {
         _ = sendMousePosition(for: event)
@@ -262,18 +223,27 @@ import spacesterminalcore
         super.keyDown(with: event)
     }
 
-    func update(snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, outputData: Data?, outputEventToken: String?) {
+    func update(
+        snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, historySeed: (id: String, data: Data)? = nil, outputData: Data?,
+        outputEventToken: String?
+    ) {
         createSurfaceIfNeeded()
         let shouldApplyIncrementalOutput = canApplyIncrementalOutput(
             outputData: outputData, outputEventToken: outputEventToken, replayStateKey: replayStateKey)
-        if let lastReplayStateKey, lastReplayStateKey != replayStateKey, !shouldApplyIncrementalOutput {
+        let shouldApplyHistorySeed = !shouldApplyIncrementalOutput && canApplyHistorySeed(historySeed, replayStateKey: replayStateKey)
+        if let lastReplayStateKey, lastReplayStateKey != replayStateKey, !shouldApplyIncrementalOutput, !shouldApplyHistorySeed {
             lastViewportSnapshot = nil
             lastReplayPixelSize = nil
+            lastAppliedHistorySeedID = nil
             lastAppliedOutputEventToken = nil
         }
         lastSnapshot = snapshot
         lastReplayStateKey = replayStateKey
         guard surface != nil else { return }
+        if shouldApplyHistorySeed, let historySeed {
+            applyHistorySeed(historySeed)
+            return
+        }
         if shouldApplyIncrementalOutput, let outputData {
             applyIncrementalOutput(outputData, outputEventToken: outputEventToken)
             return
@@ -293,7 +263,14 @@ import spacesterminalcore
 
     func replayedText() -> String? { lastRenderedText }
 
-    var hasReplaySurfaceContent: Bool { lastViewportSnapshot != nil || lastAppliedOutputEventToken != nil }
+    var hasReplaySurfaceContent: Bool { lastViewportSnapshot != nil || lastAppliedHistorySeedID != nil || lastAppliedOutputEventToken != nil }
+
+    func surfaceCellSize() -> (columns: Int, rows: Int)? {
+        guard let surface else { return sessionDriver.surfaceCellSize() }
+        let size = ghostty_surface_size(surface)
+        guard size.columns > 0, size.rows > 0 else { return sessionDriver.surfaceCellSize() }
+        return (Int(size.columns), Int(size.rows))
+    }
 
     func copySelectionToPasteboard() -> Bool { GhosttyClipboardBridge.copySelection(from: surface) }
 
@@ -455,18 +432,52 @@ import spacesterminalcore
         requestSurfaceRefresh()
     }
 
+    private func resetSessionForFreshRender() {
+        sessionDriver.processOutput(Self.sessionResetSequence)
+        lastViewportSnapshot = nil
+        lastReplayPixelSize = nil
+        lastAppliedOutputEventToken = nil
+        lastRenderedText = nil
+    }
+
+    private func canApplyHistorySeed(_ historySeed: (id: String, data: Data)?, replayStateKey: String) -> Bool {
+        guard let historySeed, !historySeed.data.isEmpty else { return false }
+        guard surface != nil else { return false }
+        guard lastAppliedHistorySeedID != historySeed.id else { return false }
+        guard lastAppliedHistorySeedID == nil || lastReplayStateKey != replayStateKey || !hasReplaySurfaceContent else { return false }
+        return true
+    }
+
+    private func applyHistorySeed(_ historySeed: (id: String, data: Data)) {
+        let renderData = TerminalReplayOutputSanitizer.renderableOutputData(from: historySeed.data)
+        guard !renderData.isEmpty else {
+            lastAppliedHistorySeedID = historySeed.id
+            return
+        }
+        resetSessionForFreshRender()
+        sessionDriver.processOutput(renderData)
+        lastAppliedHistorySeedID = historySeed.id
+        lastReplayPixelSize = currentPixelSize()
+        requestSurfaceRefresh()
+    }
+
     private func canApplyIncrementalOutput(outputData: Data?, outputEventToken: String?, replayStateKey: String) -> Bool {
         guard let outputData, !outputData.isEmpty else { return false }
         guard surface != nil else { return false }
         guard let outputEventToken, !outputEventToken.isEmpty else { return false }
         guard lastAppliedOutputEventToken != outputEventToken else { return false }
         guard lastReplayStateKey == replayStateKey else { return false }
-        guard lastViewportSnapshot != nil || lastAppliedOutputEventToken != nil else { return false }
+        guard hasReplaySurfaceContent else { return false }
         return true
     }
 
     private func applyIncrementalOutput(_ outputData: Data, outputEventToken: String?) {
-        sessionDriver.processOutput(outputData)
+        let renderData = TerminalReplayOutputSanitizer.renderableOutputData(from: outputData)
+        guard !renderData.isEmpty else {
+            lastAppliedOutputEventToken = outputEventToken
+            return
+        }
+        sessionDriver.processOutput(renderData)
         lastSnapshot = nil
         lastRenderedText = nil
         lastAppliedOutputEventToken = outputEventToken
@@ -483,6 +494,7 @@ import spacesterminalcore
     }
 
     private func replayLatestSnapshotIfNeeded() {
+        guard lastAppliedHistorySeedID == nil else { return }
         guard let lastSnapshot else { return }
         guard surface != nil else { return }
         let pixelSize = currentPixelSize()
@@ -547,17 +559,6 @@ import spacesterminalcore
         setSurfaceFocus(true)
     }
 
-    private func modifierFlag(for keyCode: UInt16) -> NSEvent.ModifierFlags {
-        switch keyCode {
-        case 54, 55: .command
-        case 56, 60: .shift
-        case 58, 61: .option
-        case 59, 62: .control
-        case 57: .capsLock
-        default: []
-        }
-    }
-
     private func ghosttyModifiers(from flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {
         var mods = GHOSTTY_MODS_NONE
         if flags.contains(.shift) { mods = ghostty_input_mods_e(rawValue: mods.rawValue | GHOSTTY_MODS_SHIFT.rawValue) }
@@ -578,30 +579,10 @@ import spacesterminalcore
         return true
     }
 
-    private func sendMouseButton(event: NSEvent, state: ghostty_input_mouse_state_e, button: ghostty_input_mouse_button_e) -> Bool {
-        guard let surface else { return false }
-        return ghostty_surface_mouse_button(surface, state, button, ghosttyModifiers(from: event.modifierFlags))
-    }
-
     private func shouldRefreshSurfaceAfterMousePositionChange() -> Bool {
         if NSEvent.pressedMouseButtons != 0 { return true }
         guard let surface else { return false }
         return ghostty_surface_mouse_captured(surface)
-    }
-
-    private func mouseButton(for event: NSEvent) -> ghostty_input_mouse_button_e {
-        switch event.buttonNumber {
-        case 2: GHOSTTY_MOUSE_MIDDLE
-        case 3: GHOSTTY_MOUSE_FOUR
-        case 4: GHOSTTY_MOUSE_FIVE
-        case 5: GHOSTTY_MOUSE_SIX
-        case 6: GHOSTTY_MOUSE_SEVEN
-        case 7: GHOSTTY_MOUSE_EIGHT
-        case 8: GHOSTTY_MOUSE_NINE
-        case 9: GHOSTTY_MOUSE_TEN
-        case 10: GHOSTTY_MOUSE_ELEVEN
-        default: GHOSTTY_MOUSE_UNKNOWN
-        }
     }
 
     private func setSurfaceFocus(_ focused: Bool) {
@@ -649,11 +630,14 @@ import spacesterminalcore
             createdAt: launchConfiguration.createdAt)
     }
 
-    private static func remoteKeySpecifier(for event: NSEvent) -> String? {
+    static func remoteKeySpecifier(for event: NSEvent) -> String? {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let semanticFlags = flags.subtracting([.function, .numericPad])
         if let fallback = GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: event) { return fallback }
         switch Int(event.keyCode) {
         case kVK_Return, kVK_ANSI_KeypadEnter: return "enter"
+        case kVK_Delete where semanticFlags == [.command]: return "ctrl+u"
+        case kVK_Delete where semanticFlags == [.option]: return "ctrl+w"
         case kVK_Delete: return "backspace"
         case kVK_Escape: return "esc"
         case kVK_Tab where flags == [.shift]: return "backtab"

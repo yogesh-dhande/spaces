@@ -602,7 +602,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
         let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
-        let outputHistory = loadReplayableOutputHistory(path: paths.outputPath)
+        let outputHistory = TerminalReplayOutputHistory.load(path: paths.outputPath, maxByteCount: Self.maxHistorySeedOutputBytes)
 
         guard runtimeState != nil || launchConfiguration != nil else {
             throw NSError(
@@ -617,28 +617,6 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             workingDirectory: runtimeState?.workingDirectory ?? launchConfiguration?.workingDirectory ?? "", snapshot: nil, snapshotText: nil,
             transcriptTail: nil, outputByteCount: outputHistory?.totalByteCount, outputData: outputHistory?.data,
             outputEndByteOffset: outputHistory?.totalByteCount)
-    }
-
-    private func loadReplayableOutputHistory(path: String) -> (data: Data?, totalByteCount: Int)? {
-        let outputURL = URL(fileURLWithPath: path)
-        guard let fileHandle = try? FileHandle(forReadingFrom: outputURL) else { return nil }
-        defer { try? fileHandle.close() }
-
-        do {
-            let fileSize = try fileHandle.seekToEnd()
-            let totalByteCount = Self.clampedInt(fileSize)
-            guard fileSize > 0 else { return (Data(), 0) }
-            guard fileSize <= UInt64(Self.maxHistorySeedOutputBytes) else { return (nil, totalByteCount) }
-
-            try fileHandle.seek(toOffset: 0)
-            let outputData = try fileHandle.read(upToCount: totalByteCount) ?? Data()
-            return (outputData, totalByteCount)
-        } catch { return nil }
-    }
-
-    private static func clampedInt(_ value: UInt64) -> Int {
-        guard value <= UInt64(Int.max) else { return Int.max }
-        return Int(value)
     }
 
     private func sendResponse(_ response: SpacesMobileBridgeResponse, to connection: NWConnection, completion: @escaping @Sendable (Error?) -> Void) {

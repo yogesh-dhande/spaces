@@ -142,6 +142,13 @@ cleanup() {
   fi
   if [[ -n "$app_pid" ]]; then
     kill "$app_pid" >/dev/null 2>&1 || true
+    for _ in {1..20}; do
+      if ! ps -p "$app_pid" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.25
+    done
+    kill -9 "$app_pid" >/dev/null 2>&1 || true
     wait "$app_pid" >/dev/null 2>&1 || true
   fi
   if [[ -n "$ipad_udid" ]]; then

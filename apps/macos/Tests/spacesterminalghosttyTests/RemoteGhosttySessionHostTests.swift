@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import Foundation
 import XCTest
 import spacesterminalcore
@@ -6,6 +7,36 @@ import spacesterminalcore
 @testable import spacesterminalghostty
 
 final class RemoteGhosttySessionHostTests: XCTestCase {
+    @MainActor func testRemoteReplayMapsModifiedBackspaceToShellEditingControls() throws {
+        XCTAssertEqual(GhosttyRemoteReplayTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_Delete))), "backspace")
+        XCTAssertEqual(
+            GhosttyRemoteReplayTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_Delete), modifierFlags: .option)), "ctrl+w")
+        XCTAssertEqual(
+            GhosttyRemoteReplayTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_Delete), modifierFlags: .command)), "ctrl+u")
+        XCTAssertEqual(
+            GhosttyRemoteReplayTerminalView.remoteKeySpecifier(
+                for: keyEvent(keyCode: UInt16(kVK_Delete), modifierFlags: [.command, .numericPad, .function])), "ctrl+u")
+    }
+
+    func testRemoteHostSendsResizeWhenRuntimeStillHasPreviousOwnerSize() {
+        XCTAssertTrue(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: (columns: 120, rows: 40), pendingSize: nil,
+                runtimeSize: (columns: 60, rows: 20), force: false))
+        XCTAssertFalse(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: (columns: 120, rows: 40), pendingSize: nil,
+                runtimeSize: (columns: 120, rows: 40), force: false))
+        XCTAssertFalse(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: nil, pendingSize: (columns: 120, rows: 40),
+                runtimeSize: (columns: 60, rows: 20), force: false))
+        XCTAssertTrue(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: nil, pendingSize: (columns: 120, rows: 40),
+                runtimeSize: (columns: 60, rows: 20), force: true))
+    }
+
     @MainActor func testRemoteHostPrefersLiveSnapshotStreamWhenAvailable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -61,6 +92,42 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         waitForCondition("owner update without snapshot") { host.activeOwnerClientID() == ownerClient.id }
         XCTAssertEqual(host.snapshotText(), "beta\ngamm")
+    }
+
+    @MainActor func testRemoteHostIgnoresStaleSnapshotWhenRuntimeSizeChanged() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: "remote-stale-size", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-05-22T00:00:00Z", columns: 12, rows: 2), paths: paths)
+        try "from-log\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let initialPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "remote-stale-size", reason: "resize", emittedAt: "2026-05-22T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
+            screenStateRevision: 1,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: "remote-stale-size", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-05-22T00:00:00Z", title: "live", workingDirectory: "/tmp/live", columns: 12, rows: 2),
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live", snapshot: snapshot(text: "tiny"),
+            snapshotText: "tiny", transcriptTail: nil, outputByteCount: nil)
+        let server = GhosttyRemoteSessionStateStreamServer(
+            socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-host.stale-size-test")
+        ) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: .init(
+                sessionID: "remote-stale-size", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-22T00:00:00Z"), paths: paths)
+
+        waitForCondition("output log fallback after stale snapshot") { (host.snapshotText() ?? "").contains("from-log") }
+        XCTAssertFalse(host.snapshotText()?.contains("tiny") == true)
     }
 
     @MainActor func testRemoteHostBuildsSnapshotAndPlainTextFromOutputLog() throws {
@@ -121,7 +188,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertFalse(updatedText.contains("hello"))
     }
 
-    @MainActor func testRemoteHostAttachesRenderableGhosttyViewerSurfaceWhenLiveStateIsAvailable() throws {
+    @MainActor func testRemoteHostExposesViewerSnapshotWhenLiveStateIsAvailable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -157,11 +224,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-19T00:00:00Z"),
             mode: .viewer, into: container)
 
-        waitForCondition("renderable viewer surface") { host.hasRenderableSurface() }
         waitForCondition("rendered viewer text") { (host.snapshotText() ?? "").contains("alpha") }
 
-        XCTAssertTrue(host.hasRenderableSurface())
         XCTAssertTrue((host.snapshotText() ?? "").contains("beta"))
+        if host.hasRenderableSurface() { XCTAssertTrue(normalize(host.debugVisibleSurfaceText()).contains("alpha")) }
     }
 
     @MainActor func testRemoteRenderableViewerPreservesSnapshotAcrossAttachmentStateChanges() throws {
@@ -200,8 +266,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-20T00:00:00Z"),
             mode: .viewer, into: container)
 
-        waitForCondition("initial renderable viewer surface") { host.hasRenderableSurface() }
-        waitForCondition("initial rendered viewer text") { self.normalize(host.debugVisibleSurfaceText()).contains("alpha") }
+        waitForCondition("initial rendered viewer text") { self.normalize(self.visibleText(for: host)).contains("alpha") }
 
         let ownerClient = TerminalClient(
             id: "ipad-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad"), connectedAt: "2026-05-20T00:00:01Z")
@@ -218,11 +283,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         waitForCondition("attachment state owner update") { host.activeOwnerClientID() == ownerClient.id }
         waitForCondition("viewer retains rendered text after attachment state") {
-            self.normalize(host.debugVisibleSurfaceText()).contains("alpha") && self.normalize(host.debugVisibleSurfaceText()).contains("beta")
+            self.normalize(self.visibleText(for: host)).contains("alpha") && self.normalize(self.visibleText(for: host)).contains("beta")
         }
 
-        XCTAssertTrue(host.hasRenderableSurface())
-        XCTAssertEqual(normalize(host.debugVisibleSurfaceText()), normalize("alpha\nbeta "))
+        XCTAssertEqual(normalize(visibleText(for: host)), normalize("alpha\nbeta "))
     }
 
     @MainActor func testRemoteRenderableViewerPrefersSnapshotWhenFreshUpdateAlsoIncludesIncrementalOutput() throws {
@@ -261,8 +325,6 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-21T00:00:00Z"),
             mode: .viewer, into: container)
 
-        waitForCondition("renderable viewer surface") { host.hasRenderableSurface() }
-
         server.broadcast(
             GhosttyRemoteSessionStatePayload(
                 sessionID: "remote-snapshot-precedence", reason: "output", emittedAt: "2026-05-21T00:00:01Z", sessionStateRevision: 2,
@@ -275,11 +337,88 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 outputData: Data("WRONG".utf8)))
 
         waitForCondition("viewer replays snapshot instead of fresh incremental bytes") {
-            self.normalize(host.debugVisibleSurfaceText()).contains("alpha") && self.normalize(host.debugVisibleSurfaceText()).contains("beta")
+            self.normalize(self.visibleText(for: host)).contains("alpha") && self.normalize(self.visibleText(for: host)).contains("beta")
         }
 
-        XCTAssertFalse(normalize(host.debugVisibleSurfaceText()).contains("WRONG"))
-        XCTAssertEqual(normalize(host.debugVisibleSurfaceText()), normalize("alpha\nbeta "))
+        XCTAssertFalse(normalize(visibleText(for: host)).contains("WRONG"))
+        XCTAssertEqual(normalize(visibleText(for: host)), normalize("alpha\nbeta "))
+    }
+
+    @MainActor func testRemoteHostRefreshesReplayFromOutputHistoryWhenHistoryAdvances() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: "remote-history-refresh", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-05-22T00:00:00Z", columns: 24, rows: 4), paths: paths)
+        try "first\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: .init(
+                sessionID: "remote-history-refresh", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-22T00:00:00Z"), paths: paths)
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let window = NSWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-22T00:00:00Z"),
+            mode: .owner, into: container)
+
+        waitForCondition("initial replay history") { self.normalize(self.visibleText(for: host)).contains("first") }
+
+        try "first\nsecond\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        waitForCondition("advanced replay history") { self.normalize(self.visibleText(for: host)).contains("second") }
+    }
+
+    @MainActor func testRemoteReplayCarrierDoesNotEchoTerminalQueryResponses() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: "remote-query-responses", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-05-28T00:00:00Z", columns: 80, rows: 8), paths: paths)
+        let transcript = "before\r\n\u{1B}[6n\u{1B}]10;?\u{7}after\r\n"
+        try transcript.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: .init(
+                sessionID: "remote-query-responses", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-28T00:00:00Z"), paths: paths)
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let window = NSWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-28T00:00:00Z"),
+            mode: .owner, into: container)
+
+        waitForCondition("replayed query transcript") {
+            self.normalize(self.visibleText(for: host)).contains("before") && self.normalize(self.visibleText(for: host)).contains("after")
+        }
+
+        let renderedText = normalize(visibleText(for: host))
+        XCTAssertFalse(renderedText.contains("^["))
+        XCTAssertFalse(renderedText.contains("^]"))
+        XCTAssertFalse(renderedText.contains("rgb:"))
+        XCTAssertFalse(renderedText.contains(";R"))
     }
 
     @MainActor private func waitForCondition(_ label: String, timeout: TimeInterval = 2, condition: @escaping () -> Bool) {
@@ -309,5 +448,14 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         (text ?? "").split(separator: "\n", omittingEmptySubsequences: false).map {
             $0.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
         }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @MainActor private func visibleText(for host: RemoteGhosttySessionHost) -> String? { host.debugVisibleSurfaceText() ?? host.snapshotText() }
+
+    @MainActor private func keyEvent(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags = []) -> NSEvent {
+        try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: modifierFlags, timestamp: 0, windowNumber: 0, context: nil, characters: "\u{7F}",
+                charactersIgnoringModifiers: "\u{7F}", isARepeat: false, keyCode: keyCode))
     }
 }

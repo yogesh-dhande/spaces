@@ -858,7 +858,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractiveRuntimeState(runtimeState))
                 rendererLabel.stringValue = rendererMode.statusSummary
             }
-            guard visibleRenderer != .ghosttyOwner else { return }
+            guard visibleRenderer != .ghosttyOwner else {
+                completeOwnershipTransitionIfNeeded(target: .owner, renderer: "owner_surface")
+                return
+            }
             let viewportState = captureOutputViewportState()
             switch visibleRenderer {
             case .ghosttyTakeoverStatus:
@@ -1223,6 +1226,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         guard case .ghosttyEmbedded = rendererMode else { return .outputFallback }
         if isOwner == true {
             if ghosttyRendererHost?.hasRenderableSurface() == true { return .ghosttyOwner }
+            if hasGhosttyVisibleRenderStateAvailable() { return .outputFallback }
             if isInteractiveRuntimeState(lastObservedRuntimeState) { return .ghosttyTakeoverStatus }
             return hasGhosttyFinalRenderStateAvailable() ? .ghosttyEndedFinalRender : .unavailable
         }
@@ -1240,6 +1244,16 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         if ghosttyRendererHost?.snapshot() != nil { return true }
         guard let snapshotText = ghosttyRendererHost?.snapshotText() else { return false }
         return !snapshotText.isEmpty
+    }
+
+    private func hasGhosttyVisibleRenderStateAvailable() -> Bool {
+        if let snapshot = ghosttyRendererHost?.snapshot(),
+            TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: snapshot, snapshotText: nil)
+        {
+            return true
+        }
+        guard let snapshotText = ghosttyRendererHost?.snapshotText() else { return false }
+        return TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: nil, snapshotText: snapshotText)
     }
 
     private func currentGhosttyStatusMessage(isOwner: Bool, runtimeState: TerminalSessionRuntimeState?, ownerClient: TerminalClient?) -> String {
