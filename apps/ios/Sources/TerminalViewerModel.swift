@@ -460,6 +460,9 @@ private enum TerminalViewerRenderMode: String {
             errorMessage = nil
             reconnectTask = nil
             trace("connect_subscribe_success")
+            if !isOwner {
+                await refreshLatestState(timeout: .seconds(1), ignoreTransientTimeout: true, reason: "connect_bootstrap")
+            }
         } catch {
             reconnectTask = nil
             isConnecting = false
@@ -752,7 +755,7 @@ private enum TerminalViewerRenderMode: String {
                 beginOwnerRenderEpoch(from: streamedState)
                 return
             }
-            if hasUsableOwnerBootstrapState(latestState) {
+            if hasUsableOwnerBootstrapState(latestState, targetViewportSize: targetViewportSize) {
                 trace("ownership_sync_using_existing_state")
                 beginOwnerRenderEpoch(from: latestState)
                 return
@@ -763,7 +766,15 @@ private enum TerminalViewerRenderMode: String {
                 reason: "owner_bootstrap_refresh"
             )
             trace("ownership_sync_using_fetched_state snapshot=\(refreshedState?.snapshot == nil ? 0 : 1) output_bytes=\(refreshedState?.outputData?.count ?? 0)")
-            beginOwnerRenderEpoch(from: refreshedState ?? latestState)
+            let fallbackState: GhosttyRemoteSessionStatePayload? =
+                if hasUsableOwnerBootstrapState(refreshedState, targetViewportSize: targetViewportSize) {
+                    refreshedState
+                } else if hasUsableOwnerBootstrapState(latestState, targetViewportSize: targetViewportSize) {
+                    latestState
+                } else {
+                    nil
+                }
+            beginOwnerRenderEpoch(from: fallbackState)
         }
     }
 
@@ -806,7 +817,7 @@ private enum TerminalViewerRenderMode: String {
         previousScreenRevision: UInt64?,
         previousRuntimeSize: (Int?, Int?)?
     ) -> Bool {
-        guard hasUsableOwnerBootstrapState(payload) else { return false }
+        guard hasUsableOwnerBootstrapState(payload, targetViewportSize: targetViewportSize) else { return false }
         if let targetViewportSize {
             let runtimeColumns = payload.runtimeState?.columns
             let runtimeRows = payload.runtimeState?.rows
@@ -820,8 +831,14 @@ private enum TerminalViewerRenderMode: String {
         return payload.emittedAt != previousEmittedAt || payload.screenStateRevision != previousScreenRevision
     }
 
-    private func hasUsableOwnerBootstrapState(_ payload: GhosttyRemoteSessionStatePayload?) -> Bool {
-        TerminalRemoteSessionStatePolicy.hasUsableOwnerBootstrapState(payload)
+    private func hasUsableOwnerBootstrapState(
+        _ payload: GhosttyRemoteSessionStatePayload?,
+        targetViewportSize: (columns: Int, rows: Int)? = nil
+    ) -> Bool {
+        TerminalRemoteSessionStatePolicy.hasUsableOwnerBootstrapState(
+            payload,
+            viewportColumns: targetViewportSize?.columns,
+            viewportRows: targetViewportSize?.rows)
     }
 
     private func unavailableMessage(for error: Error) -> String? {

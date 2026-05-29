@@ -67,7 +67,7 @@ import spacesterminalghostty
             try sessionCore.startIfNeeded()
             return TerminalServiceResponse(
                 ok: true, message: "Started terminal session \(launchConfiguration.sessionID).",
-                session: try sessionSummary(for: launchConfiguration.sessionID))
+                session: try sessionSummaryAfterStart(for: launchConfiguration.sessionID))
         } catch { return TerminalServiceResponse(ok: false, message: String(describing: error)) }
     }
 
@@ -133,6 +133,18 @@ import spacesterminalghostty
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         let launchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
         return try summary(for: launchConfiguration, paths: paths)
+    }
+
+    private func sessionSummaryAfterStart(for sessionID: String) throws -> TerminalServiceSessionSummary {
+        let deadline = Date().addingTimeInterval(1)
+        var lastError: (any Error)?
+        repeat {
+            do { return try sessionSummary(for: sessionID) } catch {
+                lastError = error
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            }
+        } while Date() < deadline
+        throw lastError ?? CocoaError(.fileReadUnknown)
     }
 
     private func summaryIfLive(for launchConfiguration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary? {

@@ -9,9 +9,18 @@ DEMO_SCRIPT="$ROOT_DIR/apps/macos/Tests/run_mobile_terminal_demo.sh"
 SPACES_CLI_BIN="${SPACES_CLI:-$ROOT_DIR/apps/macos/.build/debug/spaces}"
 SPACES_E2E_BIN="${SPACES_E2E:-$ROOT_DIR/apps/macos/.build/debug/spacese2e}"
 TERMINAL_SERVICE_BIN="${SPACES_TERMINAL_SERVICE_EXECUTABLE:-$ROOT_DIR/apps/macos/.build/debug/SpacesTerminalService}"
+TERMINAL_CREATE_TIMEOUT="${SPACES_MOBILE_E2E_TERMINAL_CREATE_TIMEOUT:-60}"
 DEFAULT_UI_TEST_CONFIG="/tmp/spaces-mobile-ui-test-config.json"
 BUNDLE_ID="com.yogeshdhande.spacesmobile"
-IPAD_NAME="${SPACES_MOBILE_DEMO_IPAD_NAME:-iPad Pro 13-inch (M5)}"
+MOBILE_DEVICE_KEY="${SPACES_MOBILE_E2E_DEVICE_KEY:-iphone}"
+if [[ "$MOBILE_DEVICE_KEY" == "ipad" ]]; then
+  MOBILE_DEVICE_NAME="${SPACES_MOBILE_E2E_DEVICE_NAME:-${SPACES_MOBILE_DEMO_IPAD_NAME:-iPad Pro 13-inch (M5)}}"
+  MOBILE_DEVICE_LABEL="${SPACES_MOBILE_E2E_DEVICE_LABEL:-iPad}"
+else
+  MOBILE_DEVICE_NAME="${SPACES_MOBILE_E2E_DEVICE_NAME:-${SPACES_MOBILE_DEMO_IPHONE_NAME:-iPhone 17 Pro}}"
+  MOBILE_DEVICE_LABEL="${SPACES_MOBILE_E2E_DEVICE_LABEL:-iPhone}"
+fi
+MOBILE_ARTIFACT_NAME="${SPACES_MOBILE_E2E_ARTIFACT_NAME:-$MOBILE_DEVICE_KEY}"
 CODEX_RESUME_THREAD_ID="${SPACES_MOBILE_CODEX_RESUME_THREAD_ID:-019e380a-9def-7852-9834-74c67b2da894}"
 FIXTURE_LINE_COUNT=520
 SCROLLBACK_SWIPE_COUNT=2
@@ -27,6 +36,9 @@ IOS_APP_PATH=""
 IOS_BUILD_LOG=""
 DEMO_STDOUT_LOG=""
 DEMO_PID=""
+DEMO_APP_PID=""
+DEMO_BRIDGE_PID=""
+DEMO_TERMINAL_SERVICE_PID=""
 DEMO_ROOT=""
 PROJECT_DIR=""
 DB_PATH=""
@@ -34,6 +46,8 @@ RUNTIME_DIR=""
 BRIDGE_HOST=""
 BRIDGE_PORT=""
 IPAD_UDID=""
+IPHONE_UDID=""
+MOBILE_UDID=""
 PERFORMANCE_LOG_PATH=""
 CURRENT_SCENARIO=""
 SCENARIO_DIR=""
@@ -129,6 +143,7 @@ demo_env() {
     SPACES_DB_PATH="$DB_PATH" \
     SPACES_RUNTIME_DIR="$RUNTIME_DIR" \
     SPACES_TERMINAL_SERVICE_EXECUTABLE="$TERMINAL_SERVICE_BIN" \
+    SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
     SPACES_MOBILE_BRIDGE_HOST="${SPACES_MOBILE_DEMO_BIND_HOST:-0.0.0.0}" \
     SPACES_MOBILE_BRIDGE_PORT="$BRIDGE_PORT" \
     "$@"
@@ -154,9 +169,34 @@ fail() {
   if [[ -n "$DEMO_ROOT" ]]; then
     tail_if_present "Mac app log tail" "$DEMO_ROOT/app.log" 160
     tail_if_present "Bridge log tail" "$DEMO_ROOT/bridge.log" 160
-    tail_if_present "iPad app stderr tail" "$DEMO_ROOT/ipad-app.stderr.log" 160
+    tail_if_present "$MOBILE_DEVICE_LABEL app stderr tail" "$DEMO_ROOT/$MOBILE_ARTIFACT_NAME-app.stderr.log" 160
   fi
   exit 1
+}
+
+terminate_pid_if_command_matches() {
+  local pid="$1"
+  local label="$2"
+  local command_pattern="$3"
+  [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 0
+
+  local command
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [[ -n "$command" ]] || return 0
+  if [[ "$command" != *"$command_pattern"* ]]; then
+    printf 'Skipping %s cleanup for pid %s because command did not match %s: %s\n' \
+      "$label" "$pid" "$command_pattern" "$command" >&2
+    return
+  fi
+
+  kill "$pid" >/dev/null 2>&1 || true
+  for _ in {1..20}; do
+    if ! ps -p "$pid" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 0.25
+  done
+  kill -9 "$pid" >/dev/null 2>&1 || true
 }
 
 cleanup() {
@@ -168,6 +208,17 @@ cleanup() {
     else
       wait "$DEMO_PID" >/dev/null 2>&1 || true
     fi
+  fi
+  terminate_pid_if_command_matches "$DEMO_APP_PID" "demo app" "SpacesApp"
+  if [[ "$DEMO_BRIDGE_PID" != "$DEMO_TERMINAL_SERVICE_PID" ]]; then
+    terminate_pid_if_command_matches "$DEMO_BRIDGE_PID" "demo bridge" "SpacesTerminalService"
+  fi
+  terminate_pid_if_command_matches "$DEMO_TERMINAL_SERVICE_PID" "terminal service" "SpacesTerminalService"
+  if [[ -n "$IPAD_UDID" ]]; then
+    xcrun simctl terminate "$IPAD_UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$IPHONE_UDID" ]]; then
+    xcrun simctl terminate "$IPHONE_UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
   fi
 
   if [[ -n "$DEMO_ROOT" && -d "$DEMO_ROOT" ]]; then
@@ -189,6 +240,7 @@ cleanup() {
       rm -rf "$SUITE_ROOT" || true
     fi
   fi
+  return "$exit_code"
 }
 trap cleanup EXIT
 
@@ -289,6 +341,10 @@ while True:
             "BRIDGE_HOST": payload["bridgeHost"],
             "BRIDGE_PORT": str(payload["bridgePort"]),
             "IPAD_UDID": payload["ipadSimulatorUDID"],
+            "IPHONE_UDID": payload["iphoneSimulatorUDID"],
+            "DEMO_APP_PID": str(payload.get("appPID") or ""),
+            "DEMO_BRIDGE_PID": str(payload.get("bridgePID") or ""),
+            "DEMO_TERMINAL_SERVICE_PID": str(payload.get("terminalServicePID") or ""),
             "PERFORMANCE_LOG_PATH": payload.get("performanceLogPath") or str(pathlib.Path(payload["root"]) / "mobile-terminal-performance.jsonl"),
         }
         for key, value in fields.items():
@@ -310,11 +366,21 @@ PY
 start_demo() {
   resolve_demo_port
   DEMO_STDOUT_LOG="$SUITE_ROOT/mobile-demo.stdout.log"
+  local demo_iphone_name="${SPACES_MOBILE_DEMO_IPHONE_NAME:-iPhone 17 Pro}"
+  local demo_ipad_name="${SPACES_MOBILE_DEMO_IPAD_NAME:-iPad Pro 13-inch (M5)}"
+  if [[ "$MOBILE_DEVICE_KEY" == "iphone" ]]; then
+    demo_iphone_name="$MOBILE_DEVICE_NAME"
+  else
+    demo_ipad_name="$MOBILE_DEVICE_NAME"
+  fi
   printf 'Launching shared mobile demo on port %s...\n' "$DEMO_PORT"
   SPACES_MOBILE_DEMO_KEEP_ROOT=1 \
     SPACES_MOBILE_DEMO_BUILD_MACOS=0 \
     SPACES_MOBILE_DEMO_APP_PATH="$IOS_APP_PATH" \
+    SPACES_MOBILE_DEMO_IPHONE_NAME="$demo_iphone_name" \
+    SPACES_MOBILE_DEMO_IPAD_NAME="$demo_ipad_name" \
     SPACES_MOBILE_DEMO_PORT="$DEMO_PORT" \
+    SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
     "$DEMO_SCRIPT" >"$DEMO_STDOUT_LOG" 2>&1 &
   DEMO_PID=$!
   wait_for_demo_metadata
@@ -480,12 +546,12 @@ cleanup_current_scenario_sessions() {
   SCENARIO_CREATED_SESSIONS=()
 }
 
-reset_ipad_app() {
-  xcrun simctl terminate "$IPAD_UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
+reset_mobile_app() {
+  xcrun simctl terminate "$MOBILE_UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
   env \
     SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE=1 \
     SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERFORMANCE_LOG_PATH" \
-    xcrun simctl launch "$IPAD_UDID" "$BUNDLE_ID" >>"$SCENARIO_LOG" 2>&1 || fail "Failed to launch SpacesMobile on the iPad simulator."
+    xcrun simctl launch "$MOBILE_UDID" "$BUNDLE_ID" >>"$SCENARIO_LOG" 2>&1 || fail "Failed to launch SpacesMobile on the $MOBILE_DEVICE_LABEL simulator."
   sleep 2
 }
 
@@ -493,7 +559,7 @@ write_ui_test_config() {
   local scenario="$1"
   local session_id="$2"
   local secondary_session_id="${3:-}"
-  python3 - "$DEMO_ROOT" "$scenario" "$session_id" "$secondary_session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$IPAD_UDID" "$UI_TEST_CONFIG" "$DEFAULT_UI_TEST_CONFIG" "$BUNDLE_ID" "$SCROLLBACK_SWIPE_COUNT" <<'PY'
+  python3 - "$DEMO_ROOT" "$scenario" "$session_id" "$secondary_session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$MOBILE_UDID" "$MOBILE_DEVICE_KEY" "$MOBILE_ARTIFACT_NAME" "$UI_TEST_CONFIG" "$DEFAULT_UI_TEST_CONFIG" "$BUNDLE_ID" "$SCROLLBACK_SWIPE_COUNT" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -505,7 +571,9 @@ from pathlib import Path
     secondary_session_id,
     bridge_host,
     bridge_port_raw,
-    ipad_udid,
+    mobile_udid,
+    mobile_device_key,
+    mobile_artifact_name,
     scenario_config_raw,
     default_config_raw,
     bundle_id,
@@ -517,22 +585,23 @@ bridge_port = int(bridge_port_raw)
 scrollback_swipe_count = int(scrollback_swipe_count_raw)
 config_paths = [Path(scenario_config_raw), Path(default_config_raw)]
 pairing = json.loads((demo_root / "pairing.json").read_text())
-ipad_pairing = pairing["ipad"]
+mobile_pairing = pairing[mobile_device_key]
 prefix = scenario
+artifact_prefix = f"{prefix}-{mobile_artifact_name}"
 
 payload = {
     "sessionID": session_id,
     "secondarySessionID": None,
     "host": bridge_host,
     "port": bridge_port,
-    "authToken": ipad_pairing["authToken"],
-    "transportKey": ipad_pairing["transportKey"],
-    "installationID": ipad_pairing["installationID"],
-    "renderDumpPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-render.json"),
-    "eventLogPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-events.jsonl"),
-    "immediateScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-post-takeover-immediate.png"),
-    "shortDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-post-takeover-plus-2s.png"),
-    "longDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-post-takeover-plus-6s.png"),
+    "authToken": mobile_pairing["authToken"],
+    "transportKey": mobile_pairing["transportKey"],
+    "installationID": mobile_pairing["installationID"],
+    "renderDumpPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-render.json"),
+    "eventLogPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-events.jsonl"),
+    "immediateScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-takeover-immediate.png"),
+    "shortDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-takeover-plus-2s.png"),
+    "longDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-takeover-plus-6s.png"),
     "proceedTakeOverPath": None,
     "firstCommandRequestPath": None,
     "firstCommandFocusedPath": None,
@@ -547,58 +616,60 @@ payload = {
     "secondCommandText": None,
     "manualRetakeoverAttempts": 0,
     "manualRetakeoverObservedPrefix": None,
+    "manualRetakeoverContinuePrefix": None,
     "postFirstCommandScreenshotPath": None,
     "postSecondCommandScreenshotPath": None,
     "finalMacRetakeoverRequestPath": None,
     "finalMacRetakeoverObservedPath": None,
     "postFinalMacRetakeoverScreenshotPath": None,
-    "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-final.png"),
+    "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final.png"),
     "scrollbackSwipeCount": 0,
     "attachToExistingApp": True,
     "bundleID": bundle_id,
-    "ipadUDID": ipad_udid,
+    "mobileUDID": mobile_udid,
 }
 
 if scenario == "codex-resume-reopen":
     payload["secondarySessionID"] = session_id
 elif scenario == "roundtrip":
     payload.update({
-        "proceedTakeOverPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-proceed-takeover"),
-        "firstCommandRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-first-command-request"),
-        "firstCommandFocusedPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-first-command-focused"),
-        "firstCommandCompletedPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-first-command-completed"),
-        "firstCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-first-command-observed"),
-        "secondCommandRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-second-command-request"),
-        "secondCommandFocusedPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-second-command-focused"),
-        "secondCommandCompletedPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-second-command-completed"),
-        "secondCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-second-command-observed"),
-        "proceedFinishPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-proceed-finish"),
-        "firstCommandText": "echo __roundtrip_ipad_one__",
-        "secondCommandText": "echo __roundtrip_ipad_two__",
+        "proceedTakeOverPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-proceed-takeover"),
+        "firstCommandRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-request"),
+        "firstCommandFocusedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-focused"),
+        "firstCommandCompletedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-completed"),
+        "firstCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-observed"),
+        "secondCommandRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-second-command-request"),
+        "secondCommandFocusedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-second-command-focused"),
+        "secondCommandCompletedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-second-command-completed"),
+        "secondCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-second-command-observed"),
+        "proceedFinishPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-proceed-finish"),
+        "firstCommandText": f"echo __roundtrip_{mobile_artifact_name}_one__",
+        "secondCommandText": f"echo __roundtrip_{mobile_artifact_name}_two__",
         "manualRetakeoverAttempts": 2,
-        "manualRetakeoverObservedPrefix": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-manual-retakeover-observed"),
-        "postFirstCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-post-first-command.png"),
-        "postSecondCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-post-second-command.png"),
-        "finalMacRetakeoverRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-final-mac-retakeover-request"),
-        "finalMacRetakeoverObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-final-mac-retakeover-observed"),
-        "postFinalMacRetakeoverScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-post-final-mac-retakeover.png"),
+        "manualRetakeoverObservedPrefix": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-manual-retakeover-observed"),
+        "manualRetakeoverContinuePrefix": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-manual-retakeover-continue"),
+        "postFirstCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-command.png"),
+        "postSecondCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-second-command.png"),
+        "finalMacRetakeoverRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final-mac-retakeover-request"),
+        "finalMacRetakeoverObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final-mac-retakeover-observed"),
+        "postFinalMacRetakeoverScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-final-mac-retakeover.png"),
     })
 elif scenario == "scrollback":
     payload.update({
-        "firstCommandRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-first-command-request"),
-        "firstCommandFocusedPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-first-command-focused"),
-        "firstCommandCompletedPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-first-command-completed"),
-        "firstCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-first-command-observed"),
-        "postFirstCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-post-command-while-scrolled.png"),
+        "firstCommandRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-request"),
+        "firstCommandFocusedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-focused"),
+        "firstCommandCompletedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-completed"),
+        "firstCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-observed"),
+        "postFirstCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-command-while-scrolled.png"),
         "scrollbackSwipeCount": scrollback_swipe_count,
     })
 elif scenario == "two-session":
     payload.update({
         "secondarySessionID": secondary_session_id,
-        "immediateScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-post-first-takeover.png"),
-        "shortDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-post-first-takeover-plus-2s.png"),
-        "longDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-post-first-takeover-plus-6s.png"),
-        "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{prefix}-ipad-post-second-takeover.png"),
+        "immediateScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-takeover.png"),
+        "shortDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-takeover-plus-2s.png"),
+        "longDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-takeover-plus-6s.png"),
+        "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-second-takeover.png"),
         "firstCommandText": "pwd",
     })
 
@@ -611,13 +682,13 @@ PY
 
 run_ui_test() {
   local test_name="$1"
-  printf 'Running iPad UI test: %s\n' "$test_name"
-  reset_ipad_app
+  printf 'Running %s UI test: %s\n' "$MOBILE_DEVICE_LABEL" "$test_name"
+  reset_mobile_app
   if ! SPACES_MOBILE_UI_TEST_CONFIG_PATH="$UI_TEST_CONFIG" \
     xcodebuild \
       -project "$ROOT_DIR/apps/ios/SpacesMobile.xcodeproj" \
       -scheme SpacesMobile \
-      -destination "platform=iOS Simulator,id=$IPAD_UDID" \
+      -destination "platform=iOS Simulator,id=$MOBILE_UDID" \
       -derivedDataPath "$IOS_DERIVED_DATA" \
       -only-testing:"$test_name" \
       test-without-building >"$UI_TEST_LOG" 2>&1; then
@@ -645,6 +716,7 @@ scenario_dir = Path(sys.argv[5])
 runtime_root = demo_root / "runtime"
 attachments_path = runtime_root / "terminal" / "sessions" / session_id / "attachments.json"
 owner_dump_path = scenario_dir / "codex-mac-owner-dump.json"
+output_log_path = runtime_root / "terminal" / "sessions" / session_id / "output.log"
 
 env = os.environ | {
     "HOME": str(demo_root / "home"),
@@ -692,7 +764,7 @@ def dump_owner_window() -> dict:
         text=True,
         check=True,
     )
-    deadline = time.time() + 5
+    deadline = time.time() + 15
     while time.time() < deadline:
         if owner_dump_path.exists():
             return json.loads(owner_dump_path.read_text())
@@ -716,6 +788,7 @@ resume_directory_prompt_confirmed = False
 deadline = time.time() + 30
 while time.time() < deadline:
     rendered_output = (dump_owner_window().get("renderedOutput") or "")
+    output_log_text = output_log_path.read_text(errors="replace") if output_log_path.exists() else ""
     if "Choose working directory to resume this session" in rendered_output:
         if resume_directory_prompt_confirmed:
             time.sleep(0.2)
@@ -736,7 +809,7 @@ while time.time() < deadline:
         trust_prompt_confirmed = True
         time.sleep(0.2)
         continue
-    normalized_output = rendered_output.lower()
+    normalized_output = f"{rendered_output}\n{output_log_text}".lower()
     if (
         "openai codex" in normalized_output
         or "gpt-" in normalized_output
@@ -751,9 +824,9 @@ raise RuntimeError(f"Timed out waiting for Codex startup output in the demo sess
 PY
 }
 
-assert_ipad_terminal_text_rendered() {
-  local screenshot_path="$SCENARIO_DIR/$CURRENT_SCENARIO-ipad-post-takeover-plus-2s.png"
-  printf 'Validating rendered iPad terminal text...\n'
+assert_mobile_terminal_text_rendered() {
+  local screenshot_path="$SCENARIO_DIR/$CURRENT_SCENARIO-$MOBILE_ARTIFACT_NAME-post-takeover-plus-2s.png"
+  printf 'Validating rendered %s terminal text...\n' "$MOBILE_DEVICE_LABEL"
   local recognized_text
   if ! recognized_text="$(swift - "$screenshot_path" <<'SWIFT'
 import AppKit
@@ -792,7 +865,7 @@ exit(1)
 SWIFT
   )"; then
     printf '\nOCR output:\n%s\n' "$recognized_text" >&2
-    fail "Codex takeover rendered a blank or unreadable iPad terminal surface."
+    fail "Codex takeover rendered a blank or unreadable $MOBILE_DEVICE_LABEL terminal surface."
   fi
 }
 
@@ -800,7 +873,7 @@ assert_codex_takeover_metrics() {
   local session_id="$1"
   local takeover_started_at="$2"
   local reopen_same_session="$3"
-  python3 - "$SCENARIO_DIR" "$CURRENT_SCENARIO" "$DEMO_ROOT" "$session_id" "$takeover_started_at" "$reopen_same_session" <<'PY'
+  python3 - "$SCENARIO_DIR" "$CURRENT_SCENARIO" "$DEMO_ROOT" "$session_id" "$takeover_started_at" "$reopen_same_session" "$MOBILE_ARTIFACT_NAME" "$MOBILE_DEVICE_LABEL" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -812,8 +885,10 @@ demo_root = Path(sys.argv[3])
 session_id = sys.argv[4]
 takeover_started_at_raw = sys.argv[5]
 reopen_same_session = sys.argv[6] == "1"
-render_dump_path = scenario_dir / f"{scenario}-ipad-render.json"
-event_log_path = scenario_dir / f"{scenario}-ipad-events.jsonl"
+mobile_artifact_name = sys.argv[7]
+mobile_device_label = sys.argv[8]
+render_dump_path = scenario_dir / f"{scenario}-{mobile_artifact_name}-render.json"
+event_log_path = scenario_dir / f"{scenario}-{mobile_artifact_name}-events.jsonl"
 performance_log_path = demo_root / "mobile-terminal-performance.jsonl"
 
 def parse_timestamp(raw: str | None):
@@ -845,11 +920,11 @@ takeover_started_at = parse_timestamp(takeover_started_at_raw)
 if render_dump.get("renderMode") not in {"ownerBootstrapping", "ownerLive"}:
     raise SystemExit(f"Unexpected render mode after takeover: {render_dump.get('renderMode')!r}")
 if render_dump.get("errorMessage"):
-    raise SystemExit(f"Unexpected iPad error after takeover: {render_dump.get('errorMessage')!r}")
+    raise SystemExit(f"Unexpected {mobile_device_label} error after takeover: {render_dump.get('errorMessage')!r}")
 if not render_dump.get("isInputSurfaceReady"):
-    raise SystemExit("The iPad owner path never reached input-ready state.")
+    raise SystemExit(f"The {mobile_device_label} owner path never reached input-ready state.")
 if not any(event.get("kind") == "input_readiness" and event.get("detail") == "ready" for event in event_payloads):
-    raise SystemExit("The iPad event log never recorded input readiness.")
+    raise SystemExit(f"The {mobile_device_label} event log never recorded input readiness.")
 rendered_terminal_text = "\n".join(
     str(render_dump.get(key) or "")
     for key in ("renderedText", "snapshotText", "visibleText")
@@ -858,7 +933,7 @@ if "codex resume" in rendered_terminal_text and not any(
     marker in rendered_terminal_text
     for marker in ("openai codex", "gpt-", "/model to change", "/mcp to list configured mcp tools", "conversation interrupted", "›")
 ):
-    raise SystemExit("The iPad owner bootstrap appears to be the stale pre-takeover shell prompt.")
+    raise SystemExit(f"The {mobile_device_label} owner bootstrap appears to be the stale pre-takeover shell prompt.")
 
 bootstrap_receipts = [event for event in session_events if event.get("name") == "owner_bootstrap_state_received"]
 local_bootstraps = [event for event in session_events if event.get("name") == "local_owner_bootstrap_begin"]
@@ -929,6 +1004,10 @@ else:
 PY
 }
 
+codex_demo_command_prefix() {
+  printf 'codex -c check_for_update_on_startup=false'
+}
+
 run_codex_scenario() {
   local scenario="$1"
   begin_scenario "$scenario"
@@ -938,12 +1017,14 @@ run_codex_scenario() {
   local command_text
   local reopen_same_session=0
   local ui_test_name="SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverFromList"
+  local codex_command_prefix
+  codex_command_prefix="$(codex_demo_command_prefix)"
   if [[ "$scenario" == "codex-resume-reopen" ]]; then
-    command_text="codex resume $CODEX_RESUME_THREAD_ID"
+    command_text="$codex_command_prefix resume $CODEX_RESUME_THREAD_ID"
     reopen_same_session=1
     ui_test_name="SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverReopenSameSessionFromList"
   else
-    command_text="${SPACES_MOBILE_CODEX_COMMAND:-codex}"
+    command_text="${SPACES_MOBILE_CODEX_COMMAND:-$codex_command_prefix}"
   fi
 
   launch_codex_on_mac_owner "$session_id" "$command_text" >>"$SCENARIO_LOG" 2>&1 || fail "Failed to launch Codex in $session_id."
@@ -956,7 +1037,7 @@ print(datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00
 PY
   )"
   run_ui_test "$ui_test_name"
-  assert_ipad_terminal_text_rendered
+  assert_mobile_terminal_text_rendered
   assert_codex_takeover_metrics "$session_id" "$takeover_started_at" "$reopen_same_session"
   printf 'Mobile scenario passed: %s\n' "$scenario"
 }
@@ -967,8 +1048,8 @@ run_roundtrip_scenario() {
   session_id="$(new_terminal_session)"
   track_current_scenario_session "$session_id"
   write_ui_test_config "roundtrip" "$session_id"
-  reset_ipad_app
-  python3 - "$ROOT_DIR" "$DEMO_ROOT" "$session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$IPAD_UDID" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$UI_TEST_CONFIG" "$UI_TEST_LOG" "$IOS_DERIVED_DATA" "$SCENARIO_DIR" <<'PY'
+  reset_mobile_app
+  python3 - "$ROOT_DIR" "$DEMO_ROOT" "$session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$MOBILE_UDID" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$UI_TEST_CONFIG" "$UI_TEST_LOG" "$IOS_DERIVED_DATA" "$SCENARIO_DIR" "$MOBILE_DEVICE_LABEL" "$MOBILE_ARTIFACT_NAME" <<'PY'
 import json
 import os
 import re
@@ -983,13 +1064,15 @@ demo_root = Path(sys.argv[2])
 session_id = sys.argv[3]
 bridge_host = sys.argv[4]
 bridge_port = int(sys.argv[5])
-ipad_udid = sys.argv[6]
+mobile_udid = sys.argv[6]
 spaces_cli = Path(sys.argv[7])
 spacese2e = Path(sys.argv[8])
 ui_test_config = Path(sys.argv[9])
 ui_test_log = Path(sys.argv[10])
 ios_derived_data = Path(sys.argv[11])
 scenario_dir = Path(sys.argv[12])
+mobile_device_label = sys.argv[13]
+mobile_artifact_name = sys.argv[14]
 runtime_root = demo_root / "runtime"
 attachments_path = runtime_root / "terminal" / "sessions" / session_id / "attachments.json"
 output_log_path = runtime_root / "terminal" / "sessions" / session_id / "output.log"
@@ -1009,6 +1092,7 @@ second_command_completed = Path(config["secondCommandCompletedPath"])
 second_command_observed = Path(config["secondCommandObservedPath"])
 proceed_finish_path = Path(config["proceedFinishPath"])
 manual_retakeover_prefix = Path(config["manualRetakeoverObservedPrefix"])
+manual_retakeover_continue_prefix = Path(config["manualRetakeoverContinuePrefix"])
 final_mac_retakeover_request = Path(config["finalMacRetakeoverRequestPath"])
 final_mac_retakeover_observed = Path(config["finalMacRetakeoverObservedPath"])
 
@@ -1023,9 +1107,9 @@ mac_prepare_commands = [
     "printf '__roundtrip_mac_before_takeover_two__\\n'",
 ]
 ios_first_command = config["firstCommandText"]
-ios_first_output = "__roundtrip_ipad_one__"
+ios_first_output = f"__roundtrip_{mobile_artifact_name}_one__"
 ios_second_command = config["secondCommandText"]
-ios_second_output = "__roundtrip_ipad_two__"
+ios_second_output = f"__roundtrip_{mobile_artifact_name}_two__"
 bare_command_lines = (
     "s",
     ios_first_command,
@@ -1171,6 +1255,39 @@ def wait_for_terminal_window_dump(output_path: Path, predicate, timeout: float, 
 def contains_command_output(text: str, command_text: str, output_text: str) -> bool:
     return f"% {command_text}" in text and f"\n{output_text}\n" in text
 
+def mobile_rendered_text(payload: dict) -> str:
+    return payload.get("renderedText") or ""
+
+def mobile_owner_render_contains(payload: dict, *markers: str) -> bool:
+    rendered_text = mobile_rendered_text(payload)
+    return (
+        payload.get("sessionID") == session_id
+        and payload.get("isOwner") is True
+        and payload.get("showsTerminalSurface") is True
+        and payload.get("isBusy") is False
+        and payload.get("isPreparingInput") is False
+        and payload.get("isSynchronizingOwnership") is False
+        and payload.get("isInputSurfaceReady") is True
+        and bool(rendered_text.strip())
+        and all(marker in rendered_text for marker in markers)
+    )
+
+def wait_for_mobile_owner_render(
+    label: str,
+    markers: tuple[str, ...],
+    timeout: float,
+    process: subprocess.Popen[str],
+) -> dict:
+    payload = wait_for_render_dump(
+        lambda candidate: mobile_owner_render_contains(candidate, *markers),
+        timeout=timeout,
+        process=process,
+    )
+    if payload.get("errorMessage"):
+        raise RuntimeError(f"{label} reported a {mobile_device_label} error:\n{json.dumps(payload, indent=2)}")
+    assert_render_output_sane(label, mobile_rendered_text(payload))
+    return payload
+
 def assert_render_output_sane(label: str, text: str) -> None:
     if "command not found: s" in text:
         raise RuntimeError(f"{label} render contains split input failure:\n{text}")
@@ -1241,7 +1358,7 @@ def request_mac_retakeover(expected_previous_owner: str) -> str:
         raise RuntimeError(f"Mac retakeover did not report success:\n{show_result.stdout}\n{show_result.stderr}")
     reclaimed_owner = wait_for_active_owner(excluded_client_ids={expected_previous_owner}, timeout=20)
     if reclaimed_owner == expected_previous_owner:
-        raise RuntimeError("Mac retakeover did not transfer ownership away from iPad.")
+        raise RuntimeError(f"Mac retakeover did not transfer ownership away from {mobile_device_label}.")
     return reclaimed_owner
 
 ui_test_command = [
@@ -1251,7 +1368,7 @@ ui_test_command = [
     "-scheme",
     "SpacesMobile",
     "-destination",
-    f"platform=iOS Simulator,id={ipad_udid}",
+    f"platform=iOS Simulator,id={mobile_udid}",
     "-derivedDataPath",
     str(ios_derived_data),
     "-only-testing:SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverRoundTripWithCommands",
@@ -1293,27 +1410,17 @@ with ui_test_log.open("w") as ui_test_output:
 
         write_marker(proceed_takeover_path, "go\n")
 
-        ipad_owner_payload = wait_for_render_dump(
-            lambda payload: (
-                payload.get("sessionID") == session_id
-                and payload.get("isOwner") is True
-                and payload.get("isBusy") is False
-                and payload.get("isPreparingInput") is False
-                and payload.get("isSynchronizingOwnership") is False
-                and payload.get("isInputSurfaceReady") is True
-                and "__roundtrip_mac_before_takeover_one__" in (payload.get("snapshotText") or payload.get("renderedText") or "")
-                and "__roundtrip_mac_before_takeover_two__" in (payload.get("snapshotText") or payload.get("renderedText") or "")
-            ),
+        mobile_owner_payload = wait_for_mobile_owner_render(
+            f"{mobile_device_label} after first takeover",
+            ("__roundtrip_mac_before_takeover_one__", "__roundtrip_mac_before_takeover_two__"),
             timeout=40,
             process=ui_test_process,
         )
-        if ipad_owner_payload.get("errorMessage"):
-            raise RuntimeError(f"iPad reported an error after first takeover:\n{json.dumps(ipad_owner_payload, indent=2)}")
-        ipad_owner_text = ipad_owner_payload.get("snapshotText") or ipad_owner_payload.get("renderedText") or ""
-        if "__roundtrip_mac_before_takeover_one__" not in ipad_owner_text or "__roundtrip_mac_before_takeover_two__" not in ipad_owner_text:
+        mobile_owner_text = mobile_rendered_text(mobile_owner_payload)
+        if "__roundtrip_mac_before_takeover_one__" not in mobile_owner_text or "__roundtrip_mac_before_takeover_two__" not in mobile_owner_text:
             raise RuntimeError(
-                "iPad owner render did not include the Mac pre-takeover transcript markers:\n"
-                f"{json.dumps(ipad_owner_payload, indent=2)}"
+                f"{mobile_device_label} owner render did not include the Mac pre-takeover transcript markers:\n"
+                f"{json.dumps(mobile_owner_payload, indent=2)}"
             )
 
         write_marker(first_command_request, "go\n")
@@ -1322,6 +1429,12 @@ with ui_test_log.open("w") as ui_test_output:
         wait_for_output_log_text(ios_first_output, timeout=20, process=ui_test_process)
         write_marker(first_command_completed)
         wait_for_file(first_command_observed, timeout=20, process=ui_test_process)
+        wait_for_mobile_owner_render(
+            f"{mobile_device_label} after first command",
+            ("__roundtrip_mac_before_takeover_one__", "__roundtrip_mac_before_takeover_two__", ios_first_output),
+            timeout=20,
+            process=ui_test_process,
+        )
 
         write_marker(second_command_request, "go\n")
         wait_for_file(second_command_focused, timeout=30, process=ui_test_process)
@@ -1329,10 +1442,16 @@ with ui_test_log.open("w") as ui_test_output:
         wait_for_output_log_text(ios_second_output, timeout=20, process=ui_test_process)
         write_marker(second_command_completed)
         wait_for_file(second_command_observed, timeout=20, process=ui_test_process)
+        wait_for_mobile_owner_render(
+            f"{mobile_device_label} after second command",
+            ("__roundtrip_mac_before_takeover_one__", "__roundtrip_mac_before_takeover_two__", ios_first_output, ios_second_output),
+            timeout=20,
+            process=ui_test_process,
+        )
 
-        ipad_owner_client_id = wait_for_active_owner(timeout=10)
-        request_mac_retakeover(ipad_owner_client_id)
-        ipad_after_mac_retakeover = wait_for_render_dump(
+        mobile_owner_client_id = wait_for_active_owner(timeout=10)
+        request_mac_retakeover(mobile_owner_client_id)
+        mobile_after_mac_retakeover = wait_for_render_dump(
             lambda payload: (
                 payload.get("sessionID") == session_id
                 and payload.get("isOwner") is False
@@ -1343,8 +1462,10 @@ with ui_test_log.open("w") as ui_test_output:
             timeout=20,
             process=ui_test_process,
         )
-        if ipad_after_mac_retakeover.get("errorMessage"):
-            raise RuntimeError(f"iPad reported an error after Mac retakeover:\n{json.dumps(ipad_after_mac_retakeover, indent=2)}")
+        if mobile_after_mac_retakeover.get("errorMessage"):
+            raise RuntimeError(
+                f"{mobile_device_label} reported an error after Mac retakeover:\n{json.dumps(mobile_after_mac_retakeover, indent=2)}"
+            )
 
         mac_owner_after_retakeover = wait_for_terminal_window_dump(
             mac_owner_dump_path,
@@ -1362,22 +1483,28 @@ with ui_test_log.open("w") as ui_test_output:
         for attempt_index in range(2):
             takeover_number = attempt_index + 2
             wait_for_file(Path(f"{manual_retakeover_prefix}-{attempt_index + 1}"), timeout=30, process=ui_test_process)
-            ipad_after_manual_takeover = wait_for_render_dump(
-                lambda payload: (
-                    payload.get("sessionID") == session_id
-                    and payload.get("isOwner") is True
-                    and payload.get("isBusy") is False
-                    and payload.get("isSynchronizingOwnership") is False
-                    and payload.get("isInputSurfaceReady") is True
-                    and (payload.get("renderedText") or payload.get("snapshotText") or "").strip()
+            wait_for_mobile_owner_render(
+                f"{mobile_device_label} after takeover {takeover_number}",
+                ("__roundtrip_mac_before_takeover_one__", "__roundtrip_mac_before_takeover_two__", ios_first_output, ios_second_output),
+                timeout=20,
+                process=ui_test_process,
+            )
+            probe_output = f"__roundtrip_{mobile_artifact_name}_after_takeover_{takeover_number}__"
+            probe_command = f"printf '{probe_output}\\n'"
+            write_command_request(probe_command)
+            wait_for_output_log_text(probe_output, timeout=20, process=ui_test_process)
+            wait_for_mobile_owner_render(
+                f"{mobile_device_label} after takeover {takeover_number} probe command",
+                (
+                    "__roundtrip_mac_before_takeover_one__",
+                    "__roundtrip_mac_before_takeover_two__",
+                    ios_first_output,
+                    ios_second_output,
+                    probe_output,
                 ),
                 timeout=20,
                 process=ui_test_process,
             )
-            if ipad_after_manual_takeover.get("errorMessage"):
-                raise RuntimeError(
-                    f"iPad reported an error after takeover {takeover_number}:\n{json.dumps(ipad_after_manual_takeover, indent=2)}"
-                )
 
             mac_status_payload = wait_for_terminal_window_dump(
                 mac_status_dump_path,
@@ -1385,14 +1512,14 @@ with ui_test_log.open("w") as ui_test_output:
                 timeout=20,
                 any_mode=True,
             )
-            assert_status_shell_hides_live_content(f"Mac status after iPad takeover {takeover_number}", mac_status_payload)
+            assert_status_shell_hides_live_content(f"Mac status after {mobile_device_label} takeover {takeover_number}", mac_status_payload)
 
             if attempt_index >= 1:
                 continue
 
-            current_ipad_owner = wait_for_active_owner(timeout=10)
-            request_mac_retakeover(current_ipad_owner)
-            ipad_after_mac_retakeover = wait_for_render_dump(
+            current_mobile_owner = wait_for_active_owner(timeout=10)
+            request_mac_retakeover(current_mobile_owner)
+            mobile_after_mac_retakeover = wait_for_render_dump(
                 lambda payload: (
                     payload.get("sessionID") == session_id
                     and payload.get("isOwner") is False
@@ -1403,9 +1530,10 @@ with ui_test_log.open("w") as ui_test_output:
                 timeout=20,
                 process=ui_test_process,
             )
-            if ipad_after_mac_retakeover.get("errorMessage"):
+            if mobile_after_mac_retakeover.get("errorMessage"):
                 raise RuntimeError(
-                    f"iPad reported an error after Mac retakeover {takeover_number}:\n{json.dumps(ipad_after_mac_retakeover, indent=2)}"
+                    f"{mobile_device_label} reported an error after Mac retakeover {takeover_number}:\n"
+                    f"{json.dumps(mobile_after_mac_retakeover, indent=2)}"
                 )
             mac_owner_after_retakeover = wait_for_terminal_window_dump(
                 mac_owner_dump_path,
@@ -1421,10 +1549,11 @@ with ui_test_log.open("w") as ui_test_output:
                 f"Mac after retakeover {takeover_number}",
                 mac_owner_after_retakeover.get("renderedOutput") or "",
             )
+            write_marker(Path(f"{manual_retakeover_continue_prefix}-{attempt_index + 1}"))
 
-        final_ipad_owner = wait_for_active_owner(timeout=10)
-        request_mac_retakeover(final_ipad_owner)
-        ipad_after_final_mac_retakeover = wait_for_render_dump(
+        final_mobile_owner = wait_for_active_owner(timeout=10)
+        request_mac_retakeover(final_mobile_owner)
+        mobile_after_final_mac_retakeover = wait_for_render_dump(
             lambda payload: (
                 payload.get("sessionID") == session_id
                 and payload.get("isOwner") is False
@@ -1435,9 +1564,10 @@ with ui_test_log.open("w") as ui_test_output:
             timeout=20,
             process=ui_test_process,
         )
-        if ipad_after_final_mac_retakeover.get("errorMessage"):
+        if mobile_after_final_mac_retakeover.get("errorMessage"):
             raise RuntimeError(
-                f"iPad reported an error after the final Mac retakeover:\n{json.dumps(ipad_after_final_mac_retakeover, indent=2)}"
+                f"{mobile_device_label} reported an error after the final Mac retakeover:\n"
+                f"{json.dumps(mobile_after_final_mac_retakeover, indent=2)}"
             )
         mac_owner_after_final_retakeover = wait_for_terminal_window_dump(
             mac_owner_dump_path,
@@ -1459,9 +1589,9 @@ with ui_test_log.open("w") as ui_test_output:
             raise RuntimeError(f"Round-trip UI test failed with status {return_code}.\n{log_tail}")
 
         if not render_dump_path.exists():
-            raise RuntimeError(f"Expected final iPad render dump at {render_dump_path}")
+            raise RuntimeError(f"Expected final {mobile_device_label} render dump at {render_dump_path}")
         if not event_log_path.exists():
-            raise RuntimeError(f"Expected iPad event log at {event_log_path}")
+            raise RuntimeError(f"Expected {mobile_device_label} event log at {event_log_path}")
     finally:
         if ui_test_process.poll() is None:
             ui_test_process.terminate()
@@ -1547,7 +1677,7 @@ def dump_owner_window() -> dict:
         text=True,
         check=True,
     )
-    deadline = time.time() + 5
+    deadline = time.time() + 15
     while time.time() < deadline:
         if owner_dump_path.exists():
             return json.loads(owner_dump_path.read_text())
@@ -1584,18 +1714,18 @@ run_scrollback_scenario() {
   track_current_scenario_session "$session_id"
   launch_scrollback_fixture_on_mac_owner "$session_id" >>"$SCENARIO_LOG" 2>&1 || fail "Failed to launch scrollback fixture."
   write_ui_test_config "scrollback" "$session_id"
-  reset_ipad_app
+  reset_mobile_app
   SPACES_MOBILE_UI_TEST_CONFIG_PATH="$UI_TEST_CONFIG" \
     xcodebuild \
       -project "$ROOT_DIR/apps/ios/SpacesMobile.xcodeproj" \
       -scheme SpacesMobile \
-      -destination "platform=iOS Simulator,id=$IPAD_UDID" \
+      -destination "platform=iOS Simulator,id=$MOBILE_UDID" \
       -derivedDataPath "$IOS_DERIVED_DATA" \
       -only-testing:SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverFromList \
       test-without-building >"$UI_TEST_LOG" 2>&1 &
   local ui_test_pid=$!
 
-  if ! python3 - "$DEMO_ROOT" "$SCENARIO_DIR" <<'PY'
+  if ! python3 - "$DEMO_ROOT" "$SCENARIO_DIR" "$UI_TEST_CONFIG" "$MOBILE_DEVICE_LABEL" <<'PY'
 import json
 import sys
 import time
@@ -1603,12 +1733,15 @@ from pathlib import Path
 
 demo_root = Path(sys.argv[1])
 scenario_dir = Path(sys.argv[2])
-event_log_path = scenario_dir / "scrollback-ipad-events.jsonl"
+ui_test_config = Path(sys.argv[3])
+mobile_device_label = sys.argv[4]
+config = json.loads(ui_test_config.read_text())
+event_log_path = Path(config["eventLogPath"])
 performance_log_path = demo_root / "mobile-terminal-performance.jsonl"
 command_request_path = Path(f"{event_log_path}.command-request.json")
-first_command_request_path = scenario_dir / "scrollback-ipad-first-command-request"
-first_command_completed_path = scenario_dir / "scrollback-ipad-first-command-completed"
-first_command_observed_path = scenario_dir / "scrollback-ipad-first-command-observed"
+first_command_request_path = Path(config["firstCommandRequestPath"])
+first_command_completed_path = Path(config["firstCommandCompletedPath"])
+first_command_observed_path = Path(config["firstCommandObservedPath"])
 command_text = "printf '__scrollback_after_output__\\n'"
 
 def read_json_lines(path: Path):
@@ -1634,7 +1767,7 @@ while time.time() < deadline:
         break
     time.sleep(0.2)
 else:
-    raise SystemExit("Timed out waiting for the iPad app to apply the scrollback history seed.")
+    raise SystemExit(f"Timed out waiting for the {mobile_device_label} app to apply the scrollback history seed.")
 
 command_request_path.write_text(json.dumps({
     "id": "scrollback-after-output",
@@ -1650,7 +1783,7 @@ while time.time() < deadline:
         break
     time.sleep(0.2)
 else:
-    raise SystemExit("Timed out waiting for the iPad app to consume the post-scrollback command request.")
+    raise SystemExit(f"Timed out waiting for the {mobile_device_label} app to consume the post-scrollback command request.")
 
 deadline = time.time() + 60
 while time.time() < deadline:
@@ -1661,7 +1794,7 @@ while time.time() < deadline:
         break
     time.sleep(0.2)
 else:
-    raise SystemExit("Timed out waiting for the iPad owner command to complete while scrolled up.")
+    raise SystemExit(f"Timed out waiting for the {mobile_device_label} owner command to complete while scrolled up.")
 
 time.sleep(1.0)
 first_command_completed_path.write_text("ready\n")
@@ -1684,7 +1817,7 @@ PY
     fail "Scrollback UI test failed."
   fi
 
-  python3 - "$SCENARIO_DIR" "$DEMO_ROOT" "$FIXTURE_LINE_COUNT" <<'PY'
+  python3 - "$SCENARIO_DIR" "$DEMO_ROOT" "$FIXTURE_LINE_COUNT" "$UI_TEST_CONFIG" "$MOBILE_DEVICE_LABEL" <<'PY'
 import json
 import sys
 from datetime import datetime
@@ -1693,13 +1826,16 @@ from pathlib import Path
 scenario_dir = Path(sys.argv[1])
 demo_root = Path(sys.argv[2])
 fixture_line_count = int(sys.argv[3])
+ui_test_config = Path(sys.argv[4])
+mobile_device_label = sys.argv[5]
+config = json.loads(ui_test_config.read_text())
 owner_dump_path = scenario_dir / "scrollback-owner-dump.json"
-ipad_dump_path = scenario_dir / "scrollback-ipad-render.json"
-event_log_path = scenario_dir / "scrollback-ipad-events.jsonl"
+mobile_dump_path = Path(config["renderDumpPath"])
+event_log_path = Path(config["eventLogPath"])
 performance_log_path = demo_root / "mobile-terminal-performance.jsonl"
 
 owner_payload = json.loads(owner_dump_path.read_text())
-ipad_payload = json.loads(ipad_dump_path.read_text())
+mobile_payload = json.loads(mobile_dump_path.read_text())
 event_payloads = []
 if event_log_path.exists():
     event_payloads = [
@@ -1720,8 +1856,8 @@ if performance_log_path.exists():
     ]
 
 owner_text = owner_payload.get("renderedOutput") or ""
-ipad_text = ipad_payload.get("renderedText") or ipad_payload.get("snapshotText") or ""
-session_id = ipad_payload.get("sessionID")
+mobile_text = mobile_payload.get("renderedText") or mobile_payload.get("snapshotText") or ""
+session_id = mobile_payload.get("sessionID")
 session_performance_events = [
     event for event in performance_events
     if event.get("sessionID") == session_id
@@ -1736,18 +1872,18 @@ def parse_timestamp(raw_value: str | None) -> datetime | None:
         return None
 
 if not any(event.get("kind") == "e2e_scroll_gesture_applied" for event in event_payloads):
-    raise SystemExit("The iPad app never applied the scrollback drag gesture.")
+    raise SystemExit(f"The {mobile_device_label} app never applied the scrollback drag gesture.")
 if not any(event.get("kind") == "e2e_command_request_consumed" for event in event_payloads):
-    raise SystemExit("The iPad app never consumed the post-scrollback owner command.")
+    raise SystemExit(f"The {mobile_device_label} app never consumed the post-scrollback owner command.")
 if f"FIXTURE_DONE mode=lines emitted={fixture_line_count}" not in owner_text:
     raise SystemExit("Owner baseline did not reach the bottom of the long-output fixture.")
-if not ipad_text.strip():
-    raise SystemExit("iPad render dump was blank after scrollback.")
+if not mobile_text.strip():
+    raise SystemExit(f"{mobile_device_label} render dump was blank after scrollback.")
 for dump in owner_render_dumps:
     dump_text = dump.get("renderedText") or ""
     if any(line.strip() == "%" for line in dump_text.splitlines()):
         raise SystemExit(
-            "iPad owner render contained a stray percent prompt row during scrollback.\n"
+            f"{mobile_device_label} owner render contained a stray percent prompt row during scrollback.\n"
             f"replay_state={dump.get('replayStateKey')}\n"
             f"rendered_text={dump_text}"
         )
@@ -1807,7 +1943,7 @@ run_ownership_guard_scenario() {
   local session_id
   session_id="$(new_terminal_session)"
   track_current_scenario_session "$session_id"
-  python3 - "$DEMO_ROOT" "$session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$SCENARIO_DIR" "$BUNDLE_ID" <<'PY'
+  python3 - "$DEMO_ROOT" "$session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$SCENARIO_DIR" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$MOBILE_DEVICE_LABEL" <<'PY'
 import json
 import os
 import socket
@@ -1825,10 +1961,13 @@ spaces_cli = Path(sys.argv[5])
 spacese2e = Path(sys.argv[6])
 scenario_dir = Path(sys.argv[7])
 bundle_id = sys.argv[8]
+mobile_device_key = sys.argv[9]
+mobile_device_name = sys.argv[10]
+mobile_device_label = sys.argv[11]
 runtime_root = demo_root / "runtime"
 attachments_path = runtime_root / "terminal" / "sessions" / session_id / "attachments.json"
 output_log_path = runtime_root / "terminal" / "sessions" / session_id / "output.log"
-pairing = json.loads((demo_root / "pairing.json").read_text())["ipad"]
+pairing = json.loads((demo_root / "pairing.json").read_text())[mobile_device_key]
 
 env = os.environ | {
     "HOME": str(demo_root / "home"),
@@ -1840,13 +1979,13 @@ client_app = {
     "installationID": pairing["installationID"],
     "bundleID": bundle_id,
     "platform": "ios",
-    "deviceName": "iPad Pro 13-inch (M5)",
+    "deviceName": mobile_device_name,
     "appVersion": "1.0",
 }
 mobile_client = {
     "id": str(uuid.uuid4()).upper(),
     "kind": "remoteViewer",
-    "identity": {"label": "ownership-guard-ipad", "deviceName": "iPad", "networkAddress": "127.0.0.1"},
+    "identity": {"label": f"ownership-guard-{mobile_device_key}", "deviceName": mobile_device_label, "networkAddress": "127.0.0.1"},
     "connectedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "disconnectedAt": None,
 }
@@ -2001,11 +2140,22 @@ run_selected_scenarios() {
 }
 
 parse_args "$@"
+case "$MOBILE_DEVICE_KEY" in
+  iphone|ipad)
+    ;;
+  *)
+    fail "SPACES_MOBILE_E2E_DEVICE_KEY must be iphone or ipad, got: $MOBILE_DEVICE_KEY"
+    ;;
+esac
 SUITE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-e2e.XXXXXX")"
-IPAD_UDID="$(resolve_simulator_udid "$IPAD_NAME")"
+MOBILE_UDID="$(resolve_simulator_udid "$MOBILE_DEVICE_NAME")"
 build_macos_debug_products
-build_ios_for_testing "$IPAD_UDID"
+build_ios_for_testing "$MOBILE_UDID"
 start_demo
+case "$MOBILE_DEVICE_KEY" in
+  iphone) MOBILE_UDID="$IPHONE_UDID" ;;
+  ipad) MOBILE_UDID="$IPAD_UDID" ;;
+esac
 run_selected_scenarios
 
 printf '\nMobile E2E passed: %s\n' "${SELECTED_SCENARIOS[*]}"

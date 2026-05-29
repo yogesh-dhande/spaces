@@ -39,9 +39,8 @@ Each live session also participates in a service-level control path:
 - App-created ad hoc workspace terminals use persistent service-owned sessions so they survive app quit. The `.whileAttached` lifetime policy remains available for callers that intentionally want service reaping after the final live attachment detaches or expires.
 - If the service restarts and finds a session left in `starting` or `running` by a dead service PID, it marks that session failed and removes the stale `control.sock`.
 
-## In-Process Runtime
-- `GhosttyEmbeddedSessionRegistry` remains available for tests and legacy in-process sessions keyed by session ID.
-- Normal built-in Spaces terminals are service-owned, so `SpacesApp` windows attach to sessions through the service control socket and can reconnect after app quit or relaunch.
+## App Client Runtime
+- Built-in Spaces terminals are service-owned, so `SpacesApp` windows attach to sessions through the service control socket and can reconnect after app quit or relaunch.
 - App shutdown does not terminate service-owned terminal sessions. The quit prompt offers a destructive stop-all option for users who want to end every live service session before quitting.
 
 ## First-Party Clients
@@ -54,11 +53,9 @@ Each live session also participates in a service-level control path:
 - Workspace process launch, built-in coding-agent launch, app-opened workspace terminals, CLI-created sessions, and mobile-visible sessions use the service-owned path.
 
 ## macOS Window Behavior
-- `SpacesApp` uses `RemoteGhosttySessionHost` for service-owned sessions and subscribes to the daemon-owned session state stream for owner handoff compatibility, metadata updates, and ended-session final renders.
-- If a legacy in-process host already exists for a session ID, `SpacesApp` can still reuse that host instead of creating a remote host.
-- `TerminalSessionWindowController` attaches a local owner or viewer client record to the daemon-owned session, keeps window reuse keyed by stable session ID, mounts a live Ghostty surface only for the active owner, and otherwise shows takeover or terminal-ended status shells.
-- The embedded Ghostty owner view can rebind a live surface to a replacement AppKit host view without restarting the underlying terminal session, which is the current fork-level bridge toward detachable renderers.
-- The current macOS daemon client path uses the service live snapshot export for owner bootstrap and ended-session final renders, with `output.log` replay through `libghostty-vt` retained for transcript history, `spaces terminal tail`, and explicit no-live-session fallback recovery.
+- `SpacesApp` uses `RemoteGhosttySessionHost` for service-owned sessions and subscribes to the daemon-owned session state stream for owner handoff compatibility and metadata updates.
+- `TerminalSessionWindowController` attaches a local owner or viewer client record to the daemon-owned session, keeps window reuse keyed by stable session ID, mounts a live Ghostty surface only for the active owner, and uses a compact ownership/status shell for non-owner windows instead of rendering a passive terminal transcript.
+- The current macOS daemon client path uses the service live snapshot export for owner bootstrap, with `output.log` replay through `libghostty-vt` retained for transcript history, `spaces terminal tail`, and explicit no-live-session fallback recovery.
 - Title and working-directory updates still follow live session metadata emitted by the service.
 - Owner or viewer attachment state is still authoritative in `attachments.json`.
 - Only the active owner attachment may send input or drive PTY size.
@@ -91,6 +88,8 @@ Each live session also participates in a service-level control path:
   - optional deferred bounded raw-output history seed data for scrollback when the complete replay fits the transfer budget
   - incremental live output batches appended after bootstrap
 - History seed responses and live output batches carry their ending `output.log` byte offset so iOS can keep only the live batches not covered by a sampled full-history replay, including batches delivered after the replay data has been applied and released.
+- macOS remote windows and iOS owner rendering use the same replay coordination policy for deciding whether to apply a history seed, preserve an already-bootstrapped owner render, or drop output bytes already covered by history replay.
+- Client renderers force a current Ghostty frame after replayed snapshots, history seeds, incremental output, and scroll gestures so prompt redraws and row clears are visible before readiness or rendered-text state advances.
 - iOS first paint and first input-ready are driven from the bootstrap snapshot plus incremental live output. Raw-output history replay is deferred until the user scrolls away from the live bottom edge, and oversized logs keep the bootstrap render instead of replaying a partial VT stream from the middle of `output.log`.
 - Ordinary resize reconciles viewport geometry inside the current owner epoch. It does not schedule another full bootstrap or another history replay.
 - If the current owner epoch becomes desynchronized after takeover, the bridge prefers one explicit refresh or resync request instead of an implicit bootstrap loop.
@@ -109,14 +108,14 @@ Each live session also participates in a service-level control path:
 
 ## Validation
 The terminal slice is considered healthy when these flows work:
-- app-launched workspace terminals, built-in process windows, and coding-agent windows attach to the live in-process Ghostty host and reopen without restarting the session while `SpacesApp` stays alive
+- app-launched workspace terminals, built-in process windows, and coding-agent windows attach to service-owned sessions and reopen without restarting the session across `SpacesApp` quit and relaunch
 - session creation through `spaces terminal command`
 - `list`, `send`, `key`, `tail`, `show`, and `takeover`
 - app quit followed by app relaunch and reopen of the same live session
 - owner and viewer attachment persistence and lease expiry
 - transcript replay from `output.log` with persisted geometry
 - iOS attach, auto-takeover to the remote client, ownership transfer back to a macOS owner, and streamed render or input freshness on top of the same session boundary
-- large-transcript iPad takeover through the standalone demo path with a non-blank first owner frame, one owner bootstrap epoch, and preserved live updates after takeover
-- long-output iPad scrollback after takeover, with deferred history seeding, preserved scroll position while scrolled up, and no stray prompt repaint rows during owner rendering
+- large-transcript iPhone takeover through the standalone demo path with a non-blank first owner frame, one owner bootstrap epoch, and preserved live updates after takeover
+- long-output iPhone scrollback after takeover, with deferred history seeding, preserved scroll position while scrolled up, and no stray prompt repaint rows during owner rendering
 - built-in terminal churn profiling through `profile_built_in_terminal_stress.sh`, with `codex_churn` kept as the primary redraw-heavy regression scenario
 - longer manual churn sampling through `soak_built_in_terminal.sh`, including `SOAK_MODE=codex_churn` for sustained scrollback pressure and redraw churn

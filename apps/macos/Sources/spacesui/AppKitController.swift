@@ -510,7 +510,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     showError(WorkspaceError.invalidArgument(message: "Unable to stop all terminal sessions before quitting."))
                     return .terminateCancel
                 }
-                GhosttyEmbeddedSessionRegistry.shared.terminateAll()
                 return .terminateNow
             case .cancel: return .terminateCancel
             }
@@ -881,29 +880,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 reusedExistingWindow = true
             } else {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
-                let useControlSocketClientActions = Self.shouldUseTerminalControlSocketClientActions(sessionID: sessionID)
-                let attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)?
-                let detachClientAction: (@Sendable (String) throws -> Void)?
-                if useControlSocketClientActions {
-                    attachClientAction = { client, attachmentMode in
-                        let response = try TerminalControlClient.send(
-                            request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
-                            socketPath: paths.controlSocketPath)
-                        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-                    }
-                    detachClientAction = { clientID in
-                        let response = try TerminalControlClient.send(
-                            request: TerminalControlRequest(command: "detach", clientID: clientID), socketPath: paths.controlSocketPath)
-                        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-                    }
-                } else {
-                    attachClientAction = nil
-                    detachClientAction = nil
+                let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void = { client, attachmentMode in
+                    let response = try TerminalControlClient.send(
+                        request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
+                        socketPath: paths.controlSocketPath)
+                    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                }
+                let detachClientAction: @Sendable (String) throws -> Void = { clientID in
+                    let response = try TerminalControlClient.send(
+                        request: TerminalControlRequest(command: "detach", clientID: clientID), socketPath: paths.controlSocketPath)
+                    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
                 }
                 let created = TerminalSessionWindowController(
                     sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false,
-                    attachClientAction: attachClientAction, detachClientAction: detachClientAction,
-                    detachClientSynchronouslyOnClose: !useControlSocketClientActions,
+                    attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
                     onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
                     onWindowClose: { [weak self] sessionID, clientID in
                         if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
@@ -1025,7 +1015,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 paths: paths, isConfiguredProcessSession: isConfiguredProcessSession,
                 isAppTerminatingAndKeepingSessions: keepsTerminalSessionsRunningDuringTermination, now: now)
         else { return }
-        if !Self.terminateLocalBuiltInTerminalSessionIfPresent(sessionID: sessionID) { try? TerminalService.terminateSession(id: sessionID) }
+        try? TerminalService.terminateSession(id: sessionID)
         if (try? orchestrator.removeAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
     }
 
@@ -1257,32 +1247,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @MainActor static func terminalSessionHost(launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths)
         -> any TerminalGhosttySessionHosting
-    {
-        if GhosttyEmbeddedSessionRegistry.shared.existingCore(sessionID: launchConfiguration.sessionID) != nil {
-            return GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths)
-        }
-        return RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
-    }
-
-    @MainActor static func shouldUseTerminalControlSocketClientActions(sessionID: String) -> Bool {
-        GhosttyEmbeddedSessionRegistry.shared.existingCore(sessionID: sessionID) == nil
-    }
-
-    nonisolated static func launchLocalBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
-        -> TerminalServiceSessionSummary
-    {
-        try performBuiltInTerminalSessionWorkOnMainThread {
-            let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
-            let sessionCore = GhosttyEmbeddedSessionRegistry.shared.core(for: launchConfiguration, paths: paths)
-            try sessionCore.startIfNeeded()
-            let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
-            return TerminalServiceSessionSummary(
-                id: launchConfiguration.sessionID, title: runtimeState.title ?? launchConfiguration.title,
-                workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, backend: launchConfiguration.backend,
-                lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
-                childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
-        }
-    }
+    { RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths) }
 
     nonisolated static func launchServiceBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
         -> TerminalServiceSessionSummary
@@ -1294,22 +1259,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     ) -> WorkspaceOrchestrator.BuiltInTerminalSessionLauncher { { launchConfiguration in try createSession(launchConfiguration) } }
 
-    nonisolated static func terminateLocalBuiltInTerminalSessionIfPresent(sessionID: String) -> Bool {
-        (try? performBuiltInTerminalSessionWorkOnMainThread {
-            guard GhosttyEmbeddedSessionRegistry.shared.existingCore(sessionID: sessionID) != nil else { return false }
-            GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
-            return true
-        }) ?? false
-    }
-
     nonisolated static func terminateBuiltInTerminalSession(sessionID: String) {
         try? performBuiltInTerminalSessionWorkOnMainThread {
             (NSApp.delegate as? AppKitController)?.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: true)
-            if GhosttyEmbeddedSessionRegistry.shared.existingCore(sessionID: sessionID) != nil {
-                GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
-            } else {
-                try? TerminalService.terminateSession(id: sessionID)
-            }
+            try? TerminalService.terminateSession(id: sessionID)
         }
     }
 

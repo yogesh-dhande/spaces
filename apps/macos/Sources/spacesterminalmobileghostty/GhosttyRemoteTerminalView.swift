@@ -67,20 +67,9 @@ import Foundation
         }
 
         public static func pendingOutputsNotCovered(byHistorySeedEndOffset historySeedEndOffset: Int?, pendingOutputs: [Self]) -> [Self] {
-            guard let historySeedEndOffset, !pendingOutputs.isEmpty else { return pendingOutputs }
-            return pendingOutputs.compactMap { pendingOutput in
-                guard let outputEndByteOffset = pendingOutput.outputEndByteOffset else { return pendingOutput }
-                guard outputEndByteOffset > historySeedEndOffset else { return nil }
-
-                let outputStartByteOffset = max(0, outputEndByteOffset - pendingOutput.data.count)
-                guard outputStartByteOffset < historySeedEndOffset else { return pendingOutput }
-
-                let coveredByteCount = historySeedEndOffset - outputStartByteOffset
-                guard coveredByteCount < pendingOutput.data.count else { return nil }
-                return Self(
-                    id: "\(pendingOutput.id)|after|\(historySeedEndOffset)", data: Data(pendingOutput.data.dropFirst(coveredByteCount)),
-                    outputEndByteOffset: outputEndByteOffset)
-            }
+            TerminalClientReplayCoordinator.outputBatchesNotCovered(
+                byHistorySeedEndOffset: historySeedEndOffset, pendingOutputs: pendingOutputs.map(\.coordinatorOutputBatch)
+            ).map(Self.init(coordinatorOutputBatch:))
         }
 
         public static func appendingOutputNotCovered(_ pendingOutput: Self, to pendingOutputs: [Self], by historySeed: Self?) -> [Self] {
@@ -90,6 +79,15 @@ import Foundation
         public static func appendingOutputNotCovered(
             _ pendingOutput: Self, to pendingOutputs: [Self], byHistorySeedEndOffset historySeedEndOffset: Int?
         ) -> [Self] { pendingOutputs + pendingOutputsNotCovered(byHistorySeedEndOffset: historySeedEndOffset, pendingOutputs: [pendingOutput]) }
+
+        private var coordinatorOutputBatch: TerminalClientReplayCoordinator.OutputBatch {
+            .init(id: id, data: data, outputEndByteOffset: outputEndByteOffset)
+        }
+
+        private init(coordinatorOutputBatch: TerminalClientReplayCoordinator.OutputBatch) {
+            self.init(
+                id: coordinatorOutputBatch.id, data: coordinatorOutputBatch.data, outputEndByteOffset: coordinatorOutputBatch.outputEndByteOffset)
+        }
     }
 
     public struct GhosttyRemoteTerminalOwnerEpoch: Equatable {
@@ -254,6 +252,7 @@ import Foundation
         private var accessoryControlModifierPending = false
         private var suppressesSoftwareKeyboard = false
         private var postRefreshEmissionScheduled = false
+        private var needsRenderedTextSurfaceRefresh = false
         private var scrollSettledEmissionGeneration: UInt64 = 0
         private var scrollSettledEmissionTasks: [Task<Void, Never>] = []
         private var didScrollDuringCurrentPan = false
@@ -1072,13 +1071,14 @@ import Foundation
             requestSurfaceRefresh()
         }
 
-        private func applyOutput(_ outputData: Data, into session: ghostty_session_t) {
+        private func applyOutput(_ outputData: Data, into session: ghostty_session_t, refreshRenderedText: Bool = true) {
             let renderData = renderableOutputData(from: outputData)
             guard !renderData.isEmpty else { return }
             renderData.withUnsafeBytes { rawBuffer in
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
                 ghostty_session_process_output(session, baseAddress, UInt(renderData.count))
             }
+            if refreshRenderedText { needsRenderedTextSurfaceRefresh = true }
             requestSurfaceRefresh()
         }
 
@@ -1166,6 +1166,7 @@ import Foundation
             ghosttyRemoteTerminalTrace(
                 "scroll horizontal=\(String(format: "%.1f", horizontal)) vertical=\(String(format: "%.1f", vertical)) mods=\(mods)")
             ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), mods)
+            needsRenderedTextSurfaceRefresh = true
             requestSurfaceRefresh()
             return true
         }
@@ -1185,6 +1186,7 @@ import Foundation
             guard let session else { return }
             ghostty_session_refresh(session)
             GhosttyMobileAppService.shared.tick()
+            ghostty_surface_draw(ghostty_session_surface(session))
             setNeedsDisplay()
             layer.setNeedsDisplay()
             schedulePostRefreshEmission()
@@ -1234,6 +1236,7 @@ import Foundation
 
         private func performRenderedTextEmissionPass() {
             GhosttyMobileAppService.shared.tick()
+            refreshRenderedTextFromSurfaceIfNeeded()
             emitRenderedTextIfNeeded()
             reportInputReadinessIfNeeded()
         }
@@ -1325,8 +1328,7 @@ import Foundation
             onViewportSizeChanged?(resolved.columns, resolved.rows)
         }
 
-        // Unit tests may inspect an idle local surface directly, but live owner render
-        // dumps must not export the iOS surface after output churn.
+        // Unit tests may inspect the local surface directly.
         func capturedSnapshotForTesting() -> GhosttyTerminalSnapshot? {
             guard let session else { return nil }
             return exportedSnapshot(from: session)
@@ -1383,6 +1385,19 @@ import Foundation
                 defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells)
         }
 
+        private func refreshRenderedTextFromSurfaceIfNeeded() {
+            guard needsRenderedTextSurfaceRefresh else { return }
+            needsRenderedTextSurfaceRefresh = false
+            guard onRenderedTextChanged != nil else { return }
+            guard isTerminalVisible, let session else {
+                currentRenderedText = ""
+                return
+            }
+            guard activeOwnerEpoch != nil || activeEndedRender != nil else { return }
+            guard let snapshot = exportedSnapshot(from: session) else { return }
+            currentRenderedText = GhosttyTerminalSnapshotLayout.plainText(for: viewportSnapshot(for: snapshot, session: session))
+        }
+
         private func updateRenderedTextSource(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch?, endedRender: GhosttyRemoteTerminalEndedRender?, fallbackText: String,
             session: ghostty_session_t?
@@ -1415,10 +1430,11 @@ import Foundation
             activeOwnerEpoch = ownerEpoch
             activeEndedRender = nil
             let bootstrapSnapshot = ownerEpoch.bootstrapSnapshot.map { viewportSnapshot(for: $0, session: session) }
-            let isFirstOwnerEpoch = lastAppliedOwnerEpochID == nil
-            let preservesExistingRenderedHistory =
-                ownerEpoch.pendingOutputs.isEmpty && ownerEpoch.historySeed == nil && bootstrapSnapshot != nil
-                && previousOwnerEpoch?.bootstrapSnapshot == ownerEpoch.bootstrapSnapshot && lastAppliedOwnerEpochID != nil
+            let preservesExistingRenderedHistory = TerminalClientReplayCoordinator.shouldPreserveRenderedHistoryForOwnerBootstrap(
+                previousOwnerEpochID: previousOwnerEpoch?.id, currentOwnerEpochID: ownerEpoch.id,
+                previousBootstrapSnapshot: previousOwnerEpoch?.bootstrapSnapshot, currentBootstrapSnapshot: ownerEpoch.bootstrapSnapshot,
+                hasPendingOutputs: !ownerEpoch.pendingOutputs.isEmpty, hasHistorySeed: ownerEpoch.historySeed != nil,
+                hasAppliedOwnerEpoch: lastAppliedOwnerEpochID != nil)
             if preservesExistingRenderedHistory {
                 updateRenderedTextSource(ownerEpoch: ownerEpoch, endedRender: nil, fallbackText: fallbackLabel.text ?? "", session: session)
                 return
@@ -1450,14 +1466,11 @@ import Foundation
                     self.ownerBootstrapEpochID = nil
                 }
             }
-            let appliedFullHistorySeed = applyHistorySeedIfNeeded(for: ownerEpoch, into: session, trigger: "bootstrap", preserveRenderedText: false)
-            var appliedOutput = appliedFullHistorySeed
+            // Full output history can contain prompt redraws and screen clears that
+            // do not reconstruct the current viewport as reliably as the exported
+            // snapshot. Load it lazily for scrollback instead of during bootstrap.
+            var appliedOutput = false
             for pendingOutput in ownerEpoch.pendingOutputs where !appliedOutputBatchIDs.contains(pendingOutput.id) {
-                if isFirstOwnerEpoch, ownerEpoch.id.hasPrefix("owner|"), bootstrapSnapshot != nil {
-                    appliedOutputBatchIDs.insert(pendingOutput.id)
-                    onOutputBatchApplied?(pendingOutput.id)
-                    continue
-                }
                 applyOutput(pendingOutput.data, into: session)
                 appliedOutput = true
                 appliedOutputBatchIDs.insert(pendingOutput.id)
@@ -1500,7 +1513,7 @@ import Foundation
                 attributes: ["epoch_id": ownerEpoch.id, "history_seed_id": historySeed.id, "trigger": trigger])
             let startedAt = Date()
             resetSessionForFreshRender(into: session, preserveRenderedText: preserveRenderedText)
-            applyOutput(preparedHistorySeed, into: session)
+            applyOutput(preparedHistorySeed, into: session, refreshRenderedText: false)
             lastAppliedHistorySeedID = historySeed.id
             onHistorySeedApplied?(historySeed.id)
             logPerformanceEvent(

@@ -48,6 +48,8 @@ import spacesterminalcore
     private var debugSurfaceRefreshRequestCountValue = 0
     private var debugSurfaceRefreshPerformedCountValue = 0
 
+    private static let clearScreenBindingAction = "clear_screen"
+
     public var surface: ghostty_surface_t? { isSurfaceAttached ? sessionDriver.surface : nil }
 
     public convenience init(launchConfiguration: TerminalSessionLaunchConfiguration) {
@@ -98,7 +100,7 @@ import spacesterminalcore
         ) { [weak self] _ in MainActor.assumeIsolated { self?.updateWindowVisibility() } }
 
         keyObserver = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) {
-            [weak self] _ in MainActor.assumeIsolated { self?.setSurfaceFocus(true) }
+            [weak self] _ in MainActor.assumeIsolated { self?.syncSurfaceFocusWithWindow() }
         }
         resignKeyObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) {
             [weak self] _ in MainActor.assumeIsolated { self?.setSurfaceFocus(false) }
@@ -109,7 +111,7 @@ import spacesterminalcore
 
         updateSurfaceGeometry()
         updateWindowVisibility()
-        setSurfaceFocus(window.isKeyWindow && window.firstResponder === self)
+        syncSurfaceFocusWithWindow()
     }
 
     public override func updateTrackingAreas() {
@@ -134,7 +136,7 @@ import spacesterminalcore
 
     public override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
-        if accepted { setSurfaceFocus(true) }
+        if accepted { syncSurfaceFocusWithWindow() }
         return accepted
     }
 
@@ -243,6 +245,14 @@ import spacesterminalcore
             super.keyDown(with: event)
             return
         }
+        guard canProcessTerminalInput else {
+            super.keyDown(with: event)
+            return
+        }
+        if event.type == .keyDown, Self.isClearScreenShortcut(keyCode: event.keyCode, modifierFlags: event.modifierFlags) {
+            performClearScreenAction()
+            return
+        }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         if sendGhosttyKey(event: event, action: event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS) {
@@ -262,6 +272,10 @@ import spacesterminalcore
     }
 
     public override func keyUp(with event: NSEvent) {
+        guard canProcessTerminalInput else {
+            super.keyUp(with: event)
+            return
+        }
         if sendGhosttyKey(event: event, action: GHOSTTY_ACTION_RELEASE) {
             requestSurfaceRefresh()
             return
@@ -270,6 +284,10 @@ import spacesterminalcore
     }
 
     public override func flagsChanged(with event: NSEvent) {
+        guard canProcessTerminalInput else {
+            super.flagsChanged(with: event)
+            return
+        }
         if sendGhosttyKey(event: event, action: modifierKeyAction(for: event)) {
             requestSurfaceRefresh()
             return
@@ -279,6 +297,11 @@ import spacesterminalcore
 
     public override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if Self.shouldDeferToSystemShortcut(keyCode: event.keyCode, modifierFlags: event.modifierFlags) { return false }
+        guard canProcessTerminalInput else { return false }
+        if event.type == .keyDown, Self.isClearScreenShortcut(keyCode: event.keyCode, modifierFlags: event.modifierFlags) {
+            performClearScreenAction()
+            return true
+        }
         guard event.type == .keyDown, let surface else { return false }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let hasActionModifier = flags.contains(.command) || flags.contains(.control) || flags.contains(.option)
@@ -401,7 +424,7 @@ import spacesterminalcore
         lastOccluded = nil
         updateSurfaceGeometry()
         updateWindowVisibility()
-        setSurfaceFocus(window.isKeyWindow && window.firstResponder === self)
+        syncSurfaceFocusWithWindow()
         sessionDriver.requestSurfaceRefresh()
     }
 
@@ -501,7 +524,7 @@ import spacesterminalcore
             lastOccluded = nil
             updateSurfaceGeometry()
             updateWindowVisibility()
-            setSurfaceFocus(window?.isKeyWindow == true && window?.firstResponder === self)
+            syncSurfaceFocusWithWindow()
             if let surface { ghostty_surface_refresh(surface) }
             TerminalPerformance.logMetric(
                 "terminal_surface_create", target: "session=\(launchConfiguration.sessionID)",
@@ -605,6 +628,28 @@ import spacesterminalcore
         setSurfaceFocus(true)
     }
 
+    private var canProcessTerminalInput: Bool {
+        Self.canProcessTerminalInput(
+            attachmentMode: desiredAttachmentMode, windowIsKey: window?.isKeyWindow == true, firstResponderIsSelf: window?.firstResponder === self,
+            hasLiveInputBackend: surface != nil || sessionDriver.isUsingFallbackPTY)
+    }
+
+    @discardableResult private func performClearScreenAction() -> Bool {
+        if let surface {
+            let action = Self.clearScreenBindingAction
+            let performed = action.withCString { actionPointer in ghostty_surface_binding_action(surface, actionPointer, UInt(action.utf8.count)) }
+            if performed {
+                onInputActivity?()
+                requestSurfaceRefresh()
+                return true
+            }
+        }
+
+        sendRawBytes(Data(TerminalKeyInput.bytes(for: "ctrl+l") ?? [0x0C]))
+        requestSurfaceRefresh()
+        return true
+    }
+
     private func sendGhosttyKey(event: NSEvent, action: ghostty_input_action_e) -> Bool {
         guard let surface else { return false }
         var input = makeGhosttyKeyEvent(for: event, action: action)
@@ -655,6 +700,15 @@ import spacesterminalcore
                 || keyCode == UInt16(kVK_DownArrow))
         return isWindowTilingShortcut
     }
+
+    static func isClearScreenShortcut(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
+        let flags = modifierFlags.intersection([.command, .shift, .option, .control, .function])
+        return keyCode == UInt16(kVK_ANSI_K) && flags == .command
+    }
+
+    static func canProcessTerminalInput(
+        attachmentMode: TerminalAttachmentMode, windowIsKey: Bool, firstResponderIsSelf: Bool, hasLiveInputBackend: Bool
+    ) -> Bool { attachmentMode == .owner && windowIsKey && firstResponderIsSelf && hasLiveInputBackend }
 
     static func makeScrollMods(hasPreciseDeltas: Bool, momentumPhase: NSEvent.Phase) -> ghostty_input_scroll_mods_t {
         var mods: Int32 = hasPreciseDeltas ? 0b0000_0001 : 0
@@ -789,6 +843,8 @@ import spacesterminalcore
         ghostty_surface_set_focus(surface, focused)
     }
 
+    private func syncSurfaceFocusWithWindow() { setSurfaceFocus(window?.isKeyWindow == true && window?.firstResponder === self) }
+
     private func setSurfaceOcclusion(_ occluded: Bool) {
         guard let surface else { return }
         guard lastOccluded != occluded else { return }
@@ -805,7 +861,7 @@ import spacesterminalcore
         surfaceHostView.layoutSubtreeIfNeeded()
         window?.contentView?.layoutSubtreeIfNeeded()
         GhosttyEmbeddedAppService.shared.tick()
-        if let surface { ghostty_surface_refresh(surface) }
+        if let surface { ghostty_surface_draw(surface) }
         surfaceHostView.needsDisplay = true
         surfaceHostView.layer?.setNeedsDisplay()
         needsDisplay = true

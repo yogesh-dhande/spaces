@@ -15,8 +15,24 @@ import Foundation
             let ensureElapsedMS = TerminalPerformance.elapsedMS(since: ensureStartedAt)
             let socketPath = try TerminalServicePaths.socketPath()
             let requestStartedAt = Date()
-            let response = try TerminalServiceClient.send(
-                request: TerminalServiceRequest(command: "create", launchConfiguration: launchConfiguration), socketPath: socketPath, timeout: 10)
+            let requestTimeout = createSessionRequestTimeout()
+            let response: TerminalServiceResponse
+            do {
+                response = try TerminalServiceClient.send(
+                    request: TerminalServiceRequest(command: "create", launchConfiguration: launchConfiguration), socketPath: socketPath,
+                    timeout: requestTimeout)
+            } catch {
+                if let recovered = waitForCreatedSessionSummary(launchConfiguration, timeout: requestTimeout) {
+                    TerminalPerformance.logMetric(
+                        "terminal_service_create_session", target: "session=\(launchConfiguration.sessionID)",
+                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
+                        detail:
+                            "service_launch=\(launchedService ? 1 : 0) ensure_running_ms=\(ensureElapsedMS) rpc_ms=\(TerminalPerformance.elapsedMS(since: requestStartedAt)) recovered=1 error=\(String(describing: error)) state=\(recovered.state.rawValue)"
+                    )
+                    return recovered
+                }
+                throw error
+            }
             guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
             guard let session = response.session else {
                 throw TerminalServiceError.requestFailed("Terminal service did not return a session summary.")
@@ -171,6 +187,42 @@ import Foundation
 
         private static func shouldUseXCTestCompatibilityBackend() -> Bool {
             isRunningUnderXCTest() && ProcessInfo.processInfo.environment["SPACES_TERMINAL_SERVICE_EXECUTABLE"] == nil
+        }
+
+        static func createSessionRequestTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
+            positiveTimeout(environment["SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT"], defaultValue: 30)
+        }
+
+        private static func positiveTimeout(_ rawValue: String?, defaultValue: TimeInterval) -> TimeInterval {
+            guard let rawValue, let value = TimeInterval(rawValue), value > 0 else { return defaultValue }
+            return value
+        }
+
+        private static func waitForCreatedSessionSummary(_ launchConfiguration: TerminalSessionLaunchConfiguration, timeout: TimeInterval)
+            -> TerminalServiceSessionSummary?
+        {
+            let deadline = Date().addingTimeInterval(timeout)
+            repeat {
+                if let summary = try? sessionSummaryIfLive(for: launchConfiguration) { return summary }
+                Thread.sleep(forTimeInterval: 0.1)
+            } while Date() < deadline
+            return nil
+        }
+
+        private static func sessionSummaryIfLive(for launchConfiguration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary?
+        {
+            let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
+            guard FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) else {
+                return nil
+            }
+            let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+            guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }
+            guard isProcessAlive(pid: Int(runtimeState.servicePID)) else { return nil }
+            return TerminalServiceSessionSummary(
+                id: launchConfiguration.sessionID, title: runtimeState.title ?? launchConfiguration.title,
+                workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, backend: launchConfiguration.backend,
+                lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
+                childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
         }
 
         private static func createXCTestCompatibilitySession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws

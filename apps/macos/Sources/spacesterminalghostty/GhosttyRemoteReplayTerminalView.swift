@@ -106,7 +106,7 @@ import spacesterminalcore
 
         updateSurfaceGeometry()
         updateWindowVisibility()
-        setSurfaceFocus(window.isKeyWindow && window.firstResponder === self)
+        syncSurfaceFocusWithWindow()
     }
 
     override func updateTrackingAreas() {
@@ -133,7 +133,7 @@ import spacesterminalcore
 
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
-        if accepted { setSurfaceFocus(true) }
+        if accepted { syncSurfaceFocusWithWindow() }
         return accepted
     }
 
@@ -195,7 +195,7 @@ import spacesterminalcore
     }
 
     override func keyDown(with event: NSEvent) {
-        guard acceptsTerminalInput else {
+        guard canProcessTerminalInput else {
             super.keyDown(with: event)
             return
         }
@@ -225,12 +225,14 @@ import spacesterminalcore
 
     func update(
         snapshot: GhosttyTerminalSnapshot?, replayStateKey: String, historySeed: (id: String, data: Data)? = nil, outputData: Data?,
-        outputEventToken: String?
+        outputEventToken: String?, forceHistorySeed: Bool = false
     ) {
         createSurfaceIfNeeded()
         let shouldApplyIncrementalOutput = canApplyIncrementalOutput(
             outputData: outputData, outputEventToken: outputEventToken, replayStateKey: replayStateKey)
-        let shouldApplyHistorySeed = !shouldApplyIncrementalOutput && canApplyHistorySeed(historySeed, replayStateKey: replayStateKey)
+        let shouldApplyHistorySeed =
+            snapshot == nil && !shouldApplyIncrementalOutput
+            && canApplyHistorySeed(historySeed, replayStateKey: replayStateKey, force: forceHistorySeed)
         if let lastReplayStateKey, lastReplayStateKey != replayStateKey, !shouldApplyIncrementalOutput, !shouldApplyHistorySeed {
             lastViewportSnapshot = nil
             lastReplayPixelSize = nil
@@ -244,17 +246,29 @@ import spacesterminalcore
             applyHistorySeed(historySeed)
             return
         }
+        if !shouldApplyIncrementalOutput, let snapshot,
+            canApplyIncrementalOutputAfterSnapshot(outputData: outputData, outputEventToken: outputEventToken)
+        {
+            replaySnapshotIfNeeded(snapshot)
+            if let outputData { applyIncrementalOutput(outputData, outputEventToken: outputEventToken) }
+            return
+        }
         if shouldApplyIncrementalOutput, let outputData {
             applyIncrementalOutput(outputData, outputEventToken: outputEventToken)
             return
         }
         guard let snapshot else { return }
+        replaySnapshotIfNeeded(snapshot)
+    }
+
+    @discardableResult private func replaySnapshotIfNeeded(_ snapshot: GhosttyTerminalSnapshot) -> Bool {
         let viewportSnapshot = viewportSnapshot(for: snapshot)
         let pixelSize = currentPixelSize()
-        guard lastViewportSnapshot != viewportSnapshot || lastReplayPixelSize != pixelSize else { return }
+        guard lastViewportSnapshot != viewportSnapshot || lastReplayPixelSize != pixelSize else { return false }
         replay(snapshot: viewportSnapshot)
         lastViewportSnapshot = viewportSnapshot
         lastReplayPixelSize = pixelSize
+        return true
     }
 
     func snapshot() -> GhosttyTerminalSnapshot? { GhosttyTerminalSnapshotCapture.captureFromSurface(surface) }
@@ -344,7 +358,7 @@ import spacesterminalcore
         lastOccluded = nil
         updateSurfaceGeometry()
         updateWindowVisibility()
-        setSurfaceFocus(window.isKeyWindow && window.firstResponder === self)
+        syncSurfaceFocusWithWindow()
         requestSurfaceRefresh()
     }
 
@@ -380,7 +394,7 @@ import spacesterminalcore
             lastOccluded = nil
             updateSurfaceGeometry()
             updateWindowVisibility()
-            setSurfaceFocus(window?.isKeyWindow == true && window?.firstResponder === self)
+            syncSurfaceFocusWithWindow()
             replayLatestSnapshotIfNeeded()
             if let surface { ghostty_surface_refresh(surface) }
         } catch {
@@ -440,12 +454,11 @@ import spacesterminalcore
         lastRenderedText = nil
     }
 
-    private func canApplyHistorySeed(_ historySeed: (id: String, data: Data)?, replayStateKey: String) -> Bool {
-        guard let historySeed, !historySeed.data.isEmpty else { return false }
-        guard surface != nil else { return false }
-        guard lastAppliedHistorySeedID != historySeed.id else { return false }
-        guard lastAppliedHistorySeedID == nil || lastReplayStateKey != replayStateKey || !hasReplaySurfaceContent else { return false }
-        return true
+    private func canApplyHistorySeed(_ historySeed: (id: String, data: Data)?, replayStateKey: String, force: Bool = false) -> Bool {
+        TerminalClientReplayCoordinator.shouldApplyHistorySeed(
+            lastAppliedHistorySeedID: lastAppliedHistorySeedID, nextHistorySeedID: historySeed?.id,
+            hasHistorySeedData: historySeed?.data.isEmpty == false, hasSurface: surface != nil,
+            replayStateChanged: force || (lastReplayStateKey.map { $0 != replayStateKey } ?? true), hasReplaySurfaceContent: hasReplaySurfaceContent)
     }
 
     private func applyHistorySeed(_ historySeed: (id: String, data: Data)) {
@@ -468,6 +481,14 @@ import spacesterminalcore
         guard lastAppliedOutputEventToken != outputEventToken else { return false }
         guard lastReplayStateKey == replayStateKey else { return false }
         guard hasReplaySurfaceContent else { return false }
+        return true
+    }
+
+    private func canApplyIncrementalOutputAfterSnapshot(outputData: Data?, outputEventToken: String?) -> Bool {
+        guard let outputData, !outputData.isEmpty else { return false }
+        guard surface != nil else { return false }
+        guard let outputEventToken, !outputEventToken.isEmpty else { return false }
+        guard lastAppliedOutputEventToken != outputEventToken else { return false }
         return true
     }
 
@@ -559,6 +580,8 @@ import spacesterminalcore
         setSurfaceFocus(true)
     }
 
+    private var canProcessTerminalInput: Bool { acceptsTerminalInput && window?.isKeyWindow == true && window?.firstResponder === self }
+
     private func ghosttyModifiers(from flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {
         var mods = GHOSTTY_MODS_NONE
         if flags.contains(.shift) { mods = ghostty_input_mods_e(rawValue: mods.rawValue | GHOSTTY_MODS_SHIFT.rawValue) }
@@ -601,7 +624,7 @@ import spacesterminalcore
 
     private func requestSurfaceRefresh() {
         GhosttyEmbeddedAppService.shared.tick()
-        if let surface { ghostty_surface_refresh(surface) }
+        if let surface { ghostty_surface_draw(surface) }
         surfaceHostView.needsDisplay = true
         surfaceHostView.layer?.setNeedsDisplay()
         needsDisplay = true
@@ -619,7 +642,7 @@ import spacesterminalcore
 
     @objc private func handleWindowDidChangeScreen(_ notification: Notification) { updateSurfaceGeometry() }
     @objc private func handleWindowDidChangeOcclusionState(_ notification: Notification) { updateWindowVisibility() }
-    @objc private func handleWindowDidBecomeKey(_ notification: Notification) { setSurfaceFocus(true) }
+    @objc private func handleWindowDidBecomeKey(_ notification: Notification) { syncSurfaceFocusWithWindow() }
     @objc private func handleWindowDidResignKey(_ notification: Notification) { setSurfaceFocus(false) }
 
     private static func replayLaunchConfiguration(from launchConfiguration: TerminalSessionLaunchConfiguration) -> TerminalSessionLaunchConfiguration
@@ -636,6 +659,7 @@ import spacesterminalcore
         if let fallback = GhosttyEmbeddedTerminalView.rawKeyFallbackSpecifier(for: event) { return fallback }
         switch Int(event.keyCode) {
         case kVK_Return, kVK_ANSI_KeypadEnter: return "enter"
+        case kVK_ANSI_K where semanticFlags == [.command]: return "ctrl+l"
         case kVK_Delete where semanticFlags == [.command]: return "ctrl+u"
         case kVK_Delete where semanticFlags == [.option]: return "ctrl+w"
         case kVK_Delete: return "backspace"
@@ -648,6 +672,8 @@ import spacesterminalcore
         if flags.contains(.control), let flag = controlKeySpecifier(for: event), !flags.contains(.command), !flags.contains(.option) { return flag }
         return nil
     }
+
+    private func syncSurfaceFocusWithWindow() { setSurfaceFocus(window?.isKeyWindow == true && window?.firstResponder === self) }
 
     private static func controlKeySpecifier(for event: NSEvent) -> String? {
         guard let flaglessCharacters = event.charactersIgnoringModifiers, flaglessCharacters.count == 1,

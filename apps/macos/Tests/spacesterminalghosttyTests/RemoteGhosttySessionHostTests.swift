@@ -18,6 +18,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 for: keyEvent(keyCode: UInt16(kVK_Delete), modifierFlags: [.command, .numericPad, .function])), "ctrl+u")
     }
 
+    @MainActor func testRemoteReplayMapsCommandKToClearScreenControl() throws {
+        XCTAssertEqual(
+            GhosttyRemoteReplayTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_ANSI_K), modifierFlags: .command)), "ctrl+l")
+    }
+
     func testRemoteHostSendsResizeWhenRuntimeStillHasPreviousOwnerSize() {
         XCTAssertTrue(
             RemoteGhosttySessionHost.shouldSendViewportResize(
@@ -337,6 +342,70 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 outputData: Data("WRONG".utf8)))
 
         waitForCondition("viewer replays snapshot instead of fresh incremental bytes") {
+            self.normalize(self.visibleText(for: host)).contains("alpha") && self.normalize(self.visibleText(for: host)).contains("beta")
+        }
+
+        XCTAssertFalse(normalize(visibleText(for: host)).contains("WRONG"))
+        XCTAssertFalse(normalize(host.snapshotText()).contains("WRONG"))
+        XCTAssertEqual(normalize(visibleText(for: host)), normalize("alpha\nbeta "))
+    }
+
+    @MainActor func testRemoteRenderableOwnerPrefersHandoffSnapshotOverFreshHistorySeed() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: "remote-handoff-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-05-29T00:00:00Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2), paths: paths)
+        let queue = DispatchQueue(label: "spaces.remote-host.handoff-snapshot-test")
+        let initialPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "remote-handoff-snapshot", reason: "initial", emittedAt: "2026-05-29T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
+            screenStateRevision: nil,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: "remote-handoff-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-05-29T00:00:00Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2),
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live", snapshot: nil, snapshotText: nil,
+            transcriptTail: nil, outputByteCount: nil)
+        let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: .init(
+                sessionID: "remote-handoff-snapshot", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-29T00:00:00Z"), paths: paths)
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let window = NSWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-29T00:00:00Z")
+        try host.attach(client: client, mode: .owner, into: container)
+
+        try "WRONG\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+        let attachmentSnapshot = TerminalSessionAttachmentSnapshot(
+            clients: [client],
+            attachments: [
+                TerminalAttachment(sessionID: "remote-handoff-snapshot", clientID: client.id, mode: .owner, attachedAt: "2026-05-29T00:00:01Z")
+            ])
+        server.broadcast(
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "remote-handoff-snapshot", reason: "attachment_state", emittedAt: "2026-05-29T00:00:01Z", sessionStateRevision: 2,
+                sessionStateFlags: 1, screenStateRevision: 2,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "remote-handoff-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                    updatedAt: "2026-05-29T00:00:01Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2),
+                attachmentSnapshot: attachmentSnapshot, title: "live", workingDirectory: "/tmp/live", snapshot: snapshot(text: "alpha\nbeta "),
+                snapshotText: "alpha\nbeta ", transcriptTail: nil, outputByteCount: nil))
+
+        waitForCondition("owner handoff snapshot") {
             self.normalize(self.visibleText(for: host)).contains("alpha") && self.normalize(self.visibleText(for: host)).contains("beta")
         }
 

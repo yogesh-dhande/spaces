@@ -39,6 +39,12 @@ import XCTest
             XCTAssertEqual(TerminalService.parseProcessIDs("123\n\nnot-a-pid\n456 789\n"), [123, 456, 789])
         }
 
+        func testCreateSessionRequestTimeoutUsesPositiveEnvironmentOverride() {
+            XCTAssertEqual(TerminalService.createSessionRequestTimeout(environment: ["SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT": "45"]), 45)
+            XCTAssertEqual(TerminalService.createSessionRequestTimeout(environment: ["SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT": "0"]), 30)
+            XCTAssertEqual(TerminalService.createSessionRequestTimeout(environment: [:]), 30)
+        }
+
         private func makeTemporaryDirectory() throws -> URL {
             let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent(
                 "spaces-terminal-service-tests-\(UUID().uuidString)", isDirectory: true)

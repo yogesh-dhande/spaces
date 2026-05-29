@@ -112,9 +112,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private let loadWindowFrameAction: (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?
     private let saveWindowFrameAction: (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void
     private let sessionHostProvider: @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
-    private var ownerGhosttySessionHost: (any TerminalGhosttySessionHosting)?
+    private var clientGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var activeGhosttySessionHost: (any TerminalGhosttySessionHosting)?
-    private var viewerGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var refreshTask: Task<Void, Never>?
     private var takeoverTask: Task<Void, Never>?
     private var pendingWindowFramePersistTask: Task<Void, Never>?
@@ -166,7 +165,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowFocus: onWindowFocus,
             onWindowClose: onWindowClose, loadWindowFrameAction: loadWindowFrameAction, saveWindowFrameAction: saveWindowFrameAction,
             sessionHostProvider: sessionHostProvider ?? { launchConfiguration, paths in
-                GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths)
+                RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
             })
     }
 
@@ -1117,7 +1116,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         let usesInlineControls = visibleRenderer == .outputFallback && isOwner
         inputRowStackView.isHidden = !usesInlineControls
         let showsTakeoverShell = visibleRenderer == .ghosttyTakeoverStatus && backend == .ghosttyEmbedded
-        takeoverContainerView.isHidden = !(showsTakeoverShell && !isOwner && isInteractive)
+        takeoverContainerView.isHidden = !(showsTakeoverShell && !isOwner)
         takeoverRowStackView.isHidden = takeoverContainerView.isHidden
         isViewerTakeoverShellActive = !takeoverContainerView.isHidden
         takeoverMessageLabel.isHidden = !isViewerTakeoverShellActive
@@ -1127,7 +1126,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         sendButton.isEnabled = usesInlineControls && isInteractive
         interruptButton.isEnabled = usesInlineControls && isInteractive
         newlineButton.isEnabled = usesInlineControls && isInteractive
-        takeoverButton.isHidden = isOwner
+        takeoverButton.isHidden = isOwner || !isInteractive
         takeoverButton.isEnabled = !isOwner && isInteractive
         if !isInteractive {
             inputField.placeholderString = "Session is not running"
@@ -1288,8 +1287,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             if isInteractiveRuntimeState(lastObservedRuntimeState) { return .ghosttyTakeoverStatus }
             return hasGhosttyFinalRenderStateAvailable() ? .ghosttyEndedFinalRender : .unavailable
         }
-        if isInteractiveRuntimeState(lastObservedRuntimeState) { return .ghosttyTakeoverStatus }
-        return hasGhosttyFinalRenderStateAvailable() ? .ghosttyEndedFinalRender : .unavailable
+        return .ghosttyTakeoverStatus
     }
 
     private func currentRefreshInterval() -> Duration {
@@ -1370,7 +1368,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private func currentWindowTitle(fallback: String, isOwner: Bool) -> String {
         guard backend == .ghosttyEmbedded else { return fallback }
         let baseTitle = ghosttySessionInfoProvider?.effectiveTitle ?? lastObservedRuntimeState?.title ?? fallback
-        return isOwner ? baseTitle : "\(baseTitle) (viewer)"
+        return baseTitle
     }
 
     private func currentSummaryWorkingDirectory(fallback: String) -> String {
@@ -1416,21 +1414,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     }
 
     private func resolvedGhosttySessionHost(for launchConfiguration: TerminalSessionLaunchConfiguration) -> any TerminalGhosttySessionHosting {
-        if GhosttyEmbeddedSessionRegistry.shared.existingCore(sessionID: launchConfiguration.sessionID) != nil {
-            if let ownerGhosttySessionHost { return ownerGhosttySessionHost }
-            let created = sessionHostProvider(launchConfiguration, paths)
-            ownerGhosttySessionHost = created
-            return created
-        }
-        if preferredAttachmentMode == .owner {
-            if let ownerGhosttySessionHost { return ownerGhosttySessionHost }
-            let created = sessionHostProvider(launchConfiguration, paths)
-            ownerGhosttySessionHost = created
-            return created
-        }
-        if let viewerGhosttySessionHost { return viewerGhosttySessionHost }
-        let created = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
-        viewerGhosttySessionHost = created
+        if let clientGhosttySessionHost { return clientGhosttySessionHost }
+        let created = sessionHostProvider(launchConfiguration, paths)
+        clientGhosttySessionHost = created
         return created
     }
 
@@ -1447,10 +1433,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     private static func resolveGhosttyHostComponents(_ host: any TerminalGhosttySessionHosting) -> (
         sessionInfoProvider: any TerminalGhosttySessionInfoProviding, rendererHost: any TerminalGhosttyRendererHosting
-    ) {
-        if let embeddedHost = host as? GhosttyEmbeddedSessionHost { return (embeddedHost, embeddedHost.rendererHost) }
-        return (host, host)
-    }
+    ) { return (host, host) }
 
     private func activeOwnerClient(snapshot: TerminalSessionAttachmentSnapshot?) -> TerminalClient? {
         guard let snapshot else { return nil }
@@ -1520,7 +1503,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     func debugForceRefreshSkippingOwnerAttach() { refreshNow(allowGhosttyOwnerAttach: false) }
     public var clientID: String { client.id }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
-    var debugShowsTakeoverButton: Bool { !takeoverRowStackView.isHidden }
+    var debugShowsTakeoverButton: Bool { !takeoverButton.isHidden }
     var debugInlineInputEnabled: Bool { inputField.isEnabled }
     var debugTakeoverEnabled: Bool { takeoverButton.isEnabled }
     var debugShowsRendererLabel: Bool { !rendererLabel.isHidden }

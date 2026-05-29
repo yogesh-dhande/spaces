@@ -15,6 +15,7 @@ public enum TerminalRemoteSessionStatePolicy {
         switch reason {
         case TerminalRemoteSessionStateReason.initial, TerminalRemoteSessionStateReason.attachmentState:
             return ownerKind == .localWindow || ownerKind == .remoteViewer
+        case TerminalRemoteSessionStateReason.resize: return ownerKind == .localWindow || ownerKind == .remoteViewer
         case TerminalRemoteSessionStateReason.terminated: return true
         case TerminalRemoteSessionStateReason.input, TerminalRemoteSessionStateReason.inputOutput: return ownerKind != .remoteViewer
         default: return false
@@ -35,5 +36,12 @@ public enum TerminalRemoteSessionStatePolicy {
         return snapshotText.contains(where: { !$0.isWhitespace && !$0.isNewline })
     }
 
-    public static func hasUsableOwnerBootstrapState(_ payload: GhosttyRemoteSessionStatePayload?) -> Bool { payload?.snapshot != nil }
+    public static func hasUsableOwnerBootstrapState(
+        _ payload: GhosttyRemoteSessionStatePayload?, viewportColumns: Int? = nil, viewportRows: Int? = nil
+    ) -> Bool {
+        guard let snapshot = payload?.snapshot else { return false }
+        if let viewportColumns, snapshot.columns != viewportColumns { return false }
+        if let viewportRows, snapshot.rows != viewportRows { return false }
+        return true
+    }
 }

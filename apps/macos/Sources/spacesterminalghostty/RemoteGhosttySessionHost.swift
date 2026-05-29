@@ -97,6 +97,7 @@ import spacesterminalcore
 
     public func snapshot() -> GhosttyTerminalSnapshot? {
         ensureStateStreamStartedIfNeeded()
+        refreshReplayFromOutputHistoryIfNeeded()
         if let snapshot = currentSnapshot() { return snapshot }
         let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         return snapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
@@ -104,11 +105,13 @@ import spacesterminalcore
 
     public func snapshotText() -> String? {
         ensureStateStreamStartedIfNeeded()
-        if let outputLogSnapshotText = currentOutputLogSnapshotText() { return outputLogSnapshotText }
-        if let transcriptTail = currentTranscriptTail(), !transcriptTail.isEmpty { return transcriptTail }
+        refreshReplayFromOutputHistoryIfNeeded()
+        if let replayedText = terminalView.replayedText(), !replayedText.isEmpty { return replayedText }
+        if terminalView.hasReplaySurfaceContent, let snapshotText = terminalView.snapshotText(), !snapshotText.isEmpty { return snapshotText }
         if let snapshotText = latestSnapshotTextIfCompatible() { return snapshotText }
-        if let snapshotText = terminalView.snapshotText(), !snapshotText.isEmpty { return snapshotText }
-        if let snapshot = currentSnapshot() { return GhosttyTerminalSnapshotRenderer.render(snapshot).string }
+        if let snapshot = latestSnapshotIfCompatible() { return GhosttyTerminalSnapshotRenderer.render(snapshot).string }
+        if let transcriptTail = currentTranscriptTail(), !transcriptTail.isEmpty { return transcriptTail }
+        if let outputLogSnapshotText = currentOutputLogSnapshotText() { return outputLogSnapshotText }
         let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         return snapshotStream.snapshotText(columns: runtimeState?.columns, rows: runtimeState?.rows)
     }
@@ -127,6 +130,7 @@ import spacesterminalcore
 
     public var debugSurfaceRefreshRequestCount: Int { 0 }
     public func debugVisibleSurfaceText() -> String? {
+        refreshReplayFromOutputHistoryIfNeeded()
         if let replayedText = terminalView.replayedText(), !replayedText.isEmpty { return replayedText }
         if terminalView.hasReplaySurfaceContent, let snapshotText = terminalView.snapshotText(), !snapshotText.isEmpty { return snapshotText }
         if let snapshot = currentSnapshot() { return GhosttyTerminalSnapshotLayout.plainText(for: snapshot) }
@@ -167,7 +171,8 @@ import spacesterminalcore
         lastSubscriptionAttemptAt = nil
         terminalView.update(
             snapshot: currentSnapshotForReplayUpdate(), replayStateKey: currentReplayStateKey(), historySeed: currentReplayHistorySeed(),
-            outputData: payload.outputData, outputEventToken: payload.outputData == nil ? nil : payload.emittedAt)
+            outputData: payload.snapshot == nil ? payload.outputData : nil,
+            outputEventToken: payload.snapshot == nil && payload.outputData != nil ? payload.emittedAt : nil)
         if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
         let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
         TerminalPerformance.logMetric(
@@ -198,27 +203,27 @@ import spacesterminalcore
     }
 
     private func currentSnapshot() -> GhosttyTerminalSnapshot? {
-        if let snapshot = latestState?.snapshot,
-            Self.shouldUseLiveSnapshot(snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
-        {
-            return snapshot
-        }
+        if let snapshot = latestSnapshotIfCompatible() { return snapshot }
         let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         return snapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
     }
 
     private func currentSnapshotForReplayUpdate() -> GhosttyTerminalSnapshot? {
-        if let snapshot = latestState?.snapshot,
-            Self.shouldUseLiveSnapshot(snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
-        {
-            return snapshot
-        }
+        if let snapshot = latestSnapshotIfCompatible() { return snapshot }
         guard !terminalView.hasReplaySurfaceContent else { return nil }
         let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         return snapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
     }
 
+    private func latestSnapshotIfCompatible() -> GhosttyTerminalSnapshot? {
+        guard let snapshot = latestState?.snapshot,
+            Self.shouldUseLiveSnapshot(snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
+        else { return nil }
+        return snapshot
+    }
+
     private func currentReplayHistorySeed() -> (id: String, data: Data)? {
+        guard latestState?.snapshot == nil else { return nil }
         guard let history = TerminalReplayOutputHistory.load(path: paths.outputPath) else { return nil }
         guard let data = history.data, !data.isEmpty else { return nil }
         if cachedReplayHistorySeed?.byteCount != history.totalByteCount || cachedReplayHistorySeed?.data.count != data.count {
@@ -226,6 +231,14 @@ import spacesterminalcore
         }
         guard let cachedReplayHistorySeed else { return nil }
         return ("history|\(cachedReplayHistorySeed.byteCount)", cachedReplayHistorySeed.data)
+    }
+
+    private func refreshReplayFromOutputHistoryIfNeeded() {
+        guard latestState?.snapshot == nil else { return }
+        guard let historySeed = currentReplayHistorySeed() else { return }
+        terminalView.update(
+            snapshot: nil, replayStateKey: currentReplayStateKey(), historySeed: historySeed, outputData: nil, outputEventToken: nil,
+            forceHistorySeed: true)
     }
 
     private func currentTranscriptTail() -> String? {

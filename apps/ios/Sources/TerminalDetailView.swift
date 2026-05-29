@@ -135,13 +135,12 @@ struct TerminalDetailView: View {
 
     private var topOverlay: some View {
         HStack(spacing: 12) {
-            chromeButton {
+            chromeButton(accessibilityIdentifier: "terminal.back", accessibilityLabel: "Back") {
                 onBack()
             } label: {
                 Image(systemName: "chevron.left")
                     .font(.headline.weight(.semibold))
             }
-            .accessibilityIdentifier("terminal.back")
 
             Spacer(minLength: 0)
 
@@ -196,11 +195,12 @@ struct TerminalDetailView: View {
     /// Zero-visual-footprint accessibility marker that preserves the ownership
     /// signal used by UI tests now that the visible "Owner" tag is removed.
     private var ownerStateMarker: some View {
-        Color.clear
+        Text("Owner")
+            .font(.caption2)
+            .foregroundStyle(.clear)
             .frame(width: 1, height: 1)
-            .accessibilityElement()
+            .clipped()
             .accessibilityIdentifier("terminal.ownerBadge")
-            .accessibilityLabel("Owner")
     }
 
     private var statusShell: some View {
@@ -228,7 +228,12 @@ struct TerminalDetailView: View {
         .background(Self.surfaceBackground)
     }
 
-    private func chromeButton<Label: View>(action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
+    private func chromeButton<Label: View>(
+        accessibilityIdentifier: String,
+        accessibilityLabel: String,
+        action: @escaping () -> Void,
+        @ViewBuilder label: () -> Label
+    ) -> some View {
         Button(action: action) {
             label()
                 .foregroundStyle(.white)
@@ -240,6 +245,9 @@ struct TerminalDetailView: View {
                         .overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1))
                 )
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityIdentifier(accessibilityIdentifier)
     }
 
     private func chromeActivityBadge(accessibilityLabel: String) -> some View {

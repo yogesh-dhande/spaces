@@ -149,52 +149,8 @@ extension Notification.Name {
     }
 }
 
-@MainActor public final class GhosttyEmbeddedSessionRegistry {
-    public static let shared = GhosttyEmbeddedSessionRegistry()
-
-    private var cores: [String: GhosttyEmbeddedSessionCore] = [:]
-    private var hosts: [String: GhosttyEmbeddedSessionHost] = [:]
-
-    private init() {}
-
-    public func core(for launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) -> GhosttyEmbeddedSessionCore {
-        if let existing = cores[launchConfiguration.sessionID] { return existing }
-        let created = GhosttyEmbeddedSessionCore(
-            launchConfiguration: launchConfiguration, paths: paths,
-            onSessionClosed: { [weak self] closedCore in self?.unregisterClosedCore(closedCore) })
-        cores[launchConfiguration.sessionID] = created
-        return created
-    }
-
-    public func existingCore(sessionID: String) -> GhosttyEmbeddedSessionCore? { cores[sessionID] }
-
-    public func host(for launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) -> GhosttyEmbeddedSessionHost {
-        if let existing = hosts[launchConfiguration.sessionID] { return existing }
-        let created = GhosttyEmbeddedSessionHost(core: core(for: launchConfiguration, paths: paths))
-        hosts[launchConfiguration.sessionID] = created
-        return created
-    }
-
-    public func existingHost(sessionID: String) -> GhosttyEmbeddedSessionHost? { hosts[sessionID] }
-
-    public func terminate(sessionID: String) {
-        hosts.removeValue(forKey: sessionID)
-        guard let core = cores.removeValue(forKey: sessionID) else { return }
-        core.terminate()
-    }
-
-    public func terminateAll() { for sessionID in Array(cores.keys) { terminate(sessionID: sessionID) } }
-
-    private func unregisterClosedCore(_ core: GhosttyEmbeddedSessionCore) {
-        let sessionID = core.launchConfiguration.sessionID
-        guard cores[sessionID] === core else { return }
-        cores.removeValue(forKey: sessionID)
-        if hosts[sessionID]?.core === core { hosts.removeValue(forKey: sessionID) }
-    }
-}
-
 @MainActor public final class GhosttyEmbeddedSessionCore {
-    private static let incomingOutputCoalescingInterval: Duration = .milliseconds(16)
+    private static let incomingOutputCoalescingInterval: Duration = .milliseconds(4)
     private static let remoteTranscriptLineCount = 2_000
 
     private final class IncomingOutputBuffer: @unchecked Sendable {
@@ -558,6 +514,7 @@ extension Notification.Name {
         guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
         do {
             try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+            flushPendingIncomingOutputForStateExport()
             refreshCachedOwnerBootstrapSnapshotBeforeRemoteTakeover()
             try TerminalSessionPersistence.transferOwnership(
                 sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths,
@@ -789,7 +746,6 @@ extension Notification.Name {
         if pendingInputOutputResync || inputOutputResyncWorkItem != nil {
             pendingInputOutputResync = false
             scheduleInputOutputResync()
-            return
         }
         broadcastCurrentState(reason: "output", outputByteCount: data.count, outputData: data, outputEndByteOffset: outputEndByteOffset)
     }
@@ -891,6 +847,12 @@ extension Notification.Name {
         }
     }
 
+    private func flushPendingIncomingOutputForStateExport() {
+        let coalescedData = incomingOutputBuffer.drain()
+        guard !coalescedData.isEmpty else { return }
+        appendOutput(coalescedData)
+    }
+
     private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputData: Data? = nil, outputEndByteOffset: Int? = nil) {
         let startedAt = Date()
         let ownerClient = activeOwnerClient()
@@ -929,7 +891,12 @@ extension Notification.Name {
         let ownerClient = activeOwnerClient()
         let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason, ownerKind: ownerClient?.kind)
         let includeTranscriptTail = Self.remoteStateShouldIncludeTranscriptTail(reason: reason, runtimeState: runtimeState)
-        let bootstrapOutputData = outputData
+        let bootstrapHistorySeed =
+            outputData == nil && Self.remoteStateShouldIncludeOwnerBootstrapHistory(reason: reason, ownerKind: ownerClient?.kind)
+            ? TerminalReplayOutputHistory.load(path: paths.outputPath) : nil
+        let bootstrapOutputData = outputData ?? bootstrapHistorySeed?.data
+        let bootstrapOutputByteCount = outputByteCount ?? bootstrapHistorySeed?.totalByteCount ?? bootstrapOutputData?.count
+        let bootstrapOutputEndByteOffset = outputEndByteOffset ?? (bootstrapHistorySeed?.data == nil ? nil : bootstrapHistorySeed?.totalByteCount)
         if includeScreenState {
             let snapshotExportStartedAt = Date()
             trace(
@@ -961,8 +928,8 @@ extension Notification.Name {
                 sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
                 screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                 title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, snapshot: snapshot, snapshotText: snapshotText,
-                transcriptTail: transcriptTail, outputByteCount: outputByteCount ?? bootstrapOutputData?.count, outputData: bootstrapOutputData,
-                outputEndByteOffset: outputEndByteOffset)
+                transcriptTail: transcriptTail, outputByteCount: bootstrapOutputByteCount, outputData: bootstrapOutputData,
+                outputEndByteOffset: bootstrapOutputEndByteOffset)
         }
         let snapshot: GhosttyTerminalSnapshot? = nil
         let snapshotText: String? = nil
@@ -973,7 +940,7 @@ extension Notification.Name {
             sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
             screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, title: effectiveTitle,
             workingDirectory: effectiveWorkingDirectory, snapshot: snapshot, snapshotText: snapshotText, transcriptTail: transcriptTail,
-            outputByteCount: outputByteCount ?? bootstrapOutputData?.count, outputData: bootstrapOutputData, outputEndByteOffset: outputEndByteOffset)
+            outputByteCount: bootstrapOutputByteCount, outputData: bootstrapOutputData, outputEndByteOffset: bootstrapOutputEndByteOffset)
     }
 
     private func resolveRemoteScreenState(runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?) -> (
@@ -1054,12 +1021,18 @@ extension Notification.Name {
         }
     }
 
+    private static func remoteStateShouldIncludeOwnerBootstrapHistory(reason: String, ownerKind: TerminalClientKind?) -> Bool {
+        guard ownerKind == .remoteViewer else { return false }
+        return reason == TerminalRemoteSessionStateReason.initial || reason == TerminalRemoteSessionStateReason.attachmentState
+    }
+
     var debugCurrentTitle: String? { currentTitle }
     var debugCurrentWorkingDirectory: String? { currentWorkingDirectory }
     func debugHandleIncomingOutput(_ data: Data) {
         requestSurfaceRefreshAction()
         appendOutput(data)
     }
+    func debugHandleOwnerInputActivity() { handleOwnerInputActivity() }
     func debugPersistRuntimeState(force: Bool = true) { refreshRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
     func debugHandleSessionClosed() { handleSessionClosed() }
@@ -1091,7 +1064,7 @@ extension Notification.Name {
     public var paths: TerminalSessionPaths { core.paths }
     public var rendererHost: any TerminalGhosttyRendererHosting { core.rendererHost }
 
-    public init(
+    init(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
         requestSurfaceRefreshAction: (@MainActor () -> Void)? = nil
     ) {
@@ -1182,6 +1155,7 @@ extension Notification.Name {
     var debugCurrentTitle: String? { core.debugCurrentTitle }
     var debugCurrentWorkingDirectory: String? { core.debugCurrentWorkingDirectory }
     func debugHandleIncomingOutput(_ data: Data) { core.debugHandleIncomingOutput(data) }
+    func debugHandleOwnerInputActivity() { core.debugHandleOwnerInputActivity() }
     func debugPersistRuntimeState(force: Bool = true) { core.debugPersistRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { core.debugSetLastKnownChildPID(pid) }
     func debugHandleSessionClosed() { core.debugHandleSessionClosed() }

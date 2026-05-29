@@ -67,6 +67,14 @@ run_demo_env() {
     "$@"
 }
 
+seed_codex_demo_config() {
+  local codex_home="$temp_root/home/.codex"
+  mkdir -p "$codex_home"
+  cat >"$codex_home/config.toml" <<'EOF'
+check_for_update_on_startup = false
+EOF
+}
+
 stop_demo_workspace() {
   if [[ -z "$project_dir" || -z "$spaces_db_path" || -z "$spaces_runtime_dir" ]]; then
     return
@@ -772,6 +780,7 @@ ipad_app_stderr_log="$temp_root/ipad-app.stderr.log"
 iphone_app_stdout_log="$temp_root/iphone-app.stdout.log"
 iphone_app_stderr_log="$temp_root/iphone-app.stderr.log"
 mkdir -p "$spaces_runtime_dir" "$project_dir" "$temp_root/home"
+seed_codex_demo_config
 
 ipad_udid="$(resolve_device_udid "$ipad_name")"
 iphone_udid="$(resolve_device_udid "$iphone_name")"
@@ -782,7 +791,7 @@ else
   ios_build_log="$temp_root/ios-build.log"
   ios_derived_data="$temp_root/ios-derived-data"
   mkdir -p "$ios_derived_data"
-  build_ios_app "$ios_derived_data" "$ios_build_log" "$ipad_udid"
+  build_ios_app "$ios_derived_data" "$ios_build_log" "$iphone_udid"
   ios_app_path="$(resolve_ios_app_path "$ios_derived_data/Build/Products/Debug-iphonesimulator/SpacesMobile.app")"
 fi
 
@@ -803,7 +812,15 @@ boot_device "$iphone_udid"
     git commit -q -m 'Initial demo repo'
 )
 
-run_demo_env \
+env \
+  -u NO_COLOR \
+  -u CLICOLOR \
+  -u CLICOLOR_FORCE \
+  -u CI \
+  -u CODEX_CI \
+  -u CODEX_MANAGED_BY_NPM \
+  -u CODEX_MANAGED_PACKAGE_ROOT \
+  -u CODEX_THREAD_ID \
   HOME="$temp_root/home" \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \

@@ -655,6 +655,39 @@
             window.isHidden = true
         }
 
+        func testRemoteTerminalHostViewDefersOwnerHistorySeedDuringBootstrap() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session",
+                    id: "owner|history-bootstrap",
+                    bootstrapSnapshot: snapshot(columns: 24, rows: 4, text: "shell % bootstrap"),
+                    historySeed: GhosttyRemoteTerminalOutputBatch(id: "history|owner", data: Data("\u{001B}[2Jprompt-only".utf8))
+                ),
+                endedRender: nil,
+                fallbackText: "Waiting for terminal state..."
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            let replayed = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let replayedText = GhosttyTerminalSnapshotLayout.plainText(for: replayed)
+            XCTAssertTrue(replayedText.localizedStandardContains("shell % bootstrap"), replayedText)
+            XCTAssertFalse(replayedText.localizedStandardContains("prompt-only"), replayedText)
+
+            window.isHidden = true
+        }
+
         func testRemoteTerminalHostViewTearsDownSessionWhenRemovedFromWindow() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
@@ -875,6 +908,148 @@
 
             wait(for: [renderedExpectation], timeout: 2)
             XCTAssertTrue(renderedText.localizedStandardContains("hi"))
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewPublishesRenderedTextAfterOwnerPendingOutput() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            let renderedExpectation = expectation(description: "pending owner output published")
+            var renderedText = ""
+            hostView.onRenderedTextChanged = { text in
+                renderedText = text
+                if text.localizedStandardContains("shell % !") { renderedExpectation.fulfill() }
+            }
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            let bootstrapSnapshot = snapshot(columns: 12, rows: 2, text: "shell % ")
+            let ownerEpochID = "owner|test"
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session",
+                    id: ownerEpochID,
+                    bootstrapSnapshot: bootstrapSnapshot,
+                    pendingOutputs: []
+                ),
+                endedRender: nil,
+                fallbackText: "Waiting for terminal state..."
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session",
+                    id: ownerEpochID,
+                    bootstrapSnapshot: bootstrapSnapshot,
+                    pendingOutputs: [GhosttyRemoteTerminalOutputBatch(id: "event-1", data: Data("!".utf8))]
+                ),
+                endedRender: nil,
+                fallbackText: "Waiting for terminal state..."
+            )
+
+            wait(for: [renderedExpectation], timeout: 2)
+            XCTAssertTrue(renderedText.localizedStandardContains("shell % !"), renderedText)
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewClearsAutosuggestionOverwriteFromRenderedText() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            let renderedExpectation = expectation(description: "autosuggestion-cleared output published")
+            var renderedText = ""
+            hostView.onRenderedTextChanged = { text in
+                renderedText = text
+                if text.localizedStandardContains("t not found") { renderedExpectation.fulfill() }
+            }
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            let ownerEpochID = "owner|autosuggestion-clear"
+            let bootstrapSnapshot = snapshot(columns: 80, rows: 8, text: "")
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session",
+                    id: ownerEpochID,
+                    bootstrapSnapshot: bootstrapSnapshot,
+                    pendingOutputs: [
+                        GhosttyRemoteTerminalOutputBatch(id: "autosuggestion-output", data: autosuggestionEraseFixtureOutput())
+                    ]
+                ),
+                endedRender: nil,
+                fallbackText: "Waiting for terminal state..."
+            )
+
+            wait(for: [renderedExpectation], timeout: 2)
+            XCTAssertTrue(renderedText.localizedStandardContains("t not found"), renderedText)
+            XCTAssertFalse(renderedText.localizedStandardContains("ailscale"), renderedText)
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewAppliesInitialOwnerPendingOutputOverBootstrapSnapshot() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            let renderedExpectation = expectation(description: "initial owner output repaired bootstrap snapshot")
+            var renderedText = ""
+            hostView.onRenderedTextChanged = { text in
+                renderedText = text
+                if text.localizedStandardContains("python not found") { renderedExpectation.fulfill() }
+            }
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            let staleBootstrap = snapshot(
+                columns: 80,
+                rows: 8,
+                text: "shell % codex -c check_for_update_on_startup=false resu"
+            )
+            let repairOutput = Data(
+                ("\u{001B}[2J\u{001B}[H"
+                    + "shell % which python\r\n"
+                    + "python not found\r\n"
+                    + "shell % ").utf8
+            )
+
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session",
+                    id: "owner|initial-output-repair",
+                    bootstrapSnapshot: staleBootstrap,
+                    pendingOutputs: [
+                        GhosttyRemoteTerminalOutputBatch(id: "repair-output", data: repairOutput)
+                    ]
+                ),
+                endedRender: nil,
+                fallbackText: "Waiting for terminal state..."
+            )
+
+            wait(for: [renderedExpectation], timeout: 2)
+            XCTAssertTrue(renderedText.localizedStandardContains("which python"), renderedText)
+            XCTAssertTrue(renderedText.localizedStandardContains("python not found"), renderedText)
+            XCTAssertFalse(renderedText.localizedStandardContains("check_for_update_on_startup"), renderedText)
+            XCTAssertFalse(renderedText.localizedStandardContains("resu"), renderedText)
 
             window.isHidden = true
         }
@@ -1304,6 +1479,62 @@
             window.isHidden = true
         }
 
+        func testRemoteTerminalHostViewResetsRenderedHistoryForNewOwnerEpochWithSameSnapshot() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            let bootstrapSnapshot = snapshot(columns: 16, rows: 2, text: "shell % ")
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session",
+                    id: "owner-epoch-1",
+                    bootstrapSnapshot: bootstrapSnapshot,
+                    historySeed: GhosttyRemoteTerminalOutputBatch(
+                        id: "history|owner-epoch-1",
+                        data: Data("old-history-line\r\nshell % ".utf8)
+                    ),
+                    pendingOutputs: []
+                ),
+                endedRender: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+            let historySnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let historyText = GhosttyTerminalSnapshotLayout.plainText(for: historySnapshot)
+            XCTAssertTrue(historyText.localizedStandardContains("old-history-line"), historyText)
+
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session",
+                    id: "owner-epoch-2",
+                    bootstrapSnapshot: bootstrapSnapshot,
+                    historySeed: nil,
+                    pendingOutputs: []
+                ),
+                endedRender: nil,
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+            let refreshedSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let refreshedText = GhosttyTerminalSnapshotLayout.plainText(for: refreshedSnapshot)
+            XCTAssertFalse(refreshedText.localizedStandardContains("old-history-line"), refreshedText)
+            XCTAssertTrue(refreshedText.localizedStandardContains("shell %"), refreshedText)
+
+            window.isHidden = true
+        }
+
         func testRemoteTerminalHostViewClearsStaleReplayBaseBeforeBootstrappingFullHistory() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
@@ -1420,6 +1651,26 @@
 
         private func promptFixtureOutput() -> Data { Data("hello\r\nshell % ".utf8) }
 
+        private func autosuggestionEraseFixtureOutput() -> Data {
+            let clearSuggestion = String(repeating: "\u{0008}", count: 8)
+                + String(repeating: "\u{001B}[39m ", count: 8)
+                + "\u{001B}[8D"
+            let output =
+                "Using Node v24.11.1\r\n"
+                + "\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J"
+                + "shell % \u{001B}[K\u{001B}[?2004h"
+                + "w\u{0008}which t"
+                + String(repeating: "\u{0008}", count: 7)
+                + "\u{001B}[32mw\u{001B}[32mh\u{001B}[32mi\u{001B}[32mc\u{001B}[32mh\u{001B}[39m"
+                + "\u{001B}[2C\u{001B}[90mailscale\u{001B}[39m"
+                + clearSuggestion
+                + "\u{001B}[?2004l\r\r\n"
+                + "t not found\r\n"
+                + "\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J"
+                + "shell % \u{001B}[K\u{001B}[?2004h"
+            return Data(output.utf8)
+        }
+
         private func snapshotSignature(_ snapshot: GhosttyTerminalSnapshot?) -> String {
             guard let snapshot else { return "nil" }
             let sampleCells = snapshot.cells.prefix(12).map { "\($0.codepoint):\($0.flags)" }.joined(separator: ",")
@@ -1468,8 +1719,6 @@
                 let epochID =
                     if outputRepresentsFullHistory {
                         "history|\(outputEventToken ?? replayStateKey)"
-                    } else if outputData == nil {
-                        "snapshot|\(snapshotSignature(snapshot))"
                     } else {
                         "owner|\(snapshotSignature(snapshot))"
                     }

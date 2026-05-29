@@ -128,6 +128,13 @@ final class TerminalOutputTailTests: XCTestCase {
             transcript.split(separator: "\n").contains { line in String(line).trimmingCharacters(in: .whitespacesAndNewlines) == "%" }, transcript)
     }
 
+    func testStableTranscriptClearsAutosuggestionOverwrite() throws {
+        let transcript = try TerminalOutputTail.stableTranscript(from: autosuggestionEraseFixtureOutput(), columns: 80, rows: 8)
+
+        XCTAssertTrue(transcript.localizedStandardContains("t not found"), transcript)
+        XCTAssertFalse(transcript.localizedStandardContains("ailscale"), transcript)
+    }
+
     private func promptEOLMarkFixtureOutput() -> Data {
         let eolMark =
             "\u{001B}[1m\u{001B}[7m%\u{001B}[27m\u{001B}[1m\u{001B}[0m" + String(repeating: " ", count: 96)
@@ -159,6 +166,16 @@ final class TerminalOutputTailTests: XCTestCase {
             __roundtrip_ipad_one__\r
             \(eolMark)shell % \u{001B}[K\u{001B}[?2004h
             """
+        return Data(output.utf8)
+    }
+
+    private func autosuggestionEraseFixtureOutput() -> Data {
+        let clearSuggestion = String(repeating: "\u{0008}", count: 8) + String(repeating: "\u{001B}[39m ", count: 8) + "\u{001B}[8D"
+        let output =
+            "Using Node v24.11.1\r\n" + "\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J" + "shell % \u{001B}[K\u{001B}[?2004h" + "w\u{0008}which t"
+            + String(repeating: "\u{0008}", count: 7) + "\u{001B}[32mw\u{001B}[32mh\u{001B}[32mi\u{001B}[32mc\u{001B}[32mh\u{001B}[39m"
+            + "\u{001B}[2C\u{001B}[90mailscale\u{001B}[39m" + clearSuggestion + "\u{001B}[?2004l\r\r\n" + "t not found\r\n"
+            + "\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J" + "shell % \u{001B}[K\u{001B}[?2004h"
         return Data(output.utf8)
     }
 }

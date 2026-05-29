@@ -143,15 +143,18 @@ final class SpacesMobileUITests: XCTestCase {
                 }
                 takeOverButton.tap()
                 guard waitForOwnerState(in: app, timeout: 20) != nil else {
-                    XCTFail("Timed out waiting for owner state after iPad retakeover attempt \(attemptIndex + 1)")
+                    XCTFail("Timed out waiting for owner state after mobile retakeover attempt \(attemptIndex + 1)")
                     return
                 }
                 XCTAssertTrue(
                     waitForOwnerReadyState(in: app, timeout: 5),
-                    "Owner-ready badge did not return promptly after iPad retakeover attempt \(attemptIndex + 1)"
+                    "Owner-ready badge did not return promptly after mobile retakeover attempt \(attemptIndex + 1)"
                 )
-                assertOwnerReadyStable(in: app, duration: 1, context: "after iPad retakeover attempt \(attemptIndex + 1)")
+                assertOwnerReadyStable(in: app, duration: 1, context: "after mobile retakeover attempt \(attemptIndex + 1)")
                 writeMarkerIfNeeded(configuration.manualRetakeoverObservedPath(for: attemptIndex))
+                if attemptIndex + 1 < configuration.manualRetakeoverAttempts {
+                    waitForMarkerIfNeeded(configuration.manualRetakeoverContinuePath(for: attemptIndex), timeout: 30)
+                }
             }
             if let finalMacRetakeoverRequestPath = configuration.finalMacRetakeoverRequestPath {
                 waitForMarkerIfNeeded(finalMacRetakeoverRequestPath, timeout: 30)
@@ -204,13 +207,37 @@ final class SpacesMobileUITests: XCTestCase {
     }
 
     private func returnToTerminalList(in app: XCUIApplication) throws {
-        let backButton = app.buttons["terminal.back"]
-        if backButton.waitForExistence(timeout: 2) {
-            backButton.tap()
+        if isTerminalListVisible(in: app) {
+            return
+        }
+
+        if let backControl = waitForElement(
+            primary: app.buttons["terminal.back"],
+            fallback: app.descendants(matching: .any)["terminal.back"],
+            timeout: 4
+        ) {
+            backControl.tap()
         } else {
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.06)).tap()
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.09, dy: 0.11)).tap()
         }
         XCTAssertTrue(waitForRunningApp(app, timeout: 5), "App stopped running after returning to the terminal list")
+        XCTAssertTrue(waitForTerminalList(in: app, timeout: 8), "Timed out returning to the terminal list")
+    }
+
+    private func waitForTerminalList(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if isTerminalListVisible(in: app) {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return false
+    }
+
+    private func isTerminalListVisible(in app: XCUIApplication) -> Bool {
+        let rowPredicate = NSPredicate(format: "identifier BEGINSWITH %@", "terminal.row.")
+        return app.buttons.matching(rowPredicate).firstMatch.exists
     }
 
     private func takeOverSessionFromList(
@@ -401,6 +428,7 @@ private struct UITestConfiguration: Decodable {
     let secondCommandText: String?
     let manualRetakeoverAttempts: Int
     let manualRetakeoverObservedPrefix: String?
+    let manualRetakeoverContinuePrefix: String?
     let postFirstCommandScreenshotPath: String?
     let postSecondCommandScreenshotPath: String?
     let finalMacRetakeoverRequestPath: String?
@@ -438,6 +466,7 @@ private struct UITestConfiguration: Decodable {
         case secondCommandText
         case manualRetakeoverAttempts
         case manualRetakeoverObservedPrefix
+        case manualRetakeoverContinuePrefix
         case postFirstCommandScreenshotPath
         case postSecondCommandScreenshotPath
         case finalMacRetakeoverRequestPath
@@ -482,6 +511,7 @@ private struct UITestConfiguration: Decodable {
         secondCommandText = try container.decodeIfPresent(String.self, forKey: .secondCommandText)
         manualRetakeoverAttempts = try container.decodeIfPresent(Int.self, forKey: .manualRetakeoverAttempts) ?? 0
         manualRetakeoverObservedPrefix = try container.decodeIfPresent(String.self, forKey: .manualRetakeoverObservedPrefix)
+        manualRetakeoverContinuePrefix = try container.decodeIfPresent(String.self, forKey: .manualRetakeoverContinuePrefix)
         postFirstCommandScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postFirstCommandScreenshotPath)
         postSecondCommandScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postSecondCommandScreenshotPath)
         finalMacRetakeoverRequestPath = try container.decodeIfPresent(String.self, forKey: .finalMacRetakeoverRequestPath)
@@ -495,6 +525,11 @@ private struct UITestConfiguration: Decodable {
     func manualRetakeoverObservedPath(for attemptIndex: Int) -> String? {
         guard let manualRetakeoverObservedPrefix else { return nil }
         return "\(manualRetakeoverObservedPrefix)-\(attemptIndex + 1)"
+    }
+
+    func manualRetakeoverContinuePath(for attemptIndex: Int) -> String? {
+        guard let manualRetakeoverContinuePrefix else { return nil }
+        return "\(manualRetakeoverContinuePrefix)-\(attemptIndex + 1)"
     }
 
     static func load(environment: [String: String]) throws -> Self {
