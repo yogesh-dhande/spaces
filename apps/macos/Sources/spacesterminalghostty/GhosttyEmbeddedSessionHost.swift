@@ -51,7 +51,7 @@ extension Notification.Name {
 @MainActor public final class GhosttyHeadlessRendererHost: TerminalGhosttyRendererHosting {
     private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
     private var isOwnerClient: (@MainActor (String) -> Bool)?
-    private var inputActivityHandler: (@MainActor () -> Void)?
+    private var inputActivityHandler: (@MainActor (Int) -> Void)?
 
     init(sessionDriver: GhosttyEmbeddedTerminalSessionDriver) { self.sessionDriver = sessionDriver }
 
@@ -59,7 +59,7 @@ extension Notification.Name {
 
     func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { sessionDriver.setOutputHandler(handler) }
 
-    func setInputActivityHandler(_ handler: (@MainActor () -> Void)?) { inputActivityHandler = handler }
+    func setInputActivityHandler(_ handler: (@MainActor (Int) -> Void)?) { inputActivityHandler = handler }
 
     func startSessionIfNeeded() throws { try sessionDriver.startIfNeeded() }
 
@@ -72,7 +72,7 @@ extension Notification.Name {
 
     func sendRawBytes(_ data: Data) {
         sessionDriver.sendRawBytes(data)
-        inputActivityHandler?()
+        inputActivityHandler?(data.count)
     }
 
     func foregroundPID() -> Int32? { sessionDriver.foregroundPID() }
@@ -133,29 +133,75 @@ extension Notification.Name {
 
 @MainActor public final class GhosttyEmbeddedSessionCore {
     private static let incomingOutputCoalescingInterval: Duration = .milliseconds(4)
+    private static let interactiveInputFlushWindowNanoseconds: UInt64 = 750_000_000
+    private static let interactiveInputMaximumByteCount = 128
 
     private final class IncomingOutputBuffer: @unchecked Sendable {
+        enum FlushSchedule: Sendable, Equatable {
+            case none
+            case delayed
+            case immediate
+        }
+
+        struct DrainedOutput: Sendable {
+            let data: Data
+            let isInteractive: Bool
+        }
+
         private let lock = NSLock()
         private var pendingData = Data()
         private var flushScheduled = false
+        private var immediateFlushScheduled = false
+        private var pendingInteractiveOutput = false
 
-        func append(_ data: Data) -> Bool {
-            guard !data.isEmpty else { return false }
+        func append(_ data: Data, interactive: Bool) -> FlushSchedule {
+            guard !data.isEmpty else { return .none }
             lock.lock()
             defer { lock.unlock() }
             pendingData.append(data)
-            guard !flushScheduled else { return false }
+            pendingInteractiveOutput = pendingInteractiveOutput || interactive
+            if flushScheduled {
+                guard interactive, !immediateFlushScheduled else { return .none }
+                immediateFlushScheduled = true
+                return .immediate
+            }
             flushScheduled = true
-            return true
+            immediateFlushScheduled = interactive
+            return interactive ? .immediate : .delayed
         }
 
-        func drain() -> Data {
+        func drain() -> DrainedOutput {
             lock.lock()
             defer { lock.unlock() }
             let drained = pendingData
+            let isInteractive = pendingInteractiveOutput
             pendingData = Data()
             flushScheduled = false
-            return drained
+            immediateFlushScheduled = false
+            pendingInteractiveOutput = false
+            return DrainedOutput(data: drained, isInteractive: isInteractive)
+        }
+    }
+
+    private final class InteractiveOutputGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var deadlineUptimeNanoseconds: UInt64?
+
+        func markActivity(now: UInt64 = DispatchTime.now().uptimeNanoseconds, windowNanoseconds: UInt64) {
+            lock.lock()
+            deadlineUptimeNanoseconds = now &+ windowNanoseconds
+            lock.unlock()
+        }
+
+        func consumeIfActive(now: UInt64 = DispatchTime.now().uptimeNanoseconds) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let deadline = deadlineUptimeNanoseconds, now <= deadline else {
+                deadlineUptimeNanoseconds = nil
+                return false
+            }
+            deadlineUptimeNanoseconds = nil
+            return true
         }
     }
 
@@ -187,6 +233,7 @@ extension Notification.Name {
     private var inputStateBroadcastScheduled = false
     private var pendingInputOutputResync = false
     private var inputOutputResyncWorkItem: DispatchWorkItem?
+    private let interactiveOutputGate = InteractiveOutputGate()
     private var ownerEpoch: UInt64 = 0
     private var lastResizeSerialByClientID: [String: UInt64] = [:]
     private let onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)?
@@ -210,7 +257,7 @@ extension Notification.Name {
             self.refreshRuntimeState(force: true)
         }
         rendererHostStorage.setOwnerClientResolver { [weak self] clientID in self?.isOwner(clientID: clientID) ?? false }
-        rendererHostStorage.setInputActivityHandler { [weak self] in self?.handleOwnerInputActivity() }
+        rendererHostStorage.setInputActivityHandler { [weak self] byteCount in self?.handleOwnerInputActivity(byteCount: byteCount) }
         sessionDriver.onSurfaceClosed = { [weak self] in self?.handleSessionClosed() }
     }
 
@@ -222,7 +269,7 @@ extension Notification.Name {
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             try ensureOutputHandle()
             rendererHostStorage.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
-            rendererHostStorage.setInputActivityHandler { [weak self] in self?.handleOwnerInputActivity() }
+            rendererHostStorage.setInputActivityHandler { [weak self] byteCount in self?.handleOwnerInputActivity(byteCount: byteCount) }
             try rendererHostStorage.startSessionIfNeeded()
             try startControlServer()
             try startStateStreamServer()
@@ -530,6 +577,10 @@ extension Notification.Name {
         let horizontal = CGFloat(request.scrollHorizontal ?? 0)
         let vertical = CGFloat(request.scrollVertical ?? 0)
         guard horizontal != 0 || vertical != 0 else { return TerminalControlResponse(ok: false, message: "Missing scroll delta.") }
+        if let ownerClient = activeOwnerClient() {
+            logMobileTakeoverPerformance(
+                name: "owner_input_activity", attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": "1", "input_kind": "scroll"])
+        }
         let scrolled = rendererHostStorage.sendScroll(horizontal: horizontal, vertical: vertical)
         if scrolled { broadcastCurrentState(reason: TerminalRemoteSessionStateReason.scroll) }
         TerminalPerformance.logMetric(
@@ -663,13 +714,15 @@ extension Notification.Name {
         return staleClientIDs
     }
 
-    private func appendOutput(_ data: Data) {
+    private func appendOutput(_ data: Data, interactiveResync: Bool = false) {
         let startedAt = Date()
         do {
             let outputHandle = try ensureOutputHandle()
             try outputHandle.write(contentsOf: data)
             let outputEndByteOffset = (try? outputHandle.seekToEnd()).map(Self.clampedInt)
-            postOutputDidChange(data: data, outputEndByteOffset: outputEndByteOffset)
+            requestSurfaceRefreshAction()
+            GhosttyEmbeddedAppService.shared.tick()
+            postOutputDidChange(data: data, outputEndByteOffset: outputEndByteOffset, interactiveResync: interactiveResync)
             TerminalPerformance.logMetric(
                 "terminal_output_write", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(data.count)")
@@ -712,7 +765,11 @@ extension Notification.Name {
         lastSessionStateRevision = change.revision
         lastSessionStateFlags = change.flags
         if change.flags.contains(.screen) { lastScreenStateRevision = change.revision }
-        if change.flags.contains(.screen) { requestSurfaceRefreshAction() }
+        if change.flags.contains(.screen) {
+            requestSurfaceRefreshAction()
+            logMobileTakeoverPerformance(
+                name: "state_change", attributes: ["revision": String(change.revision), "flags": String(change.flags.rawValue)])
+        }
         var metadataChanged = false
 
         if change.flags.contains(.title) {
@@ -773,18 +830,27 @@ extension Notification.Name {
         broadcastCurrentState(reason: "runtime_state")
     }
 
-    private func postOutputDidChange(data: Data, outputEndByteOffset: Int?) {
+    private func postOutputDidChange(data: Data, outputEndByteOffset: Int?, interactiveResync: Bool = false) {
         NotificationCenter.default.post(
             name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID, "byteCount": data.count])
-        if pendingInputOutputResync || inputOutputResyncWorkItem != nil {
+        if interactiveResync {
+            pendingInputOutputResync = false
+            inputOutputResyncWorkItem?.cancel()
+            inputOutputResyncWorkItem = nil
+        } else if pendingInputOutputResync || inputOutputResyncWorkItem != nil {
             pendingInputOutputResync = false
             scheduleInputOutputResync()
         }
         broadcastCurrentState(reason: "output", outputByteCount: data.count, outputEndByteOffset: outputEndByteOffset)
     }
 
-    private func handleOwnerInputActivity() {
+    private func handleOwnerInputActivity(byteCount: Int) {
         guard let ownerClient = activeOwnerClient() else { return }
+        let interactiveInput = byteCount > 0 && byteCount <= Self.interactiveInputMaximumByteCount
+        logMobileTakeoverPerformance(
+            name: "owner_input_activity", count: byteCount,
+            attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": interactiveInput ? "1" : "0"])
+        if interactiveInput { interactiveOutputGate.markActivity(windowNanoseconds: Self.interactiveInputFlushWindowNanoseconds) }
         if ownerClient.kind == .localWindow {
             pendingInputOutputResync = true
             return
@@ -867,23 +933,21 @@ extension Notification.Name {
     }
 
     private nonisolated func enqueueIncomingOutput(_ data: Data) {
-        guard incomingOutputBuffer.append(data) else { return }
+        let flushSchedule = incomingOutputBuffer.append(data, interactive: interactiveOutputGate.consumeIfActive())
+        guard flushSchedule != .none else { return }
         Task { [weak self] in
-            do { try await Task.sleep(for: Self.incomingOutputCoalescingInterval) } catch { return }
+            if flushSchedule == .delayed { do { try await Task.sleep(for: Self.incomingOutputCoalescingInterval) } catch { return } }
             guard let self else { return }
-            let coalescedData = incomingOutputBuffer.drain()
-            guard !coalescedData.isEmpty else { return }
-            await MainActor.run {
-                self.requestSurfaceRefreshAction()
-                self.appendOutput(coalescedData)
-            }
+            let drainedOutput = incomingOutputBuffer.drain()
+            guard !drainedOutput.data.isEmpty else { return }
+            await MainActor.run { self.appendOutput(drainedOutput.data, interactiveResync: drainedOutput.isInteractive) }
         }
     }
 
     private func flushPendingIncomingOutputForStateExport() {
         let coalescedData = incomingOutputBuffer.drain()
-        guard !coalescedData.isEmpty else { return }
-        appendOutput(coalescedData)
+        guard !coalescedData.data.isEmpty else { return }
+        appendOutput(coalescedData.data, interactiveResync: coalescedData.isInteractive)
     }
 
     func prepareRenderStateExport() { flushPendingIncomingOutputForStateExport() }
@@ -906,7 +970,8 @@ extension Notification.Name {
         let decodedFrame = payload.decodedRenderFrame
         let renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
             reason: reason, frame: decodedFrame, frameByteCount: payload.renderFrame?.count, payloadByteCount: payloadBytes,
-            payloadEncodeMS: payloadEncodeMS, outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision)
+            payloadEncodeMS: payloadEncodeMS, outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision,
+            targetRevision: payload.screenStateRevision)
         logMobileTakeoverPerformance(
             name: "remote_state_publish", count: payloadBytes,
             attributes: [
@@ -963,7 +1028,7 @@ extension Notification.Name {
             )
             var renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
                 reason: reason, frame: frame, frameByteCount: renderFrame?.count, frameEncodeMS: renderFrameEncodeMS,
-                outputByteCount: outputByteCount, screenStateRevision: lastScreenStateRevision)
+                outputByteCount: outputByteCount, screenStateRevision: lastScreenStateRevision, targetRevision: lastScreenStateRevision)
             renderFrameAttributes["source"] = resolvedScreenState.source
             renderFrameAttributes["owner_kind"] = ownerClient?.kind.rawValue ?? "nil"
             logMobileTakeoverPerformance(
@@ -1020,11 +1085,8 @@ extension Notification.Name {
 
     var debugCurrentTitle: String? { currentTitle }
     var debugCurrentWorkingDirectory: String? { currentWorkingDirectory }
-    func debugHandleIncomingOutput(_ data: Data) {
-        requestSurfaceRefreshAction()
-        appendOutput(data)
-    }
-    func debugHandleOwnerInputActivity() { handleOwnerInputActivity() }
+    func debugHandleIncomingOutput(_ data: Data) { appendOutput(data, interactiveResync: interactiveOutputGate.consumeIfActive()) }
+    func debugHandleOwnerInputActivity(byteCount: Int = 1) { handleOwnerInputActivity(byteCount: byteCount) }
     func debugPersistRuntimeState(force: Bool = true) { refreshRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
     func debugSetLastKnownSurfaceSize(columns: Int, rows: Int) { lastKnownSurfaceSize = (columns, rows) }
@@ -1152,7 +1214,7 @@ extension Notification.Name {
     var debugCurrentTitle: String? { core.debugCurrentTitle }
     var debugCurrentWorkingDirectory: String? { core.debugCurrentWorkingDirectory }
     func debugHandleIncomingOutput(_ data: Data) { core.debugHandleIncomingOutput(data) }
-    func debugHandleOwnerInputActivity() { core.debugHandleOwnerInputActivity() }
+    func debugHandleOwnerInputActivity(byteCount: Int = 1) { core.debugHandleOwnerInputActivity(byteCount: byteCount) }
     func debugPersistRuntimeState(force: Bool = true) { core.debugPersistRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { core.debugSetLastKnownChildPID(pid) }
     func debugHandleSessionClosed() { core.debugHandleSessionClosed() }

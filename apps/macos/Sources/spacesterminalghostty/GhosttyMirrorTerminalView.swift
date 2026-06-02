@@ -291,9 +291,9 @@ import spacesterminalcore
         let applyStartedAt = Date()
         let applied = withCFrame(frame) { cFrame in ghostty_mirror_apply_render_frame(mirror, cFrame) }
         let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
-        var attributes = GhosttyRenderFrameMetrics.attributes(
-            frame: frame, dropped: !applied, dropReason: applied ? nil : "mirror_apply_failed", renderMode: "ghostty-mirror")
-        attributes["apply_ms"] = String(applyMS)
+        let attributes = GhosttyRenderFrameMetrics.attributes(
+            frame: frame, dropped: !applied, dropReason: applied ? nil : "mirror_apply_failed", renderMode: "ghostty-mirror",
+            targetRevision: frame.sessionRevision, appliedRevision: applied ? frame.sessionRevision : nil, applyMS: applyMS)
         SpacesMobileTerminalPerformanceLogger.emit(
             .init(
                 sessionID: launchConfiguration.sessionID, source: "mac-mirror", name: "render_frame_mirror_apply", elapsedMS: applyMS,

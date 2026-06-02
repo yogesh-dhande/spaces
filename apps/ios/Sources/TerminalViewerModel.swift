@@ -285,9 +285,11 @@ private enum TerminalViewerRenderMode: String {
         guard acceptsInput, hasConfirmedOwnerInputReadiness else { return }
         guard !text.isEmpty else { return }
         if appendNewline {
-            bufferInputText(text)
             flushBufferedInputText()
-            await sendKey("enter")
+            enqueueInputSend(kind: "send_text", detail: "\(text)\\n") { [weak self, text] in
+                guard let self else { return }
+                try await self.performSendTextRequest(text, appendNewline: true)
+            }
             return
         }
         bufferInputText(text)
@@ -331,6 +333,10 @@ private enum TerminalViewerRenderMode: String {
 
     private func bufferInputText(_ text: String) {
         bufferedInputText.append(text)
+        guard text.count != 1 else {
+            flushBufferedInputText()
+            return
+        }
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = Task { [weak self] in
             try? await Task.sleep(for: Self.inputBatchDelay)
@@ -358,15 +364,16 @@ private enum TerminalViewerRenderMode: String {
         }
     }
 
-    private func performSendTextRequest(_ text: String) async throws {
+    private func performSendTextRequest(_ text: String, appendNewline: Bool = false) async throws {
         let ownerEpoch = currentOwnerEpoch
-        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
+        try await performRequestUsingInputChannel {
+            [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, appendNewline] commandChannel in
             try await bridgeClient.sendText(
                 sessionID: sessionID,
                 clientID: clientID,
                 text: text,
                 ownerEpoch: ownerEpoch,
-                appendNewline: false,
+                appendNewline: appendNewline,
                 timeout: Self.inputRequestTimeout,
                 commandChannel: commandChannel
             )
@@ -420,27 +427,52 @@ private enum TerminalViewerRenderMode: String {
         detail: String,
         _ request: @escaping @Sendable () async throws -> Void
     ) {
-        inputSendQueue.enqueue(priority: .userInitiated) { [weak self] in
+        let enqueuedAt = Date()
+        logPerformanceEvent(name: "input_command_enqueue", count: detail.utf8.count, attributes: inputCommandAttributes(kind: kind, detail: detail))
+        inputSendQueue.enqueue(priority: .userInitiated) { [weak self, enqueuedAt] in
             guard let self, !Task.isCancelled else { return }
+            let rpcStartedAt = Date()
             do {
                 await MainActor.run {
+                    self.logPerformanceEvent(
+                        name: "input_command_rpc_begin",
+                        elapsedMS: TerminalPerformance.elapsedMS(since: enqueuedAt),
+                        count: detail.utf8.count,
+                        attributes: self.inputCommandAttributes(kind: kind, detail: detail)
+                    )
                     self.writeE2EEventIfNeeded(kind: "\(kind)_begin", detail: detail)
                 }
                 try await request()
+                let rpcMS = TerminalPerformance.elapsedMS(since: rpcStartedAt)
                 await MainActor.run {
                     if self.isOwner {
                         self.hasConfirmedOwnerInputReadiness = true
                         self.isInputSurfaceReady = true
                     }
+                    var attributes = self.inputCommandAttributes(kind: kind, detail: detail)
+                    attributes["success"] = "1"
+                    self.logPerformanceEvent(name: "input_command_rpc_end", elapsedMS: rpcMS, count: detail.utf8.count, attributes: attributes)
                     self.writeE2EEventIfNeeded(kind: "\(kind)_success", detail: detail)
                 }
             } catch {
+                let rpcMS = TerminalPerformance.elapsedMS(since: rpcStartedAt)
                 await MainActor.run {
+                    var attributes = self.inputCommandAttributes(kind: kind, detail: detail)
+                    attributes["success"] = "0"
+                    attributes["error"] = Self.sanitizedPerformanceDetail(error.localizedDescription)
+                    self.logPerformanceEvent(name: "input_command_rpc_end", elapsedMS: rpcMS, count: detail.utf8.count, attributes: attributes)
                     self.writeE2EEventIfNeeded(kind: "\(kind)_failure", detail: "\(detail) :: \(error.localizedDescription)")
                     self.handleInputSendError(error)
                 }
             }
         }
+    }
+
+    private func inputCommandAttributes(kind: String, detail: String) -> [String: String] {
+        [
+            "input_kind": kind,
+            "input_bytes": String(detail.utf8.count),
+        ]
     }
 
     private func handleInputSendError(_ error: Error) {
@@ -1015,6 +1047,7 @@ private enum TerminalViewerRenderMode: String {
         let decodedFrame = payload.decodedRenderFrame
         let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
         let wasOwner = isOwner
+        let wasTakingOver = isBusy || isAwaitingTakeoverConfirmation
         latestState = latestState?.merged(with: payload) ?? payload
         if payload.attachmentSnapshot != nil {
             isAwaitingTakeoverConfirmation = false
@@ -1027,6 +1060,11 @@ private enum TerminalViewerRenderMode: String {
             } else {
                 updateOwnerRenderSnapshot(from: payload)
             }
+        }
+        if isOwnerAfterMerge, wasTakingOver {
+            isAwaitingTakeoverConfirmation = false
+            isBusy = false
+            trace("takeover_confirmed_by_stream")
         }
         if !isOwnerAfterMerge {
             if wasOwner, let latestState {
@@ -1056,8 +1094,10 @@ private enum TerminalViewerRenderMode: String {
             screenStateRevision: payload.screenStateRevision,
             dropped: payload.renderFrame == nil ? nil : decodedFrame == nil,
             dropReason: payload.renderFrame != nil && decodedFrame == nil ? "decode_failed" : nil,
-            renderMode: renderMode)
-        renderFrameAttributes["apply_ms"] = String(TerminalPerformance.elapsedMS(since: applyStartedAt))
+            renderMode: renderMode,
+            targetRevision: payload.screenStateRevision,
+            appliedRevision: decodedFrame == nil && payload.renderFrame != nil ? nil : payload.screenStateRevision,
+            applyMS: TerminalPerformance.elapsedMS(since: applyStartedAt))
         renderFrameAttributes["owner_before"] = wasOwner ? "1" : "0"
         renderFrameAttributes["owner_after"] = isOwnerAfterMerge ? "1" : "0"
         logPerformanceEvent(
@@ -1146,6 +1186,10 @@ private enum TerminalViewerRenderMode: String {
     }
 
     private func sanitizedTraceDetail(_ value: String) -> String {
+        value.replacingOccurrences(of: "\n", with: "\\n")
+    }
+
+    private static func sanitizedPerformanceDetail(_ value: String) -> String {
         value.replacingOccurrences(of: "\n", with: "\\n")
     }
 

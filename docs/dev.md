@@ -39,7 +39,7 @@ scripts/verify.sh
 `scripts/format-staged-swift.sh` formats staged macOS Swift source and test files in place and re-stages them.
 `scripts/lint.sh` runs `scripts/format-staged-swift.sh` and then `SwiftLint` when `swiftlint` is available.
 `scripts/coverage.sh` runs SwiftPM tests in parallel by default and caps auto-detected workers at `8` unless you override it with `SPACES_TEST_WORKERS` or change the cap with `SPACES_TEST_MAX_AUTO_WORKERS`.
-`scripts/verify.sh` is the canonical sequential local verification path: staged formatting and lint, build, coverage, then iOS unit tests. Set `SPACES_IOS_TEST_DESTINATION` to override the simulator destination used for the iOS unit test pass, or `SPACES_IOS_DERIVED_DATA` to override its DerivedData directory.
+`scripts/verify.sh` is the canonical sequential local verification path: staged formatting and lint, build, coverage, then iOS unit tests. The iOS unit pass prefers an available non-booted iPhone simulator so it does not attach to a simulator already owned by mobile E2E; set `SPACES_IOS_TEST_DESTINATION` to override the destination, or `SPACES_IOS_DERIVED_DATA` to override its DerivedData directory.
 `scripts/swiftpm.sh` also uses a fail-fast lock around SwiftPM itself so overlapping build, test, or coverage commands stop immediately with a clear message instead of silently contending on the shared `.build` directory.
 
 Useful local entry points:
@@ -152,6 +152,20 @@ apps/macos/Tests/e2e_mobile.sh
 The mobile suite builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack, and then runs the selected scenarios with `test-without-building` against that shared stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, `--keep-root` to preserve the shared demo root, and `--port <port>` to pin the daemon bridge port. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again.
 
 The daemon-hosted mobile bridge is the first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spaces mobile serve` remains available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spaces mobile request` so local scripts use the same TLS-PSK transport as the iOS app.
+
+For focused terminal latency probes:
+
+```bash
+apps/macos/Tests/e2e_terminal_latency.sh --list
+apps/macos/Tests/e2e_terminal_latency.sh --scenario mac-input-latency
+apps/macos/Tests/e2e_terminal_latency.sh --scenario mac-scrollback-latency
+apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-input-latency --network-profile local
+apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-input-latency --network-profile ios-constrained
+apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-scrollback-latency --network-profile local
+apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-scrollback-latency --network-profile ios-constrained
+```
+
+The latency scripts are fast performance iteration lanes rather than the canonical correctness gate. They write `terminal-latency-summary.json`, print p50, p95, max, per-sample timings, and render payload rates, fail input scenarios only on gross latency regressions or render-frame decode failures, and leave report-only targets visible in the terminal output. Input summaries include enqueue-to-RPC-begin, RPC duration, frame-apply or frame-publish timing, RPC-end-to-render-visible, and event-to-visible totals. Mac probes target the debug app by executable name; input totals are key-down-to-rendered-text, and scroll totals are wheel-event-to-rendered-text-change with alternating directions across samples. Mac summaries also split owner input activity to state change, state change to frame export, and frame export to mirror apply. Mobile summaries split host publish to relay read, relay read to network send begin, and network send begin to stream-visible. Scrollback summaries measure rendered text changes, no-op gesture counts, and render cadence as report-only metrics. The `ios-constrained` mobile profile shapes the standalone bridge with `80ms` RTT, `8Mbps` bandwidth, and `16KB` chunks unless `SPACES_MOBILE_BRIDGE_NETWORK_RTT_MS`, `SPACES_MOBILE_BRIDGE_NETWORK_BANDWIDTH_BPS`, or `SPACES_MOBILE_BRIDGE_NETWORK_CHUNK_BYTES` override those values.
 
 For direct CLI verification of Spaces terminal commands:
 

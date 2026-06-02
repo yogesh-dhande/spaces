@@ -4,6 +4,10 @@ import Foundation
 import spacesterminalcore
 
 final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
+    fileprivate static let ioBufferSize = 256 * 1024
+    private static let socketBufferSize: Int32 = 1024 * 1024
+    private static let writeRetrySleepInterval: TimeInterval = 0.0005
+
     private let socketPath: String
     private let queue: DispatchQueue
     private let initialStateProvider: @Sendable () -> GhosttyRemoteSessionStatePayload?
@@ -81,6 +85,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
 
             do {
                 try Self.setNoSIGPIPE(clientFD)
+                Self.applySocketBuffers(clientFD)
                 try Self.setNonBlocking(clientFD)
                 Self.applySocketTimeouts(clientFD)
                 let source = DispatchSource.makeReadSource(fileDescriptor: clientFD, queue: queue)
@@ -157,6 +162,12 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
         setsockopt(fileDescriptor, SOL_SOCKET, SO_SNDTIMEO, &timeValue, socklen_t(MemoryLayout<timeval>.size))
     }
 
+    fileprivate static func applySocketBuffers(_ fileDescriptor: Int32) {
+        var bufferSize = socketBufferSize
+        setsockopt(fileDescriptor, SOL_SOCKET, SO_SNDBUF, &bufferSize, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(fileDescriptor, SOL_SOCKET, SO_RCVBUF, &bufferSize, socklen_t(MemoryLayout<Int32>.size))
+    }
+
     private static func writeAll(data: Data, to fileDescriptor: Int32) -> Bool {
         do {
             try data.withUnsafeBytes { rawBuffer in
@@ -167,7 +178,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
                     let written = write(fileDescriptor, baseAddress.advanced(by: offset), bytesRemaining)
                     if written < 0 {
                         if errno == EWOULDBLOCK || errno == EAGAIN {
-                            Thread.sleep(forTimeInterval: 0.005)
+                            Thread.sleep(forTimeInterval: writeRetrySleepInterval)
                             continue
                         }
                         throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
@@ -207,6 +218,7 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         try GhosttyRemoteSessionStateStreamServer.setNoSIGPIPE(socketFD)
+        GhosttyRemoteSessionStateStreamServer.applySocketBuffers(socketFD)
 
         var address = try GhosttyRemoteSessionStateStreamServer.makeSocketAddress(path: socketPath)
         let connectResult = withUnsafePointer(to: &address) { pointer in
@@ -242,7 +254,7 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
 
     private func readAvailableEvents() {
         guard socketFD >= 0 else { return }
-        var buffer = [UInt8](repeating: 0, count: 4096)
+        var buffer = [UInt8](repeating: 0, count: GhosttyRemoteSessionStateStreamServer.ioBufferSize)
         while true {
             let count = read(socketFD, &buffer, buffer.count)
             if count == 0 {

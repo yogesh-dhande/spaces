@@ -354,9 +354,10 @@ struct TerminalDetailView: View {
                         kind: "e2e_command_request_consumed",
                         detail: "id=\(request.id) sendEnter=\(request.sendEnter ?? true) text=\(request.text)"
                     )
-                    await model.sendText(request.text)
                     if request.sendEnter ?? true {
-                        await model.sendKey("enter")
+                        await model.sendText(request.text, appendNewline: true)
+                    } else {
+                        await model.sendText(request.text)
                     }
                 } else {
                     writeE2EEventIfNeeded(kind: "e2e_command_request_invalid", detail: requestURL.lastPathComponent)

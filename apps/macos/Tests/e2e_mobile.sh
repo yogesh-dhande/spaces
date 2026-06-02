@@ -1301,13 +1301,11 @@ def send_unix_control_request(request: dict) -> dict:
 
 def send_owner_command(command_text: str) -> None:
     owner_client_id = current_owner_client_id()
-    for request in (
-        {"command": "send", "text": command_text, "clientID": owner_client_id},
-        {"command": "key", "key": "enter", "clientID": owner_client_id},
-    ):
-        response = send_unix_control_request(request)
-        if not response.get("ok"):
-            raise RuntimeError(f"Owner control request failed: {response}")
+    response = send_unix_control_request(
+        {"command": "send", "text": command_text, "appendNewline": True, "clientID": owner_client_id}
+    )
+    if not response.get("ok"):
+        raise RuntimeError(f"Owner control request failed: {response}")
 
 def wait_for_render_dump(predicate, timeout: float, process: subprocess.Popen[str]) -> dict:
     deadline = time.time() + timeout
@@ -1905,7 +1903,13 @@ while time.time() < deadline:
     events = read_json_lines(event_log_path)
     send_text_success = any(event.get("kind") == "send_text_success" and command_text in (event.get("detail") or "") for event in events)
     send_key_success = any(event.get("kind") == "send_key_success" and event.get("detail") == "enter" for event in events)
-    if send_text_success and send_key_success:
+    combined_send_success = any(
+        event.get("kind") == "send_text_success"
+        and command_text in (event.get("detail") or "")
+        and (event.get("detail") or "").endswith("\\n")
+        for event in events
+    )
+    if combined_send_success or (send_text_success and send_key_success):
         break
     time.sleep(0.2)
 else:

@@ -19,14 +19,154 @@ extension SpacesMobilePairingStore: SpacesMobilePairingStoreProtocol {}
 
 public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "resize", "scroll"]
+    private static let streamRelayReadBufferSize = 256 * 1024
+
+    private struct NetworkShaper: Sendable {
+        static let profileEnvironmentKey = "SPACES_MOBILE_BRIDGE_NETWORK_PROFILE"
+        static let rttEnvironmentKey = "SPACES_MOBILE_BRIDGE_NETWORK_RTT_MS"
+        static let bandwidthEnvironmentKey = "SPACES_MOBILE_BRIDGE_NETWORK_BANDWIDTH_BPS"
+        static let chunkEnvironmentKey = "SPACES_MOBILE_BRIDGE_NETWORK_CHUNK_BYTES"
+
+        let profile: String
+        let rttMS: Int
+        let bandwidthBPS: Int
+        let chunkBytes: Int
+
+        var isEnabled: Bool { profile != "local" && (rttMS > 0 || bandwidthBPS > 0 || chunkBytes > 0) }
+
+        private final class SendChain: @unchecked Sendable {
+            private let chunks: [Data]
+            private let connection: NWConnection
+            private let queue: DispatchQueue
+            private let interChunkDelayMicroseconds: @Sendable (Int) -> Int
+            private let onSendBegin: @Sendable () -> Void
+            private let completion: @Sendable (Error?) -> Void
+
+            init(
+                chunks: [Data], connection: NWConnection, queue: DispatchQueue, interChunkDelayMicroseconds: @escaping @Sendable (Int) -> Int,
+                onSendBegin: @escaping @Sendable () -> Void, completion: @escaping @Sendable (Error?) -> Void
+            ) {
+                self.chunks = chunks
+                self.connection = connection
+                self.queue = queue
+                self.interChunkDelayMicroseconds = interChunkDelayMicroseconds
+                self.onSendBegin = onSendBegin
+                self.completion = completion
+            }
+
+            func send(index: Int) {
+                guard index < chunks.count else {
+                    completion(nil)
+                    return
+                }
+                let chunk = chunks[index]
+                if index == 0 { onSendBegin() }
+                connection.send(
+                    content: chunk, contentContext: .defaultMessage, isComplete: false,
+                    completion: .contentProcessed { [self] error in
+                        if let error {
+                            self.completion(error)
+                            return
+                        }
+                        let delayMicroseconds = self.interChunkDelayMicroseconds(chunk.count)
+                        if delayMicroseconds <= 0 {
+                            self.queue.async { self.send(index: index + 1) }
+                        } else {
+                            self.queue.asyncAfter(deadline: .now() + .microseconds(delayMicroseconds)) { self.send(index: index + 1) }
+                        }
+                    })
+            }
+        }
+
+        init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+            let resolvedProfile = environment[Self.profileEnvironmentKey]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "local"
+            profile = resolvedProfile.isEmpty ? "local" : resolvedProfile
+            let constrained = profile == "ios-constrained"
+            rttMS = Self.intValue(environment[Self.rttEnvironmentKey], fallback: constrained ? 80 : 0)
+            bandwidthBPS = Self.intValue(environment[Self.bandwidthEnvironmentKey], fallback: constrained ? 8_000_000 : 0)
+            chunkBytes = Self.intValue(environment[Self.chunkEnvironmentKey], fallback: constrained ? 16 * 1024 : 0)
+        }
+
+        func send(
+            content data: Data, to connection: NWConnection, on queue: DispatchQueue, onSendBegin: @escaping @Sendable () -> Void = {},
+            completion: @escaping @Sendable (Error?) -> Void
+        ) {
+            guard isEnabled, !data.isEmpty else {
+                onSendBegin()
+                connection.send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed(completion))
+                return
+            }
+
+            let chunks = chunked(data)
+            let initialDelay = DispatchTimeInterval.milliseconds(max(rttMS / 2, 0))
+            let bandwidthBPS = bandwidthBPS
+            let chain = SendChain(
+                chunks: chunks, connection: connection, queue: queue,
+                interChunkDelayMicroseconds: { byteCount in Self.interChunkDelayMicroseconds(forByteCount: byteCount, bandwidthBPS: bandwidthBPS) },
+                onSendBegin: onSendBegin, completion: completion)
+            queue.asyncAfter(deadline: .now() + initialDelay) { chain.send(index: 0) }
+        }
+
+        private func chunked(_ data: Data) -> [Data] {
+            let size = chunkBytes > 0 ? chunkBytes : data.count
+            guard data.count > size else { return [data] }
+            var chunks: [Data] = []
+            chunks.reserveCapacity(Int(ceil(Double(data.count) / Double(size))))
+            var offset = data.startIndex
+            while offset < data.endIndex {
+                let end = data.index(offset, offsetBy: size, limitedBy: data.endIndex) ?? data.endIndex
+                chunks.append(data[offset..<end])
+                offset = end
+            }
+            return chunks
+        }
+
+        private static func interChunkDelayMicroseconds(forByteCount byteCount: Int, bandwidthBPS: Int) -> Int {
+            guard bandwidthBPS > 0, byteCount > 0 else { return 0 }
+            let bytesPerSecond = Double(bandwidthBPS) / 8.0
+            let seconds = Double(byteCount) / max(bytesPerSecond, 1)
+            return max(Int((seconds * 1_000_000).rounded()), 0)
+        }
+
+        private static func intValue(_ rawValue: String?, fallback: Int) -> Int {
+            guard let rawValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines), !rawValue.isEmpty else { return fallback }
+            return max(Int(rawValue) ?? fallback, 0)
+        }
+    }
 
     private struct StreamRelay {
+        let sessionID: String
         let installationID: String
         let relaySocketFD: Int32
         let relayQueue: DispatchQueue
         let relaySource: DispatchSourceRead
         let heartbeatTimer: DispatchSourceTimer?
         let connection: NWConnection
+        let sendSequencer: StreamSendSequencer
+    }
+
+    private final class StreamSendSequencer: @unchecked Sendable {
+        typealias Operation = @Sendable (@escaping @Sendable (Error?) -> Void) -> Void
+
+        private var pendingOperations: [Operation] = []
+        private var isRunning = false
+
+        func enqueue(_ operation: @escaping Operation) {
+            pendingOperations.append(operation)
+            startNextIfNeeded()
+        }
+
+        private func startNextIfNeeded() {
+            guard !isRunning, !pendingOperations.isEmpty else { return }
+            isRunning = true
+            let operation = pendingOperations.removeFirst()
+            operation { [weak self] _ in self?.finishCurrent() }
+        }
+
+        private func finishCurrent() {
+            isRunning = false
+            startNextIfNeeded()
+        }
     }
 
     private final class RequestConnection: @unchecked Sendable {
@@ -169,6 +309,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Void>()
     private let stateLock = NSLock()
+    private let networkShaper: NetworkShaper
     private let traceEnabled = ProcessInfo.processInfo.environment["SPACES_MOBILE_BRIDGE_TRACE"] == "1"
 
     private var listener: NWListener?
@@ -187,6 +328,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         self.pairingCoordinator = pairingCoordinator
         self.onPairingSucceeded = onPairingSucceeded
         if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesMobilePairingStore() }
+        networkShaper = NetworkShaper()
         queue = DispatchQueue(label: "spaces.mobile.bridge")
         queue.setSpecific(key: queueKey, value: ())
     }
@@ -201,6 +343,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         self.pairingCoordinator = pairingCoordinator
         self.pairingStore = pairingStoreProtocol
         self.onPairingSucceeded = onPairingSucceeded
+        networkShaper = NetworkShaper()
         queue = DispatchQueue(label: "spaces.mobile.bridge")
         queue.setSpecific(key: queueKey, value: ())
     }
@@ -378,20 +521,6 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         TerminalPerformance.logMetric(
             "mobile_bridge_\(command)", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: response.ok)
-        if command == "takeover", response.ok {
-            let stateFetchStartedAt = Date()
-            do {
-                let sessionState = try loadCurrentState(sessionID: sessionID)
-                TerminalPerformance.logMetric(
-                    "mobile_bridge_takeover_state", target: "session=\(sessionID)",
-                    elapsedMS: TerminalPerformance.elapsedMS(since: stateFetchStartedAt), success: true)
-                return SpacesMobileBridgeResponse(ok: true, message: response.message, sessionState: sessionState)
-            } catch {
-                TerminalPerformance.logMetric(
-                    "mobile_bridge_takeover_state", target: "session=\(sessionID)",
-                    elapsedMS: TerminalPerformance.elapsedMS(since: stateFetchStartedAt), success: false)
-            }
-        }
         return SpacesMobileBridgeResponse(ok: response.ok, message: response.message)
     }
 
@@ -464,8 +593,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         }
 
         streamRelays[ObjectIdentifier(connection)] = StreamRelay(
-            installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource,
-            heartbeatTimer: heartbeatTimer, connection: connection)
+            sessionID: sessionID, installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource,
+            heartbeatTimer: heartbeatTimer, connection: connection, sendSequencer: StreamSendSequencer())
 
         relaySource.resume()
         heartbeatTimer?.resume()
@@ -475,10 +604,15 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     }
 
     private func relayStateData(from relaySocketFD: Int32, to connection: NWConnection) {
-        var buffer = [UInt8](repeating: 0, count: 4096)
+        var buffer = [UInt8](repeating: 0, count: Self.streamRelayReadBufferSize)
+        var relayedData = Data()
+        var firstReadUptimeNanoseconds: UInt64?
         while true {
             let count = read(relaySocketFD, &buffer, buffer.count)
             if count == 0 {
+                if !relayedData.isEmpty {
+                    enqueueRelayedStateData(relayedData, firstReadUptimeNanoseconds: firstReadUptimeNanoseconds, to: connection)
+                }
                 queue.async { [weak self, weak connection] in
                     guard let self, let connection else { return }
                     self.closeStreamRelay(connection: connection)
@@ -486,25 +620,73 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                 return
             }
             if count < 0 {
-                if errno == EWOULDBLOCK || errno == EAGAIN { return }
+                if errno == EWOULDBLOCK || errno == EAGAIN {
+                    if !relayedData.isEmpty {
+                        enqueueRelayedStateData(relayedData, firstReadUptimeNanoseconds: firstReadUptimeNanoseconds, to: connection)
+                    }
+                    return
+                }
                 queue.async { [weak self, weak connection] in
                     guard let self, let connection else { return }
                     self.closeStreamRelay(connection: connection)
                 }
                 return
             }
-            let data = Data(buffer.prefix(count))
-            connection.send(
-                content: data, contentContext: .defaultMessage, isComplete: false,
-                completion: .contentProcessed { [weak self] error in
-                    guard let error else { return }
-                    self?.trace("stream_relay_send_error error=\(error)")
-                    self?.queue.async { [weak self, weak connection] in
-                        guard let self, let connection else { return }
-                        self.closeStreamRelay(connection: connection)
-                    }
-                })
+            firstReadUptimeNanoseconds = firstReadUptimeNanoseconds ?? DispatchTime.now().uptimeNanoseconds
+            relayedData.append(buffer, count: count)
         }
+    }
+
+    private func enqueueRelayedStateData(_ data: Data, firstReadUptimeNanoseconds: UInt64?, to connection: NWConnection) {
+        queue.async { [weak self, weak connection, data, firstReadUptimeNanoseconds] in
+            guard let self, let connection else { return }
+            self.sendRelayedStateData(data, firstReadUptimeNanoseconds: firstReadUptimeNanoseconds, to: connection)
+        }
+    }
+
+    private func sendRelayedStateData(_ data: Data, firstReadUptimeNanoseconds: UInt64?, to connection: NWConnection) {
+        guard let relay = streamRelays[ObjectIdentifier(connection)] else { return }
+        let attributes = streamRelayAttributes(for: data)
+        logBridgePerformance(
+            sessionID: relay.sessionID, name: "stream_relay_read",
+            emittedUptimeNanoseconds: firstReadUptimeNanoseconds ?? DispatchTime.now().uptimeNanoseconds, count: data.count, attributes: attributes)
+        relay.sendSequencer.enqueue { [weak self, weak connection, sessionID = relay.sessionID, attributes, data] finish in
+            guard let self, let connection else {
+                finish(nil)
+                return
+            }
+            self.networkShaper.send(
+                content: data, to: connection, on: self.queue,
+                onSendBegin: { [weak self, sessionID, attributes, count = data.count] in
+                    self?.logBridgePerformance(sessionID: sessionID, name: "stream_network_send_begin", count: count, attributes: attributes)
+                }
+            ) { [weak self, weak connection] error in
+                self?.queue.async { [weak self, weak connection] in
+                    if let error {
+                        self?.trace("stream_relay_send_error error=\(error)")
+                        if let self, let connection { self.closeStreamRelay(connection: connection) }
+                    }
+                    finish(error)
+                }
+            }
+        }
+    }
+
+    private func streamRelayAttributes(for data: Data) -> [String: String] {
+        var attributes: [String: String] = [
+            "payload_bytes": String(data.count), "payload_count": String(data.split(separator: 0x0A, omittingEmptySubsequences: true).count),
+        ]
+        guard let firstLine = data.split(separator: 0x0A, maxSplits: 1, omittingEmptySubsequences: true).first,
+            let payload = try? GhosttyRemoteSessionStateCodec.decodeLine(Data(firstLine))
+        else {
+            attributes["render_frame"] = "unknown"
+            return attributes
+        }
+        attributes["reason"] = payload.reason
+        attributes["render_frame"] = payload.renderFrame == nil ? "0" : "1"
+        attributes["frame_bytes"] = String(payload.renderFrame?.count ?? 0)
+        attributes["target_revision"] = payload.screenStateRevision.map(String.init) ?? "nil"
+        return attributes
     }
 
     private func closeStreamRelay(connection: NWConnection) {
@@ -617,7 +799,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         do {
             var data = try SpacesMobileBridgeCodec.encodeResponse(response)
             data.append(0x0A)
-            connection.send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed(completion))
+            networkShaper.send(content: data, to: connection, on: queue, completion: completion)
         } catch { completion(error) }
     }
 
@@ -643,6 +825,16 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         guard traceEnabled else { return }
         fputs("spaces-mobile-bridge-trace \(message)\n", stdout)
         fflush(stdout)
+    }
+
+    private func logBridgePerformance(
+        sessionID: String, name: String, emittedUptimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds, count: Int? = nil,
+        attributes: [String: String] = [:]
+    ) {
+        SpacesMobileTerminalPerformanceLogger.emit(
+            .init(
+                sessionID: sessionID, source: "mobile-bridge", name: name, emittedUptimeNanoseconds: emittedUptimeNanoseconds, count: count,
+                attributes: attributes))
     }
 
     private func setRunning(_ value: Bool) {

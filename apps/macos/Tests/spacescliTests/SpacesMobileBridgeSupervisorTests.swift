@@ -154,6 +154,7 @@ import spacesterminalcore
                     command: "send", authToken: authToken, clientApp: clientApp, sessionID: sessionID, clientID: "   ", text: "echo denied"),
                 SpacesMobileBridgeRequest(command: "key", authToken: authToken, clientApp: clientApp, sessionID: sessionID, key: "enter"),
                 SpacesMobileBridgeRequest(command: "resize", authToken: authToken, clientApp: clientApp, sessionID: sessionID, columns: 80, rows: 24),
+                SpacesMobileBridgeRequest(command: "scroll", authToken: authToken, clientApp: clientApp, sessionID: sessionID, scrollVertical: 24),
             ]
 
             for request in rejectedRequests {
@@ -182,9 +183,9 @@ import spacesterminalcore
         }
     }
 
-    func testTakeoverResponseIncludesFreshTerminalState() async throws {
+    func testTakeoverResponseAcknowledgesWithoutEmbeddingTerminalState() async throws {
         try await withTemporaryProfile { _ in
-            let sessionID = "session-takeover-state-\(UUID().uuidString)"
+            let sessionID = "session-takeover-ack-\(UUID().uuidString)"
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
             try TerminalSessionPersistence.writeLaunchConfiguration(
@@ -200,10 +201,6 @@ import spacesterminalcore
             }
             try controlServer.start()
             defer { controlServer.stop() }
-            let liveState = Self.liveTerminalStatePayload(sessionID: sessionID, snapshotText: "LIVE-TAKEOVER-STATE")
-            let subscriptionServer = MobileBridgeTestSubscriptionServer(socketPath: paths.subscriptionSocketPath, payload: liveState)
-            try subscriptionServer.start()
-            defer { subscriptionServer.stop() }
 
             let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
             let clientApp = SpacesMobileClientApp(
@@ -222,8 +219,7 @@ import spacesterminalcore
             }.value
 
             XCTAssertTrue(response.ok)
-            XCTAssertEqual(response.sessionState?.sessionID, sessionID)
-            XCTAssertEqual(response.sessionState?.renderFrameText, "LIVE-TAKEOVER-STATE")
+            XCTAssertNil(response.sessionState)
             XCTAssertEqual(recorder.requests().first?.command, "takeover")
             XCTAssertEqual(recorder.requests().first?.clientID, "ios-client")
         }

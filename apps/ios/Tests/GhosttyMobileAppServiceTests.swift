@@ -8,6 +8,16 @@
 
     @MainActor
     final class GhosttyMobileAppServiceTests: XCTestCase {
+        override func setUp() {
+            super.setUp()
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = false
+        }
+
+        override func tearDown() {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            super.tearDown()
+        }
+
         func testRuntimeConfigProvidesRequiredCallbacks() {
             let runtimeConfig = GhosttyMobileAppService.makeRuntimeConfig()
 
@@ -242,7 +252,7 @@
             XCTAssertTrue(validDescriptors.contains(6))
         }
 
-        func testRemoteTerminalHostViewCanMountInWindow() throws {
+        func testRemoteTerminalHostViewDoesNotCreateMirrorBeforeRenderState() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
             window.rootViewController = viewController
@@ -262,8 +272,7 @@
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
-            XCTAssertNotNil(GhosttyMobileAppService.shared.app)
-            XCTAssertTrue(hostView.hasMirrorSurfaceForTesting)
+            XCTAssertFalse(hostView.hasMirrorSurfaceForTesting)
             XCTAssertFalse(hostView.subviews.contains { $0 is UILabel })
 
             window.isHidden = true

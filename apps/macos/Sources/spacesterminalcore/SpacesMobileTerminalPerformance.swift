@@ -1,4 +1,5 @@
 import Darwin
+import Dispatch
 import Foundation
 
 public struct SpacesMobileTerminalPerformanceEvent: Codable, Equatable, Sendable {
@@ -6,18 +7,21 @@ public struct SpacesMobileTerminalPerformanceEvent: Codable, Equatable, Sendable
     public let source: String
     public let name: String
     public let emittedAt: String
+    public let emittedUptimeNanoseconds: UInt64
     public let elapsedMS: Int?
     public let count: Int?
     public let attributes: [String: String]
 
     public init(
         sessionID: String, source: String, name: String, emittedAt: String = GhosttyRemoteSessionStateTimestamp.string(from: Date()),
-        elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String] = [:]
+        emittedUptimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds, elapsedMS: Int? = nil, count: Int? = nil,
+        attributes: [String: String] = [:]
     ) {
         self.sessionID = sessionID
         self.source = source
         self.name = name
         self.emittedAt = emittedAt
+        self.emittedUptimeNanoseconds = emittedUptimeNanoseconds
         self.elapsedMS = elapsedMS
         self.count = count
         self.attributes = attributes

@@ -177,11 +177,12 @@ import spacesterminalcore
         if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
         let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
         let payloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(payload).count) ?? 0
-        var renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
+        let renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
             reason: payload.reason, frame: decodedFrame, frameByteCount: payload.renderFrame?.count, payloadByteCount: payloadBytes,
             decodeMS: decodeMS, outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
-            dropped: payload.renderFrame == nil ? nil : dropReason != nil, dropReason: dropReason, renderMode: "ghostty-mirror")
-        renderFrameAttributes["apply_ms"] = String(applyMS)
+            dropped: payload.renderFrame == nil ? nil : dropReason != nil, dropReason: dropReason, renderMode: "ghostty-mirror",
+            targetRevision: payload.screenStateRevision,
+            appliedRevision: frameForUpdate == nil ? nil : (payload.screenStateRevision ?? frameForUpdate?.sessionRevision), applyMS: applyMS)
         SpacesMobileTerminalPerformanceLogger.emit(
             .init(
                 sessionID: payload.sessionID, source: "mac-mirror", name: "render_frame_payload_receive",

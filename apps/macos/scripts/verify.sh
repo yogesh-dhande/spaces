@@ -26,6 +26,7 @@ for runtime, runtime_devices in data.get("devices", {}).items():
             devices.append(device)
 
 for candidates in (
+    [device for device in devices if device.get("state") != "Booted"],
     [device for device in devices if device.get("state") == "Booted"],
     devices,
 ):

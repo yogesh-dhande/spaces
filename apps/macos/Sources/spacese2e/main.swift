@@ -1,6 +1,8 @@
 import AppKit
 import ApplicationServices
 import ArgumentParser
+import Carbon
+import Dispatch
 import Foundation
 import spacesmobilebridge
 import spacesmobilecore
@@ -24,7 +26,7 @@ struct MXE2ECommand: ParsableCommand {
             FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self,
             SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
             StartTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, OpenMobilePairingWindowCommand.self, RecordScreenCommand.self,
-            ScrollApplicationWindowCommand.self,
+            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
         ])
 }
 
@@ -51,7 +53,7 @@ private struct HideMainWindowCommand: ParsableCommand {
 private struct ScrollApplicationWindowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "scroll-application-window")
 
-    @Option(name: .long) var bundleID: String
+    @Option(name: .long) var executableName: String
     @Option(name: .long) var windowTitleContains: String?
     @Option(name: .long) var normalizedX = 0.5
     @Option(name: .long) var normalizedY = 0.5
@@ -63,35 +65,54 @@ private struct ScrollApplicationWindowCommand: ParsableCommand {
             throw ValidationError("Normalized coordinates must be between 0 and 1.")
         }
         guard repetitions > 0 else { throw ValidationError("Repetitions must be greater than zero.") }
-        guard let application = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }) else {
-            throw ValidationError("Application not running: \(bundleID)")
-        }
-        let appElement = AXUIElementCreateApplication(application.processIdentifier)
-        let titleFilter = windowTitleContains?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let windows = axElementArrayAttribute(appElement, attribute: kAXWindowsAttribute).filter(isVisibleWindow)
-        let window =
-            if let titleFilter, !titleFilter.isEmpty {
-                windows.first {
-                    guard let title = axStringAttribute($0, attribute: kAXTitleAttribute as String) else { return false }
-                    return title.localizedStandardContains(titleFilter)
-                }
-            } else {
-                axElementAttribute(appElement, attribute: kAXFocusedWindowAttribute) ?? axElementAttribute(
-                    appElement, attribute: kAXMainWindowAttribute) ?? windows.first
-            }
-        guard let window else { throw ValidationError("No accessible window found for \(bundleID)") }
-        guard let frame = axWindowFrame(window) else { throw ValidationError("Unable to read application window frame for \(bundleID)") }
+        let target = try targetApplicationWindow(executableName: executableName, windowTitleContains: windowTitleContains)
 
-        application.activate(options: [.activateIgnoringOtherApps])
-        axPerformAction(window, action: kAXRaiseAction as String)
+        target.application.activate(options: [])
+        axPerformAction(target.window, action: kAXRaiseAction as String)
         Thread.sleep(forTimeInterval: 0.2)
 
-        let point = CGPoint(x: frame.minX + frame.width * normalizedX, y: frame.minY + frame.height * normalizedY)
-        try postScrollEvent(at: point, deltaY: deltaY, repetitions: repetitions)
+        let point = CGPoint(x: target.frame.minX + target.frame.width * normalizedX, y: target.frame.minY + target.frame.height * normalizedY)
+        let timing = try postScrollEvent(at: point, deltaY: deltaY, repetitions: repetitions)
         try emitJSON(
             ScrollApplicationWindowPayload(
-                bundleID: bundleID, windowTitle: axStringAttribute(window, attribute: kAXTitleAttribute as String), pointX: point.x, pointY: point.y,
-                deltaY: deltaY, repetitions: repetitions, success: true))
+                executableName: executableName, windowTitle: target.title, pointX: point.x, pointY: point.y, deltaY: deltaY, repetitions: repetitions,
+                firstScrollEventUptimeNanoseconds: timing.firstScrollEventUptimeNanoseconds,
+                lastScrollEventUptimeNanoseconds: timing.lastScrollEventUptimeNanoseconds, success: true))
+    }
+}
+
+private struct TypeApplicationWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "type-application-window")
+
+    @Option(name: .long) var executableName: String
+    @Option(name: .long) var windowTitleContains: String?
+    @Option(name: .long) var normalizedX = 0.5
+    @Option(name: .long) var normalizedY = 0.5
+    @Option(name: .long) var text: String
+    @Flag(name: .long) var appendNewline = false
+    @Option(name: .long) var interKeyDelayMS = 5
+
+    func run() throws {
+        guard (0...1).contains(normalizedX), (0...1).contains(normalizedY) else {
+            throw ValidationError("Normalized coordinates must be between 0 and 1.")
+        }
+        let inputText = appendNewline ? "\(text)\n" : text
+        guard !inputText.isEmpty else { throw ValidationError("Missing text.") }
+        let target = try targetApplicationWindow(executableName: executableName, windowTitleContains: windowTitleContains)
+
+        target.application.activate(options: [])
+        axPerformAction(target.window, action: kAXRaiseAction as String)
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let point = CGPoint(x: target.frame.minX + target.frame.width * normalizedX, y: target.frame.minY + target.frame.height * normalizedY)
+        try postMouseClick(at: point)
+        Thread.sleep(forTimeInterval: 0.05)
+        let timing = try postKeyboardText(inputText, interKeyDelayMS: interKeyDelayMS)
+        try emitJSON(
+            TypeApplicationWindowPayload(
+                executableName: executableName, windowTitle: target.title, pointX: point.x, pointY: point.y, textByteCount: inputText.utf8.count,
+                firstKeyDownUptimeNanoseconds: timing.firstKeyDownUptimeNanoseconds, lastKeyUpUptimeNanoseconds: timing.lastKeyUpUptimeNanoseconds,
+                success: true))
     }
 }
 
@@ -1134,13 +1155,48 @@ private struct SpacesSurfacePayload: Codable {
 }
 
 private struct ScrollApplicationWindowPayload: Codable {
-    let bundleID: String
+    let executableName: String
     let windowTitle: String?
     let pointX: CGFloat
     let pointY: CGFloat
     let deltaY: Int
     let repetitions: Int
+    let firstScrollEventUptimeNanoseconds: UInt64
+    let lastScrollEventUptimeNanoseconds: UInt64
     let success: Bool
+}
+
+private struct TypeApplicationWindowPayload: Codable {
+    let executableName: String
+    let windowTitle: String?
+    let pointX: CGFloat
+    let pointY: CGFloat
+    let textByteCount: Int
+    let firstKeyDownUptimeNanoseconds: UInt64
+    let lastKeyUpUptimeNanoseconds: UInt64
+    let success: Bool
+}
+
+private struct TargetApplicationWindow {
+    let application: NSRunningApplication
+    let window: AXUIElement
+    let title: String?
+    let frame: CGRect
+}
+
+private struct KeyboardTextTiming {
+    let firstKeyDownUptimeNanoseconds: UInt64
+    let lastKeyUpUptimeNanoseconds: UInt64
+}
+
+private struct KeyEventTiming {
+    let downUptimeNanoseconds: UInt64
+    let upUptimeNanoseconds: UInt64
+}
+
+private struct ScrollEventTiming {
+    let firstScrollEventUptimeNanoseconds: UInt64
+    let lastScrollEventUptimeNanoseconds: UInt64
 }
 
 /// Looks up one workspace by project directory and title, matching the GUI's
@@ -1279,7 +1335,7 @@ private func axWindowFrame(_ element: AXUIElement) -> CGRect? {
 private func axCGPointAttribute(_ element: AXUIElement, attribute: String) -> CGPoint? {
     guard let value = axAttributeValue(element, attribute: attribute) else { return nil }
     guard CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
-    let axValue = unsafeBitCast(value, to: AXValue.self)
+    let axValue = unsafeDowncast(value, to: AXValue.self)
     guard AXValueGetType(axValue) == .cgPoint else { return nil }
     var point = CGPoint.zero
     guard AXValueGetValue(axValue, .cgPoint, &point) else { return nil }
@@ -1289,14 +1345,87 @@ private func axCGPointAttribute(_ element: AXUIElement, attribute: String) -> CG
 private func axCGSizeAttribute(_ element: AXUIElement, attribute: String) -> CGSize? {
     guard let value = axAttributeValue(element, attribute: attribute) else { return nil }
     guard CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
-    let axValue = unsafeBitCast(value, to: AXValue.self)
+    let axValue = unsafeDowncast(value, to: AXValue.self)
     guard AXValueGetType(axValue) == .cgSize else { return nil }
     var size = CGSize.zero
     guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
     return size
 }
 
-private func postScrollEvent(at point: CGPoint, deltaY: Int, repetitions: Int) throws {
+private func targetApplicationWindow(executableName: String, windowTitleContains: String?) throws -> TargetApplicationWindow {
+    let executableName = executableName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !executableName.isEmpty else { throw ValidationError("Missing executable name.") }
+    let titleFilter = windowTitleContains?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let applications = NSWorkspace.shared.runningApplications.filter { $0.executableURL?.lastPathComponent == executableName }
+    guard !applications.isEmpty else { throw ValidationError("Application not running: executable-name \(executableName)") }
+    for application in applications {
+        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        let windows = axElementArrayAttribute(appElement, attribute: kAXWindowsAttribute).filter(isVisibleWindow)
+        let window =
+            if let titleFilter, !titleFilter.isEmpty {
+                windows.first {
+                    guard let title = axStringAttribute($0, attribute: kAXTitleAttribute as String) else { return false }
+                    return title.localizedStandardContains(titleFilter)
+                }
+            } else {
+                axElementAttribute(appElement, attribute: kAXFocusedWindowAttribute) ?? axElementAttribute(
+                    appElement, attribute: kAXMainWindowAttribute) ?? windows.first
+            }
+        guard let window else { continue }
+        guard let frame = axWindowFrame(window) else { continue }
+        return TargetApplicationWindow(
+            application: application, window: window, title: axStringAttribute(window, attribute: kAXTitleAttribute as String), frame: frame)
+    }
+    throw ValidationError("No accessible window found for executable-name \(executableName)")
+}
+
+private func postMouseClick(at point: CGPoint) throws {
+    guard let downEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
+        let upEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+    else { throw ValidationError("Unable to create mouse click event.") }
+    downEvent.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.02)
+    upEvent.post(tap: .cghidEventTap)
+}
+
+private func postKeyboardText(_ text: String, interKeyDelayMS: Int) throws -> KeyboardTextTiming {
+    let source = CGEventSource(stateID: .hidSystemState)
+    var firstKeyDownUptimeNanoseconds: UInt64?
+    var lastKeyUpUptimeNanoseconds: UInt64?
+    for unit in text.utf16 {
+        let timing = if unit == 0x0A { try postVirtualKey(CGKeyCode(kVK_Return), source: source) } else { try postUnicodeKey(unit, source: source) }
+        firstKeyDownUptimeNanoseconds = firstKeyDownUptimeNanoseconds ?? timing.downUptimeNanoseconds
+        lastKeyUpUptimeNanoseconds = timing.upUptimeNanoseconds
+        if interKeyDelayMS > 0 { Thread.sleep(forTimeInterval: Double(interKeyDelayMS) / 1000.0) }
+    }
+    guard let firstKeyDownUptimeNanoseconds, let lastKeyUpUptimeNanoseconds else { throw ValidationError("No keyboard events were posted.") }
+    return KeyboardTextTiming(firstKeyDownUptimeNanoseconds: firstKeyDownUptimeNanoseconds, lastKeyUpUptimeNanoseconds: lastKeyUpUptimeNanoseconds)
+}
+
+private func postUnicodeKey(_ unit: UInt16, source: CGEventSource?) throws -> KeyEventTiming {
+    var character = UniChar(unit)
+    guard let downEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+        let upEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+    else { throw ValidationError("Unable to create keyboard event.") }
+    downEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &character)
+    upEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &character)
+    let downUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    downEvent.post(tap: .cghidEventTap)
+    upEvent.post(tap: .cghidEventTap)
+    return KeyEventTiming(downUptimeNanoseconds: downUptimeNanoseconds, upUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds)
+}
+
+private func postVirtualKey(_ keyCode: CGKeyCode, source: CGEventSource?) throws -> KeyEventTiming {
+    guard let downEvent = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+        let upEvent = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
+    else { throw ValidationError("Unable to create keyboard event.") }
+    let downUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    downEvent.post(tap: .cghidEventTap)
+    upEvent.post(tap: .cghidEventTap)
+    return KeyEventTiming(downUptimeNanoseconds: downUptimeNanoseconds, upUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds)
+}
+
+private func postScrollEvent(at point: CGPoint, deltaY: Int, repetitions: Int) throws -> ScrollEventTiming {
     guard let moveEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
         throw ValidationError("Unable to create mouse move event.")
     }
@@ -1305,6 +1434,8 @@ private func postScrollEvent(at point: CGPoint, deltaY: Int, repetitions: Int) t
     let phases: [NSEvent.Phase]
     if repetitions <= 1 { phases = [.began, .ended] } else { phases = [.began] + Array(repeating: .changed, count: repetitions - 1) + [.ended] }
 
+    var firstScrollEventUptimeNanoseconds: UInt64?
+    var lastScrollEventUptimeNanoseconds: UInt64?
     for phase in phases {
         let phaseDeltaY = phase == .ended ? 0 : deltaY
         guard let scrollEvent = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(phaseDeltaY), wheel2: 0, wheel3: 0)
@@ -1315,9 +1446,15 @@ private func postScrollEvent(at point: CGPoint, deltaY: Int, repetitions: Int) t
         scrollEvent.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 0)
         scrollEvent.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: Int64(phaseDeltaY))
         scrollEvent.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: Int64(phaseDeltaY))
+        let scrollEventUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         scrollEvent.post(tap: .cghidEventTap)
+        firstScrollEventUptimeNanoseconds = firstScrollEventUptimeNanoseconds ?? scrollEventUptimeNanoseconds
+        lastScrollEventUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         Thread.sleep(forTimeInterval: 0.05)
     }
+    guard let firstScrollEventUptimeNanoseconds, let lastScrollEventUptimeNanoseconds else { throw ValidationError("No scroll events were posted.") }
+    return ScrollEventTiming(
+        firstScrollEventUptimeNanoseconds: firstScrollEventUptimeNanoseconds, lastScrollEventUptimeNanoseconds: lastScrollEventUptimeNanoseconds)
 }
 
 MXE2ECommand.main()

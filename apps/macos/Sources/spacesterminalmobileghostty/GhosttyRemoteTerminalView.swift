@@ -159,6 +159,7 @@ import Foundation
         private static let contentInsets = GhosttyRemoteTerminalViewport.contentInsets
 
         nonisolated(unsafe) static var sessionFreeHandlerForTesting: @Sendable (UnsafeRawPointer?) -> Void = { _ in }
+        nonisolated(unsafe) static var nativeMirrorEnabledForTesting = true
 
         private let surfaceHostView = UIView(frame: .zero)
         private var mirror: ghostty_mirror_t?
@@ -173,6 +174,8 @@ import Foundation
         private var lastReportedViewportSize: (columns: Int, rows: Int)?
         private var lastRenderedText = ""
         private var lastReportedInputReadiness = false
+        private var emittedHostRenderEvents = Set<String>()
+        private var mirrorCreationTask: Task<Void, Never>?
         private var isTerminalVisible = true
         private var fallbackText = ""
         private var lastScrollTranslation = CGPoint.zero
@@ -295,8 +298,6 @@ import Foundation
             if window == nil {
                 prepareForDismantle()
             } else {
-                ensureMirrorIfNeeded()
-                updateSurfaceGeometry()
                 reportViewportSizeIfNeeded()
                 renderLatestSnapshot()
             }
@@ -309,6 +310,8 @@ import Foundation
             resignFirstResponder()
             activeOwnerEpoch = nil
             activeEndedRender = nil
+            mirrorCreationTask?.cancel()
+            mirrorCreationTask = nil
             latestRenderFrame = nil
             latestSnapshot = nil
             currentRenderedSnapshot = nil
@@ -370,8 +373,6 @@ import Foundation
 
         public override func layoutSubviews() {
             super.layoutSubviews()
-            ensureMirrorIfNeeded()
-            updateSurfaceGeometry()
             reportViewportSizeIfNeeded()
             renderLatestSnapshot()
         }
@@ -559,7 +560,8 @@ import Foundation
         }
 
         private func reportInputReadinessIfNeeded(force: Bool = false) {
-            let ready = isTerminalVisible && acceptsTerminalInput && currentRenderedSnapshot != nil
+            let hasRenderableSurface = currentRenderedSnapshot != nil && (mirror != nil || !Self.nativeMirrorEnabledForTesting)
+            let ready = isTerminalVisible && acceptsTerminalInput && hasRenderableSurface
             guard force || ready != lastReportedInputReadiness else { return }
             lastReportedInputReadiness = ready
             onInputReadinessChanged?(ready)
@@ -574,20 +576,47 @@ import Foundation
                 reportInputReadinessIfNeeded()
                 return
             }
-            ensureMirrorIfNeeded()
-            updateSurfaceGeometry()
+            emitHostRenderEvent("host_view_render_begin", dedupeKey: lastRenderKey)
+            scheduleMirrorCreationIfNeeded()
             let window = viewportWindow(for: latestSnapshot)
             let cropped = GhosttyTerminalSnapshotViewport.crop(latestSnapshot, window: window)
             currentRenderedSnapshot = cropped
-            applyLatestRenderFrameIfPossible()
+            emitHostRenderEvent(
+                "host_view_snapshot_ready", dedupeKey: lastRenderKey,
+                attributes: ["snapshot_columns": "\(cropped.columns)", "snapshot_rows": "\(cropped.rows)"])
+            if mirror != nil {
+                updateSurfaceGeometry()
+                emitHostRenderEvent("host_view_after_geometry", dedupeKey: lastRenderKey)
+                applyLatestRenderFrameIfPossible()
+            } else {
+                setNeedsDisplay()
+            }
             emitRenderedTextIfNeeded(force: false)
             reportInputReadinessIfNeeded()
+            emitHostRenderEvent("host_view_render_end", dedupeKey: lastRenderKey)
         }
 
-        private func ensureMirrorIfNeeded() {
+        private func scheduleMirrorCreationIfNeeded() {
+            guard mirror == nil, mirrorCreationTask == nil, window != nil else { return }
+            guard bounds.width > 0, bounds.height > 0 else { return }
+            guard Self.nativeMirrorEnabledForTesting else { return }
+            emitHostRenderEvent("host_view_mirror_create_scheduled", dedupeKey: lastRenderKey)
+            mirrorCreationTask = Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self, !Task.isCancelled else { return }
+                self.mirrorCreationTask = nil
+                self.createMirrorIfNeeded()
+                self.renderLatestSnapshot()
+            }
+        }
+
+        private func createMirrorIfNeeded() {
             guard mirror == nil, window != nil else { return }
+            guard Self.nativeMirrorEnabledForTesting else { return }
             do {
+                emitHostRenderEvent("host_view_mirror_service_start_begin", dedupeKey: lastRenderKey)
                 try GhosttyMobileAppService.shared.startIfNeeded()
+                emitHostRenderEvent("host_view_mirror_service_start_end", dedupeKey: lastRenderKey)
                 guard let app = GhosttyMobileAppService.shared.app else { throw GhosttyMobileAppServiceError.configuration("ghostty app missing") }
                 var host = makeSurfaceHost()
                 var config = ghostty_session_config_new()
@@ -597,10 +626,13 @@ import Foundation
                 config.surface.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
                 config.surface.backend = GHOSTTY_SURFACE_IO_BACKEND_HOST_MANAGED
                 config.parked_host = host
+                emitHostRenderEvent("host_view_mirror_new_begin", dedupeKey: lastRenderKey)
                 mirror = ghostty_mirror_new(app, &host, &config)
+                emitHostRenderEvent("host_view_mirror_new_end", dedupeKey: lastRenderKey)
                 guard mirror != nil else { throw GhosttyMobileAppServiceError.configuration("ghostty_mirror_new failed") }
                 lastSurfaceGeometry = nil
                 updateSurfaceGeometry()
+                emitHostRenderEvent("host_view_mirror_create_end", dedupeKey: lastRenderKey)
             } catch { ghosttyRemoteTerminalTrace("mirror_create_failed error=\(error)") }
         }
 
@@ -625,12 +657,33 @@ import Foundation
             let geometry = SurfaceGeometry(width: width, height: height, scale: scale)
             guard geometry != lastSurfaceGeometry else { return }
             var host = makeSurfaceHost()
+            let geometryKey = "\(lastRenderKey)|\(geometry.width)x\(geometry.height)@\(geometry.scale)"
+            emitHostRenderEvent("host_view_geometry_set_host_begin", dedupeKey: geometryKey)
             _ = ghostty_mirror_set_host(mirror, &host)
+            emitHostRenderEvent("host_view_geometry_set_host_end", dedupeKey: geometryKey)
             ghostty_surface_set_content_scale(surface, scale, scale)
             ghostty_surface_set_size(surface, width, height)
             ghostty_surface_set_occlusion(surface, isTerminalVisible && window != nil)
             ghostty_surface_refresh(surface)
             lastSurfaceGeometry = geometry
+            emitHostRenderEvent("host_view_geometry_end", dedupeKey: geometryKey)
+        }
+
+        private func emitHostRenderEvent(_ name: String, dedupeKey: String? = nil, attributes: [String: String] = [:]) {
+            guard let ownerEpoch = activeOwnerEpoch else { return }
+            if let dedupeKey {
+                let eventKey = "\(name)|\(dedupeKey)"
+                guard emittedHostRenderEvents.insert(eventKey).inserted else { return }
+            }
+            var eventAttributes = attributes
+            eventAttributes["owner_epoch"] = "\(ownerEpoch.ownerEpoch)"
+            eventAttributes["render_key"] = lastRenderKey
+            eventAttributes["mirror"] = mirror == nil ? "0" : "1"
+            eventAttributes["visible"] = isTerminalVisible ? "1" : "0"
+            eventAttributes["accepts_input"] = acceptsTerminalInput ? "1" : "0"
+            eventAttributes["bounds"] = "\(Int(bounds.width))x\(Int(bounds.height))"
+            SpacesMobileTerminalPerformanceLogger.emit(
+                .init(sessionID: ownerEpoch.sessionID, source: "ios-host-view", name: name, attributes: eventAttributes))
         }
 
         private func applyLatestRenderFrameIfPossible() {
@@ -642,9 +695,9 @@ import Foundation
             let applied = withCFrame(frame) { cFrame in ghostty_mirror_apply_render_frame(mirror, cFrame) }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
             if let sessionID = activeOwnerEpoch?.sessionID {
-                var attributes = GhosttyRenderFrameMetrics.attributes(
-                    frame: frame, dropped: !applied, dropReason: applied ? nil : "mirror_apply_failed", renderMode: "ghostty-mirror")
-                attributes["apply_ms"] = String(applyMS)
+                let attributes = GhosttyRenderFrameMetrics.attributes(
+                    frame: frame, dropped: !applied, dropReason: applied ? nil : "mirror_apply_failed", renderMode: "ghostty-mirror",
+                    targetRevision: frame.sessionRevision, appliedRevision: applied ? frame.sessionRevision : nil, applyMS: applyMS)
                 SpacesMobileTerminalPerformanceLogger.emit(
                     .init(sessionID: sessionID, source: "ios-mirror", name: "render_frame_mirror_apply", elapsedMS: applyMS, attributes: attributes))
             }

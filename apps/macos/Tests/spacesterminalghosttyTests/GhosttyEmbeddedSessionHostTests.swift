@@ -429,21 +429,63 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "session-3", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh",
             createdAt: "2026-05-10T00:00:00Z")
         var refreshCount = 0
+        var outputAtRefresh: String?
         let host = GhosttyEmbeddedSessionHost(
-            launchConfiguration: launchConfiguration, paths: .init(rootDirectory: root.path), requestSurfaceRefreshAction: { refreshCount += 1 })
+            launchConfiguration: launchConfiguration, paths: paths,
+            requestSurfaceRefreshAction: {
+                refreshCount += 1
+                outputAtRefresh = try? String(contentsOfFile: paths.outputPath)
+            })
 
         host.debugHandleIncomingOutput(Data("echo hello\n".utf8))
 
         XCTAssertEqual(refreshCount, 1)
-        let output = try String(contentsOfFile: TerminalSessionPaths(rootDirectory: root.path).outputPath)
+        XCTAssertEqual(outputAtRefresh, "echo hello\n")
+        let output = try String(contentsOfFile: paths.outputPath)
         XCTAssertEqual(output, "echo hello\n")
     }
 
-    @MainActor func testLocalOwnerOutputPublishesSnapshotBeforeInputOutputResync() throws {
+    @MainActor func testInteractiveLocalOwnerOutputPublishesSnapshotWithoutDelayedInputOutputResync() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-interactive-input-output", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+            shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-28T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        defer { host.terminate() }
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in self.snapshot(text: "echo hello") }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        let localOwner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-28T00:00:00Z")
+        try host.attach(client: localOwner, mode: .owner, into: nil)
+
+        var receivedPayloads: [GhosttyRemoteSessionStatePayload] = []
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+
+        let output = Data("e".utf8)
+        host.debugHandleOwnerInputActivity(byteCount: output.count)
+        host.debugHandleIncomingOutput(output)
+
+        try waitUntil(timeout: 2) {
+            receivedPayloads.contains { $0.reason == "output" && $0.outputByteCount == output.count && $0.renderFrame != nil }
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertFalse(receivedPayloads.contains { $0.reason == "input_output" })
+    }
+
+    @MainActor func testBulkLocalOwnerOutputPublishesSnapshotBeforeInputOutputResync() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -468,7 +510,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { client.stop() }
 
         let output = Data("echo hello\n".utf8)
-        host.debugHandleOwnerInputActivity()
+        host.debugHandleOwnerInputActivity(byteCount: 4096)
         host.debugHandleIncomingOutput(output)
 
         try waitUntil(timeout: 2) {
