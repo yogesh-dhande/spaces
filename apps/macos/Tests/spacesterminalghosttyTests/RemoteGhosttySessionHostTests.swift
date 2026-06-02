@@ -8,6 +8,9 @@ import spacesterminalcore
 @testable import spacesterminalghostty
 
 final class RemoteGhosttySessionHostTests: XCTestCase {
+    @MainActor private final class FocusableView: NSView { override var acceptsFirstResponder: Bool { true } }
+    @MainActor private final class KeyTestWindow: NSWindow { override var isKeyWindow: Bool { true } }
+
     @MainActor func testRemoteMirrorMapsModifiedBackspaceToShellEditingControls() throws {
         XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_Delete))), "backspace")
         XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_Delete), modifierFlags: .option)), "ctrl+w")
@@ -19,6 +22,34 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
     @MainActor func testRemoteMirrorMapsCommandKToClearScreenControl() throws {
         XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_ANSI_K), modifierFlags: .command)), "ctrl+l")
+    }
+
+    @MainActor func testRemoteMirrorWindowKeyHandoffRestoresFirstResponderAndSendsEnter() throws {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-key-handoff", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-02T00:00:00Z")
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        container.addSubview(mirrorView)
+        mirrorView.frame = container.bounds
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        let dummyResponder = FocusableView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        container.addSubview(dummyResponder)
+        var sentKeys: [String] = []
+        mirrorView.acceptsTerminalInput = true
+        mirrorView.onSendKey = { sentKeys.append($0) }
+        XCTAssertTrue(window.makeFirstResponder(dummyResponder))
+        XCTAssertTrue(window.firstResponder === dummyResponder)
+
+        XCTAssertTrue(mirrorView.handleTerminalKeyEvent(keyEvent(keyCode: UInt16(kVK_Return)), requireFirstResponder: false))
+
+        XCTAssertEqual(sentKeys, ["enter"])
+        XCTAssertTrue(window.firstResponder === mirrorView)
     }
 
     func testSnapshotTextCaptureReadsVisibleViewport() {
@@ -231,6 +262,61 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         XCTAssertTrue((host.snapshotText() ?? "").contains("beta"))
         if host.hasRenderableSurface() { XCTAssertTrue(normalize(host.debugVisibleSurfaceText()).contains("alpha")) }
+    }
+
+    @MainActor func testRemoteOwnerFrameUpdateRestoresMirrorFirstResponder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let queue = DispatchQueue(label: "spaces.remote-host.owner-focus-render-test")
+        let initialPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "remote-owner-focus", reason: "initial", emittedAt: "2026-06-02T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
+            screenStateRevision: 1,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: "remote-owner-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-06-02T00:00:00Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "owner", workingDirectory: "/tmp/live",
+            renderFrame: try renderFrame(text: "alpha", sessionRevision: 1), outputByteCount: nil)
+        let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: .init(
+                sessionID: "remote-owner-focus", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-06-02T00:00:00Z"), paths: paths)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        try host.attach(
+            client: TerminalClient(
+                id: "owner-client", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z"),
+            mode: .owner, into: container)
+        waitForCondition("initial owner first responder") { window.firstResponder is GhosttyMirrorTerminalView }
+
+        let dummyResponder = FocusableView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        container.addSubview(dummyResponder)
+        XCTAssertTrue(window.makeFirstResponder(dummyResponder))
+        XCTAssertTrue(window.firstResponder === dummyResponder)
+
+        server.broadcast(
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "remote-owner-focus", reason: "state_change", emittedAt: "2026-06-02T00:00:01Z", sessionStateRevision: 2,
+                sessionStateFlags: 1, screenStateRevision: 2,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "remote-owner-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                    updatedAt: "2026-06-02T00:00:01Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "owner", workingDirectory: "/tmp/live",
+                renderFrame: try renderFrame(text: "beta", sessionRevision: 2), outputByteCount: nil))
+
+        waitForCondition("owner first responder restored") { window.firstResponder is GhosttyMirrorTerminalView }
     }
 
     @MainActor func testRemoteRenderableViewerPreservesSnapshotAcrossAttachmentStateChanges() throws {

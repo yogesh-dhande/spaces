@@ -33,6 +33,11 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         func releaseRendererSurface() { didReleaseSurface = true }
         func setFocused(_ focused: Bool, for clientID: String) { focusedStates.append((clientID, focused)) }
         func focusWindow(_ window: NSWindow?) { focusWindowCount += 1 }
+        @discardableResult func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool {
+            _ = event
+            _ = clientID
+            return false
+        }
         @discardableResult func synchronizeSurfaceGeometry() -> Bool {
             synchronizeSurfaceGeometryCount += 1
             return true

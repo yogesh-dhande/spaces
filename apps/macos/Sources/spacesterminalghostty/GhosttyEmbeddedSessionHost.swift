@@ -31,6 +31,7 @@ extension Notification.Name {
     func releaseRendererSurface()
     func setFocused(_ focused: Bool, for clientID: String)
     func focusWindow(_ window: NSWindow?)
+    @discardableResult func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool
     @discardableResult func synchronizeSurfaceGeometry() -> Bool
     func hasRenderableSurface() -> Bool
     func requestSurfaceRefresh()
@@ -100,6 +101,12 @@ extension Notification.Name {
         guard let window else { return }
         if !window.isVisible { window.orderFront(nil) }
         if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
+    }
+
+    @discardableResult public func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool {
+        _ = event
+        _ = clientID
+        return false
     }
 
     @discardableResult public func synchronizeSurfaceGeometry() -> Bool { false }
@@ -225,12 +232,15 @@ extension Notification.Name {
     private var lastSessionStateRevision: UInt64?
     private var lastSessionStateFlags: GhosttyEmbeddedSessionStateChange.Flags?
     private var lastScreenStateRevision: UInt64?
+    private var lastExportedScreenStateRevision: UInt64?
     private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
     private var lastRuntimeStateWriteAt: Date?
     private var sessionStartedAt: Date?
     private var didLogFirstOutput = false
     private let incomingOutputBuffer = IncomingOutputBuffer()
     private var inputStateBroadcastScheduled = false
+    private var screenStateChangeBroadcastScheduled = false
+    private var pendingScreenStateChangeBroadcastRevision: UInt64?
     private var pendingInputOutputResync = false
     private var inputOutputResyncWorkItem: DispatchWorkItem?
     private let interactiveOutputGate = InteractiveOutputGate()
@@ -769,6 +779,7 @@ extension Notification.Name {
             requestSurfaceRefreshAction()
             logMobileTakeoverPerformance(
                 name: "state_change", attributes: ["revision": String(change.revision), "flags": String(change.flags.rawValue)])
+            scheduleScreenStateChangeBroadcast(revision: change.revision)
         }
         var metadataChanged = false
 
@@ -872,6 +883,24 @@ extension Notification.Name {
         }
     }
 
+    private func scheduleScreenStateChangeBroadcast(revision: UInt64) {
+        guard activeOwnerClient()?.kind == .localWindow else { return }
+        pendingScreenStateChangeBroadcastRevision = max(pendingScreenStateChangeBroadcastRevision ?? revision, revision)
+        guard !screenStateChangeBroadcastScheduled else { return }
+        screenStateChangeBroadcastScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.screenStateChangeBroadcastScheduled = false
+            let revision = self.pendingScreenStateChangeBroadcastRevision
+            self.pendingScreenStateChangeBroadcastRevision = nil
+            guard self.screenStateRevisionNeedsExport(revision) else { return }
+            self.requestSurfaceRefreshAction()
+            GhosttyEmbeddedAppService.shared.tick()
+            guard self.screenStateRevisionNeedsExport(revision) else { return }
+            self.broadcastCurrentState(reason: TerminalRemoteSessionStateReason.stateChange)
+        }
+    }
+
     private func scheduleInputOutputResync() {
         inputOutputResyncWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
@@ -885,6 +914,12 @@ extension Notification.Name {
         }
         inputOutputResyncWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.02, execute: workItem)
+    }
+
+    private func screenStateRevisionNeedsExport(_ revision: UInt64?) -> Bool {
+        guard let revision else { return true }
+        guard let lastExportedScreenStateRevision else { return true }
+        return lastExportedScreenStateRevision < revision
     }
 
     private func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
@@ -1023,6 +1058,7 @@ extension Notification.Name {
             let renderFrameEncodeStartedAt = Date()
             let renderFrame = frame.flatMap { try? GhosttyRenderFrame.encode($0) }
             let renderFrameEncodeMS = TerminalPerformance.elapsedMS(since: renderFrameEncodeStartedAt)
+            if renderFrame != nil, let lastScreenStateRevision { lastExportedScreenStateRevision = lastScreenStateRevision }
             trace(
                 "render_frame_export_end reason=\(reason) render_frame=\(renderFrame == nil ? 0 : 1) frame_size=\(traceSize(columns: snapshot?.columns, rows: snapshot?.rows)) source=\(resolvedScreenState.source) owner_epoch=\(ownerEpoch)"
             )
@@ -1161,6 +1197,10 @@ extension Notification.Name {
     public func setFocused(_ focused: Bool, for clientID: String) { core.rendererHost.setFocused(focused, for: clientID) }
 
     public func focusWindow(_ window: NSWindow?) { core.rendererHost.focusWindow(window) }
+
+    @discardableResult public func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool {
+        core.rendererHost.handleKeyEvent(event, for: clientID)
+    }
 
     @discardableResult public func synchronizeSurfaceGeometry() -> Bool { core.rendererHost.synchronizeSurfaceGeometry() }
 

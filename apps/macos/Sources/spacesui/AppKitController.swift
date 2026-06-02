@@ -334,6 +334,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let didClose: Bool?
         let surfaceColumns: Int?
         let surfaceRows: Int?
+        let windowIsKey: Bool?
+        let firstResponderTypeName: String?
     }
 
     enum WindowFocusRequest: Sendable {
@@ -854,7 +856,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             sessionID: sessionID, requestedMode: requestedMode, found: controller != nil, windowTitle: debugState?.windowTitle,
             rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput, summary: debugState?.summary,
             state: debugState?.state, showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
-            didClose: debugState?.didCloseWindow, surfaceColumns: debugState?.surfaceColumns, surfaceRows: debugState?.surfaceRows)
+            didClose: debugState?.didCloseWindow, surfaceColumns: debugState?.surfaceColumns, surfaceRows: debugState?.surfaceRows,
+            windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName)
         writeTerminalSessionWindowStateDump(payload, to: outputPath)
     }
 

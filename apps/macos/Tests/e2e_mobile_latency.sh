@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
+source "$SCRIPT_DIR/terminal_harness_lock.sh"
 
 SPACES_CLI="${SPACES_CLI:-$APP_ROOT/.build/debug/spaces}"
 TERMINAL_SERVICE="${SPACES_TERMINAL_SERVICE_EXECUTABLE:-$APP_ROOT/.build/debug/SpacesTerminalService}"
@@ -120,6 +121,7 @@ cleanup() {
     kill "$SERVICE_PID" >/dev/null 2>&1 || true
     wait "$SERVICE_PID" >/dev/null 2>&1 || true
   fi
+  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR" 5
   if [[ "$KEEP_ROOT" == "1" || $exit_code -ne 0 ]]; then
     printf 'Preserved mobile latency root: %s\n' "$WORK_ROOT" >&2
   else
@@ -128,19 +130,6 @@ cleanup() {
   return "$exit_code"
 }
 trap cleanup EXIT
-
-terminal_service_socket_path() {
-  python3 - <<'PY'
-import os
-import pathlib
-
-terminal_root = str(pathlib.Path(os.environ["SPACES_RUNTIME_DIR"]) / "terminal")
-hash_value = 5381
-for byte in terminal_root.encode("utf-8"):
-    hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
-print(f"/tmp/spaces-terminal-sockets/service-{hash_value:016x}.sock")
-PY
-}
 
 parse_args "$@"
 [[ "$NETWORK_PROFILE" == "local" || "$NETWORK_PROFILE" == "ios-constrained" ]] || fail "--network-profile must be local or ios-constrained"
@@ -158,7 +147,7 @@ export SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERF_JSONL"
 "$TERMINAL_SERVICE" >"$SERVICE_LOG" 2>&1 &
 SERVICE_PID="$!"
 
-service_socket="$(terminal_service_socket_path)"
+service_socket="$(terminal_service_socket_path_for_runtime_dir "$RUNTIME_DIR")"
 service_deadline=$((SECONDS + 15))
 while [[ $SECONDS -lt $service_deadline ]]; do
   [[ -S "$service_socket" ]] && break

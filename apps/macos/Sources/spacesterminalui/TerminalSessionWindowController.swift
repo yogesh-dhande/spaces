@@ -5,6 +5,13 @@ import spacesterminalcore
 import spacesterminalghostty
 
 @MainActor private final class TerminalSessionWindow: NSWindow {
+    var terminalKeyEventHandler: ((NSEvent) -> Bool)?
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, terminalKeyEventHandler?(event) == true { return }
+        super.sendEvent(event)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.type == .keyDown else { return super.performKeyEquivalent(with: event) }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -30,6 +37,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public let didCloseWindow: Bool
     public let surfaceColumns: Int?
     public let surfaceRows: Int?
+    public let windowIsKey: Bool
+    public let firstResponderTypeName: String?
 }
 
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
@@ -245,6 +254,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         window.minSize = NSSize(width: 760, height: 420)
         super.init(window: window)
         window.delegate = self
+        window.terminalKeyEventHandler = { [weak self] event in self?.handleTerminalWindowKeyEvent(event) ?? false }
         startObservingApplicationActivation()
         buildUI()
         if performInitialRefresh { refreshNow() }
@@ -880,6 +890,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 rendererLabel.stringValue = rendererMode.statusSummary
             }
             guard visibleRenderer != .ghosttyOwner else {
+                restoreGhosttyOwnerInputFocusIfReady()
                 completeOwnershipTransitionIfNeeded(target: .owner, renderer: "owner_surface")
                 return
             }
@@ -1190,7 +1201,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private func assignPreferredFirstResponder() {
         guard let window else { return }
         switch visibleRenderer {
-        case .ghosttyOwner: break
+        case .ghosttyOwner: restoreGhosttyOwnerInputFocusIfReady()
         case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable, .textView:
             if !takeoverContainerView.isHidden, takeoverButton.isEnabled {
                 window.makeFirstResponder(takeoverButton)
@@ -1200,6 +1211,20 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 window.makeFirstResponder(outputView)
             }
         }
+    }
+
+    private func handleTerminalWindowKeyEvent(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown, backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner,
+            isInteractiveRuntimeState(lastObservedRuntimeState), window?.isKeyWindow == true
+        else { return false }
+        return ghosttyRendererHost?.handleKeyEvent(event, for: client.id) ?? false
+    }
+
+    private func restoreGhosttyOwnerInputFocusIfReady() {
+        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner,
+            isInteractiveRuntimeState(lastObservedRuntimeState), window?.isKeyWindow == true
+        else { return }
+        ghosttyRendererHost?.setFocused(true, for: client.id)
     }
 
     private func scrollOutputToBottom() {
@@ -1491,7 +1516,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             renderedOutput: renderedOutput, showsTerminalSurface: !terminalContainer.isHidden, showsTextRenderer: !outputScrollView.isHidden,
             rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue, state: stateLabel.stringValue,
             windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
-            surfaceRows: surfaceSnapshot?.rows)
+            surfaceRows: surfaceSnapshot?.rows, windowIsKey: window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName)
     }
 
     var debugRenderedOutput: String { outputView.string }

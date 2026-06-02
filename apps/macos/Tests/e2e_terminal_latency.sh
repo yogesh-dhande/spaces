@@ -23,7 +23,7 @@ SAMPLES="${SAMPLES:-12}"
 KEEP_ROOT="${KEEP_ROOT:-0}"
 APP_PID=""
 
-SCENARIOS=(mac-input-latency mac-scrollback-latency)
+SCENARIOS=(mac-input-latency mac-scrollback-latency mac-command-output-catchup)
 SELECTED_SCENARIOS=()
 
 print_usage() {
@@ -40,6 +40,7 @@ Options:
 Scenarios:
   mac-input-latency
   mac-scrollback-latency
+  mac-command-output-catchup
 EOF
 }
 
@@ -104,6 +105,7 @@ cleanup() {
     kill "$APP_PID" >/dev/null 2>&1 || true
     wait "$APP_PID" >/dev/null 2>&1 || true
   fi
+  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR" 5
   release_terminal_harness_lock
   if [[ "$KEEP_ROOT" == "1" || $exit_code -ne 0 ]]; then
     printf 'Preserved latency root: %s\n' "$WORK_ROOT" >&2
@@ -167,6 +169,7 @@ scenario_results: dict[str, dict] = {}
 budgets = {
     "mac-input-latency": {"gross_p95_ms": 500, "target_p95_ms": 75},
     "mac-scrollback-latency": {"gross_p95_ms": 500, "target_p95_ms": 75},
+    "mac-command-output-catchup": {"gross_p95_ms": 2000, "target_p95_ms": 150},
 }
 
 
@@ -346,20 +349,21 @@ def request_terminal_window(session_id: str) -> None:
     time.sleep(0.5)
 
 
-def start_terminal(title: str, command: str) -> str:
+def start_terminal(title: str, command: str | None) -> str:
     try:
+        arguments = [
+            spaces_cli,
+            "terminal",
+            "command",
+            "--backend",
+            "ghostty-embedded",
+            "--title",
+            title,
+        ]
+        if command is not None:
+            arguments.extend(["--command", command])
         completed = run(
-            [
-                spaces_cli,
-                "terminal",
-                "command",
-                "--backend",
-                "ghostty-embedded",
-                "--command",
-                command,
-                "--title",
-                title,
-            ],
+            arguments,
             timeout=20,
         )
         session_id = extract_session_id(completed.stdout)
@@ -767,11 +771,127 @@ def run_mac_scrollback_latency() -> dict:
     }
 
 
+def run_mac_command_output_catchup() -> dict:
+    scenario = "mac-command-output-catchup"
+    title_prefix = f"{scenario}-{uuid.uuid4().hex[:8]}"
+    initial_render_modes = []
+    session_ids = []
+    measurements = []
+    for index in range(sample_count):
+        title = f"{title_prefix}-{index + 1:03d}"
+        session_id = start_terminal(title, None)
+        session_ids.append(session_id)
+        initial_state, _ = wait_for_state(session_id, lambda state: state.get("found") and renderer_is_ghostty(state), 20, "initial")
+        initial_render_modes.append(initial_state.get("rendererSummary"))
+        probe_id = f"mac-command-{index + 1:03d}-{uuid.uuid4().hex[:8]}"
+        marker_prefix = f"__mac_command_probe_{index + 1:03d}_"
+        marker_suffix = uuid.uuid4().hex[:10]
+        marker = f"{marker_prefix}{marker_suffix}__"
+        command_text = f"echo '{marker_prefix}'\"{marker_suffix}\"'__'"
+        enqueue_ns = now_ns()
+        event("mac_command_enqueue", scenario, probe_id, enqueue_ns)
+        rpc_begin_ns = now_ns()
+        event("mac_command_rpc_begin", scenario, probe_id, rpc_begin_ns, enqueue_to_rpc_begin_ms=ms_between(enqueue_ns, rpc_begin_ns))
+        completed = run(
+            [
+                spacese2e,
+                "type-application-window",
+                "--executable-name",
+                app_executable_name,
+                "--window-title-contains",
+                title,
+                "--normalized-y",
+                "0.58",
+                "--text",
+                command_text,
+                "--append-newline",
+                "--inter-key-delay-ms",
+                "5",
+            ],
+            timeout=15,
+        )
+        rpc_end_ns = now_ns()
+        try:
+            helper_payload = json.loads(completed.stdout)
+            begin_ns = int(helper_payload["firstKeyDownUptimeNanoseconds"])
+            key_up_ns = int(helper_payload["lastKeyUpUptimeNanoseconds"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise RuntimeError(f"failed to parse spacese2e keyboard timing payload: {completed.stdout}") from error
+        event("mac_command_begin", scenario, probe_id, begin_ns, marker=marker)
+        event(
+            "mac_command_rpc_end",
+            scenario,
+            probe_id,
+            rpc_end_ns,
+            rpc_ms=ms_between(rpc_begin_ns, rpc_end_ns),
+            rpc_begin_to_key_event_ms=ms_between(rpc_begin_ns, begin_ns),
+            key_up_to_rpc_end_ms=ms_between(key_up_ns, rpc_end_ns),
+        )
+        visible_state, visible_ns = wait_for_state(
+            session_id, lambda state, marker=marker: marker in compact_rendered_output(state), 8, probe_id)
+        frame_apply = first_mac_frame_apply(session_id, begin_ns, visible_ns)
+        frame_apply_ns = frame_apply[1] if frame_apply else None
+        event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
+        frame_apply_to_visible_ms = ms_between(frame_apply_ns, visible_ns) if frame_apply_ns is not None else None
+        stage_split = mac_host_latency_split(session_id, begin_ns, frame_apply_ns, visible_ns)
+        if frame_apply_ns is not None:
+            event(
+                "mac_command_frame_applied",
+                scenario,
+                probe_id,
+                frame_apply_ns,
+                event_to_frame_apply_ms=event_to_frame_apply_ms,
+                frame_apply_to_visible_ms=frame_apply_to_visible_ms,
+                target_revision=(frame_apply[0].get("attributes") or {}).get("target_revision"),
+                applied_revision=(frame_apply[0].get("attributes") or {}).get("applied_revision"),
+            )
+        event(
+            "mac_command_output_visible",
+            scenario,
+            probe_id,
+            visible_ns,
+            rpc_end_to_render_visible_ms=ms_between(rpc_end_ns, visible_ns),
+            event_to_visible_ms=ms_between(begin_ns, visible_ns),
+        )
+        measurements.append(
+            {
+                "sample_index": index + 1,
+                "probe_id": probe_id,
+                "session_id": session_id,
+                "marker": marker,
+                "enqueue_to_rpc_begin_ms": ms_between(enqueue_ns, rpc_begin_ns),
+                "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
+                "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
+                "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
+                "event_to_frame_apply_ms": event_to_frame_apply_ms,
+                "frame_apply_to_visible_ms": frame_apply_to_visible_ms,
+                "event_to_visible_ms": ms_between(begin_ns, visible_ns),
+                "visible_latency_ms": ms_between(begin_ns, visible_ns),
+                "rpc_ms": ms_between(rpc_begin_ns, rpc_end_ns),
+                "rpc_begin_to_key_event_ms": ms_between(rpc_begin_ns, begin_ns),
+                "key_up_to_rpc_end_ms": ms_between(key_up_ns, rpc_end_ns),
+                "render_mode": "ghostty-mirror" if renderer_is_ghostty(visible_state) else visible_state.get("rendererSummary"),
+            }
+        )
+    return {
+        "session_ids": session_ids,
+        "window_title": title_prefix,
+        "initial_render_mode": initial_render_modes[0] if initial_render_modes else None,
+        "measurements": measurements,
+        "summary": summarize_latencies(measurements),
+        "phase_summaries": summarize_phases(measurements),
+        "budget_enforced": True,
+    }
+
+
 for scenario in scenarios:
     if scenario == "mac-input-latency":
         scenario_results[scenario] = run_mac_input_latency()
     elif scenario == "mac-scrollback-latency":
         scenario_results[scenario] = run_mac_scrollback_latency()
+    elif scenario == "mac-command-output-catchup":
+        scenario_results[scenario] = run_mac_command_output_catchup()
     else:
         raise RuntimeError(f"unknown scenario: {scenario}")
 

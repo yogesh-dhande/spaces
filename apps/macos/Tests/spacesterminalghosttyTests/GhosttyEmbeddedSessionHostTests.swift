@@ -108,6 +108,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "terminated"))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "output", ownerKind: .localWindow))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "output", ownerKind: .remoteViewer))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "state_change", ownerKind: .localWindow))
+        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "state_change", ownerKind: .remoteViewer))
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize"))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize", ownerKind: .remoteViewer))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize", ownerKind: .localWindow))
@@ -138,6 +140,45 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         core.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
 
         XCTAssertEqual(refreshRequestCount, 1)
+    }
+
+    @MainActor func testScreenStateChangePublishesUnexportedLocalOwnerFrame() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-screen-state-change-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-06-02T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        defer { host.terminate() }
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in self.snapshot(text: "state changed") }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        let localOwner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z")
+        try host.attach(client: localOwner, mode: .owner, into: nil)
+
+        var receivedPayloads: [GhosttyRemoteSessionStatePayload] = []
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        try waitUntil(timeout: 2) { !receivedPayloads.isEmpty }
+        receivedPayloads.removeAll()
+
+        let screenRevision: UInt64 = 9_000_000
+        host.applySessionStateChange(.init(flags: [.screen], revision: screenRevision, title: nil, workingDirectory: nil))
+
+        try waitUntil(timeout: 2) {
+            receivedPayloads.contains {
+                $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision && $0.renderFrameSnapshot != nil
+            }
+        }
+        let payload = try XCTUnwrap(receivedPayloads.first { $0.reason == TerminalRemoteSessionStateReason.stateChange })
+        let snapshot = try XCTUnwrap(payload.renderFrameSnapshot)
+        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: snapshot), "state changed")
     }
 
     @MainActor func testRemoteScreenStateVisibleContentIgnoresBlankSnapshotsAndText() {

@@ -80,6 +80,11 @@ import spacesterminalcore
 
     public func focusWindow(_ window: NSWindow?) { terminalView.focusWindow(window) }
 
+    @discardableResult public func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool {
+        guard clientID == attachedClient?.id, attachedMode == .owner else { return false }
+        return terminalView.handleTerminalKeyEvent(event, requireFirstResponder: false)
+    }
+
     @discardableResult public func synchronizeSurfaceGeometry() -> Bool {
         guard attachedMode == .owner else { return false }
         sendCurrentViewportResizeIfNeeded(force: true)

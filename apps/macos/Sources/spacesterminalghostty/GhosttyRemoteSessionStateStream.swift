@@ -197,9 +197,12 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
     private let onEvent: @MainActor @Sendable (GhosttyRemoteSessionStatePayload) -> Void
     private let onDisconnect: @MainActor @Sendable () -> Void
     private let queue: DispatchQueue
+    private let eventLock = NSLock()
     private var socketFD: Int32 = -1
     private var readSource: DispatchSourceRead?
     private var readBuffer = Data()
+    private var pendingEvent: GhosttyRemoteSessionStatePayload?
+    private var eventDeliveryScheduled = false
 
     init(
         socketPath: String, onEvent: @escaping @MainActor @Sendable (GhosttyRemoteSessionStatePayload) -> Void,
@@ -247,6 +250,10 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         let socketFD = self.socketFD
         self.socketFD = -1
         readBuffer.removeAll(keepingCapacity: false)
+        eventLock.lock()
+        pendingEvent = nil
+        eventDeliveryScheduled = false
+        eventLock.unlock()
         source?.cancel()
         shutdown(socketFD, SHUT_RDWR)
         Task { @MainActor [onDisconnect] in onDisconnect() }
@@ -273,8 +280,41 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
             let line = readBuffer.prefix(upTo: newlineIndex)
             readBuffer.removeSubrange(...newlineIndex)
             guard !line.isEmpty, let payload = try? GhosttyRemoteSessionStateCodec.decodeLine(Data(line)) else { continue }
-            Task { @MainActor [onEvent] in onEvent(payload) }
+            enqueueEvent(payload)
         }
+    }
+
+    private func enqueueEvent(_ payload: GhosttyRemoteSessionStatePayload) {
+        eventLock.lock()
+        if let pendingEvent, pendingEvent.sessionID == payload.sessionID {
+            self.pendingEvent = pendingEvent.merged(with: payload)
+        } else {
+            pendingEvent = payload
+        }
+        guard !eventDeliveryScheduled else {
+            eventLock.unlock()
+            return
+        }
+        eventDeliveryScheduled = true
+        eventLock.unlock()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            while let payload = self.takePendingEvent() {
+                self.onEvent(payload)
+                await Task.yield()
+            }
+        }
+    }
+
+    private func takePendingEvent() -> GhosttyRemoteSessionStatePayload? {
+        eventLock.lock()
+        defer { eventLock.unlock() }
+        guard let payload = pendingEvent else {
+            eventDeliveryScheduled = false
+            return nil
+        }
+        pendingEvent = nil
+        return payload
     }
 }
 

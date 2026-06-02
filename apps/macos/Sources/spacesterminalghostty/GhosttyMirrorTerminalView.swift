@@ -35,8 +35,9 @@ import spacesterminalcore
     private var lastGeometry: SurfaceGeometry?
     private var lastReportedViewportSize: (columns: Int, rows: Int)?
     private var renderedText = ""
+    private var pendingFirstResponderRestoreTask: Task<Void, Never>?
 
-    var acceptsTerminalInput = false { didSet { updateSurfaceFocus() } }
+    var acceptsTerminalInput = false { didSet { restoreFirstResponderIfWindowReady() } }
     var onSendText: SendTextHandler?
     var onSendKey: SendKeyHandler?
     var onSendScroll: SendScrollHandler?
@@ -52,7 +53,12 @@ import spacesterminalcore
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    deinit { MainActor.assumeIsolated { if let mirror { ghostty_mirror_free(mirror) } } }
+    deinit {
+        MainActor.assumeIsolated {
+            pendingFirstResponderRestoreTask?.cancel()
+            if let mirror { ghostty_mirror_free(mirror) }
+        }
+    }
 
     override var acceptsFirstResponder: Bool { acceptsTerminalInput }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -69,7 +75,7 @@ import spacesterminalcore
         updateSurfaceGeometry()
         reportViewportSizeIfNeeded()
         applyLatestFrameIfPossible()
-        updateSurfaceFocus()
+        restoreFirstResponderIfWindowReady()
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -101,28 +107,27 @@ import spacesterminalcore
     }
 
     override func keyDown(with event: NSEvent) {
-        guard canProcessTerminalInput else {
-            super.keyDown(with: event)
-            return
-        }
-        if GhosttyTerminalInputTranslator.shouldDeferToSystemShortcut(keyCode: event.keyCode, modifierFlags: event.modifierFlags) {
-            super.keyDown(with: event)
-            return
-        }
+        if handleTerminalKeyEvent(event) { return }
+        super.keyDown(with: event)
+    }
+
+    @discardableResult func handleTerminalKeyEvent(_ event: NSEvent, requireFirstResponder: Bool = true) -> Bool {
+        guard event.type == .keyDown, acceptsTerminalInput, window?.isKeyWindow == true else { return false }
+        if GhosttyTerminalInputTranslator.shouldDeferToSystemShortcut(keyCode: event.keyCode, modifierFlags: event.modifierFlags) { return false }
+        if !requireFirstResponder, window?.firstResponder !== self { window?.makeFirstResponder(self) }
+        guard !requireFirstResponder || canProcessTerminalInput else { return false }
+        guard canProcessTerminalInput else { return false }
         if let keySpec = Self.remoteKeySpecifier(for: event) {
             onSendKey?(keySpec)
-            return
+            return true
         }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if flags.contains(.command) {
-            super.keyDown(with: event)
-            return
-        }
+        if flags.contains(.command) { return false }
         if let characters = GhosttyTerminalInputTranslator.ghosttyText(for: event), !characters.isEmpty {
             onSendText?(characters)
-            return
+            return true
         }
-        super.keyDown(with: event)
+        return false
     }
 
     func update(frame: GhosttyRenderFrame?, renderStateKey: String) {
@@ -132,6 +137,7 @@ import spacesterminalcore
         renderedText = frame.map { GhosttyTerminalSnapshotGrid.fullPlainText(for: $0.snapshot) } ?? ""
         ensureMirrorIfNeeded()
         applyLatestFrameIfPossible()
+        restoreFirstResponderIfWindowReady()
     }
 
     func update(snapshot: GhosttyTerminalSnapshot?, renderStateKey: String) {
@@ -201,6 +207,30 @@ import spacesterminalcore
     private var canProcessTerminalInput: Bool { acceptsTerminalInput && window?.isKeyWindow == true && window?.firstResponder === self }
 
     private func focusWindow() { focusWindow(window) }
+
+    private func restoreFirstResponderIfWindowReady(deferIfNeeded: Bool = true) {
+        guard acceptsTerminalInput, let window, window.isKeyWindow else {
+            updateSurfaceFocus()
+            return
+        }
+        if window.firstResponder !== self { window.makeFirstResponder(self) }
+        updateSurfaceFocus()
+        if window.firstResponder !== self {
+            window.makeFirstResponder(self)
+            updateSurfaceFocus()
+        }
+        if deferIfNeeded { scheduleDeferredFirstResponderRestore() }
+    }
+
+    private func scheduleDeferredFirstResponderRestore() {
+        guard pendingFirstResponderRestoreTask == nil else { return }
+        pendingFirstResponderRestoreTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self else { return }
+            self.pendingFirstResponderRestoreTask = nil
+            self.restoreFirstResponderIfWindowReady(deferIfNeeded: false)
+        }
+    }
 
     private func installSurfaceHostView() {
         surfaceHostView.translatesAutoresizingMaskIntoConstraints = false
