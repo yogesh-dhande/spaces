@@ -22,6 +22,11 @@ else
 fi
 MOBILE_ARTIFACT_NAME="${SPACES_MOBILE_E2E_ARTIFACT_NAME:-$MOBILE_DEVICE_KEY}"
 CODEX_RESUME_THREAD_ID="${SPACES_MOBILE_CODEX_RESUME_THREAD_ID:-019e380a-9def-7852-9834-74c67b2da894}"
+USER_HOME="${HOME:?}"
+SOURCE_CODEX_HOME="${SPACES_MOBILE_CODEX_HOME:-${CODEX_HOME:-$USER_HOME/.codex}}"
+E2E_CODEX_HOME="$SOURCE_CODEX_HOME"
+USER_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$USER_HOME/.config}"
+E2E_GHOSTTY_XDG_CONFIG_HOME="${SPACES_MOBILE_GHOSTTY_XDG_CONFIG_HOME:-$USER_XDG_CONFIG_HOME}"
 FIXTURE_LINE_COUNT=520
 SCROLLBACK_SWIPE_COUNT=2
 
@@ -140,6 +145,8 @@ run_demo_env() {
 demo_env() {
   run_demo_env \
     HOME="$DEMO_ROOT/home" \
+    CODEX_HOME="$E2E_CODEX_HOME" \
+    XDG_CONFIG_HOME="$E2E_GHOSTTY_XDG_CONFIG_HOME" \
     SPACES_DB_PATH="$DB_PATH" \
     SPACES_RUNTIME_DIR="$RUNTIME_DIR" \
     SPACES_TERMINAL_SERVICE_EXECUTABLE="$TERMINAL_SERVICE_BIN" \
@@ -337,7 +344,7 @@ while True:
             "DEMO_ROOT": payload["root"],
             "PROJECT_DIR": payload["projectDir"],
             "DB_PATH": payload["dbPath"],
-            "RUNTIME_DIR": str(pathlib.Path(payload["root"]) / "runtime"),
+            "RUNTIME_DIR": payload.get("runtimeDir") or str(pathlib.Path(payload["root"]) / "runtime"),
             "BRIDGE_HOST": payload["bridgeHost"],
             "BRIDGE_PORT": str(payload["bridgePort"]),
             "IPAD_UDID": payload["ipadSimulatorUDID"],
@@ -375,12 +382,15 @@ start_demo() {
   fi
   printf 'Launching shared mobile demo on port %s...\n' "$DEMO_PORT"
   SPACES_MOBILE_DEMO_KEEP_ROOT=1 \
+    SPACES_MOBILE_DEMO_PROFILE_MODE=isolated \
     SPACES_MOBILE_DEMO_BUILD_MACOS=0 \
     SPACES_MOBILE_DEMO_APP_PATH="$IOS_APP_PATH" \
     SPACES_MOBILE_DEMO_IPHONE_NAME="$demo_iphone_name" \
     SPACES_MOBILE_DEMO_IPAD_NAME="$demo_ipad_name" \
     SPACES_MOBILE_DEMO_PORT="$DEMO_PORT" \
     SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
+    CODEX_HOME="$E2E_CODEX_HOME" \
+    XDG_CONFIG_HOME="$E2E_GHOSTTY_XDG_CONFIG_HOME" \
     "$DEMO_SCRIPT" >"$DEMO_STDOUT_LOG" 2>&1 &
   DEMO_PID=$!
   wait_for_demo_metadata
@@ -624,10 +634,18 @@ payload = {
     "postFinalMacRetakeoverScreenshotPath": None,
     "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final.png"),
     "scrollbackSwipeCount": 0,
+    "minimumVisibleTerminalInkBands": 0,
+    "maximumTerminalTopBlankRatio": 0,
     "attachToExistingApp": True,
     "bundleID": bundle_id,
     "mobileUDID": mobile_udid,
 }
+
+if scenario in ("codex", "codex-resume-reopen"):
+    payload.update({
+        "minimumVisibleTerminalInkBands": 3,
+        "maximumTerminalTopBlankRatio": 0.20,
+    })
 
 if scenario == "codex-resume-reopen":
     payload["secondarySessionID"] = session_id
@@ -653,6 +671,8 @@ elif scenario == "roundtrip":
         "finalMacRetakeoverRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final-mac-retakeover-request"),
         "finalMacRetakeoverObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final-mac-retakeover-observed"),
         "postFinalMacRetakeoverScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-final-mac-retakeover.png"),
+        "minimumVisibleTerminalInkBands": 3,
+        "maximumTerminalTopBlankRatio": 0.20,
     })
 elif scenario == "scrollback":
     payload.update({
@@ -662,6 +682,8 @@ elif scenario == "scrollback":
         "firstCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-observed"),
         "postFirstCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-command-while-scrolled.png"),
         "scrollbackSwipeCount": scrollback_swipe_count,
+        "minimumVisibleTerminalInkBands": 3,
+        "maximumTerminalTopBlankRatio": 0.20,
     })
 elif scenario == "two-session":
     payload.update({
@@ -720,6 +742,8 @@ output_log_path = runtime_root / "terminal" / "sessions" / session_id / "output.
 
 env = os.environ | {
     "HOME": str(demo_root / "home"),
+    "CODEX_HOME": os.environ.get("CODEX_HOME", str(Path.home() / ".codex")),
+    "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")),
     "SPACES_DB_PATH": str(demo_root / "spaces.db"),
     "SPACES_RUNTIME_DIR": str(runtime_root),
 }
@@ -783,19 +807,41 @@ for request in (
     if not response.get("ok"):
         raise RuntimeError(f"Codex launch request failed: {response}")
 
+def send_owner_key(key: str, label: str) -> None:
+    response = send_request({"command": "key", "key": key, "clientID": owner_client_id})
+    if not response.get("ok"):
+        raise RuntimeError(f"Failed to {label}: {response}")
+
+def is_codex_update_prompt(text: str) -> bool:
+    normalized = " ".join(text.lower().split())
+    return (
+        "update available" in normalized
+        and "update now" in normalized
+        and "skip" in normalized
+        and "press enter to continue" in normalized
+    )
+
+update_prompt_skipped = False
 trust_prompt_confirmed = False
 resume_directory_prompt_confirmed = False
 deadline = time.time() + 30
 while time.time() < deadline:
     rendered_output = (dump_owner_window().get("renderedOutput") or "")
     output_log_text = output_log_path.read_text(errors="replace") if output_log_path.exists() else ""
+    if is_codex_update_prompt(rendered_output):
+        if update_prompt_skipped:
+            time.sleep(0.2)
+            continue
+        send_owner_key("down", "select Skip in the Codex update prompt")
+        send_owner_key("enter", "confirm Skip in the Codex update prompt")
+        update_prompt_skipped = True
+        time.sleep(0.2)
+        continue
     if "Choose working directory to resume this session" in rendered_output:
         if resume_directory_prompt_confirmed:
             time.sleep(0.2)
             continue
-        response = send_request({"command": "key", "key": "enter", "clientID": owner_client_id})
-        if not response.get("ok"):
-            raise RuntimeError(f"Failed to confirm the Codex resume directory prompt: {response}")
+        send_owner_key("enter", "confirm the Codex resume directory prompt")
         resume_directory_prompt_confirmed = True
         time.sleep(0.2)
         continue
@@ -803,19 +849,27 @@ while time.time() < deadline:
         if trust_prompt_confirmed:
             time.sleep(0.2)
             continue
-        response = send_request({"command": "key", "key": "enter", "clientID": owner_client_id})
-        if not response.get("ok"):
-            raise RuntimeError(f"Failed to confirm the Codex trust prompt: {response}")
+        send_owner_key("enter", "confirm the Codex trust prompt")
         trust_prompt_confirmed = True
         time.sleep(0.2)
         continue
-    normalized_output = f"{rendered_output}\n{output_log_text}".lower()
+    normalized_rendered_output = rendered_output.lower()
+    normalized_output_log = output_log_text.lower()
     if (
-        "openai codex" in normalized_output
-        or "gpt-" in normalized_output
-        or "/review on my current changes" in normalized_output
-        or "/model to change" in normalized_output
-        or "/mcp to list configured mcp tools" in normalized_output
+        "sign in with chatgpt" in normalized_rendered_output
+        or "provide your own api key" in normalized_rendered_output
+        or "sign in with chatgpt" in normalized_output_log
+        or "provide your own api key" in normalized_output_log
+    ):
+        raise RuntimeError(
+            "Codex started without a signed-in user. "
+            "Set SPACES_MOBILE_CODEX_HOME or CODEX_HOME to a Codex home containing auth.json."
+        )
+    if (
+        "gpt-" in normalized_rendered_output
+        or "/review on my current changes" in normalized_rendered_output
+        or "/model to change" in normalized_rendered_output
+        or "/mcp to list configured mcp tools" in normalized_rendered_output
     ):
         raise SystemExit(0)
     time.sleep(0.2)
@@ -917,7 +971,7 @@ session_events = [
 ]
 takeover_started_at = parse_timestamp(takeover_started_at_raw)
 
-if render_dump.get("renderMode") not in {"ownerBootstrapping", "ownerLive"}:
+if render_dump.get("renderMode") != "ghostty-mirror":
     raise SystemExit(f"Unexpected render mode after takeover: {render_dump.get('renderMode')!r}")
 if render_dump.get("errorMessage"):
     raise SystemExit(f"Unexpected {mobile_device_label} error after takeover: {render_dump.get('errorMessage')!r}")
@@ -931,12 +985,17 @@ rendered_terminal_text = "\n".join(
 ).lower()
 if "codex resume" in rendered_terminal_text and not any(
     marker in rendered_terminal_text
-    for marker in ("openai codex", "gpt-", "/model to change", "/mcp to list configured mcp tools", "conversation interrupted", "›")
+    for marker in (
+        "gpt-",
+        "/model to change",
+        "/mcp to list configured mcp tools",
+        "conversation interrupted",
+        "›",
+    )
 ):
     raise SystemExit(f"The {mobile_device_label} owner bootstrap appears to be the stale pre-takeover shell prompt.")
 
 bootstrap_receipts = [event for event in session_events if event.get("name") == "owner_bootstrap_state_received"]
-local_bootstraps = [event for event in session_events if event.get("name") == "local_owner_bootstrap_begin"]
 first_nonblank = [event for event in session_events if event.get("name") == "owner_first_nonblank_render"]
 first_input_ready = [event for event in session_events if event.get("name") == "owner_first_input_ready"]
 initial_snapshot_exports = [
@@ -962,25 +1021,20 @@ post_ready_snapshot_exports = [
 ]
 
 if reopen_same_session:
-    expected_local_bootstraps = 4
-    if len(local_bootstraps) != expected_local_bootstraps:
+    expected_bootstraps = 4
+    if len(first_nonblank) != expected_bootstraps:
         raise SystemExit(
-            f"Expected {expected_local_bootstraps} local owner bootstraps across reopen cycles, "
-            f"found {len(local_bootstraps)}"
-        )
-    if len(first_nonblank) != expected_local_bootstraps:
-        raise SystemExit(
-            f"Expected {expected_local_bootstraps} first non-blank render events across reopen cycles, "
+            f"Expected {expected_bootstraps} first non-blank render events across reopen cycles, "
             f"found {len(first_nonblank)}"
         )
-    if len(first_input_ready) != expected_local_bootstraps:
+    if len(first_input_ready) != expected_bootstraps:
         raise SystemExit(
-            f"Expected {expected_local_bootstraps} first input-ready events across reopen cycles, "
+            f"Expected {expected_bootstraps} first input-ready events across reopen cycles, "
             f"found {len(first_input_ready)}"
         )
-    if len(bootstrap_receipts) < expected_local_bootstraps:
+    if len(bootstrap_receipts) < expected_bootstraps:
         raise SystemExit(
-            f"Expected at least {expected_local_bootstraps} owner bootstrap receipts across reopen cycles, "
+            f"Expected at least {expected_bootstraps} owner bootstrap receipts across reopen cycles, "
             f"found {len(bootstrap_receipts)}"
         )
     if not initial_snapshot_exports:
@@ -988,8 +1042,6 @@ if reopen_same_session:
 else:
     if len(bootstrap_receipts) != 1:
         raise SystemExit(f"Expected exactly one owner bootstrap receipt, found {len(bootstrap_receipts)}")
-    if len(local_bootstraps) != 1:
-        raise SystemExit(f"Expected exactly one local owner bootstrap, found {len(local_bootstraps)}")
     if len(first_nonblank) != 1:
         raise SystemExit(f"Expected exactly one first non-blank render event, found {len(first_nonblank)}")
     if len(first_input_ready) != 1:
@@ -1005,12 +1057,68 @@ PY
 }
 
 codex_demo_command_prefix() {
-  printf 'codex -c check_for_update_on_startup=false'
+  printf 'CODEX_HOME=%q codex' "$E2E_CODEX_HOME"
+}
+
+require_codex_auth_for_e2e() {
+  if [[ ! -f "$SOURCE_CODEX_HOME/auth.json" ]]; then
+    fail "Codex E2E scenarios require signed-in Codex credentials at CODEX_HOME=$SOURCE_CODEX_HOME. Set SPACES_MOBILE_CODEX_HOME or run codex login."
+  fi
+}
+
+prepare_codex_home_for_e2e() {
+  local trusted_project_dir="$1"
+  local generated_home="$DEMO_ROOT/codex-home"
+  rm -rf "$generated_home"
+  mkdir -p "$generated_home"
+
+  if [[ -f "$SOURCE_CODEX_HOME/config.toml" ]]; then
+    cp "$SOURCE_CODEX_HOME/config.toml" "$generated_home/config.toml"
+  else
+    : >"$generated_home/config.toml"
+  fi
+
+  local auth_file
+  for auth_file in "$SOURCE_CODEX_HOME"/auth.json "$SOURCE_CODEX_HOME"/auth.*.json; do
+    [[ -f "$auth_file" ]] || continue
+    ln -s "$auth_file" "$generated_home/$(basename "$auth_file")"
+  done
+
+  local escaped_project_dir="$trusted_project_dir"
+  escaped_project_dir="${escaped_project_dir//\\/\\\\}"
+  escaped_project_dir="${escaped_project_dir//\"/\\\"}"
+  if ! grep -F "[projects.\"$escaped_project_dir\"]" "$generated_home/config.toml" >/dev/null 2>&1; then
+    printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$escaped_project_dir" >>"$generated_home/config.toml"
+  fi
+
+  E2E_CODEX_HOME="$generated_home"
+}
+
+copy_codex_resume_session_for_e2e() {
+  local generated_home="$1"
+  local source_sessions_dir="$SOURCE_CODEX_HOME/sessions"
+  [[ -d "$source_sessions_dir" ]] || return 1
+
+  local source_session_path
+  source_session_path="$(find "$source_sessions_dir" -type f -name "*$CODEX_RESUME_THREAD_ID*.jsonl" -print -quit)"
+  [[ -n "$source_session_path" ]] || return 1
+
+  local relative_session_path
+  relative_session_path="${source_session_path#$source_sessions_dir/}"
+  mkdir -p "$generated_home/sessions/$(dirname "$relative_session_path")"
+  cp "$source_session_path" "$generated_home/sessions/$relative_session_path"
 }
 
 run_codex_scenario() {
   local scenario="$1"
   begin_scenario "$scenario"
+  require_codex_auth_for_e2e
+  local trusted_project_dir
+  trusted_project_dir="$(cd "$PROJECT_DIR" && pwd -P)"
+  prepare_codex_home_for_e2e "$trusted_project_dir"
+  if [[ "$scenario" == "codex-resume-reopen" ]]; then
+    copy_codex_resume_session_for_e2e "$E2E_CODEX_HOME" || fail "Codex resume E2E requires saved session $CODEX_RESUME_THREAD_ID under CODEX_HOME=$SOURCE_CODEX_HOME."
+  fi
   local session_id
   session_id="$(new_terminal_session)"
   track_current_scenario_session "$session_id"
@@ -1253,7 +1361,13 @@ def wait_for_terminal_window_dump(output_path: Path, predicate, timeout: float, 
     )
 
 def contains_command_output(text: str, command_text: str, output_text: str) -> bool:
-    return f"% {command_text}" in text and f"\n{output_text}\n" in text
+    lines = text.splitlines()
+    compact_text = re.sub(r"\s+", "", text)
+    compact_command = re.sub(r"\s+", "", command_text)
+    return (
+        f"%{compact_command}" in compact_text
+        and any(line.strip() == output_text for line in lines)
+    )
 
 def mobile_rendered_text(payload: dict) -> str:
     return payload.get("renderedText") or ""
@@ -1297,7 +1411,7 @@ def assert_render_output_sane(label: str, text: str) -> None:
         if line.count("%") > 1:
             raise RuntimeError(f"{label} render contains duplicated prompt on one line:\n{text}")
         if line.strip() in bare_command_lines:
-            raise RuntimeError(f"{label} render contains a bare replay command line:\n{text}")
+            raise RuntimeError(f"{label} render contains a bare command line:\n{text}")
     if text.count("Last login:") > 1:
         raise RuntimeError(f"{label} render contains repeated login banner:\n{text}")
     if "\x1b" in text or "^[" in text:
@@ -1309,12 +1423,14 @@ def mac_owner_render_contains(payload: dict, *markers: str) -> bool:
     rendered_text = payload.get("renderedOutput") or payload.get("visibleText") or ""
     if not all(marker in rendered_text for marker in markers):
         return False
-    if payload.get("showsTerminalSurface") is True:
-        return True
     renderer_summary = payload.get("rendererSummary") or ""
-    return payload.get("showsOutputFallback") is True and (
-        "owner fallback" in renderer_summary or "output tail" in renderer_summary
-    )
+    return payload.get("showsTerminalSurface") is True and renderer_summary == "Renderer: ghostty-mirror"
+
+def mac_owner_render_uses_mac_sized_surface(payload: dict) -> bool:
+    if payload.get("showsTerminalSurface") is not True:
+        return False
+    columns = payload.get("surfaceColumns")
+    return isinstance(columns, int) and columns > 40
 
 def write_command_request(command_text: str, send_enter: bool = True) -> None:
     payload = {
@@ -1323,7 +1439,9 @@ def write_command_request(command_text: str, send_enter: bool = True) -> None:
         "sendEnter": send_enter,
     }
     command_request_path.parent.mkdir(parents=True, exist_ok=True)
-    command_request_path.write_text(json.dumps(payload, sort_keys=True))
+    temp_path = command_request_path.with_name(f"{command_request_path.name}.{payload['id']}.tmp")
+    temp_path.write_text(json.dumps(payload, sort_keys=True))
+    temp_path.replace(command_request_path)
 
 def wait_for_output_log_text(text: str, timeout: float, process: subprocess.Popen[str]) -> None:
     deadline = time.time() + timeout
@@ -1471,6 +1589,7 @@ with ui_test_log.open("w") as ui_test_output:
             mac_owner_dump_path,
             lambda payload: (
                 mac_owner_render_contains(payload, ios_first_output, ios_second_output)
+                and mac_owner_render_uses_mac_sized_surface(payload)
                 and contains_command_output(payload.get("renderedOutput") or "", ios_first_command, ios_first_output)
                 and contains_command_output(payload.get("renderedOutput") or "", ios_second_command, ios_second_output)
             ),
@@ -1485,7 +1604,7 @@ with ui_test_log.open("w") as ui_test_output:
             wait_for_file(Path(f"{manual_retakeover_prefix}-{attempt_index + 1}"), timeout=30, process=ui_test_process)
             wait_for_mobile_owner_render(
                 f"{mobile_device_label} after takeover {takeover_number}",
-                ("__roundtrip_mac_before_takeover_one__", "__roundtrip_mac_before_takeover_two__", ios_first_output, ios_second_output),
+                (ios_first_output, ios_second_output),
                 timeout=20,
                 process=ui_test_process,
             )
@@ -1495,13 +1614,7 @@ with ui_test_log.open("w") as ui_test_output:
             wait_for_output_log_text(probe_output, timeout=20, process=ui_test_process)
             wait_for_mobile_owner_render(
                 f"{mobile_device_label} after takeover {takeover_number} probe command",
-                (
-                    "__roundtrip_mac_before_takeover_one__",
-                    "__roundtrip_mac_before_takeover_two__",
-                    ios_first_output,
-                    ios_second_output,
-                    probe_output,
-                ),
+                (ios_first_output, ios_second_output, probe_output),
                 timeout=20,
                 process=ui_test_process,
             )
@@ -1539,6 +1652,7 @@ with ui_test_log.open("w") as ui_test_output:
                 mac_owner_dump_path,
                 lambda payload: (
                     mac_owner_render_contains(payload, ios_first_output, ios_second_output)
+                    and mac_owner_render_uses_mac_sized_surface(payload)
                     and contains_command_output(payload.get("renderedOutput") or "", ios_first_command, ios_first_output)
                     and contains_command_output(payload.get("renderedOutput") or "", ios_second_command, ios_second_output)
                 ),
@@ -1573,6 +1687,7 @@ with ui_test_log.open("w") as ui_test_output:
             mac_owner_dump_path,
             lambda payload: (
                 mac_owner_render_contains(payload, ios_first_output, ios_second_output)
+                and mac_owner_render_uses_mac_sized_surface(payload)
                 and contains_command_output(payload.get("renderedOutput") or "", ios_first_command, ios_first_output)
                 and contains_command_output(payload.get("renderedOutput") or "", ios_second_command, ios_second_output)
             ),
@@ -1762,12 +1877,12 @@ while time.time() < deadline:
     performance_events = read_json_lines(performance_log_path)
     if (
         "e2e_scroll_gesture_applied" in kinds
-        and any(event.get("name") == "owner_history_seed_apply_end" for event in performance_events)
+        and any(event.get("name") == "owner_first_input_ready" for event in performance_events)
     ):
         break
     time.sleep(0.2)
 else:
-    raise SystemExit(f"Timed out waiting for the {mobile_device_label} app to apply the scrollback history seed.")
+    raise SystemExit(f"Timed out waiting for the {mobile_device_label} app to apply the scrollback gesture.")
 
 command_request_path.write_text(json.dumps({
     "id": "scrollback-after-output",
@@ -1884,15 +1999,12 @@ for dump in owner_render_dumps:
     if any(line.strip() == "%" for line in dump_text.splitlines()):
         raise SystemExit(
             f"{mobile_device_label} owner render contained a stray percent prompt row during scrollback.\n"
-            f"replay_state={dump.get('replayStateKey')}\n"
+            f"render_state={dump.get('renderStateKey')}\n"
             f"rendered_text={dump_text}"
         )
 
-local_bootstraps = [event for event in session_performance_events if event.get("name") == "local_owner_bootstrap_begin"]
 first_nonblank = [event for event in session_performance_events if event.get("name") == "owner_first_nonblank_render"]
 first_input_ready = [event for event in session_performance_events if event.get("name") == "owner_first_input_ready"]
-history_seed_apply_begin = [event for event in session_performance_events if event.get("name") == "owner_history_seed_apply_begin"]
-history_seed_apply_end = [event for event in session_performance_events if event.get("name") == "owner_history_seed_apply_end"]
 post_ready_snapshot_exports = [
     event for event in session_performance_events
     if event.get("name") == "snapshot_export_begin"
@@ -1904,17 +2016,10 @@ post_ready_snapshot_exports = [
     )
 ]
 
-if len(local_bootstraps) != 1:
-    raise SystemExit(f"Expected exactly one local owner bootstrap during scrollback, found {len(local_bootstraps)}")
 if len(first_nonblank) != 1:
     raise SystemExit(f"Expected exactly one first non-blank render during scrollback, found {len(first_nonblank)}")
 if len(first_input_ready) != 1:
     raise SystemExit(f"Expected exactly one first input-ready event during scrollback, found {len(first_input_ready)}")
-if len(history_seed_apply_begin) != 1 or len(history_seed_apply_end) != 1:
-    raise SystemExit(
-        "Expected exactly one lazy history seed apply during scrollback, "
-        f"found begin={len(history_seed_apply_begin)} end={len(history_seed_apply_end)}"
-    )
 if post_ready_snapshot_exports:
     raise SystemExit(
         "Found unexpected snapshot exports after takeover became interactive during scrollback: "

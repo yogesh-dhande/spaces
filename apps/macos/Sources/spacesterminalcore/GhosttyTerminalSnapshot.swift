@@ -38,3 +38,27 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
         self.cells = cells
     }
 }
+
+public struct GhosttyRenderFrame: Codable, Sendable, Equatable {
+    public static let currentVersion = 1
+
+    public let version: Int
+    public let sessionRevision: UInt64?
+    public let ownerEpoch: UInt64
+    public let columns: Int
+    public let rows: Int
+    public let snapshot: GhosttyTerminalSnapshot
+
+    public init(version: Int = Self.currentVersion, sessionRevision: UInt64?, ownerEpoch: UInt64, snapshot: GhosttyTerminalSnapshot) {
+        self.version = version
+        self.sessionRevision = sessionRevision
+        self.ownerEpoch = ownerEpoch
+        self.columns = snapshot.columns
+        self.rows = snapshot.rows
+        self.snapshot = snapshot
+    }
+
+    public static func encode(_ frame: GhosttyRenderFrame) throws -> Data { try JSONEncoder().encode(frame) }
+
+    public static func decode(_ data: Data) throws -> GhosttyRenderFrame { try JSONDecoder().decode(GhosttyRenderFrame.self, from: data) }
+}

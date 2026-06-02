@@ -3,62 +3,84 @@ import Foundation
 import GhosttyKit
 import spacesterminalcore
 
-@MainActor private final class GhosttyEmbeddedSessionHostView: NSView {}
+@MainActor private final class GhosttyHeadlessSessionHostView: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
+
+private final class GhosttyHostManagedOutputPipe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var session: ghostty_session_t?
+
+    func setSession(_ session: ghostty_session_t?) {
+        lock.lock()
+        self.session = session
+        lock.unlock()
+    }
+
+    func process(_ data: Data) {
+        guard !data.isEmpty else { return }
+        lock.lock()
+        if let session {
+            data.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
+                ghostty_session_process_output(session, baseAddress, UInt(data.count))
+            }
+            ghostty_session_refresh(session)
+        }
+        lock.unlock()
+    }
+}
 
 @MainActor final class GhosttyEmbeddedTerminalSessionDriver {
     private let launchConfiguration: TerminalSessionLaunchConfiguration
-    private let allowsPTYFallback: Bool
 
     private var session: ghostty_session_t?
-    private var fallbackPTY: FallbackPTYTerminalSessionDriver?
-    private var hiddenHostWindow: NSWindow?
-    private weak var hiddenHostView: GhosttyEmbeddedSessionHostView?
+    private var hostPTY: HostManagedPTYTerminalSessionDriver?
+    private var headlessHostView: GhosttyHeadlessSessionHostView?
     private var surfaceUserData: GhosttyEmbeddedSurfaceUserData?
+    private let outputPipe = GhosttyHostManagedOutputPipe()
     private nonisolated(unsafe) var outputHandler: (@Sendable (Data) -> Void)?
     private var didHandleSurfaceClose = false
     private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
-    private var lastKnownPixelSize: (width: UInt32, height: UInt32)?
     private var lastDeliveredSessionStateRevision: UInt64 = 0
     private var sessionStateDeliveryScheduled = false
+    private var debugRefreshRequestCountValue = 0
 
     var onActionEvent: (@MainActor (GhosttyActionEvent) -> Void)?
     var onSurfaceClosed: (@MainActor () -> Void)?
     var onSurfaceCellSizeChanged: (@MainActor (Int, Int) -> Void)?
     var onSessionStateChanged: (@MainActor (GhosttyEmbeddedSessionStateChange) -> Void)?
 
-    init(launchConfiguration: TerminalSessionLaunchConfiguration, allowsPTYFallback: Bool = true) {
-        self.launchConfiguration = launchConfiguration
-        self.allowsPTYFallback = allowsPTYFallback
-    }
+    init(launchConfiguration: TerminalSessionLaunchConfiguration) { self.launchConfiguration = launchConfiguration }
 
-    deinit { MainActor.assumeIsolated { if session != nil || fallbackPTY != nil { terminate() } } }
+    deinit { MainActor.assumeIsolated { if session != nil || hostPTY != nil { terminate() } } }
 
     var surface: ghostty_surface_t? {
         guard let session else { return nil }
         return ghostty_session_surface(session)
     }
-    var isUsingFallbackPTY: Bool { fallbackPTY != nil }
 
-    func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) {
-        outputHandler = handler
-        fallbackPTY?.setOutputHandler(handler)
-    }
+    var debugRefreshRequestCount: Int { debugRefreshRequestCountValue }
+
+    func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { outputHandler = handler }
 
     func startIfNeeded() throws {
-        guard session == nil, fallbackPTY == nil else { return }
+        guard session == nil, hostPTY == nil else { return }
 
         try GhosttyEmbeddedAppService.shared.startIfNeeded()
         guard let app = GhosttyEmbeddedAppService.shared.app else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty app missing") }
 
-        let hostWindow = ensureHiddenHostWindow()
-        guard let hostView = hiddenHostView else { throw GhosttyEmbeddedAppServiceError.configuration("hidden host view missing") }
-        if hostWindow.isVisible { hostWindow.orderOut(nil) }
+        let hostPTY = HostManagedPTYTerminalSessionDriver(launchConfiguration: launchConfiguration)
+        let hostView = headlessSurfaceHostView()
+        let scaleFactor = Double(NSScreen.main?.backingScaleFactor ?? 2.0)
 
         var sessionConfig = ghostty_session_config_new()
         sessionConfig.surface.platform_tag = GHOSTTY_PLATFORM_MACOS
         sessionConfig.surface.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(nsview: Unmanaged.passUnretained(hostView).toOpaque()))
-        sessionConfig.surface.scale_factor = Double(hostWindow.backingScaleFactor)
+        sessionConfig.surface.scale_factor = scaleFactor
         sessionConfig.surface.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
+        sessionConfig.surface.backend = GHOSTTY_SURFACE_IO_BACKEND_HOST_MANAGED
+        sessionConfig.surface.receive_userdata = Unmanaged.passUnretained(hostPTY).toOpaque()
+        sessionConfig.surface.receive_buffer = Self.hostManagedReceiveBufferCallback
+        sessionConfig.surface.receive_resize = Self.hostManagedReceiveResizeCallback
 
         let surfaceUserData = GhosttyEmbeddedSurfaceUserData(
             closeHandler: { [weak self] in self?.handleSurfaceClosed() }, surfaceProvider: { [weak self] in self?.surface })
@@ -68,97 +90,83 @@ import spacesterminalcore
         sessionConfig.parked_host.platform_tag = GHOSTTY_PLATFORM_MACOS
         sessionConfig.parked_host.platform = ghostty_platform_u(
             macos: ghostty_platform_macos_s(nsview: Unmanaged.passUnretained(hostView).toOpaque()))
-        sessionConfig.parked_host.scale_factor = Double(hostWindow.backingScaleFactor)
-
-        var allocatedStrings: [UnsafeMutablePointer<CChar>] = []
-        defer { for pointer in allocatedStrings { free(pointer) } }
-
-        if let command = launchConfiguration.command, let wrapped = strdup(Self.launchCommand(shell: launchConfiguration.shell, command: command)) {
-            allocatedStrings.append(wrapped)
-            sessionConfig.surface.command = UnsafePointer(wrapped)
-            sessionConfig.surface.wait_after_command = false
-        }
+        sessionConfig.parked_host.scale_factor = scaleFactor
 
         let workingDirectory = launchConfiguration.workingDirectory
         let createdSession = workingDirectory.withCString { cwd in
             sessionConfig.surface.working_directory = cwd
-            return ghostty_session_new(app, &sessionConfig)
+            return ghostty_session_new_headless(app, &sessionConfig)
         }
-        guard let createdSession else {
-            if allowsPTYFallback {
-                try startFallbackPTY()
-                return
-            }
-            throw GhosttyEmbeddedAppServiceError.configuration("ghostty_session_new failed")
-        }
+        guard let createdSession else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_session_new_headless failed") }
 
         session = createdSession
+        self.hostPTY = hostPTY
+        outputPipe.setSession(createdSession)
         didHandleSurfaceClose = false
         ghostty_session_set_data_callback(createdSession, Self.surfaceDataCallback, Unmanaged.passUnretained(self).toOpaque())
         ghostty_session_set_state_callback(createdSession, Self.sessionStateCallback, Unmanaged.passUnretained(self).toOpaque())
         if let surface = surface {
             GhosttyEmbeddedAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.onActionEvent?(event) }
         }
+        hostPTY.setOutputHandler { [weak self, outputPipe] data in
+            outputPipe.process(data)
+            Task { @MainActor [weak self] in self?.deliverSessionStateChange() }
+        }
+        hostPTY.setSessionClosedHandler { [weak self] in self?.handleHostPTYClosed() }
+
+        do { try hostPTY.startIfNeeded() } catch {
+            hostPTY.setOutputHandler(nil)
+            hostPTY.setSessionClosedHandler(nil)
+            self.hostPTY = nil
+            outputPipe.setSession(nil)
+            ghostty_session_set_data_callback(createdSession, nil, nil)
+            ghostty_session_set_state_callback(createdSession, nil, nil)
+            if let surface = surface { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
+            session = nil
+            self.surfaceUserData = nil
+            ghostty_session_free(createdSession)
+            throw error
+        }
 
         ghostty_session_set_focus(createdSession, false)
         ghostty_session_set_occlusion(createdSession, true)
-        ghostty_session_set_size(createdSession, 960, 640)
-        lastKnownPixelSize = (960, 640)
+        let initialSize = lastKnownSurfaceSize ?? hostPTY.surfaceCellSize()
+        _ = resizeCellGrid(columns: initialSize.columns, rows: initialSize.rows)
         ghostty_session_refresh(createdSession)
         deliverSessionStateChange(forcedFlags: .allKnown)
         notifySurfaceCellSizeIfChanged()
     }
 
     func terminate() {
-        if let fallbackPTY {
-            self.fallbackPTY = nil
-            fallbackPTY.terminate()
-            lastKnownSurfaceSize = nil
-            lastKnownPixelSize = nil
-            hiddenHostWindow?.orderOut(nil)
-            return
+        let currentSession = session
+        let currentHostPTY = hostPTY
+        if let currentSession {
+            let surface = ghostty_session_surface(currentSession)
+            GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface)
+            ghostty_session_set_data_callback(currentSession, nil, nil)
+            ghostty_session_set_state_callback(currentSession, nil, nil)
         }
-        guard let session else { return }
-        let surface = ghostty_session_surface(session)
-        GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface)
-        ghostty_session_set_data_callback(session, nil, nil)
-        ghostty_session_set_state_callback(session, nil, nil)
-        self.session = nil
-        self.surfaceUserData = nil
+        outputPipe.setSession(nil)
+        currentHostPTY?.setOutputHandler(nil)
+        currentHostPTY?.setSessionClosedHandler(nil)
+        hostPTY = nil
+        session = nil
+        surfaceUserData = nil
         lastDeliveredSessionStateRevision = 0
         sessionStateDeliveryScheduled = false
-        ghostty_session_free(session)
+        currentHostPTY?.terminate()
+        if let currentSession { ghostty_session_free(currentSession) }
         lastKnownSurfaceSize = nil
-        lastKnownPixelSize = nil
-        hiddenHostWindow?.orderOut(nil)
-    }
-
-    func attachRenderer(_ renderer: ghostty_renderer_t?) -> Bool {
-        guard let session, let renderer else { return false }
-        return ghostty_renderer_attach(renderer, session)
-    }
-
-    func detachRenderer(_ renderer: ghostty_renderer_t?) -> Bool {
-        guard let renderer else { return true }
-        return ghostty_renderer_detach(renderer)
-    }
-
-    func updateRendererHost(_ renderer: ghostty_renderer_t?, host: inout ghostty_surface_host_s) -> Bool {
-        guard let renderer else { return false }
-        return ghostty_renderer_set_host(renderer, &host)
+        headlessHostView = nil
     }
 
     func requestSurfaceRefresh() {
-        guard fallbackPTY == nil else { return }
+        debugRefreshRequestCountValue += 1
         guard let session else { return }
         ghostty_session_refresh(session)
     }
 
     func sendRawBytes(_ data: Data) {
-        if let fallbackPTY {
-            fallbackPTY.sendRawBytes(data)
-            return
-        }
         guard let session, !data.isEmpty else { return }
         data.withUnsafeBytes { rawBuffer in
             guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
@@ -168,17 +176,12 @@ import spacesterminalcore
     }
 
     func processOutput(_ data: Data) {
-        guard fallbackPTY == nil else { return }
-        guard let session, !data.isEmpty else { return }
-        data.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
-            ghostty_session_process_output(session, baseAddress, UInt(data.count))
-        }
+        outputPipe.process(data)
         requestSurfaceRefresh()
     }
 
     func foregroundPID() -> Int32? {
-        if let fallbackPTY { return fallbackPTY.foregroundPID() }
+        if let pid = hostPTY?.foregroundPID() { return pid }
         guard let session else { return nil }
         let pid = ghostty_session_foreground_pid(session)
         guard pid > 0 else { return nil }
@@ -186,58 +189,57 @@ import spacesterminalcore
     }
 
     func surfaceCellSize() -> (columns: Int, rows: Int)? {
-        if let fallbackPTY { return fallbackPTY.surfaceCellSize() }
-        guard let session else { return lastKnownSurfaceSize }
+        guard let session else { return hostPTY?.surfaceCellSize() ?? lastKnownSurfaceSize }
         let size = ghostty_session_size(session)
-        guard size.columns > 0, size.rows > 0 else { return lastKnownSurfaceSize }
+        guard size.columns > 0, size.rows > 0 else { return hostPTY?.surfaceCellSize() ?? lastKnownSurfaceSize }
         let resolved = (columns: Int(size.columns), rows: Int(size.rows))
         lastKnownSurfaceSize = resolved
         return resolved
     }
 
     func setFocused(_ focused: Bool) {
-        guard fallbackPTY == nil else { return }
         guard let session else { return }
         ghostty_session_set_focus(session, focused)
     }
 
-    func setOccluded(_ occluded: Bool) {
-        guard fallbackPTY == nil else { return }
-        guard let session else { return }
-        ghostty_session_set_occlusion(session, occluded)
-    }
-
     func updateGeometry(width: UInt32, height: UInt32, scale: Double, displayID: UInt32?) {
-        guard fallbackPTY == nil else { return }
         guard let session else { return }
         ghostty_session_set_content_scale(session, scale, scale)
         if let displayID { ghostty_session_set_display_id(session, displayID) }
         ghostty_session_set_size(session, width, height)
-        lastKnownPixelSize = (width, height)
-        syncHiddenHostWindowSize(width: width, height: height)
         notifySurfaceCellSizeIfChanged()
     }
 
     @discardableResult func resizeCellGrid(columns: Int, rows: Int) -> Bool {
-        if let fallbackPTY { return fallbackPTY.resizeCellGrid(columns: columns, rows: rows) }
-        guard let session else { return false }
-        let targetColumns = max(columns, 1)
-        let targetRows = max(rows, 1)
-        guard let currentSize = surfaceCellSize(), currentSize.columns > 0, currentSize.rows > 0 else { return false }
+        let targetColumns = max(min(columns, Int(UInt16.max)), 1)
+        let targetRows = max(min(rows, Int(UInt16.max)), 1)
+        let targetSize = (columns: targetColumns, rows: targetRows)
+        lastKnownSurfaceSize = targetSize
+        guard let session else {
+            notifySurfaceCellSizeIfChanged()
+            return false
+        }
 
-        let currentPixels = lastKnownPixelSize ?? (width: 960, height: 640)
-        var nextWidth = Double(currentPixels.width)
-        var nextHeight = Double(currentPixels.height)
+        ghostty_session_set_grid_size(session, UInt16(targetColumns), UInt16(targetRows))
+        _ = hostPTY?.resizeCellGrid(columns: targetColumns, rows: targetRows)
+        ghostty_session_refresh(session)
+        GhosttyEmbeddedAppService.shared.tick()
 
-        for _ in 0..<3 {
-            guard let measuredSize = surfaceCellSize(), measuredSize.columns > 0, measuredSize.rows > 0 else { break }
-            let widthScale = Double(targetColumns) / Double(measuredSize.columns)
-            let heightScale = Double(targetRows) / Double(measuredSize.rows)
-            nextWidth = max((nextWidth * widthScale).rounded(), 1)
-            nextHeight = max((nextHeight * heightScale).rounded(), 1)
-            ghostty_session_set_size(session, UInt32(nextWidth), UInt32(nextHeight))
-            lastKnownPixelSize = (UInt32(nextWidth), UInt32(nextHeight))
-            syncHiddenHostWindowSize(width: UInt32(nextWidth), height: UInt32(nextHeight))
+        for _ in 0..<5 {
+            let measured = ghostty_session_size(session)
+            guard measured.columns > 0, measured.rows > 0 else { break }
+            if Int(measured.columns) == targetColumns, Int(measured.rows) == targetRows {
+                notifySurfaceCellSizeIfChanged()
+                return true
+            }
+
+            let currentWidth = measured.width_px > 0 ? measured.width_px : max(UInt32(targetColumns) * max(measured.cell_width_px, 9), 1)
+            let currentHeight = measured.height_px > 0 ? measured.height_px : max(UInt32(targetRows) * max(measured.cell_height_px, 18), 1)
+            let widthScale = Double(targetColumns) / Double(measured.columns)
+            let heightScale = Double(targetRows) / Double(measured.rows)
+            let nextWidth = UInt32(max((Double(currentWidth) * widthScale).rounded(), 1))
+            let nextHeight = UInt32(max((Double(currentHeight) * heightScale).rounded(), 1))
+            ghostty_session_set_size(session, nextWidth, nextHeight)
             ghostty_session_refresh(session)
             GhosttyEmbeddedAppService.shared.tick()
         }
@@ -247,77 +249,45 @@ import spacesterminalcore
         return resolvedSize.columns == targetColumns && resolvedSize.rows == targetRows
     }
 
-    func preserveCurrentOwnerGeometryForParking() {
-        guard fallbackPTY == nil else { return }
-        guard let session else { return }
-        let size = ghostty_session_size(session)
-        let width = size.width_px > 0 ? size.width_px : (lastKnownPixelSize?.width ?? 0)
-        let height = size.height_px > 0 ? size.height_px : (lastKnownPixelSize?.height ?? 0)
-        guard width > 0, height > 0 else { return }
-        lastKnownPixelSize = (width, height)
-        syncHiddenHostWindowSize(width: width, height: height)
+    @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+        guard let surface else { return false }
+        ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), 0)
+        requestSurfaceRefresh()
+        return true
     }
 
-    func snapshot() -> GhosttyTerminalSnapshot? { return GhosttyTerminalSnapshotCapture.captureFromSession(session) }
+    func snapshot() -> GhosttyTerminalSnapshot? { GhosttyTerminalSnapshotCapture.captureFromSession(session) }
 
     func snapshotText() -> String? {
-        guard fallbackPTY == nil else { return nil }
-        guard let surface else { return nil }
-        return GhosttyTerminalSnapshotCapture.captureText(from: surface)
+        guard let snapshot = snapshot() else { return nil }
+        return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot)
     }
 
     func sessionTitle() -> String? {
-        guard fallbackPTY == nil else { return nil }
         guard let session else { return nil }
         return Self.takeString(ghostty_session_title(session))
     }
 
     func sessionWorkingDirectory() -> String? {
-        guard fallbackPTY == nil else { return nil }
         guard let session else { return nil }
         return Self.takeString(ghostty_session_working_directory(session))
     }
 
-    func copySelectionToPasteboard() -> Bool { GhosttyClipboardBridge.copySelection(from: surface) }
-
-    func pasteClipboardContents() -> Bool {
-        guard fallbackPTY == nil else { return false }
-        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return false }
-        sendRawBytes(Data(text.utf8))
-        return true
-    }
-
-    private func ensureHiddenHostWindow() -> NSWindow {
-        if let hiddenHostWindow { return hiddenHostWindow }
-
-        let frame = NSRect(x: 0, y: 0, width: 960, height: 640)
-        let hostWindow = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        hostWindow.isReleasedWhenClosed = false
-        hostWindow.alphaValue = 0
-        hostWindow.ignoresMouseEvents = true
-        hostWindow.backgroundColor = .clear
-        let hostView = GhosttyEmbeddedSessionHostView(frame: frame)
-        hostView.wantsLayer = true
-        hostWindow.contentView = hostView
-        hostWindow.orderOut(nil)
-        hiddenHostWindow = hostWindow
-        hiddenHostView = hostView
-        return hostWindow
-    }
-
-    private func syncHiddenHostWindowSize(width: UInt32, height: UInt32) {
-        guard width > 0, height > 0 else { return }
-        let hostWindow = ensureHiddenHostWindow()
-        let contentSize = NSSize(width: Int(width), height: Int(height))
-        if hostWindow.contentRect(forFrameRect: hostWindow.frame).size != contentSize { hostWindow.setContentSize(contentSize) }
-        if let hiddenHostView, hiddenHostView.frame.size != contentSize {
-            hiddenHostView.frame = NSRect(origin: .zero, size: contentSize)
-            hiddenHostView.layoutSubtreeIfNeeded()
-        }
+    private func headlessSurfaceHostView() -> GhosttyHeadlessSessionHostView {
+        if let headlessHostView { return headlessHostView }
+        let view = GhosttyHeadlessSessionHostView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        view.wantsLayer = true
+        headlessHostView = view
+        return view
     }
 
     private func notifySurfaceCellSizeIfChanged() {
         guard let size = surfaceCellSize() else { return }
+        guard lastKnownSurfaceSize?.columns != size.columns || lastKnownSurfaceSize?.rows != size.rows else {
+            onSurfaceCellSizeChanged?(size.columns, size.rows)
+            return
+        }
+        lastKnownSurfaceSize = size
         onSurfaceCellSizeChanged?(size.columns, size.rows)
     }
 
@@ -328,23 +298,10 @@ import spacesterminalcore
         onSurfaceClosed?()
     }
 
-    private func startFallbackPTY() throws {
-        let fallbackPTY = FallbackPTYTerminalSessionDriver(launchConfiguration: launchConfiguration)
-        fallbackPTY.setOutputHandler(outputHandler)
-        fallbackPTY.setSessionClosedHandler { [weak self] in self?.handleFallbackPTYClosed() }
-        try fallbackPTY.startIfNeeded()
-        self.fallbackPTY = fallbackPTY
-        lastKnownSurfaceSize = fallbackPTY.surfaceCellSize()
-        notifySurfaceCellSizeIfChanged()
-    }
-
-    private func handleFallbackPTYClosed() {
+    private func handleHostPTYClosed() {
         guard !didHandleSurfaceClose else { return }
         didHandleSurfaceClose = true
-        fallbackPTY = nil
-        lastKnownSurfaceSize = nil
-        lastKnownPixelSize = nil
-        hiddenHostWindow?.orderOut(nil)
+        terminate()
         onSurfaceClosed?()
     }
 
@@ -370,12 +327,6 @@ import spacesterminalcore
                 workingDirectory: flags.contains(.workingDirectory) ? sessionWorkingDirectory() : nil))
     }
 
-    nonisolated static func launchCommand(shell: String, command: String) -> String {
-        if command.hasPrefix("direct:") || command.hasPrefix("shell:") { return command }
-        let escaped = command.replacingOccurrences(of: "'", with: "'\\''")
-        return "\(shell) -l -c '\(escaped)'"
-    }
-
     private nonisolated static let surfaceDataCallback: ghostty_surface_data_cb = { userdata, bytes, len in
         guard let userdata, let bytes, len > 0 else { return }
         let runtime = Unmanaged<GhosttyEmbeddedTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
@@ -388,6 +339,19 @@ import spacesterminalcore
         guard let userdata else { return }
         let runtime = Unmanaged<GhosttyEmbeddedTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
         Task { @MainActor in runtime.scheduleSessionStateDelivery() }
+    }
+
+    private nonisolated static let hostManagedReceiveBufferCallback: ghostty_surface_receive_buffer_cb = { userdata, bytes, len in
+        guard let userdata, let bytes, len > 0 else { return }
+        let hostPTY = Unmanaged<HostManagedPTYTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
+        hostPTY.sendRawBytes(Data(bytes: bytes, count: len))
+    }
+
+    private nonisolated static let hostManagedReceiveResizeCallback: ghostty_surface_receive_resize_cb = {
+        userdata, columns, rows, pixelWidth, pixelHeight in
+        guard let userdata, columns > 0, rows > 0 else { return }
+        let hostPTY = Unmanaged<HostManagedPTYTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
+        _ = hostPTY.resizeCellGrid(columns: Int(columns), rows: Int(rows), pixelWidth: pixelWidth, pixelHeight: pixelHeight)
     }
 
     private static func takeString(_ raw: ghostty_string_s) -> String? {

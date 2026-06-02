@@ -11,18 +11,14 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     public let attachmentSnapshot: TerminalSessionAttachmentSnapshot?
     public let title: String
     public let workingDirectory: String
-    public let snapshot: GhosttyTerminalSnapshot?
-    public let snapshotText: String?
-    public let transcriptTail: String?
+    public let renderFrame: Data?
     public let outputByteCount: Int?
-    public let outputData: Data?
     public let outputEndByteOffset: Int?
 
     public init(
         sessionID: String, reason: String, emittedAt: String, sessionStateRevision: UInt64?, sessionStateFlags: UInt32?, screenStateRevision: UInt64?,
         runtimeState: TerminalSessionRuntimeState?, attachmentSnapshot: TerminalSessionAttachmentSnapshot?, title: String, workingDirectory: String,
-        snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, transcriptTail: String?, outputByteCount: Int?, outputData: Data? = nil,
-        outputEndByteOffset: Int? = nil
+        renderFrame: Data?, outputByteCount: Int?, outputEndByteOffset: Int? = nil
     ) {
         self.sessionID = sessionID
         self.reason = reason
@@ -34,26 +30,45 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
         self.attachmentSnapshot = attachmentSnapshot
         self.title = title
         self.workingDirectory = workingDirectory
-        self.snapshot = snapshot
-        self.snapshotText = snapshotText
-        self.transcriptTail = transcriptTail
+        self.renderFrame = renderFrame
         self.outputByteCount = outputByteCount
-        self.outputData = outputData
         self.outputEndByteOffset = outputEndByteOffset
     }
 
     public func merged(with update: Self) -> Self {
         precondition(sessionID == update.sessionID, "Cannot merge terminal state from a different session.")
+        let previousOwnerClientID = Self.activeOwnerClientID(in: attachmentSnapshot)
+        let nextOwnerClientID = Self.activeOwnerClientID(in: update.attachmentSnapshot ?? attachmentSnapshot)
+        let ownerChanged = update.attachmentSnapshot != nil && previousOwnerClientID != nextOwnerClientID
+        let mergedRenderFrame = update.renderFrame ?? (ownerChanged ? nil : renderFrame)
         return .init(
             sessionID: update.sessionID, reason: update.reason, emittedAt: update.emittedAt,
             sessionStateRevision: update.sessionStateRevision ?? sessionStateRevision,
             sessionStateFlags: update.sessionStateFlags ?? sessionStateFlags, screenStateRevision: update.screenStateRevision ?? screenStateRevision,
             runtimeState: update.runtimeState ?? runtimeState, attachmentSnapshot: update.attachmentSnapshot ?? attachmentSnapshot,
-            title: update.title, workingDirectory: update.workingDirectory, snapshot: update.snapshot ?? snapshot,
-            snapshotText: update.snapshotText ?? (update.snapshot != nil ? nil : snapshotText),
-            transcriptTail: update.transcriptTail ?? transcriptTail, outputByteCount: update.outputByteCount, outputData: update.outputData,
+            title: update.title, workingDirectory: update.workingDirectory, renderFrame: mergedRenderFrame, outputByteCount: update.outputByteCount,
             outputEndByteOffset: update.outputEndByteOffset)
     }
+
+    private static func activeOwnerClientID(in snapshot: TerminalSessionAttachmentSnapshot?) -> String? {
+        snapshot?.attachments.first { $0.mode == .owner && $0.detachedAt == nil }?.clientID
+    }
+}
+
+extension GhosttyRemoteSessionStatePayload {
+    public var decodedRenderFrame: GhosttyRenderFrame? {
+        guard let renderFrame else { return nil }
+        return try? GhosttyRenderFrame.decode(renderFrame)
+    }
+
+    public var renderFrameSnapshot: GhosttyTerminalSnapshot? { decodedRenderFrame?.snapshot }
+
+    public var renderFrameText: String? {
+        guard let snapshot = renderFrameSnapshot else { return nil }
+        return GhosttyTerminalSnapshotLayout.plainText(for: snapshot)
+    }
+
+    public var renderFrameOwnerEpoch: UInt64? { decodedRenderFrame?.ownerEpoch }
 }
 
 public enum GhosttyRemoteSessionStateCodec {

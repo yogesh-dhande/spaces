@@ -183,7 +183,7 @@ import Foundation
 
         private func configureProcessEnvironment() throws {
             try Self.configureGhosttyProcessEnvironment()
-            // Simulator stdin can remain guarded even when valid; always swap in a disposable pipe so Ghostty can close and re-open carrier stdio.
+            // Simulator stdin can remain guarded even when valid; always swap in a disposable pipe so Ghostty can close and re-open stdio.
             let repairedDescriptors = try Self.repairStandardFileDescriptors()
             if let previousDescriptor = retainedStandardInputWriteDescriptor,
                 previousDescriptor != repairedDescriptors.retainedStandardInputWriteDescriptor

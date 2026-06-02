@@ -22,12 +22,14 @@ import spacesterminalghostty
 public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public let renderedOutput: String
     public let showsTerminalSurface: Bool
-    public let showsOutputFallback: Bool
+    public let showsTextRenderer: Bool
     public let rendererSummary: String
     public let summary: String
     public let state: String
     public let windowTitle: String
     public let didCloseWindow: Bool
+    public let surfaceColumns: Int?
+    public let surfaceRows: Int?
 }
 
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
@@ -40,7 +42,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         case ghosttyTakeoverStatus
         case ghosttyEndedFinalRender
         case unavailable
-        case outputFallback
+        case textView
     }
 
     private enum OwnershipTransitionTarget: String {
@@ -124,7 +126,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var lastObservedAttachmentMode: TerminalAttachmentMode?
     private var ghosttyRendererHost: (any TerminalGhosttyRendererHosting)?
     private var ghosttySessionInfoProvider: (any TerminalGhosttySessionInfoProviding)?
-    private var visibleRenderer: VisibleRenderer = .outputFallback
+    private var visibleRenderer: VisibleRenderer = .textView
     private var lastObservedOwnerClientID: String?
     private var lastObservedRuntimeState: TerminalSessionRuntimeState?
     private var shouldShowOwnerStateLabel = true
@@ -135,7 +137,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var sessionMetadataDidChangeObserver: NSObjectProtocol?
     private var runtimeStateDidChangeObserver: NSObjectProtocol?
     private var outputDidChangeObserver: NSObjectProtocol?
-    private var hasHeadlessPresentation = false
+    private var hasTestWindowPresentation = false
     private var pendingOwnershipTransitionStartedAt: Date?
     private var pendingOwnershipTransitionTarget: OwnershipTransitionTarget?
     private var pendingOwnershipTransitionReason: String?
@@ -300,6 +302,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 "terminal_window_focus_stage", startedAt: startedAt, requestID: requestID,
                 detail: "stage=pre_focus reused_surface=\(reusedSurface ? 1 : 0) route=\(route ?? "focus")")
             if !reusedSurface { ensureGhosttyHostAttached(requestID: requestID, reason: "focus_window") }
+            if reusedSurface { ghosttyRendererHost?.synchronizeSurfaceGeometry() }
             let syncStartedAt = Date()
             syncGhosttyOwnerFocus(reason: "window_focus_ipc", requestWindowFocus: true)
             logFocusMetric(
@@ -334,11 +337,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         let sessionIsTerminating = closesForSessionTermination
         closesForSessionTermination = false
         didCloseWindow = true
-        hasHeadlessPresentation = false
+        hasTestWindowPresentation = false
         persistCurrentWindowFrame(immediately: true)
         if backend == .ghosttyEmbedded {
             syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false)
-            if !sessionIsTerminating { ghosttyRendererHost?.parkSurfaceInHiddenHostWindow() }
+            if !sessionIsTerminating { ghosttyRendererHost?.releaseRendererSurface() }
         }
         if sessionIsTerminating { isClientAttached = false } else { detachLocalClientIfNeeded(synchronously: detachClientSynchronouslyOnClose) }
         refreshTask?.cancel()
@@ -384,13 +387,13 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             switch visibleRenderer {
             case .ghosttyOwner: return preferredAttachmentMode == .owner
             case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable: return true
-            case .outputFallback: return true
+            case .textView: return true
             }
         case #selector(NSText.paste(_:)):
             switch visibleRenderer {
             case .ghosttyOwner: return preferredAttachmentMode == .owner && isInteractiveRuntimeState(lastObservedRuntimeState)
             case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable: return false
-            case .outputFallback: return !inputRowStackView.isHidden && inputField.isEnabled
+            case .textView: return !inputRowStackView.isHidden && inputField.isEnabled
             }
         case #selector(selectAll(_:)): return visibleRenderer != .ghosttyOwner
         default: return true
@@ -409,7 +412,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 NSSound.beep()
                 return
             }
-        case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable, .outputFallback: outputView.copy(sender)
+        case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable, .textView: outputView.copy(sender)
         }
     }
 
@@ -434,7 +437,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             updateInputStatus(message: "Take over ownership before sending terminal input.", isError: true)
             NSSound.beep()
             return
-        case .outputFallback:
+        case .textView:
             guard !inputRowStackView.isHidden, inputField.isEnabled else {
                 NSSound.beep()
                 return
@@ -714,8 +717,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
 
-    private func parkGhosttySurfaceIfNeeded() {
-        ghosttyRendererHost?.parkSurfaceInHiddenHostWindow()
+    private func releaseGhosttySurfaceIfNeeded() {
+        ghosttyRendererHost?.releaseRendererSurface()
         terminalContainer.subviews.forEach { $0.removeFromSuperview() }
     }
 
@@ -771,13 +774,13 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     }
 
     private func isWindowPresented(_ window: NSWindow) -> Bool {
-        if Self.isRunningUnderXCTest { return hasHeadlessPresentation }
+        if Self.isRunningUnderXCTest { return hasTestWindowPresentation }
         return window.isVisible
     }
 
     private func presentWindow(_ window: NSWindow, forceFrontmost: Bool = false) {
         if Self.isRunningUnderXCTest {
-            hasHeadlessPresentation = true
+            hasTestWindowPresentation = true
             return
         }
         let appWasActive = NSApp.isActive
@@ -843,20 +846,20 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                         if activeAttachment.mode == .owner {
                             if allowGhosttyOwnerAttach { ensureGhosttyHostAttached(reason: "attachment_mode_changed") }
                         } else {
-                            parkGhosttySurfaceIfNeeded()
+                            releaseGhosttySurfaceIfNeeded()
                             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
                             syncGhosttyOwnerFocus(reason: "ownership_demoted", requestWindowFocus: false, focused: false)
                         }
                     }
                 } else if preferredAttachmentMode != .owner {
-                    parkGhosttySurfaceIfNeeded()
+                    releaseGhosttySurfaceIfNeeded()
                 }
                 if lastObservedOwnerClientID != currentOwnerClient?.id {
                     if isOwner {
                         beginOwnershipTransition(.owner, reason: "ownership_promoted")
                     } else if lastObservedOwnerClientID == client.id {
                         beginOwnershipTransition(.viewer, reason: "ownership_demoted")
-                        parkGhosttySurfaceIfNeeded()
+                        releaseGhosttySurfaceIfNeeded()
                     }
                     lastObservedOwnerClientID = currentOwnerClient?.id
                     if isOwner {
@@ -871,7 +874,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 rendererLabel.stringValue = rendererSummary(isOwner: isOwner)
             } else {
                 shouldShowOwnerStateLabel = true
-                visibleRenderer = .outputFallback
+                visibleRenderer = .textView
                 updateRendererVisibility()
                 updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractiveRuntimeState(runtimeState))
                 rendererLabel.stringValue = rendererMode.statusSummary
@@ -908,23 +911,22 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 updateOutputPlainText("Terminal render unavailable.")
                 restoreOutputViewportState(viewportState)
                 completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "unavailable")
-            case .outputFallback:
+            case .textView:
                 if let snapshot = ghosttyRendererHost?.snapshot() {
                     updateOutputSnapshot(snapshot)
                     restoreOutputViewportState(viewportState)
-                    completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "owner_snapshot_fallback")
+                    completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "owner_snapshot_text_view")
                     return
                 }
                 if let snapshotText = ghosttyRendererHost?.snapshotText() {
                     updateOutputPlainText(snapshotText)
                     restoreOutputViewportState(viewportState)
-                    completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "owner_snapshot_text_fallback")
+                    completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "owner_snapshot_text")
                     return
                 }
-                let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 200)) ?? ""
-                updateOutputPlainText(output)
+                updateOutputPlainText("Terminal render unavailable.")
                 restoreOutputViewportState(viewportState)
-                completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "output_tail")
+                completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "owner_render_unavailable")
             case .ghosttyOwner: break
             }
         } catch {
@@ -1053,7 +1055,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             let changedSessionID = notification.userInfo?["sessionID"] as? String
             MainActor.assumeIsolated {
                 guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
-                guard self.visibleRenderer == .ghosttyEndedFinalRender || self.visibleRenderer == .outputFallback else { return }
+                guard self.visibleRenderer == .ghosttyEndedFinalRender || self.visibleRenderer == .textView else { return }
                 self.refreshNow()
             }
         }
@@ -1090,7 +1092,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         case .ghosttyOwner:
             terminalContainer.isHidden = false
             outputScrollView.isHidden = true
-        case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable, .outputFallback:
+        case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable, .textView:
             outputScrollView.isHidden = false
             terminalContainer.isHidden = true
         }
@@ -1100,20 +1102,20 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         summaryLabel.isHidden = shouldCollapseOwnerChrome
         rendererLabel.isHidden = isGhosttyOwner
         stateLabel.isHidden = shouldCollapseOwnerChrome
-        outputScrollView.borderType = backend == .ghosttyEmbedded && visibleRenderer != .outputFallback ? .noBorder : .bezelBorder
+        outputScrollView.borderType = backend == .ghosttyEmbedded && visibleRenderer != .textView ? .noBorder : .bezelBorder
         bodyStackView.spacing = isGhosttyOwner ? 0 : 12
         bodyLeadingConstraint?.constant = isGhosttyOwner ? 0 : 16
         bodyTrailingConstraint?.constant = isGhosttyOwner ? 0 : -16
         bodyTopToContentConstraint?.constant = isGhosttyOwner ? 0 : 12
         bodyBottomToContentConstraint?.constant = isGhosttyOwner ? 0 : -16
         outputView.textContainerInset =
-            backend == .ghosttyEmbedded && visibleRenderer != .outputFallback ? NSSize(width: 14, height: 14) : NSSize(width: 8, height: 10)
-        outputView.textContainer?.lineFragmentPadding = backend == .ghosttyEmbedded && visibleRenderer != .outputFallback ? 0 : 5
+            backend == .ghosttyEmbedded && visibleRenderer != .textView ? NSSize(width: 14, height: 14) : NSSize(width: 8, height: 10)
+        outputView.textContainer?.lineFragmentPadding = backend == .ghosttyEmbedded && visibleRenderer != .textView ? 0 : 5
         updateHeaderLayoutVisibility()
     }
 
     private func updateInputOwnershipUI(isOwner: Bool, isInteractive: Bool) {
-        let usesInlineControls = visibleRenderer == .outputFallback && isOwner
+        let usesInlineControls = visibleRenderer == .textView && isOwner
         inputRowStackView.isHidden = !usesInlineControls
         let showsTakeoverShell = visibleRenderer == .ghosttyTakeoverStatus && backend == .ghosttyEmbedded
         takeoverContainerView.isHidden = !(showsTakeoverShell && !isOwner)
@@ -1189,7 +1191,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         guard let window else { return }
         switch visibleRenderer {
         case .ghosttyOwner: break
-        case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable, .outputFallback:
+        case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable, .textView:
             if !takeoverContainerView.isHidden, takeoverButton.isEnabled {
                 window.makeFirstResponder(takeoverButton)
             } else if !inputRowStackView.isHidden, inputField.isEnabled {
@@ -1280,10 +1282,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     }
 
     private func resolveVisibleRenderer(isOwner: Bool?) -> VisibleRenderer {
-        guard case .ghosttyEmbedded = rendererMode else { return .outputFallback }
+        guard case .ghosttyEmbedded = rendererMode else { return .textView }
         if isOwner == true {
             if ghosttyRendererHost?.hasRenderableSurface() == true { return .ghosttyOwner }
-            if hasGhosttyVisibleRenderStateAvailable() { return .outputFallback }
+            if hasGhosttyVisibleRenderStateAvailable() { return .textView }
             if isInteractiveRuntimeState(lastObservedRuntimeState) { return .ghosttyTakeoverStatus }
             return hasGhosttyFinalRenderStateAvailable() ? .ghosttyEndedFinalRender : .unavailable
         }
@@ -1325,8 +1327,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     }
 
     private func updateOutputSnapshot(_ snapshot: GhosttyTerminalSnapshot) {
-        outputView.textStorage?.setAttributedString(
-            GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
+        outputView.string = GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot)
         if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
         outputView.sizeToFit()
         lastRenderedOutput = outputView.string
@@ -1346,22 +1347,20 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             case .ghosttyTakeoverStatus: return "Renderer: takeover status"
             case .ghosttyEndedFinalRender: return "Renderer: final Ghostty render"
             case .unavailable: return "Renderer: unavailable"
-            case .outputFallback: return "Renderer: output tail"
-            case .ghosttyOwner: return "Renderer: libghostty (owner)"
+            case .textView: return "Renderer: render-frame text"
+            case .ghosttyOwner: return "Renderer: ghostty-mirror"
             }
         }
         switch visibleRenderer {
-        case .ghosttyOwner: return "Renderer: libghostty (owner)"
+        case .ghosttyOwner: return "Renderer: ghostty-mirror"
         case .ghosttyTakeoverStatus: return "Renderer: preparing owner surface"
         case .ghosttyEndedFinalRender: return "Renderer: final Ghostty render"
         case .unavailable: return "Renderer: unavailable"
-        case .outputFallback:
-            if backend == .ghosttyEmbedded, ghosttyRendererHost?.prefersOutputFallbackWhenSurfaceUnavailable == false,
-                ghosttyRendererHost?.snapshot() != nil || ghosttyRendererHost?.snapshotText() != nil
-            {
-                return "Renderer: libghostty snapshot (owner fallback)"
+        case .textView:
+            if backend == .ghosttyEmbedded, ghosttyRendererHost?.snapshot() != nil || ghosttyRendererHost?.snapshotText() != nil {
+                return "Renderer: ghostty-mirror text debug"
             }
-            return "Renderer: output tail (owner fallback)"
+            return "Renderer: owner render unavailable"
         }
     }
 
@@ -1423,7 +1422,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private func switchGhosttySessionHostIfNeeded(_ host: any TerminalGhosttySessionHosting) {
         let hostObject = host as AnyObject
         if let activeGhosttySessionHost, activeGhosttySessionHost as AnyObject === hostObject { return }
-        ghosttyRendererHost?.parkSurfaceInHiddenHostWindow()
+        ghosttyRendererHost?.releaseRendererSurface()
         terminalContainer.subviews.forEach { $0.removeFromSuperview() }
         activeGhosttySessionHost = host
         let resolvedHostComponents = Self.resolveGhosttyHostComponents(host)
@@ -1475,20 +1474,29 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     public func debugStateDump() -> TerminalSessionWindowDebugState {
         let renderedOutput: String
-        if !terminalContainer.isHidden, let snapshotText = ghosttyRendererHost?.sessionSnapshotText(), !snapshotText.isEmpty {
-            renderedOutput = snapshotText
+        if !terminalContainer.isHidden { ghosttyRendererHost?.prepareRenderStateExport() }
+        let surfaceSnapshot = ghosttyRendererHost?.snapshot() ?? ghosttyRendererHost?.sessionSnapshot()
+        if !terminalContainer.isHidden, let surfaceSnapshot,
+            TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: surfaceSnapshot, snapshotText: nil)
+        {
+            renderedOutput = GhosttyTerminalSnapshotGrid.fullPlainText(for: surfaceSnapshot)
+        } else if !terminalContainer.isHidden, let visibleText = ghosttyRendererHost?.debugVisibleSurfaceText(), !visibleText.isEmpty {
+            renderedOutput = visibleText
+        } else if !terminalContainer.isHidden, let sessionSnapshotText = ghosttyRendererHost?.sessionSnapshotText(), !sessionSnapshotText.isEmpty {
+            renderedOutput = sessionSnapshotText
         } else {
             renderedOutput = outputView.string
         }
         return .init(
-            renderedOutput: renderedOutput, showsTerminalSurface: !terminalContainer.isHidden, showsOutputFallback: !outputScrollView.isHidden,
+            renderedOutput: renderedOutput, showsTerminalSurface: !terminalContainer.isHidden, showsTextRenderer: !outputScrollView.isHidden,
             rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue, state: stateLabel.stringValue,
-            windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow)
+            windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
+            surfaceRows: surfaceSnapshot?.rows)
     }
 
     var debugRenderedOutput: String { outputView.string }
     var debugShowsTerminalSurface: Bool { !terminalContainer.isHidden }
-    var debugShowsOutputFallback: Bool { !outputScrollView.isHidden }
+    var debugShowsTextRenderer: Bool { !outputScrollView.isHidden }
     var debugRendererSummary: String { rendererLabel.stringValue }
     var debugSummary: String { summaryLabel.stringValue }
     var debugState: String { stateLabel.stringValue }
@@ -1574,7 +1582,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         }
     }
     @discardableResult func debugSendGhosttyScroll(horizontal: CGFloat = 0, vertical: CGFloat) -> Bool {
-        ghosttyRendererHost?.debugSendScroll(horizontal: horizontal, vertical: vertical) ?? false
+        ghosttyRendererHost?.sendScroll(horizontal: horizontal, vertical: vertical) ?? false
     }
     var debugGhosttyHasRenderableSurface: Bool { ghosttyRendererHost?.hasRenderableSurface() ?? false }
     var debugGhosttySurfaceRefreshRequestCount: Int { ghosttyRendererHost?.debugSurfaceRefreshRequestCount ?? 0 }

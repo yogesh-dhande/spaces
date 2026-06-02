@@ -49,4 +49,22 @@ final class GhosttyTerminalSnapshotLayoutTests: XCTestCase {
         XCTAssertEqual(lines[0].runs.first?.isUnderline, true)
         XCTAssertTrue(lines[1].runs.isEmpty)
     }
+
+    func testLayoutPreservesBackgroundOnlyBlankRuns() {
+        let snapshot = GhosttyTerminalSnapshot(
+            columns: 4, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xEEEEEE, defaultBackgroundRGB: 0x101010,
+            cells: [
+                .init(codepoint: 65, foregroundRGB: 0xEEEEEE, backgroundRGB: 0x101010, flags: 0),
+                .init(codepoint: 0, foregroundRGB: 0xEEEEEE, backgroundRGB: 0x444444, flags: 0),
+                .init(codepoint: 0, foregroundRGB: 0xEEEEEE, backgroundRGB: 0x444444, flags: 0),
+                .init(codepoint: 0, foregroundRGB: 0xEEEEEE, backgroundRGB: 0x101010, flags: 0),
+            ])
+
+        let line = GhosttyTerminalSnapshotLayout.lines(for: snapshot)[0]
+
+        XCTAssertEqual(line.text, "A  ")
+        XCTAssertEqual(line.runs.count, 2)
+        XCTAssertEqual(line.runs[1].text, "  ")
+        XCTAssertEqual(line.runs[1].backgroundRGB, 0x444444)
+    }
 }

@@ -124,11 +124,10 @@ struct SpacesMobileE2ERenderDump: Codable, Equatable {
     let snapshotColumns: Int?
     let snapshotRows: Int?
     let snapshotText: String?
-    let transcriptTail: String?
     let errorMessage: String?
     let visibleText: String
     let renderedText: String
-    let replayStateKey: String
+    let renderStateKey: String
     let emittedAt: String
 }
 

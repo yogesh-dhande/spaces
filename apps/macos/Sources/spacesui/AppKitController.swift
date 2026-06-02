@@ -330,8 +330,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let summary: String?
         let state: String?
         let showsTerminalSurface: Bool?
-        let showsOutputFallback: Bool?
+        let showsTextRenderer: Bool?
         let didClose: Bool?
+        let surfaceColumns: Int?
+        let surfaceRows: Int?
     }
 
     enum WindowFocusRequest: Sendable {
@@ -851,8 +853,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let payload = TerminalSessionWindowStateDump(
             sessionID: sessionID, requestedMode: requestedMode, found: controller != nil, windowTitle: debugState?.windowTitle,
             rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput, summary: debugState?.summary,
-            state: debugState?.state, showsTerminalSurface: debugState?.showsTerminalSurface, showsOutputFallback: debugState?.showsOutputFallback,
-            didClose: debugState?.didCloseWindow)
+            state: debugState?.state, showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
+            didClose: debugState?.didCloseWindow, surfaceColumns: debugState?.surfaceColumns, surfaceRows: debugState?.surfaceRows)
         writeTerminalSessionWindowStateDump(payload, to: outputPath)
     }
 

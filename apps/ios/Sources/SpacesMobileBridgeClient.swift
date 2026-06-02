@@ -69,7 +69,6 @@ struct SpacesMobileBridgeClient: Sendable {
 
     func fetchState(
         sessionID: String,
-        includeOutputHistory: Bool = false,
         timeout: Duration = .seconds(3),
         commandChannel: SpacesMobileBridgeCommandChannel? = nil
     ) async throws -> GhosttyRemoteSessionStatePayload {
@@ -77,8 +76,7 @@ struct SpacesMobileBridgeClient: Sendable {
             command: "state",
             authToken: settings.trimmedAuthToken,
             clientApp: clientAppIdentity,
-            sessionID: sessionID,
-            includeOutputHistory: includeOutputHistory
+            sessionID: sessionID
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
@@ -127,7 +125,7 @@ struct SpacesMobileBridgeClient: Sendable {
         clientID: String,
         timeout: Duration = .seconds(3),
         commandChannel: SpacesMobileBridgeCommandChannel? = nil
-    ) async throws {
+    ) async throws -> GhosttyRemoteSessionStatePayload? {
         let request = SpacesMobileBridgeRequest(
             command: "takeover",
             authToken: settings.trimmedAuthToken,
@@ -137,12 +135,14 @@ struct SpacesMobileBridgeClient: Sendable {
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+        return response.sessionState
     }
 
     func sendText(
         sessionID: String,
         clientID: String,
         text: String,
+        ownerEpoch: UInt64?,
         appendNewline: Bool = false,
         timeout: Duration = .seconds(3),
         commandChannel: SpacesMobileBridgeCommandChannel? = nil
@@ -154,6 +154,7 @@ struct SpacesMobileBridgeClient: Sendable {
             sessionID: sessionID,
             clientID: clientID,
             text: text,
+            ownerEpoch: ownerEpoch,
             appendNewline: appendNewline
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
@@ -164,6 +165,7 @@ struct SpacesMobileBridgeClient: Sendable {
         sessionID: String,
         clientID: String,
         key: String,
+        ownerEpoch: UInt64?,
         timeout: Duration = .seconds(3),
         commandChannel: SpacesMobileBridgeCommandChannel? = nil
     ) async throws {
@@ -173,7 +175,8 @@ struct SpacesMobileBridgeClient: Sendable {
             clientApp: clientAppIdentity,
             sessionID: sessionID,
             clientID: clientID,
-            key: key
+            key: key,
+            ownerEpoch: ownerEpoch
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
@@ -184,6 +187,8 @@ struct SpacesMobileBridgeClient: Sendable {
         clientID: String,
         columns: Int,
         rows: Int,
+        ownerEpoch: UInt64?,
+        resizeSerial: UInt64?,
         timeout: Duration = .seconds(3),
         commandChannel: SpacesMobileBridgeCommandChannel? = nil
     ) async throws {
@@ -194,7 +199,32 @@ struct SpacesMobileBridgeClient: Sendable {
             sessionID: sessionID,
             clientID: clientID,
             columns: columns,
-            rows: rows
+            rows: rows,
+            ownerEpoch: ownerEpoch,
+            resizeSerial: resizeSerial
+        )
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+    }
+
+    func scroll(
+        sessionID: String,
+        clientID: String,
+        horizontal: Double,
+        vertical: Double,
+        ownerEpoch: UInt64?,
+        timeout: Duration = .seconds(3),
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws {
+        let request = SpacesMobileBridgeRequest(
+            command: "scroll",
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity,
+            sessionID: sessionID,
+            clientID: clientID,
+            ownerEpoch: ownerEpoch,
+            scrollHorizontal: horizontal,
+            scrollVertical: vertical
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
@@ -302,7 +332,10 @@ actor SpacesMobileBridgeCommandChannel {
                 key: request.key,
                 columns: request.columns,
                 rows: request.rows,
-                includeOutputHistory: request.includeOutputHistory,
+                ownerEpoch: request.ownerEpoch,
+                resizeSerial: request.resizeSerial,
+                scrollHorizontal: request.scrollHorizontal,
+                scrollVertical: request.scrollVertical,
                 appendNewline: request.appendNewline
             )
         }

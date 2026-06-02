@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import spacesterminalcore
 
-final class FallbackPTYTerminalSessionDriver: @unchecked Sendable {
+final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private let launchConfiguration: TerminalSessionLaunchConfiguration
     private let readQueue: DispatchQueue
     private let writeQueue: DispatchQueue
@@ -17,8 +17,8 @@ final class FallbackPTYTerminalSessionDriver: @unchecked Sendable {
 
     init(launchConfiguration: TerminalSessionLaunchConfiguration) {
         self.launchConfiguration = launchConfiguration
-        readQueue = DispatchQueue(label: "spaces.terminal.fallback-pty.read.\(launchConfiguration.sessionID)")
-        writeQueue = DispatchQueue(label: "spaces.terminal.fallback-pty.write.\(launchConfiguration.sessionID)")
+        readQueue = DispatchQueue(label: "spaces.terminal.host-managed-pty.read.\(launchConfiguration.sessionID)")
+        writeQueue = DispatchQueue(label: "spaces.terminal.host-managed-pty.write.\(launchConfiguration.sessionID)")
     }
 
     func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) {
@@ -114,7 +114,7 @@ final class FallbackPTYTerminalSessionDriver: @unchecked Sendable {
         }
     }
 
-    @discardableResult func resizeCellGrid(columns: Int, rows: Int) -> Bool {
+    @discardableResult func resizeCellGrid(columns: Int, rows: Int, pixelWidth: UInt32 = 0, pixelHeight: UInt32 = 0) -> Bool {
         let resolvedColumns = max(columns, 1)
         let resolvedRows = max(rows, 1)
         lock.lock()
@@ -122,7 +122,9 @@ final class FallbackPTYTerminalSessionDriver: @unchecked Sendable {
         let fd = masterFD
         lock.unlock()
         guard fd >= 0 else { return false }
-        var windowSize = winsize(ws_row: UInt16(resolvedRows), ws_col: UInt16(resolvedColumns), ws_xpixel: 0, ws_ypixel: 0)
+        var windowSize = winsize(
+            ws_row: UInt16(resolvedRows), ws_col: UInt16(resolvedColumns), ws_xpixel: UInt16(clamping: pixelWidth),
+            ws_ypixel: UInt16(clamping: pixelHeight))
         return ioctl(fd, TIOCSWINSZ, &windowSize) == 0
     }
 
@@ -204,7 +206,7 @@ final class FallbackPTYTerminalSessionDriver: @unchecked Sendable {
         currentFD == readFD && currentGeneration == readGeneration
     }
 
-    private static func execCommand(for launchConfiguration: TerminalSessionLaunchConfiguration) -> (executable: String, arguments: [String]) {
+    static func execCommand(for launchConfiguration: TerminalSessionLaunchConfiguration) -> (executable: String, arguments: [String]) {
         let shell = launchConfiguration.shell.isEmpty ? "/bin/zsh" : launchConfiguration.shell
         let shellName = URL(fileURLWithPath: shell).lastPathComponent
         guard let command = launchConfiguration.command, !command.isEmpty else { return (shell, ["-\(shellName)"]) }

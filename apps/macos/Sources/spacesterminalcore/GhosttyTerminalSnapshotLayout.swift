@@ -100,7 +100,7 @@ public enum GhosttyTerminalSnapshotLayout {
         -> GhosttyTerminalSnapshotDisplayRun
     {
         var foreground = cell.codepoint == 0 ? snapshot.defaultForegroundRGB : cell.foregroundRGB
-        var background = cell.codepoint == 0 ? snapshot.defaultBackgroundRGB : cell.backgroundRGB
+        var background = cell.backgroundRGB
         if cell.flags & inverseFlag != 0 || invertForCursor { swap(&foreground, &background) }
         return GhosttyTerminalSnapshotDisplayRun(
             text: displayCharacter(for: cell), foregroundRGB: foreground, backgroundRGB: background, isBold: cell.flags & boldFlag != 0,

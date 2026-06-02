@@ -10,6 +10,10 @@ spacese2e="${SPACES_E2E:-$repo_root/apps/macos/.build/debug/spacese2e}"
 terminal_service="${SPACES_TERMINAL_SERVICE_EXECUTABLE:-$repo_root/apps/macos/.build/debug/SpacesTerminalService}"
 ghostty_xcframework="${SPACES_GHOSTTYKIT_XCFRAMEWORK:-$repo_root/apps/macos/.local/ghosttykit/GhosttyKit.xcframework}"
 ghostty_resources="${SPACES_GHOSTTY_RESOURCES_DIR:-$repo_root/apps/macos/.local/ghosttykit/Resources/ghostty}"
+user_home="${HOME:?}"
+source_xdg_config_home="${SPACES_MOBILE_GHOSTTY_XDG_CONFIG_HOME:-${XDG_CONFIG_HOME:-$user_home/.config}}"
+profile_mode="${SPACES_MOBILE_DEMO_PROFILE_MODE:-isolated}"
+demo_root_parent="${SPACES_MOBILE_DEMO_ROOT_PARENT:-$user_home/.spaces-dev/mobile-demo}"
 
 bridge_bind_host="${SPACES_MOBILE_DEMO_BIND_HOST:-0.0.0.0}"
 bridge_host="${SPACES_MOBILE_DEMO_HOST:-127.0.0.1}"
@@ -53,9 +57,11 @@ ipad_launch_pid=""
 iphone_launch_pid=""
 terminal_service_pid=""
 performance_log_path=""
+ghostty_demo_xdg_config_home=""
+demo_home=""
 
 run_demo_env() {
-  env \
+  local -a env_args=(
     -u NO_COLOR \
     -u CLICOLOR \
     -u CLICOLOR_FORCE \
@@ -63,16 +69,16 @@ run_demo_env() {
     -u CODEX_CI \
     -u CODEX_MANAGED_BY_NPM \
     -u CODEX_MANAGED_PACKAGE_ROOT \
-    -u CODEX_THREAD_ID \
-    "$@"
+    -u CODEX_THREAD_ID
+  )
+  if [[ -n "$ghostty_demo_xdg_config_home" ]]; then
+    env_args+=(XDG_CONFIG_HOME="$ghostty_demo_xdg_config_home")
+  fi
+  env "${env_args[@]}" "$@"
 }
 
-seed_codex_demo_config() {
-  local codex_home="$temp_root/home/.codex"
-  mkdir -p "$codex_home"
-  cat >"$codex_home/config.toml" <<'EOF'
-check_for_update_on_startup = false
-EOF
+prepare_ghostty_demo_config() {
+  ghostty_demo_xdg_config_home="$source_xdg_config_home"
 }
 
 stop_demo_workspace() {
@@ -84,7 +90,7 @@ stop_demo_workspace() {
   fi
 
   run_demo_env \
-    HOME="$temp_root/home" \
+    HOME="$demo_home" \
     SPACES_DB_PATH="$spaces_db_path" \
     SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
@@ -180,6 +186,51 @@ trap cleanup EXIT
 trap handle_interrupt INT TERM
 
 acquire_terminal_harness_lock
+
+validate_profile_mode() {
+  case "$profile_mode" in
+    user|isolated)
+      ;;
+    *)
+      echo "SPACES_MOBILE_DEMO_PROFILE_MODE must be 'user' or 'isolated', got: $profile_mode" >&2
+      exit 1
+      ;;
+  esac
+}
+
+create_demo_root() {
+  mkdir -p "$demo_root_parent"
+  temp_root="$(mktemp -d "$demo_root_parent/run.XXXXXX")"
+}
+
+resolve_user_profile_paths() {
+  local profile_exports
+  if ! profile_exports="$(run_demo_env "$spaces_cli" profile show --shell)"; then
+    echo "Failed to resolve Spaces profile paths with $spaces_cli profile show --shell." >&2
+    exit 1
+  fi
+  eval "$profile_exports"
+  spaces_db_path="${SPACES_DB_PATH:-}"
+  spaces_runtime_dir="${SPACES_RUNTIME_DIR:-}"
+  if [[ -z "$spaces_db_path" || -z "$spaces_runtime_dir" ]]; then
+    echo "Failed to resolve SPACES_DB_PATH and SPACES_RUNTIME_DIR for the demo profile." >&2
+    exit 1
+  fi
+}
+
+prepare_demo_profile() {
+  demo_home="$user_home"
+  if [[ "$profile_mode" == "isolated" ]]; then
+    spaces_db_path="$temp_root/spaces.db"
+    spaces_runtime_dir="$temp_root/runtime"
+    mkdir -p "$spaces_runtime_dir" "$project_dir"
+  else
+    resolve_user_profile_paths
+    mkdir -p "$spaces_runtime_dir" "$(dirname "$spaces_db_path")" "$project_dir"
+  fi
+
+  prepare_ghostty_demo_config
+}
 
 fail_if_existing_spaces_app() {
   local existing
@@ -361,7 +412,7 @@ open_mobile_pairing_window() {
   local window_json
   if ! window_json="$(
     run_demo_env \
-      HOME="$temp_root/home" \
+      HOME="$demo_home" \
       SPACES_DB_PATH="$spaces_db_path" \
       SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
       SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
@@ -397,7 +448,7 @@ PY
 
 start_mobile_bridge() {
   if ! run_demo_env \
-    HOME="$temp_root/home" \
+    HOME="$demo_home" \
     SPACES_DB_PATH="$spaces_db_path" \
     SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
@@ -439,6 +490,47 @@ load_discovered_session_ids() {
   done < <(discover_session_ids)
 }
 
+wait_for_session_owner() {
+  local owner_session_id="$1"
+  python3 - "$spaces_runtime_dir" "$owner_session_id" <<'PY'
+import json
+import pathlib
+import sys
+import time
+
+runtime_dir = pathlib.Path(sys.argv[1])
+session_id = sys.argv[2]
+attachments_path = runtime_dir / "terminal" / "sessions" / session_id / "attachments.json"
+deadline = time.time() + 30
+last_snapshot = ""
+while time.time() < deadline:
+    try:
+        payload = json.loads(attachments_path.read_text())
+    except Exception as exc:
+        last_snapshot = repr(exc)
+        time.sleep(0.1)
+        continue
+    last_snapshot = json.dumps(payload, indent=2, sort_keys=True)
+    for attachment in payload:
+        if attachment.get("mode") == "owner" and attachment.get("detachedAt") is None:
+            raise SystemExit(0)
+    time.sleep(0.1)
+raise SystemExit(f"Timed out waiting for active owner attachment for {session_id}.\n{last_snapshot}")
+PY
+}
+
+show_session_on_mac() {
+  local owner_session_id="$1"
+  run_demo_env \
+    HOME="$demo_home" \
+    SPACES_DB_PATH="$spaces_db_path" \
+    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+    SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
+    SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
+    SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
+    "$spaces_cli" terminal show "$owner_session_id" >/dev/null
+}
+
 discover_workspace_running_state() {
   local workspace_id="$1"
   python3 - "$spaces_db_path" "$workspace_id" <<'PY'
@@ -457,7 +549,7 @@ PY
 
 open_demo_workspace_terminal() {
   run_demo_env \
-    HOME="$temp_root/home" \
+    HOME="$demo_home" \
     SPACES_DB_PATH="$spaces_db_path" \
     SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
@@ -608,18 +700,21 @@ PY
 }
 
 print_summary() {
-  python3 - "$temp_root" "$app_pid" "$bridge_pid" "$terminal_service_pid" "$session_id" "$secondary_session_id" "$spaces_db_path" "$project_dir" "$app_log" "$bridge_log" "$performance_log_path" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_bind_host" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
+  python3 - "$temp_root" "$profile_mode" "$demo_home" "$app_pid" "$bridge_pid" "$terminal_service_pid" "$session_id" "$secondary_session_id" "$spaces_db_path" "$spaces_runtime_dir" "$project_dir" "$app_log" "$bridge_log" "$performance_log_path" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_bind_host" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
 import json
 import sys
 
 (
     root,
+    profile_mode,
+    home,
     app_pid,
     bridge_pid,
     terminal_service_pid,
     session_id,
     secondary_session_id,
     db_path,
+    runtime_dir,
     project_dir,
     app_log,
     bridge_log,
@@ -642,6 +737,8 @@ import sys
 ) = sys.argv[1:]
 payload = {
     "root": root,
+    "profileMode": profile_mode,
+    "home": home,
     "appPID": int(app_pid),
     "bridgePID": int(bridge_pid),
     "terminalServicePID": int(terminal_service_pid) if terminal_service_pid else None,
@@ -653,6 +750,7 @@ payload = {
     "sessionIDs": [value for value in (session_id, secondary_session_id) if value],
     "workspaceTitle": workspace_title,
     "dbPath": db_path,
+    "runtimeDir": runtime_dir,
     "projectDir": project_dir,
     "appLog": app_log,
     "bridgeLog": bridge_log,
@@ -679,7 +777,8 @@ write_manual_shell_helper() {
   manual_shell_path="$temp_root/manual-demo-env.sh"
   cat >"$manual_shell_path" <<EOF
 #!/usr/bin/env bash
-export HOME=$(printf '%q' "$temp_root/home")
+export HOME=$(printf '%q' "$demo_home")
+export XDG_CONFIG_HOME=$(printf '%q' "$ghostty_demo_xdg_config_home")
 export SPACES_DB_PATH=$(printf '%q' "$spaces_db_path")
 export SPACES_RUNTIME_DIR=$(printf '%q' "$spaces_runtime_dir")
 export SPACES_TERMINAL_SERVICE_EXECUTABLE=$(printf '%q' "$terminal_service")
@@ -758,6 +857,7 @@ EOF
 
 require_path "$ghostty_xcframework" "GhosttyKit.xcframework"
 require_path "$ghostty_resources" "Ghostty resources"
+validate_profile_mode
 fail_if_existing_spaces_app
 fail_if_bridge_port_in_use
 build_macos_debug_products
@@ -766,9 +866,7 @@ require_executable "$spaces_cli" "spaces CLI"
 require_executable "$spacese2e" "spacese2e"
 require_executable "$terminal_service" "SpacesTerminalService"
 
-temp_root="$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-demo.XXXXXX")"
-spaces_db_path="$temp_root/spaces.db"
-spaces_runtime_dir="$temp_root/runtime"
+create_demo_root
 project_dir="$temp_root/project"
 app_log="$temp_root/app.log"
 bridge_log="$temp_root/bridge.log"
@@ -779,8 +877,7 @@ ipad_app_stdout_log="$temp_root/ipad-app.stdout.log"
 ipad_app_stderr_log="$temp_root/ipad-app.stderr.log"
 iphone_app_stdout_log="$temp_root/iphone-app.stdout.log"
 iphone_app_stderr_log="$temp_root/iphone-app.stderr.log"
-mkdir -p "$spaces_runtime_dir" "$project_dir" "$temp_root/home"
-seed_codex_demo_config
+prepare_demo_profile
 
 ipad_udid="$(resolve_device_udid "$ipad_name")"
 iphone_udid="$(resolve_device_udid "$iphone_name")"
@@ -821,7 +918,8 @@ env \
   -u CODEX_MANAGED_BY_NPM \
   -u CODEX_MANAGED_PACKAGE_ROOT \
   -u CODEX_THREAD_ID \
-  HOME="$temp_root/home" \
+  HOME="$demo_home" \
+  XDG_CONFIG_HOME="$ghostty_demo_xdg_config_home" \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
@@ -836,7 +934,7 @@ app_pid=$!
 wait_for_pid "$app_pid" "SpacesApp"
 
 run_demo_env \
-  HOME="$temp_root/home" \
+  HOME="$demo_home" \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service" \
@@ -875,6 +973,8 @@ if [[ -z "$session_id" ]]; then
   echo "Failed to discover the primary terminal session." >&2
   exit 1
 fi
+show_session_on_mac "$session_id"
+wait_for_session_owner "$session_id"
 
 for attempt in $(seq 1 3); do
   workspace_open_payload="$(open_demo_workspace_terminal)"
@@ -904,6 +1004,8 @@ if [[ -z "$secondary_session_id" ]]; then
   echo "Failed to discover the secondary terminal session." >&2
   exit 1
 fi
+show_session_on_mac "$secondary_session_id"
+wait_for_session_owner "$secondary_session_id"
 
 start_mobile_bridge
 wait_for_bridge_port
@@ -947,7 +1049,7 @@ echo "Demo is live. Press Ctrl+C to stop it."
 echo "Mac app: $spaces_app"
 echo "iPad simulator: $ipad_name"
 echo "iPhone simulator: $iphone_name"
-printf -v demo_env_prefix 'HOME=%q SPACES_DB_PATH=%q SPACES_RUNTIME_DIR=%q' "$temp_root/home" "$spaces_db_path" "$spaces_runtime_dir"
+printf -v demo_env_prefix 'HOME=%q XDG_CONFIG_HOME=%q SPACES_DB_PATH=%q SPACES_RUNTIME_DIR=%q' "$demo_home" "$ghostty_demo_xdg_config_home" "$spaces_db_path" "$spaces_runtime_dir"
 echo "Manual demo env: $demo_env_prefix"
 echo "Helper shell: source $manual_shell_path"
 printf 'List sessions: %s %q terminal list\n' "$demo_env_prefix" "$spaces_cli"

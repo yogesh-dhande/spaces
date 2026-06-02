@@ -29,6 +29,7 @@ GHOSTTYVT_LIB_ROOT="$GHOSTTYVT_ROOT/lib"
 TOOLCHAIN_ROOT="$GHOSTTYVT_ROOT/toolchain"
 
 ZIG_VERSION="0.15.2"
+GHOSTTY_BUILD_OPTIMIZE="${SPACES_GHOSTTY_BUILD_OPTIMIZE:-ReleaseFast}"
 
 MODE="default"
 STRICT=0
@@ -420,12 +421,12 @@ build_from_source() {
     local app_version
     app_version="$(ghostty_app_version)"
 
-    echo "==> Building Ghostty artifacts from $GHOSTTY_SOURCE_ROOT ($GHOSTTY_SHA)"
+    echo "==> Building Ghostty artifacts from $GHOSTTY_SOURCE_ROOT ($GHOSTTY_SHA, optimize=$GHOSTTY_BUILD_OPTIMIZE)"
     patch_libxev_for_ios_simulator "$zig_bin"
     (
         cd "$GHOSTTY_SOURCE_ROOT"
-        "$zig_bin" build -Demit-xcframework=true -Demit-macos-app=false -Di18n=false -Dversion-string="$app_version"
-        "$zig_bin" build -Demit-lib-vt=true -Dversion-string="$app_version"
+        "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-xcframework=true -Demit-macos-app=false -Di18n=false -Dversion-string="$app_version"
+        "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-lib-vt=true -Dversion-string="$app_version"
     )
 
     install_source_build_outputs

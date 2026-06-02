@@ -108,13 +108,13 @@ BRIDGE_PORT="$bridge_port" \
 TRANSPORT_KEY="$transport_key" \
 SPACES_CLI="$spaces_cli" \
 python3 - <<'PY'
+import base64
 import json
 import os
 import select
 import subprocess
 import time
 import uuid
-import base64
 from pathlib import Path
 
 HOST = "127.0.0.1"
@@ -171,14 +171,16 @@ def connect_stream(payload: dict) -> subprocess.Popen:
 
 
 def plain_text(payload: dict) -> str:
-    if payload.get("snapshotText"):
-        return payload["snapshotText"]
-    if payload.get("transcriptTail"):
-        return payload["transcriptTail"]
-    if payload.get("outputData"):
-        return base64.b64decode(payload["outputData"]).decode("utf-8", errors="replace")
+    encoded_frame = payload.get("renderFrame")
+    if not encoded_frame:
+        return ""
 
-    snapshot = payload.get("snapshot") or {}
+    try:
+        frame = json.loads(base64.b64decode(encoded_frame))
+    except (ValueError, json.JSONDecodeError):
+        return ""
+
+    snapshot = frame.get("snapshot") or {}
     columns = int(snapshot.get("columns") or 0)
     rows = int(snapshot.get("rows") or 0)
     cells = snapshot.get("cells") or []

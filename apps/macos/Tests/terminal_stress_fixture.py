@@ -136,7 +136,7 @@ def emit_codex_churn_stream(args: argparse.Namespace, rng: random.Random) -> int
                 )
             elif template_index == 3:
                 detail = (
-                    f"file=GhosttyRemoteTerminalView.swift hunk=history_seed trim={frame % 2} "
+                    f"file=GhosttyRemoteTerminalView.swift hunk=owner_epoch trim={frame % 2} "
                     f"rows={row:03d} payload={payload}"
                 )
             elif template_index == 4:

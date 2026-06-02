@@ -5,8 +5,7 @@ import spacesterminalcore
 @MainActor public final class RemoteGhosttySessionHost: TerminalGhosttySessionHosting {
     private let launchConfiguration: TerminalSessionLaunchConfiguration
     private let paths: TerminalSessionPaths
-    private let snapshotStream: GhosttyVTSnapshotStream
-    private let terminalView: GhosttyRemoteReplayTerminalView
+    private let terminalView: GhosttyMirrorTerminalView
     private var latestState: GhosttyRemoteSessionStatePayload?
     private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
     private var lastSubscriptionAttemptAt: Date?
@@ -15,14 +14,13 @@ import spacesterminalcore
     private var lastRequestedViewportSize: (columns: Int, rows: Int)?
     private var pendingViewportResizeSize: (columns: Int, rows: Int)?
     private var pendingViewportResizeTask: Task<Void, Never>?
+    private var resizeSerial: UInt64 = 0
     private let inputQueue = TerminalInputSerialQueue()
-    private var cachedReplayHistorySeed: (byteCount: Int, data: Data)?
 
     public init(launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) {
         self.launchConfiguration = launchConfiguration
         self.paths = paths
-        snapshotStream = GhosttyVTSnapshotStream(sessionID: launchConfiguration.sessionID, outputPath: paths.outputPath)
-        terminalView = GhosttyRemoteReplayTerminalView(launchConfiguration: launchConfiguration)
+        terminalView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         ensureStateStreamStartedIfNeeded()
     }
 
@@ -48,6 +46,7 @@ import spacesterminalcore
         terminalView.acceptsTerminalInput = mode == .owner
         terminalView.onSendText = { [weak self] text in self?.sendRemoteInput(text) }
         terminalView.onSendKey = { [weak self] key in self?.sendRemoteKey(key) }
+        terminalView.onSendScroll = { [weak self] horizontal, vertical in self?.sendRemoteScroll(horizontal: horizontal, vertical: vertical) }
         terminalView.onViewportSizeChanged = { [weak self] columns, rows in self?.handleViewportSizeChange(columns: columns, rows: rows) }
 
         if let container, terminalView.superview !== container {
@@ -65,13 +64,11 @@ import spacesterminalcore
             container.needsLayout = true
             container.layoutSubtreeIfNeeded()
         }
-        terminalView.update(
-            snapshot: currentSnapshotForReplayUpdate(), replayStateKey: currentReplayStateKey(), historySeed: currentReplayHistorySeed(),
-            outputData: nil, outputEventToken: nil)
+        terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
         if mode == .owner { sendCurrentViewportResizeIfNeeded(force: true) }
     }
 
-    public func parkSurfaceInHiddenHostWindow() { terminalView.parkInHiddenHostWindowIfNeeded() }
+    public func releaseRendererSurface() { terminalView.releaseSurface() }
 
     public func setFocused(_ focused: Bool, for clientID: String) {
         guard clientID == attachedClient?.id else {
@@ -83,6 +80,12 @@ import spacesterminalcore
 
     public func focusWindow(_ window: NSWindow?) { terminalView.focusWindow(window) }
 
+    @discardableResult public func synchronizeSurfaceGeometry() -> Bool {
+        guard attachedMode == .owner else { return false }
+        sendCurrentViewportResizeIfNeeded(force: true)
+        return true
+    }
+
     public func activeOwnerClientID() -> String? {
         ensureStateStreamStartedIfNeeded()
         if let attachmentSnapshot = latestState?.attachmentSnapshot {
@@ -91,29 +94,23 @@ import spacesterminalcore
         return ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).first(where: { $0.mode == .owner })?.clientID
     }
 
-    public func hasRenderableSurface() -> Bool { terminalView.surface != nil }
+    public func hasRenderableSurface() -> Bool { terminalView.hasRenderedContent }
 
-    public var prefersOutputFallbackWhenSurfaceUnavailable: Bool { false }
+    public func requestSurfaceRefresh() { terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey()) }
+
+    public func prepareRenderStateExport() {}
 
     public func snapshot() -> GhosttyTerminalSnapshot? {
         ensureStateStreamStartedIfNeeded()
-        refreshReplayFromOutputHistoryIfNeeded()
-        if let snapshot = currentSnapshot() { return snapshot }
-        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
-        return snapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
+        return currentSnapshot()
     }
 
     public func snapshotText() -> String? {
         ensureStateStreamStartedIfNeeded()
-        refreshReplayFromOutputHistoryIfNeeded()
-        if let replayedText = terminalView.replayedText(), !replayedText.isEmpty { return replayedText }
-        if terminalView.hasReplaySurfaceContent, let snapshotText = terminalView.snapshotText(), !snapshotText.isEmpty { return snapshotText }
+        if let renderedSnapshotText = terminalView.renderedSnapshotText(), !renderedSnapshotText.isEmpty { return renderedSnapshotText }
         if let snapshotText = latestSnapshotTextIfCompatible() { return snapshotText }
-        if let snapshot = latestSnapshotIfCompatible() { return GhosttyTerminalSnapshotRenderer.render(snapshot).string }
-        if let transcriptTail = currentTranscriptTail(), !transcriptTail.isEmpty { return transcriptTail }
-        if let outputLogSnapshotText = currentOutputLogSnapshotText() { return outputLogSnapshotText }
-        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
-        return snapshotStream.snapshotText(columns: runtimeState?.columns, rows: runtimeState?.rows)
+        if let snapshot = latestSnapshotIfCompatible() { return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot) }
+        return nil
     }
 
     public func sessionSnapshot() -> GhosttyTerminalSnapshot? { snapshot() }
@@ -124,16 +121,14 @@ import spacesterminalcore
 
     public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
 
-    @discardableResult public func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+    @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
         terminalView.sendScroll(horizontal: horizontal, vertical: vertical)
     }
 
     public var debugSurfaceRefreshRequestCount: Int { 0 }
     public func debugVisibleSurfaceText() -> String? {
-        refreshReplayFromOutputHistoryIfNeeded()
-        if let replayedText = terminalView.replayedText(), !replayedText.isEmpty { return replayedText }
-        if terminalView.hasReplaySurfaceContent, let snapshotText = terminalView.snapshotText(), !snapshotText.isEmpty { return snapshotText }
-        if let snapshot = currentSnapshot() { return GhosttyTerminalSnapshotLayout.plainText(for: snapshot) }
+        if let renderedSnapshotText = terminalView.renderedSnapshotText(), !renderedSnapshotText.isEmpty { return renderedSnapshotText }
+        if let snapshot = currentSnapshot() { return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot) }
         return terminalView.snapshotText()
     }
 
@@ -167,21 +162,50 @@ import spacesterminalcore
     }
 
     private func applyRemoteState(_ payload: GhosttyRemoteSessionStatePayload) {
+        let decodeStartedAt = Date()
+        let decodedFrame = payload.decodedRenderFrame
+        let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
+        let dropReason = renderFrameDropReason(for: payload, decodedFrame: decodedFrame)
         latestState = latestState?.merged(with: payload) ?? payload
         lastSubscriptionAttemptAt = nil
-        terminalView.update(
-            snapshot: currentSnapshotForReplayUpdate(), replayStateKey: currentReplayStateKey(), historySeed: currentReplayHistorySeed(),
-            outputData: payload.snapshot == nil ? payload.outputData : nil,
-            outputEventToken: payload.snapshot == nil && payload.outputData != nil ? payload.emittedAt : nil)
+        let frameForUpdate = currentRenderFrameForRenderUpdate()
+        let applyStartedAt = Date()
+        if frameForUpdate != nil || !terminalView.hasRenderedSurfaceContent {
+            terminalView.update(frame: frameForUpdate, renderStateKey: currentRenderStateKey())
+        }
+        let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
         if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
         let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
+        let payloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(payload).count) ?? 0
+        var renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
+            reason: payload.reason, frame: decodedFrame, frameByteCount: payload.renderFrame?.count, payloadByteCount: payloadBytes,
+            decodeMS: decodeMS, outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
+            dropped: payload.renderFrame == nil ? nil : dropReason != nil, dropReason: dropReason, renderMode: "ghostty-mirror")
+        renderFrameAttributes["apply_ms"] = String(applyMS)
+        SpacesMobileTerminalPerformanceLogger.emit(
+            .init(
+                sessionID: payload.sessionID, source: "mac-mirror", name: "render_frame_payload_receive",
+                elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), count: payload.renderFrame?.count, attributes: renderFrameAttributes))
         TerminalPerformance.logMetric(
             "terminal_remote_state_receive", target: "session=\(payload.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
             success: true,
             detail:
-                "reason=\(payload.reason) snapshot=\(payload.snapshot == nil ? 0 : 1) snapshot_text=\(payload.snapshotText == nil ? 0 : 1) bytes=\(payload.outputByteCount ?? 0) streamed=\(payload.outputData?.count ?? 0)"
+                "reason=\(payload.reason) render_frame=\(payload.renderFrame == nil ? 0 : 1) bytes=\(payload.outputByteCount ?? 0) payload_bytes=\(payloadBytes) frame_bytes=\(payload.renderFrame?.count ?? 0)"
         )
+        TerminalPerformance.logMetric(
+            "terminal_render_frame_payload_receive", target: "session=\(payload.sessionID)",
+            elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
+            detail: GhosttyRenderFrameMetrics.detailString(renderFrameAttributes))
         postLocalNotifications(for: payload)
+    }
+
+    private func renderFrameDropReason(for payload: GhosttyRemoteSessionStatePayload, decodedFrame: GhosttyRenderFrame?) -> String? {
+        guard payload.renderFrame != nil else { return nil }
+        guard let decodedFrame else { return "decode_failed" }
+        guard Self.shouldUseRenderFrameSnapshot(decodedFrame.snapshot, runtimeState: payload.runtimeState, reason: payload.reason) else {
+            return "stale_resize_grid"
+        }
+        return nil
     }
 
     private func postLocalNotifications(for payload: GhosttyRemoteSessionStatePayload) {
@@ -202,85 +226,54 @@ import spacesterminalcore
         }
     }
 
-    private func currentSnapshot() -> GhosttyTerminalSnapshot? {
+    private func currentSnapshot() -> GhosttyTerminalSnapshot? { latestSnapshotIfCompatible() }
+
+    private func currentSnapshotForRenderUpdate() -> GhosttyTerminalSnapshot? {
         if let snapshot = latestSnapshotIfCompatible() { return snapshot }
-        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
-        return snapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
+        guard !terminalView.hasRenderedSurfaceContent else { return nil }
+        return nil
     }
 
-    private func currentSnapshotForReplayUpdate() -> GhosttyTerminalSnapshot? {
-        if let snapshot = latestSnapshotIfCompatible() { return snapshot }
-        guard !terminalView.hasReplaySurfaceContent else { return nil }
-        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
-        return snapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
+    private func currentRenderFrameForRenderUpdate() -> GhosttyRenderFrame? {
+        guard let frame = latestState?.decodedRenderFrame,
+            Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
+        else {
+            guard !terminalView.hasRenderedSurfaceContent else { return nil }
+            return nil
+        }
+        return frame
     }
 
     private func latestSnapshotIfCompatible() -> GhosttyTerminalSnapshot? {
-        guard let snapshot = latestState?.snapshot,
-            Self.shouldUseLiveSnapshot(snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
+        guard let snapshot = latestState?.renderFrameSnapshot,
+            Self.shouldUseRenderFrameSnapshot(snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
         else { return nil }
         return snapshot
     }
 
-    private func currentReplayHistorySeed() -> (id: String, data: Data)? {
-        guard latestState?.snapshot == nil else { return nil }
-        guard let history = TerminalReplayOutputHistory.load(path: paths.outputPath) else { return nil }
-        guard let data = history.data, !data.isEmpty else { return nil }
-        if cachedReplayHistorySeed?.byteCount != history.totalByteCount || cachedReplayHistorySeed?.data.count != data.count {
-            cachedReplayHistorySeed = (history.totalByteCount, data)
-        }
-        guard let cachedReplayHistorySeed else { return nil }
-        return ("history|\(cachedReplayHistorySeed.byteCount)", cachedReplayHistorySeed.data)
-    }
-
-    private func refreshReplayFromOutputHistoryIfNeeded() {
-        guard latestState?.snapshot == nil else { return }
-        guard let historySeed = currentReplayHistorySeed() else { return }
-        terminalView.update(
-            snapshot: nil, replayStateKey: currentReplayStateKey(), historySeed: historySeed, outputData: nil, outputEventToken: nil,
-            forceHistorySeed: true)
-    }
-
-    private func currentTranscriptTail() -> String? {
-        if terminalView.hasReplaySurfaceContent, let snapshotText = terminalView.snapshotText(), !snapshotText.isEmpty { return snapshotText }
-        if let transcriptTail = latestState?.transcriptTail, !transcriptTail.isEmpty { return transcriptTail }
-        if let snapshotText = latestSnapshotTextIfCompatible(), !snapshotText.isEmpty { return snapshotText }
-        return nil
-    }
-
     private func latestSnapshotTextIfCompatible() -> String? {
-        guard let snapshotText = latestState?.snapshotText, !snapshotText.isEmpty else { return nil }
-        if let snapshot = latestState?.snapshot,
-            !Self.shouldUseLiveSnapshot(snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
-        {
-            return nil
-        }
-        return snapshotText
+        guard let snapshot = latestSnapshotIfCompatible() else { return nil }
+        return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot)
     }
 
-    private func currentOutputLogSnapshotText() -> String? {
-        let runtimeState = latestState?.runtimeState ?? (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
-        guard let snapshotText = snapshotStream.snapshotText(columns: runtimeState?.columns, rows: runtimeState?.rows) else { return nil }
-        guard TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: nil, snapshotText: snapshotText) else { return nil }
-        return snapshotText
-    }
-
-    private func currentReplayStateKey() -> String {
+    private func currentRenderStateKey() -> String {
         let snapshot = currentSnapshot()
         let snapshotColumns = snapshot?.columns ?? 0
         let snapshotRows = snapshot?.rows ?? 0
         let runtimeColumns = latestState?.runtimeState?.columns ?? 0
         let runtimeRows = latestState?.runtimeState?.rows ?? 0
-        return "runtime=\(runtimeColumns)x\(runtimeRows)|snapshot=\(snapshotColumns)x\(snapshotRows)"
+        let ownerEpoch = latestState?.renderFrameOwnerEpoch ?? 0
+        return "runtime=\(runtimeColumns)x\(runtimeRows)|frame=\(snapshotColumns)x\(snapshotRows)|ownerEpoch=\(ownerEpoch)"
     }
 
     private func sendRemoteInput(_ text: String) {
         guard let client = attachedClient else { return }
         let socketPath = paths.controlSocketPath
         let clientID = client.id
+        let ownerEpoch = latestState?.renderFrameOwnerEpoch
         inputQueue.enqueue(priority: .userInitiated) {
             _ = try TerminalControlClient.send(
-                request: TerminalControlRequest(command: "send", text: text, clientID: clientID), socketPath: socketPath)
+                request: TerminalControlRequest(command: "send", text: text, clientID: clientID, ownerEpoch: ownerEpoch), socketPath: socketPath)
         }
     }
 
@@ -288,8 +281,23 @@ import spacesterminalcore
         guard let client = attachedClient else { return }
         let socketPath = paths.controlSocketPath
         let clientID = client.id
+        let ownerEpoch = latestState?.renderFrameOwnerEpoch
         inputQueue.enqueue(priority: .userInitiated) {
-            _ = try TerminalControlClient.send(request: TerminalControlRequest(command: "key", key: key, clientID: clientID), socketPath: socketPath)
+            _ = try TerminalControlClient.send(
+                request: TerminalControlRequest(command: "key", key: key, clientID: clientID, ownerEpoch: ownerEpoch), socketPath: socketPath)
+        }
+    }
+
+    private func sendRemoteScroll(horizontal: CGFloat, vertical: CGFloat) {
+        guard let client = attachedClient, attachedMode == .owner else { return }
+        let socketPath = paths.controlSocketPath
+        let clientID = client.id
+        let ownerEpoch = latestState?.renderFrameOwnerEpoch
+        inputQueue.enqueue(priority: .userInitiated) {
+            _ = try TerminalControlClient.send(
+                request: TerminalControlRequest(
+                    command: "scroll", clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: Double(horizontal),
+                    scrollVertical: Double(vertical)), socketPath: socketPath)
         }
     }
 
@@ -311,6 +319,9 @@ import spacesterminalcore
         pendingViewportResizeSize = requestedSize
         let socketPath = paths.controlSocketPath
         let clientID = client.id
+        resizeSerial &+= 1
+        let currentResizeSerial = resizeSerial
+        let ownerEpoch = latestState?.renderFrameOwnerEpoch
         let finishResizeRequest: @MainActor @Sendable (Bool) -> Void = { [weak self, requestedSize] success in
             guard let self else { return }
             if let pendingViewportResizeSize = self.pendingViewportResizeSize, pendingViewportResizeSize == requestedSize {
@@ -321,7 +332,9 @@ import spacesterminalcore
         }
         pendingViewportResizeTask = Task.detached(priority: .utility) {
             let response = try? TerminalControlClient.send(
-                request: TerminalControlRequest(command: "resize", clientID: clientID, columns: columns, rows: rows), socketPath: socketPath)
+                request: TerminalControlRequest(
+                    command: "resize", clientID: clientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch, resizeSerial: currentResizeSerial),
+                socketPath: socketPath)
             await finishResizeRequest(response?.ok == true)
         }
     }
@@ -332,9 +345,9 @@ import spacesterminalcore
         return snapshot.columns == columns && snapshot.rows == rows
     }
 
-    nonisolated static func shouldUseLiveSnapshot(_ snapshot: GhosttyTerminalSnapshot, runtimeState: TerminalSessionRuntimeState?, reason: String?)
-        -> Bool
-    {
+    nonisolated static func shouldUseRenderFrameSnapshot(
+        _ snapshot: GhosttyTerminalSnapshot, runtimeState: TerminalSessionRuntimeState?, reason: String?
+    ) -> Bool {
         guard reason == TerminalRemoteSessionStateReason.resize else { return true }
         return Self.snapshot(snapshot, matches: runtimeState)
     }

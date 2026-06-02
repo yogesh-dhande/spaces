@@ -165,25 +165,49 @@ import spacesterminalcore
             }
 
             XCTAssertTrue(recorder.requests().isEmpty)
+
+            let acceptedResponse = try await Task.detached {
+                try Self.sendBridgeRequest(
+                    SpacesMobileBridgeRequest(
+                        command: "resize", authToken: authToken, clientApp: clientApp, sessionID: sessionID, clientID: "ios-client", columns: 80,
+                        rows: 24, ownerEpoch: 11, resizeSerial: 5), port: server.listeningPort, transportKey: transportKey)
+            }.value
+
+            XCTAssertTrue(acceptedResponse.ok)
+            let forwardedResize = try XCTUnwrap(recorder.requests().first)
+            XCTAssertEqual(forwardedResize.command, "resize")
+            XCTAssertEqual(forwardedResize.clientID, "ios-client")
+            XCTAssertEqual(forwardedResize.ownerEpoch, 11)
+            XCTAssertEqual(forwardedResize.resizeSerial, 5)
         }
     }
 
-    func testStateHistorySeedReturnsFullReplayWhenOutputFitsBudget() async throws {
+    func testTakeoverResponseIncludesFreshTerminalState() async throws {
         try await withTemporaryProfile { _ in
-            let sessionID = "session-history-full-\(UUID().uuidString)"
+            let sessionID = "session-takeover-state-\(UUID().uuidString)"
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
-                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "history", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                    command: "cat", createdAt: "2026-05-26T00:00:00Z"), paths: paths)
-
-            let outputLog = Data("\u{1B}[32mREADY\u{1B}[0m\n".utf8)
-            try outputLog.write(to: URL(fileURLWithPath: paths.outputPath))
+                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "takeover", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                    command: "cat", createdAt: "2026-05-29T00:00:00Z"), paths: paths)
+            let recorder = MobileBridgeTerminalControlRecorder()
+            let controlServer = TerminalControlServer(
+                socketPath: paths.controlSocketPath, queue: DispatchQueue(label: "spaces.mobile.bridge.takeover-state.test")
+            ) { request in
+                recorder.record(request)
+                return TerminalControlResponse(ok: true, message: "Transferred terminal ownership.")
+            }
+            try controlServer.start()
+            defer { controlServer.stop() }
+            let liveState = Self.liveTerminalStatePayload(sessionID: sessionID, snapshotText: "LIVE-TAKEOVER-STATE")
+            let subscriptionServer = MobileBridgeTestSubscriptionServer(socketPath: paths.subscriptionSocketPath, payload: liveState)
+            try subscriptionServer.start()
+            defer { subscriptionServer.stop() }
 
             let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
             let clientApp = SpacesMobileClientApp(
-                installationID: "INSTALLATION-HISTORY-FULL", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios",
+                installationID: "INSTALLATION-TAKEOVER-STATE", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let authToken = try SpacesMobilePairingStore().issueToken(for: clientApp)
             let server = try SpacesMobileBridgeServer(host: SpacesMobileBridgeDefaults.loopbackHost, port: 0, transportKey: transportKey)
@@ -193,36 +217,37 @@ import spacesterminalcore
             let response = try await Task.detached {
                 try Self.sendBridgeRequest(
                     SpacesMobileBridgeRequest(
-                        command: "state", authToken: authToken, clientApp: clientApp, sessionID: sessionID, includeOutputHistory: true),
+                        command: "takeover", authToken: authToken, clientApp: clientApp, sessionID: sessionID, clientID: "ios-client"),
                     port: server.listeningPort, transportKey: transportKey)
             }.value
 
-            XCTAssertEqual(response.sessionState?.outputData, outputLog)
-            XCTAssertEqual(response.sessionState?.outputByteCount, outputLog.count)
-            XCTAssertEqual(response.sessionState?.outputEndByteOffset, outputLog.count)
+            XCTAssertTrue(response.ok)
+            XCTAssertEqual(response.sessionState?.sessionID, sessionID)
+            XCTAssertEqual(response.sessionState?.renderFrameText, "LIVE-TAKEOVER-STATE")
+            XCTAssertEqual(recorder.requests().first?.command, "takeover")
+            XCTAssertEqual(recorder.requests().first?.clientID, "ios-client")
         }
     }
 
-    func testStateHistorySeedOmitsPartialReplayWhenOutputExceedsBudget() async throws {
+    func testStateRequestReturnsLiveStateInsteadOfOutputLog() async throws {
         try await withTemporaryProfile { _ in
-            let sessionID = "session-history-tail-\(UUID().uuidString)"
+            let sessionID = "session-live-state-\(UUID().uuidString)"
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
-                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "tail", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "live", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
                     createdAt: "2026-05-26T00:00:00Z"), paths: paths)
 
-            let droppedPrefix = Data("DROP-MARKER\n".utf8)
-            let tailMarker = Data("\nTAIL-MARKER".utf8)
-            var outputLog = droppedPrefix
-            outputLog.append(Data(repeating: 0x41, count: SpacesMobileBridgeServer.maxHistorySeedOutputBytes + 1024))
-            outputLog.append(tailMarker)
-            try outputLog.write(to: URL(fileURLWithPath: paths.outputPath))
+            try Data("\u{1B}[32mOUTPUT-LOG-SHOULD-NOT-APPEAR\u{1B}[0m\n".utf8).write(to: URL(fileURLWithPath: paths.outputPath))
+            let liveState = Self.liveTerminalStatePayload(sessionID: sessionID, snapshotText: "LIVE-STATE")
+            let subscriptionServer = MobileBridgeTestSubscriptionServer(socketPath: paths.subscriptionSocketPath, payload: liveState)
+            try subscriptionServer.start()
+            defer { subscriptionServer.stop() }
 
             let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
             let clientApp = SpacesMobileClientApp(
-                installationID: "INSTALLATION-HISTORY-TAIL", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios",
+                installationID: "INSTALLATION-LIVE-STATE", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let authToken = try SpacesMobilePairingStore().issueToken(for: clientApp)
             let server = try SpacesMobileBridgeServer(host: SpacesMobileBridgeDefaults.loopbackHost, port: 0, transportKey: transportKey)
@@ -231,14 +256,13 @@ import spacesterminalcore
 
             let response = try await Task.detached {
                 try Self.sendBridgeRequest(
-                    SpacesMobileBridgeRequest(
-                        command: "state", authToken: authToken, clientApp: clientApp, sessionID: sessionID, includeOutputHistory: true),
+                    SpacesMobileBridgeRequest(command: "state", authToken: authToken, clientApp: clientApp, sessionID: sessionID),
                     port: server.listeningPort, transportKey: transportKey)
             }.value
 
-            XCTAssertNil(response.sessionState?.outputData)
-            XCTAssertEqual(response.sessionState?.outputByteCount, outputLog.count)
-            XCTAssertEqual(response.sessionState?.outputEndByteOffset, outputLog.count)
+            XCTAssertEqual(response.sessionState?.renderFrameText, "LIVE-STATE")
+            XCTAssertNil(response.sessionState?.outputByteCount)
+            XCTAssertNil(response.sessionState?.outputEndByteOffset)
         }
     }
 
@@ -562,6 +586,29 @@ import spacesterminalcore
         return try SpacesMobileBridgeCodec.decodeResponse(resultBox.responseData())
     }
 
+    nonisolated private static func liveTerminalStatePayload(sessionID: String, snapshotText: String) -> GhosttyRemoteSessionStatePayload {
+        let snapshot = ghosttySnapshot(text: snapshotText)
+        return GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: "live_state", emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()), sessionStateRevision: 1,
+            sessionStateFlags: nil, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live",
+            workingDirectory: "/tmp/work", renderFrame: try? GhosttyRenderFrame.encode(.init(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot)),
+            outputByteCount: nil, outputEndByteOffset: nil)
+    }
+
+    nonisolated private static func ghosttySnapshot(text: String) -> GhosttyTerminalSnapshot {
+        let rows = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let columns = rows.map(\.count).max() ?? 0
+        let paddedRows = rows.map { row in row.padding(toLength: columns, withPad: " ", startingAt: 0) }
+        let cells = paddedRows.flatMap { row in
+            row.unicodeScalars.map { scalar in
+                GhosttyTerminalSnapshot.Cell(codepoint: scalar.value, foregroundRGB: 0xFFFFFF, backgroundRGB: 0x000000, flags: 0)
+            }
+        }
+        return GhosttyTerminalSnapshot(
+            columns: columns, rows: paddedRows.count, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
+            defaultBackgroundRGB: 0x000000, cells: cells)
+    }
+
     private func withTemporaryProfile(_ body: (URL) async throws -> Void) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -745,13 +792,17 @@ private final class BlockingAuthorizePairingStore: SpacesMobilePairingStoreProto
 
 private final class MobileBridgeTestSubscriptionServer: @unchecked Sendable {
     private let socketPath: String
+    private let payload: GhosttyRemoteSessionStatePayload?
     private let queue = DispatchQueue(label: "spaces.mobile.bridge.supervisor.subscription.test")
     private let accepted = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var listenSocketFD: Int32 = -1
     private var clientSocketFD: Int32 = -1
 
-    init(socketPath: String) { self.socketPath = socketPath }
+    init(socketPath: String, payload: GhosttyRemoteSessionStatePayload? = nil) {
+        self.socketPath = socketPath
+        self.payload = payload
+    }
 
     func start() throws {
         try? FileManager.default.removeItem(atPath: socketPath)
@@ -805,6 +856,7 @@ private final class MobileBridgeTestSubscriptionServer: @unchecked Sendable {
         clientSocketFD = clientFD
         lock.unlock()
         accepted.signal()
+        writePayloadIfNeeded(to: clientFD)
     }
 
     private func currentListenSocket() -> Int32 {
@@ -812,6 +864,15 @@ private final class MobileBridgeTestSubscriptionServer: @unchecked Sendable {
         let socketFD = listenSocketFD
         lock.unlock()
         return socketFD
+    }
+
+    private func writePayloadIfNeeded(to socketFD: Int32) {
+        guard let payload, var data = try? GhosttyRemoteSessionStateCodec.encodeLine(payload) else { return }
+        data.append(0x0A)
+        data.withUnsafeBytes { buffer in
+            guard let baseAddress = buffer.baseAddress else { return }
+            _ = Darwin.write(socketFD, baseAddress, buffer.count)
+        }
     }
 
     private func makeSocketAddress(path: String) throws -> sockaddr_un {

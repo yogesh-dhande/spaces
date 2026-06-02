@@ -19,7 +19,7 @@ private func terminalViewerTraceSeconds() -> String { String(format: "%.3f", Dat
 private enum TerminalViewerRenderMode: String {
     case status
     case ownerBootstrapping
-    case ownerLive
+    case ownerLive = "ghostty-mirror"
     case ended
 }
 
@@ -67,9 +67,9 @@ private enum TerminalViewerRenderMode: String {
     private var bufferedInputFlushTask: Task<Void, Never>?
     private let inputSendQueue = TerminalInputSerialQueue()
     private var ownershipSynchronizationTask: Task<Void, Never>?
-    private var historySeedTask: Task<Void, Never>?
     private var viewportSize: (columns: Int, rows: Int)?
     private var lastSentResizeSize: (columns: Int, rows: Int)?
+    private var resizeSerial: UInt64 = 0
     private var needsOwnershipSynchronizationAfterCurrentRun = false
     private var isAwaitingTakeoverConfirmation = false {
         didSet {
@@ -83,8 +83,8 @@ private enum TerminalViewerRenderMode: String {
     private var hasConfirmedOwnerInputReadiness = false
     private var ownerRecoveryGraceDeadline: Date?
     private var ownerRenderEpochState: GhosttyRemoteTerminalOwnerEpoch?
-    private var requestedHistorySeedEpochID: String?
     private var reportedOwnerReadyEpochID: String?
+    private var reportedOwnerNonblankEpochID: String?
 
     private static let inputBatchDelay: Duration = .milliseconds(35)
     private static let inputRequestTimeout: Duration = .seconds(6)
@@ -122,16 +122,14 @@ private enum TerminalViewerRenderMode: String {
     var renderMode: String { renderModeValue.rawValue }
     var ownerRenderEpoch: GhosttyRemoteTerminalOwnerEpoch? { ownerRenderEpochState }
     var endedRender: GhosttyRemoteTerminalEndedRender? {
-        guard shouldRenderEndedTerminalSurface, let snapshot = latestState?.snapshot else { return nil }
+        guard shouldRenderEndedTerminalSurface, let snapshot = latestState?.renderFrameSnapshot else { return nil }
         return GhosttyRemoteTerminalEndedRender(id: endedRenderID(for: snapshot), snapshot: snapshot)
     }
     var latestScreenStateRevision: UInt64? { latestState?.screenStateRevision }
-    var snapshotText: String? { latestState?.snapshotText ?? latestState?.snapshot.map(GhosttyTerminalSnapshotLayout.plainText) }
-    var transcriptTail: String? { latestState?.transcriptTail }
-    var replayStateKey: String {
+    var snapshotText: String? { latestState?.renderFrameText }
+    var renderStateKey: String {
         if let ownerRenderEpochState {
-            return
-                "owner|\(ownerRenderEpochState.id)|history=\(ownerRenderEpochState.historySeed?.id ?? "nil")|pending_count=\(ownerRenderEpochState.pendingOutputs.count)|pending_last=\(ownerRenderEpochState.pendingOutputs.last?.id ?? "nil")"
+            return "owner|\(ownerRenderEpochState.id)"
         }
         if let endedRender { return "ended|\(endedRender.id)" }
         return "status"
@@ -139,10 +137,7 @@ private enum TerminalViewerRenderMode: String {
     var showsTerminalSurface: Bool { isOwner || ownerRenderEpochState != nil || endedRender != nil }
     var shouldPresentLiveSurface: Bool { showsTerminalSurface }
     var visibleText: String {
-        if shouldRenderEndedTerminalSurface, let transcriptTail, !transcriptTail.isEmpty {
-            return transcriptTail
-        }
-        if shouldRenderEndedTerminalSurface, let snapshotText = latestState?.snapshotText {
+        if shouldRenderEndedTerminalSurface, let snapshotText = latestState?.renderFrameText {
             return snapshotText
         }
         if isSessionUnavailable {
@@ -177,8 +172,8 @@ private enum TerminalViewerRenderMode: String {
     var lastSentResizeRows: Int? { lastSentResizeSize?.rows }
     var runtimeColumns: Int? { latestState?.runtimeState?.columns }
     var runtimeRows: Int? { latestState?.runtimeState?.rows }
-    var snapshotColumns: Int? { latestState?.snapshot?.columns }
-    var snapshotRows: Int? { latestState?.snapshot?.rows }
+    var snapshotColumns: Int? { latestState?.renderFrameSnapshot?.columns }
+    var snapshotRows: Int? { latestState?.renderFrameSnapshot?.rows }
 
     func start() {
         guard streamHandle == nil, reconnectTask == nil else { return }
@@ -204,16 +199,15 @@ private enum TerminalViewerRenderMode: String {
         inputSendQueue.cancelAll()
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = nil
-        historySeedTask?.cancel()
-        historySeedTask = nil
         bufferedInputText = ""
         viewportSize = nil
         lastSentResizeSize = nil
+        resizeSerial = 0
         needsOwnershipSynchronizationAfterCurrentRun = false
         ownerRenderEpochState = nil
         ownerRecoveryGraceDeadline = nil
-        requestedHistorySeedEpochID = nil
         reportedOwnerReadyEpochID = nil
+        reportedOwnerNonblankEpochID = nil
         isOwnershipSynchronizationScheduled = false
         isSynchronizingOwnership = false
         streamHandle?.cancel()
@@ -239,18 +233,23 @@ private enum TerminalViewerRenderMode: String {
         isBusy = true
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
+        isAwaitingTakeoverConfirmation = true
         defer { isBusy = false }
         trace("takeover_begin")
         do {
-            try await bridgeClient.takeOver(
+            let takeoverState = try await bridgeClient.takeOver(
                 sessionID: session.id,
                 clientID: remoteClient.id,
                 timeout: Self.inputRequestTimeout
             )
             replaceCommandChannel()
+            if let takeoverState { applyLatestState(takeoverState) }
+            if !isOwner {
+                await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "takeover_confirmation")
+            }
             isAwaitingTakeoverConfirmation = !isOwner
             errorMessage = nil
-            trace("takeover_success")
+            trace("takeover_success state=\(takeoverState == nil ? 0 : 1) owner=\(isOwner ? 1 : 0)")
         } catch {
             isAwaitingTakeoverConfirmation = false
             if Self.isTransientReconnectError(error) {
@@ -304,6 +303,32 @@ private enum TerminalViewerRenderMode: String {
         }
     }
 
+    func sendScroll(horizontal: Double, vertical: Double) async {
+        guard isOwner else { return }
+        guard keepsTerminalInputSurfaceActive else { return }
+        flushBufferedInputText()
+        let detail = "\(horizontal),\(vertical)"
+        enqueueInputSend(kind: "send_scroll", detail: detail) { [weak self, horizontal, vertical] in
+            guard let self else { return }
+            try await self.performSendScrollRequest(horizontal: horizontal, vertical: vertical)
+        }
+    }
+
+    func recordRenderedText(_ text: String) {
+        guard isOwner, let ownerRenderEpochState else { return }
+        guard Self.hasVisibleRenderedContent(text) else { return }
+        guard reportedOwnerNonblankEpochID != ownerRenderEpochState.id else { return }
+        reportedOwnerNonblankEpochID = ownerRenderEpochState.id
+        logPerformanceEvent(
+            name: "owner_first_nonblank_render",
+            count: text.utf8.count,
+            attributes: [
+                "epoch_id": ownerRenderEpochState.id,
+                "render_mode": renderMode,
+            ]
+        )
+    }
+
     private func bufferInputText(_ text: String) {
         bufferedInputText.append(text)
         bufferedInputFlushTask?.cancel()
@@ -334,11 +359,13 @@ private enum TerminalViewerRenderMode: String {
     }
 
     private func performSendTextRequest(_ text: String) async throws {
-        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id] commandChannel in
+        let ownerEpoch = currentOwnerEpoch
+        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
             try await bridgeClient.sendText(
                 sessionID: sessionID,
                 clientID: clientID,
                 text: text,
+                ownerEpoch: ownerEpoch,
                 appendNewline: false,
                 timeout: Self.inputRequestTimeout,
                 commandChannel: commandChannel
@@ -347,11 +374,28 @@ private enum TerminalViewerRenderMode: String {
     }
 
     private func performSendKeyRequest(_ key: String) async throws {
-        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id] commandChannel in
+        let ownerEpoch = currentOwnerEpoch
+        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
             try await bridgeClient.sendKey(
                 sessionID: sessionID,
                 clientID: clientID,
                 key: key,
+                ownerEpoch: ownerEpoch,
+                timeout: Self.inputRequestTimeout,
+                commandChannel: commandChannel
+            )
+        }
+    }
+
+    private func performSendScrollRequest(horizontal: Double, vertical: Double) async throws {
+        let ownerEpoch = currentOwnerEpoch
+        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
+            try await bridgeClient.scroll(
+                sessionID: sessionID,
+                clientID: clientID,
+                horizontal: horizontal,
+                vertical: vertical,
+                ownerEpoch: ownerEpoch,
                 timeout: Self.inputRequestTimeout,
                 commandChannel: commandChannel
             )
@@ -461,7 +505,10 @@ private enum TerminalViewerRenderMode: String {
             reconnectTask = nil
             trace("connect_subscribe_success")
             if !isOwner {
-                await refreshLatestState(timeout: .seconds(1), ignoreTransientTimeout: true, reason: "connect_bootstrap")
+                let refreshedState = await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap")
+                if refreshedState == nil, !isOwner, !isStopping {
+                    isConnecting = false
+                }
             }
         } catch {
             reconnectTask = nil
@@ -475,40 +522,36 @@ private enum TerminalViewerRenderMode: String {
     private func refreshLatestState(
         timeout: Duration = .seconds(3),
         ignoreTransientTimeout: Bool = false,
-        includeOutputHistory: Bool = false,
         applyToLatestState: Bool = true,
         reason: String = "state_refresh"
     ) async
         -> GhosttyRemoteSessionStatePayload?
     {
         trace(
-            "fetch_state_begin timeout_ms=\(Self.traceDurationMilliseconds(timeout)) ignore_transient_timeout=\(ignoreTransientTimeout ? 1 : 0) include_output_history=\(includeOutputHistory ? 1 : 0) reason=\(reason)"
+            "fetch_state_begin timeout_ms=\(Self.traceDurationMilliseconds(timeout)) ignore_transient_timeout=\(ignoreTransientTimeout ? 1 : 0) reason=\(reason)"
         )
         logPerformanceEvent(
             name: "explicit_state_refresh_begin",
             attributes: [
                 "reason": reason,
-                "include_output_history": includeOutputHistory ? "1" : "0",
             ]
         )
         let startedAt = Date()
         do {
             let fetchedState = try await bridgeClient.fetchState(
                 sessionID: session.id,
-                includeOutputHistory: includeOutputHistory,
                 timeout: timeout
             )
             trace(
-                "fetch_state_success reason=\(fetchedState.reason) runtime=\(traceSize(columns: fetchedState.runtimeState?.columns, rows: fetchedState.runtimeState?.rows)) snapshot=\(traceSize(columns: fetchedState.snapshot?.columns, rows: fetchedState.snapshot?.rows)) owner=\(traceOwnerID(fetchedState.attachmentSnapshot))"
+                "fetch_state_success reason=\(fetchedState.reason) runtime=\(traceSize(columns: fetchedState.runtimeState?.columns, rows: fetchedState.runtimeState?.rows)) frame=\(traceSize(columns: fetchedState.renderFrameSnapshot?.columns, rows: fetchedState.renderFrameSnapshot?.rows)) owner=\(traceOwnerID(fetchedState.attachmentSnapshot))"
             )
             logPerformanceEvent(
                 name: "explicit_state_refresh_end",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                count: fetchedState.outputData?.count,
+                count: fetchedState.outputByteCount,
                 attributes: [
                     "reason": reason,
-                    "include_output_history": includeOutputHistory ? "1" : "0",
-                    "snapshot": fetchedState.snapshot == nil ? "0" : "1",
+                    "render_frame": fetchedState.renderFrame == nil ? "0" : "1",
                 ]
             )
             if applyToLatestState { applyLatestState(fetchedState) }
@@ -522,7 +565,6 @@ private enum TerminalViewerRenderMode: String {
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                 attributes: [
                     "reason": reason,
-                    "include_output_history": includeOutputHistory ? "1" : "0",
                 ]
             )
             if ignoreTransientTimeout, Self.isTransientReconnectError(error) {
@@ -594,7 +636,7 @@ private enum TerminalViewerRenderMode: String {
 
     private var shouldRenderEndedTerminalSurface: Bool {
         guard isOwner == false, isEndedState else { return false }
-        return latestState?.snapshot != nil
+        return latestState?.renderFrame != nil
     }
 
     private var activeOwnerDisplayLabel: String? {
@@ -719,11 +761,15 @@ private enum TerminalViewerRenderMode: String {
                 stateWaitTargetViewportSize = targetViewportSize
                 do {
                     lastSentResizeSize = targetViewportSize
+                    resizeSerial &+= 1
+                    let currentResizeSerial = resizeSerial
                     try await bridgeClient.resize(
                         sessionID: session.id,
                         clientID: remoteClient.id,
                         columns: targetViewportSize.columns,
                         rows: targetViewportSize.rows,
+                        ownerEpoch: currentOwnerEpoch,
+                        resizeSerial: currentResizeSerial,
                         timeout: Self.inputRequestTimeout
                     )
                     trace("ownership_resize_success columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
@@ -765,7 +811,7 @@ private enum TerminalViewerRenderMode: String {
                 ignoreTransientTimeout: true,
                 reason: "owner_bootstrap_refresh"
             )
-            trace("ownership_sync_using_fetched_state snapshot=\(refreshedState?.snapshot == nil ? 0 : 1) output_bytes=\(refreshedState?.outputData?.count ?? 0)")
+            trace("ownership_sync_using_fetched_state render_frame=\(refreshedState?.renderFrame == nil ? 0 : 1) output_bytes=\(refreshedState?.outputByteCount ?? 0)")
             let fallbackState: GhosttyRemoteSessionStatePayload? =
                 if hasUsableOwnerBootstrapState(refreshedState, targetViewportSize: targetViewportSize) {
                     refreshedState
@@ -867,9 +913,6 @@ private enum TerminalViewerRenderMode: String {
         isInputSurfaceReady = false
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = nil
-        historySeedTask?.cancel()
-        historySeedTask = nil
-        requestedHistorySeedEpochID = nil
         reportedOwnerReadyEpochID = nil
         needsOwnershipSynchronizationAfterCurrentRun = false
         isOwnershipSynchronizationScheduled = false
@@ -960,16 +1003,17 @@ private enum TerminalViewerRenderMode: String {
             attachmentSnapshot: payload.attachmentSnapshot,
             title: payload.title,
             workingDirectory: payload.workingDirectory,
-            snapshot: nil,
-            snapshotText: nil,
-            transcriptTail: payload.transcriptTail,
+            renderFrame: nil,
             outputByteCount: payload.outputByteCount,
-            outputData: payload.outputData,
             outputEndByteOffset: payload.outputEndByteOffset
         )
     }
 
     private func applyLatestState(_ payload: GhosttyRemoteSessionStatePayload) {
+        let applyStartedAt = Date()
+        let decodeStartedAt = Date()
+        let decodedFrame = payload.decodedRenderFrame
+        let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
         let wasOwner = isOwner
         latestState = latestState?.merged(with: payload) ?? payload
         if payload.attachmentSnapshot != nil {
@@ -977,8 +1021,12 @@ private enum TerminalViewerRenderMode: String {
             hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
         }
         let isOwnerAfterMerge = isOwner
-        if isOwnerAfterMerge, let outputData = payload.outputData, !outputData.isEmpty, ownerRenderEpochState != nil, payload.reason != "initial" {
-            appendOwnerRenderOutput(data: outputData, token: payload.emittedAt, outputEndByteOffset: payload.outputEndByteOffset)
+        if isOwnerAfterMerge, payload.renderFrame != nil {
+            if ownerRenderEpochState == nil || !wasOwner {
+                beginOwnerRenderEpoch(from: payload)
+            } else {
+                updateOwnerRenderSnapshot(from: payload)
+            }
         }
         if !isOwnerAfterMerge {
             if wasOwner, let latestState {
@@ -991,9 +1039,6 @@ private enum TerminalViewerRenderMode: String {
             needsOwnershipSynchronizationAfterCurrentRun = false
             ownershipSynchronizationTask?.cancel()
             ownershipSynchronizationTask = nil
-            historySeedTask?.cancel()
-            historySeedTask = nil
-            requestedHistorySeedEpochID = nil
             reportedOwnerReadyEpochID = nil
             isOwnershipSynchronizationScheduled = false
             isSynchronizingOwnership = false
@@ -1001,40 +1046,32 @@ private enum TerminalViewerRenderMode: String {
         isSessionUnavailable = false
         errorMessage = nil
         isConnecting = false
+        let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
+        var renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
+            reason: payload.reason,
+            frame: decodedFrame,
+            frameByteCount: payload.renderFrame?.count,
+            decodeMS: decodeMS,
+            outputByteCount: payload.outputByteCount,
+            screenStateRevision: payload.screenStateRevision,
+            dropped: payload.renderFrame == nil ? nil : decodedFrame == nil,
+            dropReason: payload.renderFrame != nil && decodedFrame == nil ? "decode_failed" : nil,
+            renderMode: renderMode)
+        renderFrameAttributes["apply_ms"] = String(TerminalPerformance.elapsedMS(since: applyStartedAt))
+        renderFrameAttributes["owner_before"] = wasOwner ? "1" : "0"
+        renderFrameAttributes["owner_after"] = isOwnerAfterMerge ? "1" : "0"
+        logPerformanceEvent(
+            name: "render_frame_payload_receive",
+            elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
+            count: payload.renderFrame?.count,
+            attributes: renderFrameAttributes)
         trace(
-            "apply_state reason=\(payload.reason) owner_before=\(wasOwner ? 1 : 0) owner_after=\(isOwnerAfterMerge ? 1 : 0) awaiting_takeover=\(isAwaitingTakeoverConfirmation ? 1 : 0) runtime=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows)) snapshot=\(traceSize(columns: latestState?.snapshot?.columns, rows: latestState?.snapshot?.rows)) screen_revision=\(latestState?.screenStateRevision.map(String.init) ?? "nil") owner_client=\(traceOwnerID(latestState?.attachmentSnapshot))")
+            "apply_state reason=\(payload.reason) owner_before=\(wasOwner ? 1 : 0) owner_after=\(isOwnerAfterMerge ? 1 : 0) awaiting_takeover=\(isAwaitingTakeoverConfirmation ? 1 : 0) runtime=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows)) frame=\(traceSize(columns: latestState?.renderFrameSnapshot?.columns, rows: latestState?.renderFrameSnapshot?.rows)) screen_revision=\(latestState?.screenStateRevision.map(String.init) ?? "nil") owner_client=\(traceOwnerID(latestState?.attachmentSnapshot))")
         if isOwnerAfterMerge, !wasOwner || ownerRenderEpochState == nil {
             beginOwnerRecoveryGracePeriod()
             scheduleOwnershipSynchronization()
         }
         attemptAutomaticTakeoverIfNeeded()
-    }
-
-    func markOwnerRenderOutputApplied(_ batchID: String) {
-        guard var ownerRenderEpochState,
-            let appliedBatchIndex = ownerRenderEpochState.pendingOutputs.firstIndex(where: { $0.id == batchID })
-        else { return }
-        ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
-            sessionID: ownerRenderEpochState.sessionID,
-            id: ownerRenderEpochState.id,
-            bootstrapSnapshot: ownerRenderEpochState.bootstrapSnapshot,
-            historySeed: ownerRenderEpochState.historySeed,
-            historySeedEndByteOffset: ownerRenderEpochState.historySeedEndByteOffset,
-            pendingOutputs: Array(ownerRenderEpochState.pendingOutputs.dropFirst(appliedBatchIndex + 1))
-        )
-        self.ownerRenderEpochState = ownerRenderEpochState
-    }
-
-    func markOwnerHistorySeedApplied(_ batchID: String) {
-        guard var ownerRenderEpochState, ownerRenderEpochState.historySeed?.id == batchID else { return }
-        ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
-            sessionID: ownerRenderEpochState.sessionID,
-            id: ownerRenderEpochState.id,
-            bootstrapSnapshot: ownerRenderEpochState.bootstrapSnapshot,
-            historySeedEndByteOffset: ownerRenderEpochState.historySeedEndByteOffset,
-            pendingOutputs: ownerRenderEpochState.pendingOutputs
-        )
-        self.ownerRenderEpochState = ownerRenderEpochState
     }
 
     func setInputSurfaceReady(_ ready: Bool) {
@@ -1064,47 +1101,6 @@ private enum TerminalViewerRenderMode: String {
                 attributes: [
                     "epoch_id": ownerRenderEpochState.id,
                     "render_mode": renderMode,
-                ]
-            )
-        }
-    }
-
-    private func requestHistorySeedIfNeeded() {
-        guard isOwner, let ownerRenderEpochState else { return }
-        guard ownerRenderEpochState.historySeed == nil else { return }
-        guard requestedHistorySeedEpochID != ownerRenderEpochState.id else { return }
-        requestedHistorySeedEpochID = ownerRenderEpochState.id
-        historySeedTask?.cancel()
-        historySeedTask = Task { [weak self] in
-            guard let self else { return }
-            defer { self.historySeedTask = nil }
-            let fetchedState = await self.refreshLatestState(
-                timeout: Self.inputRequestTimeout,
-                includeOutputHistory: true,
-                applyToLatestState: false,
-                reason: "owner_history_seed"
-            )
-            guard !Task.isCancelled else { return }
-            guard self.isOwner, var currentEpoch = self.ownerRenderEpochState, currentEpoch.id == ownerRenderEpochState.id else { return }
-            guard let outputData = fetchedState?.outputData, !outputData.isEmpty else { return }
-            let historySeedID = "history|\(currentEpoch.id)"
-            let historySeed = GhosttyRemoteTerminalOutputBatch(
-                id: historySeedID, data: outputData, outputEndByteOffset: fetchedState?.outputEndByteOffset)
-            currentEpoch = GhosttyRemoteTerminalOwnerEpoch(
-                sessionID: currentEpoch.sessionID,
-                id: currentEpoch.id,
-                bootstrapSnapshot: currentEpoch.bootstrapSnapshot,
-                historySeed: historySeed,
-                historySeedEndByteOffset: historySeed.outputEndByteOffset,
-                pendingOutputs: GhosttyRemoteTerminalOutputBatch.pendingOutputsNotCovered(
-                    by: historySeed, pendingOutputs: currentEpoch.pendingOutputs)
-            )
-            self.ownerRenderEpochState = currentEpoch
-            self.logPerformanceEvent(
-                name: "owner_history_seed_received",
-                count: outputData.count,
-                attributes: [
-                    "epoch_id": currentEpoch.id,
                 ]
             )
         }
@@ -1162,26 +1158,16 @@ private enum TerminalViewerRenderMode: String {
 
     private func beginOwnerRenderEpoch(from payload: GhosttyRemoteSessionStatePayload?) {
         guard let payload, isOwner else { return }
-        guard let bootstrapSnapshot = payload.snapshot else { return }
-        historySeedTask?.cancel()
-        historySeedTask = nil
-        requestedHistorySeedEpochID = nil
+        guard let bootstrapSnapshot = payload.renderFrameSnapshot else { return }
         reportedOwnerReadyEpochID = nil
+        reportedOwnerNonblankEpochID = nil
         hasConfirmedOwnerInputReadiness = false
         let epochID = ownerRenderEpochID(for: payload)
-        let historySeed: GhosttyRemoteTerminalOutputBatch? =
-            if let outputData = payload.outputData, !outputData.isEmpty {
-                GhosttyRemoteTerminalOutputBatch(id: "history|\(epochID)", data: outputData, outputEndByteOffset: payload.outputEndByteOffset)
-            } else {
-                nil
-            }
         ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
             sessionID: session.id,
             id: epochID,
-            bootstrapSnapshot: bootstrapSnapshot,
-            historySeed: historySeed,
-            historySeedEndByteOffset: historySeed?.outputEndByteOffset,
-            pendingOutputs: []
+            ownerEpoch: payload.renderFrameOwnerEpoch ?? 0,
+            bootstrapSnapshot: bootstrapSnapshot
         )
         trace(
             "owner_render_epoch_begin id=\(epochID) snapshot=1"
@@ -1196,34 +1182,38 @@ private enum TerminalViewerRenderMode: String {
             ]
         )
         if isInputSurfaceReady { handleOwnerInputSurfaceReady() }
-        requestHistorySeedIfNeeded()
     }
 
-    private func appendOwnerRenderOutput(data: Data, token: String, outputEndByteOffset: Int?) {
-        guard var ownerRenderEpochState else { return }
-        let pendingOutput = GhosttyRemoteTerminalOutputBatch(id: token, data: data, outputEndByteOffset: outputEndByteOffset)
-        let pendingOutputs = GhosttyRemoteTerminalOutputBatch.appendingOutputNotCovered(
-            pendingOutput,
-            to: ownerRenderEpochState.pendingOutputs,
-            byHistorySeedEndOffset: ownerRenderEpochState.historySeedEndByteOffset
-        )
-        guard pendingOutputs != ownerRenderEpochState.pendingOutputs else { return }
-        ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
+    private func updateOwnerRenderSnapshot(from payload: GhosttyRemoteSessionStatePayload) {
+        guard let ownerRenderEpochState, let snapshot = payload.renderFrameSnapshot else { return }
+        guard ownerRenderEpochState.bootstrapSnapshot != snapshot else { return }
+        self.ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
             sessionID: ownerRenderEpochState.sessionID,
             id: ownerRenderEpochState.id,
-            bootstrapSnapshot: ownerRenderEpochState.bootstrapSnapshot,
-            historySeed: ownerRenderEpochState.historySeed,
-            historySeedEndByteOffset: ownerRenderEpochState.historySeedEndByteOffset,
-            pendingOutputs: pendingOutputs
+            ownerEpoch: payload.renderFrameOwnerEpoch ?? ownerRenderEpochState.ownerEpoch,
+            bootstrapSnapshot: snapshot
         )
-        self.ownerRenderEpochState = ownerRenderEpochState
+        trace(
+            "owner_render_snapshot_update id=\(ownerRenderEpochState.id) snapshot=1"
+        )
+    }
+
+    private static func hasVisibleRenderedContent(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            scalar != "\u{00A0}" && !CharacterSet.whitespacesAndNewlines.contains(scalar)
+        }
     }
 
     private func ownerRenderEpochID(for payload: GhosttyRemoteSessionStatePayload) -> String {
         let runtimeColumns = payload.runtimeState?.columns ?? 0
         let runtimeRows = payload.runtimeState?.rows ?? 0
         let screenRevision = payload.screenStateRevision ?? 0
-        return "owner|\(payload.emittedAt)|\(screenRevision)|\(runtimeColumns)x\(runtimeRows)"
+        let ownerEpoch = payload.renderFrameOwnerEpoch ?? 0
+        return "owner|\(ownerEpoch)|\(payload.emittedAt)|\(screenRevision)|\(runtimeColumns)x\(runtimeRows)"
+    }
+
+    private var currentOwnerEpoch: UInt64? {
+        ownerRenderEpochState?.ownerEpoch ?? latestState?.renderFrameOwnerEpoch
     }
 
     private func endedRenderID(for snapshot: GhosttyTerminalSnapshot) -> String {

@@ -18,8 +18,7 @@ protocol SpacesMobilePairingStoreProtocol: Sendable {
 extension SpacesMobilePairingStore: SpacesMobilePairingStoreProtocol {}
 
 public final class SpacesMobileBridgeServer: @unchecked Sendable {
-    static let maxHistorySeedOutputBytes = 2 * 1024 * 1024
-    private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "resize"]
+    private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "resize", "scroll"]
 
     private struct StreamRelay {
         let installationID: String
@@ -344,6 +343,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         case "send": return try handleTerminalControlRequest(request, command: "send")
         case "key": return try handleTerminalControlRequest(request, command: "key")
         case "resize": return try handleTerminalControlRequest(request, command: "resize")
+        case "scroll": return try handleTerminalControlRequest(request, command: "scroll")
         default: return SpacesMobileBridgeResponse(ok: false, message: "Unsupported mobile bridge command '\(request.command)'.")
         }
     }
@@ -371,11 +371,27 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
 
         let terminalRequest = TerminalControlRequest(
             command: command, text: request.text, key: request.key, clientID: clientID, client: request.client,
-            attachmentMode: request.attachmentMode, columns: request.columns, rows: request.rows, appendNewline: request.appendNewline)
+            attachmentMode: request.attachmentMode, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
+            resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
+            appendNewline: request.appendNewline)
         let response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath)
         TerminalPerformance.logMetric(
             "mobile_bridge_\(command)", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: response.ok)
+        if command == "takeover", response.ok {
+            let stateFetchStartedAt = Date()
+            do {
+                let sessionState = try loadCurrentState(sessionID: sessionID)
+                TerminalPerformance.logMetric(
+                    "mobile_bridge_takeover_state", target: "session=\(sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: stateFetchStartedAt), success: true)
+                return SpacesMobileBridgeResponse(ok: true, message: response.message, sessionState: sessionState)
+            } catch {
+                TerminalPerformance.logMetric(
+                    "mobile_bridge_takeover_state", target: "session=\(sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: stateFetchStartedAt), success: false)
+            }
+        }
         return SpacesMobileBridgeResponse(ok: response.ok, message: response.message)
     }
 
@@ -399,7 +415,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private func handleStateRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
         guard let sessionID = request.sessionID else { return SpacesMobileBridgeResponse(ok: false, message: "Missing session ID.") }
         let startedAt = Date()
-        let payload = try loadCurrentState(sessionID: sessionID, includeOutputHistory: request.includeOutputHistory)
+        let payload = try loadCurrentState(sessionID: sessionID)
         TerminalPerformance.logMetric(
             "mobile_bridge_state", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
         return SpacesMobileBridgeResponse(ok: true, message: "Loaded terminal state.", sessionState: payload)
@@ -559,9 +575,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         return address
     }
 
-    private func loadCurrentState(sessionID: String, includeOutputHistory: Bool) throws -> GhosttyRemoteSessionStatePayload {
+    private func loadCurrentState(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        if includeOutputHistory { return try loadCurrentStateWithOutputHistory(sessionID: sessionID, paths: paths) }
         guard FileManager.default.fileExists(atPath: paths.subscriptionSocketPath) else {
             throw NSError(
                 domain: "SpacesMobileBridgeServer", code: 404,
@@ -596,27 +611,6 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                 userInfo: [NSLocalizedDescriptionKey: "Terminal session '\(sessionID)' did not return a state payload."])
         }
         return try GhosttyRemoteSessionStateCodec.decodeLine(data)
-    }
-
-    private func loadCurrentStateWithOutputHistory(sessionID: String, paths: TerminalSessionPaths) throws -> GhosttyRemoteSessionStatePayload {
-        let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
-        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
-        let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
-        let outputHistory = TerminalReplayOutputHistory.load(path: paths.outputPath, maxByteCount: Self.maxHistorySeedOutputBytes)
-
-        guard runtimeState != nil || launchConfiguration != nil else {
-            throw NSError(
-                domain: "SpacesMobileBridgeServer", code: 404,
-                userInfo: [NSLocalizedDescriptionKey: "Terminal session '\(sessionID)' has no persisted state."])
-        }
-
-        return GhosttyRemoteSessionStatePayload(
-            sessionID: sessionID, reason: "history_seed", emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()),
-            sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtimeState,
-            attachmentSnapshot: attachmentSnapshot, title: runtimeState?.title ?? launchConfiguration?.title ?? sessionID,
-            workingDirectory: runtimeState?.workingDirectory ?? launchConfiguration?.workingDirectory ?? "", snapshot: nil, snapshotText: nil,
-            transcriptTail: nil, outputByteCount: outputHistory?.totalByteCount, outputData: outputHistory?.data,
-            outputEndByteOffset: outputHistory?.totalByteCount)
     }
 
     private func sendResponse(_ response: SpacesMobileBridgeResponse, to connection: NWConnection, completion: @escaping @Sendable (Error?) -> Void) {

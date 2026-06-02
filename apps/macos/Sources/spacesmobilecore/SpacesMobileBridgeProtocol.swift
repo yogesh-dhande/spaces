@@ -121,14 +121,17 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
     public let key: String?
     public let columns: Int?
     public let rows: Int?
-    public let includeOutputHistory: Bool
+    public let ownerEpoch: UInt64?
+    public let resizeSerial: UInt64?
+    public let scrollHorizontal: Double?
+    public let scrollVertical: Double?
     public let appendNewline: Bool
 
     public init(
         command: String, authToken: String? = nil, pairingCode: String? = nil, pairingNonce: String? = nil, clientApp: SpacesMobileClientApp? = nil,
         sessionID: String? = nil, clientID: String? = nil, client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil,
-        text: String? = nil, key: String? = nil, columns: Int? = nil, rows: Int? = nil, includeOutputHistory: Bool = false,
-        appendNewline: Bool = false
+        text: String? = nil, key: String? = nil, columns: Int? = nil, rows: Int? = nil, ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil,
+        scrollHorizontal: Double? = nil, scrollVertical: Double? = nil, appendNewline: Bool = false
     ) {
         self.command = command
         self.authToken = authToken
@@ -143,7 +146,10 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         self.key = key
         self.columns = columns
         self.rows = rows
-        self.includeOutputHistory = includeOutputHistory
+        self.ownerEpoch = ownerEpoch
+        self.resizeSerial = resizeSerial
+        self.scrollHorizontal = scrollHorizontal
+        self.scrollVertical = scrollVertical
         self.appendNewline = appendNewline
     }
 
@@ -161,7 +167,10 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         case key
         case columns
         case rows
-        case includeOutputHistory
+        case ownerEpoch
+        case resizeSerial
+        case scrollHorizontal
+        case scrollVertical
         case appendNewline
     }
 
@@ -180,7 +189,10 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         key = try container.decodeIfPresent(String.self, forKey: .key)
         columns = try container.decodeIfPresent(Int.self, forKey: .columns)
         rows = try container.decodeIfPresent(Int.self, forKey: .rows)
-        includeOutputHistory = try container.decodeIfPresent(Bool.self, forKey: .includeOutputHistory) ?? false
+        ownerEpoch = try container.decodeIfPresent(UInt64.self, forKey: .ownerEpoch)
+        resizeSerial = try container.decodeIfPresent(UInt64.self, forKey: .resizeSerial)
+        scrollHorizontal = try container.decodeIfPresent(Double.self, forKey: .scrollHorizontal)
+        scrollVertical = try container.decodeIfPresent(Double.self, forKey: .scrollVertical)
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
     }
 
@@ -199,7 +211,10 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(key, forKey: .key)
         try container.encodeIfPresent(columns, forKey: .columns)
         try container.encodeIfPresent(rows, forKey: .rows)
-        try container.encode(includeOutputHistory, forKey: .includeOutputHistory)
+        try container.encodeIfPresent(ownerEpoch, forKey: .ownerEpoch)
+        try container.encodeIfPresent(resizeSerial, forKey: .resizeSerial)
+        try container.encodeIfPresent(scrollHorizontal, forKey: .scrollHorizontal)
+        try container.encodeIfPresent(scrollVertical, forKey: .scrollVertical)
         try container.encode(appendNewline, forKey: .appendNewline)
     }
 }

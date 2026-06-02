@@ -28,130 +28,111 @@ extension Notification.Name {
 
 @MainActor public protocol TerminalGhosttyRendererHosting: AnyObject {
     func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws
-    func parkSurfaceInHiddenHostWindow()
+    func releaseRendererSurface()
     func setFocused(_ focused: Bool, for clientID: String)
     func focusWindow(_ window: NSWindow?)
+    @discardableResult func synchronizeSurfaceGeometry() -> Bool
     func hasRenderableSurface() -> Bool
-    var prefersOutputFallbackWhenSurfaceUnavailable: Bool { get }
+    func requestSurfaceRefresh()
+    func prepareRenderStateExport()
     func snapshot() -> GhosttyTerminalSnapshot?
     func snapshotText() -> String?
     func sessionSnapshot() -> GhosttyTerminalSnapshot?
     func sessionSnapshotText() -> String?
     func copySelectionToPasteboard() -> Bool
     func pasteClipboardContents() -> Bool
-    @discardableResult func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool
+    @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool
     var debugSurfaceRefreshRequestCount: Int { get }
     func debugVisibleSurfaceText() -> String?
 }
 
 @MainActor public protocol TerminalGhosttySessionHosting: TerminalGhosttySessionInfoProviding, TerminalGhosttyRendererHosting {}
 
-@MainActor public final class GhosttyEmbeddedRendererHost: TerminalGhosttyRendererHosting {
-    private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-
-    private let terminalView: GhosttyEmbeddedTerminalView
+@MainActor public final class GhosttyHeadlessRendererHost: TerminalGhosttyRendererHosting {
+    private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
     private var isOwnerClient: (@MainActor (String) -> Bool)?
+    private var inputActivityHandler: (@MainActor () -> Void)?
 
-    init(launchConfiguration: TerminalSessionLaunchConfiguration, terminalView: GhosttyEmbeddedTerminalView) { self.terminalView = terminalView }
+    init(sessionDriver: GhosttyEmbeddedTerminalSessionDriver) { self.sessionDriver = sessionDriver }
 
     func setOwnerClientResolver(_ resolver: @escaping @MainActor (String) -> Bool) { isOwnerClient = resolver }
 
-    func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { terminalView.setOutputHandler(handler) }
+    func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { sessionDriver.setOutputHandler(handler) }
 
-    func setInputActivityHandler(_ handler: (@MainActor () -> Void)?) { terminalView.onInputActivity = handler }
+    func setInputActivityHandler(_ handler: (@MainActor () -> Void)?) { inputActivityHandler = handler }
 
-    func ensureHostingWindowForSurface() throws { try terminalView.ensureHostingWindowForSurface() }
+    func startSessionIfNeeded() throws { try sessionDriver.startIfNeeded() }
 
-    func requestSurfaceRefresh() { terminalView.requestSurfaceRefresh() }
+    public func requestSurfaceRefresh() { sessionDriver.requestSurfaceRefresh() }
 
-    func sendRawBytes(_ data: Data) { terminalView.sendRawBytes(data) }
+    public func prepareRenderStateExport() {
+        sessionDriver.requestSurfaceRefresh()
+        GhosttyEmbeddedAppService.shared.tick()
+    }
 
-    func foregroundPID() -> Int32? { terminalView.foregroundPID() }
+    func sendRawBytes(_ data: Data) {
+        sessionDriver.sendRawBytes(data)
+        inputActivityHandler?()
+    }
 
-    func surfaceCellSize() -> (columns: Int, rows: Int)? { terminalView.sessionCellSize() }
+    func foregroundPID() -> Int32? { sessionDriver.foregroundPID() }
 
-    @discardableResult func resizeCellGrid(columns: Int, rows: Int) -> Bool { terminalView.resizeCellGrid(columns: columns, rows: rows) }
+    func surfaceCellSize() -> (columns: Int, rows: Int)? { sessionDriver.surfaceCellSize() }
 
-    func terminateSession() { terminalView.terminateSession() }
+    @discardableResult func resizeCellGrid(columns: Int, rows: Int) -> Bool { sessionDriver.resizeCellGrid(columns: columns, rows: rows) }
 
-    func setSurfaceFocused(_ focused: Bool) { terminalView.setFocused(focused) }
+    func terminateSession() { sessionDriver.terminate() }
+
+    func setSurfaceFocused(_ focused: Bool) { sessionDriver.setFocused(focused) }
 
     public func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
-        guard let container else { return }
-        terminalView.setAttachmentMode(mode)
-        if terminalView.superview !== container {
-            terminalView.removeFromSuperview()
-            terminalView.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(terminalView)
-            NSLayoutConstraint.activate([
-                terminalView.topAnchor.constraint(equalTo: container.topAnchor),
-                terminalView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                terminalView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-                terminalView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            ])
-        }
-        container.needsLayout = true
-        container.layoutSubtreeIfNeeded()
+        _ = client
+        _ = mode
+        _ = container
+        try startSessionIfNeeded()
     }
 
-    public func parkSurfaceInHiddenHostWindow() {
-        guard hasRenderableSurface() else { return }
-        terminalView.parkInHiddenHostWindowIfNeeded()
-    }
+    public func releaseRendererSurface() {}
 
-    public func setFocused(_ focused: Bool, for clientID: String) {
-        guard isOwnerClient?(clientID) == true else {
-            terminalView.setFocused(false)
-            return
-        }
-        terminalView.setFocused(focused)
-    }
+    public func setFocused(_ focused: Bool, for clientID: String) { sessionDriver.setFocused(isOwnerClient?(clientID) == true && focused) }
 
     public func focusWindow(_ window: NSWindow?) {
         guard let window else { return }
-        if Self.isRunningUnderXCTest {
-            window.makeFirstResponder(terminalView)
-            terminalView.setFocused(true)
-            return
-        }
         if !window.isVisible { window.orderFront(nil) }
         if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
-        window.makeFirstResponder(terminalView)
-        terminalView.setFocused(window.isKeyWindow)
     }
 
-    public func hasRenderableSurface() -> Bool { terminalView.surface != nil }
+    @discardableResult public func synchronizeSurfaceGeometry() -> Bool { false }
 
-    public var prefersOutputFallbackWhenSurfaceUnavailable: Bool { false }
+    public func hasRenderableSurface() -> Bool { sessionDriver.snapshot() != nil }
 
-    public func snapshot() -> GhosttyTerminalSnapshot? { terminalView.snapshot() }
+    public func snapshot() -> GhosttyTerminalSnapshot? { sessionDriver.snapshot() }
 
-    public func snapshotText() -> String? { terminalView.snapshotText() }
+    public func snapshotText() -> String? { sessionDriver.snapshotText() }
 
-    public func sessionSnapshot() -> GhosttyTerminalSnapshot? { terminalView.sessionSnapshot() }
+    public func sessionSnapshot() -> GhosttyTerminalSnapshot? { sessionDriver.snapshot() }
 
-    public func sessionSnapshotText() -> String? { terminalView.sessionSnapshotText() }
+    public func sessionSnapshotText() -> String? { sessionDriver.snapshotText() }
 
-    public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
+    public func copySelectionToPasteboard() -> Bool { false }
 
-    public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
-
-    @discardableResult public func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
-        terminalView.sendScroll(horizontal: horizontal, vertical: vertical)
+    public func pasteClipboardContents() -> Bool {
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return false }
+        sendRawBytes(Data(text.utf8))
+        return true
     }
 
-    public var debugSurfaceRefreshRequestCount: Int { terminalView.debugSurfaceRefreshRequestCount }
-
-    public func debugVisibleSurfaceText() -> String? {
-        if let sessionSnapshotText = terminalView.sessionSnapshotText(), !sessionSnapshotText.isEmpty { return sessionSnapshotText }
-        if let snapshotText = terminalView.snapshotText(), !snapshotText.isEmpty { return snapshotText }
-        return nil
+    @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+        sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical)
     }
+
+    public var debugSurfaceRefreshRequestCount: Int { sessionDriver.debugRefreshRequestCount }
+
+    public func debugVisibleSurfaceText() -> String? { sessionDriver.snapshotText() }
 }
 
 @MainActor public final class GhosttyEmbeddedSessionCore {
     private static let incomingOutputCoalescingInterval: Duration = .milliseconds(4)
-    private static let remoteTranscriptLineCount = 2_000
 
     private final class IncomingOutputBuffer: @unchecked Sendable {
         private let lock = NSLock()
@@ -184,8 +165,7 @@ extension Notification.Name {
     private let controlQueue: DispatchQueue
     private let stateStreamQueue: DispatchQueue
     private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
-    private let terminalView: GhosttyEmbeddedTerminalView
-    private lazy var rendererHostStorage = GhosttyEmbeddedRendererHost(launchConfiguration: launchConfiguration, terminalView: terminalView)
+    private lazy var rendererHostStorage = GhosttyHeadlessRendererHost(sessionDriver: sessionDriver)
     private let requestSurfaceRefreshAction: @MainActor () -> Void
     private var runtimeStateTimer: Timer?
     private var controlServer: TerminalControlServer?
@@ -204,12 +184,11 @@ extension Notification.Name {
     private var sessionStartedAt: Date?
     private var didLogFirstOutput = false
     private let incomingOutputBuffer = IncomingOutputBuffer()
-    private let remoteSnapshotStream: GhosttyVTSnapshotStream
     private var inputStateBroadcastScheduled = false
     private var pendingInputOutputResync = false
     private var inputOutputResyncWorkItem: DispatchWorkItem?
-    private var lastCachedSessionSnapshot: GhosttyTerminalSnapshot?
-    private var lastCachedSessionSnapshotText: String?
+    private var ownerEpoch: UInt64 = 0
+    private var lastResizeSerialByClientID: [String: UInt64] = [:]
     private let onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)?
 
     public init(
@@ -222,19 +201,17 @@ extension Notification.Name {
         controlQueue = DispatchQueue(label: "spaces.terminal.session-host.control.\(launchConfiguration.sessionID)")
         stateStreamQueue = DispatchQueue(label: "spaces.terminal.session-host.state-stream.\(launchConfiguration.sessionID)")
         sessionDriver = GhosttyEmbeddedTerminalSessionDriver(launchConfiguration: launchConfiguration)
-        terminalView = GhosttyEmbeddedTerminalView(launchConfiguration: launchConfiguration, sessionDriver: sessionDriver)
-        remoteSnapshotStream = GhosttyVTSnapshotStream(sessionID: launchConfiguration.sessionID, outputPath: paths.outputPath)
-        self.requestSurfaceRefreshAction = requestSurfaceRefreshAction ?? { [terminalView] in terminalView.requestSurfaceRefresh() }
-        terminalView.onActionEvent = { [weak self] event in self?.applyActionEvent(event) }
+        self.requestSurfaceRefreshAction = requestSurfaceRefreshAction ?? { [sessionDriver] in sessionDriver.requestSurfaceRefresh() }
+        sessionDriver.onActionEvent = { [weak self] event in self?.applyActionEvent(event) }
         sessionDriver.onSessionStateChanged = { [weak self] change in self?.applySessionStateChange(change) }
-        terminalView.onSurfaceCellSizeChanged = { [weak self] columns, rows in
+        sessionDriver.onSurfaceCellSizeChanged = { [weak self] columns, rows in
             guard let self else { return }
             self.lastKnownSurfaceSize = (columns, rows)
             self.refreshRuntimeState(force: true)
         }
         rendererHostStorage.setOwnerClientResolver { [weak self] clientID in self?.isOwner(clientID: clientID) ?? false }
         rendererHostStorage.setInputActivityHandler { [weak self] in self?.handleOwnerInputActivity() }
-        terminalView.onSessionClosed = { [weak self] in self?.handleSessionClosed() }
+        sessionDriver.onSurfaceClosed = { [weak self] in self?.handleSessionClosed() }
     }
 
     public func startIfNeeded() throws {
@@ -246,7 +223,7 @@ extension Notification.Name {
             try ensureOutputHandle()
             rendererHostStorage.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
             rendererHostStorage.setInputActivityHandler { [weak self] in self?.handleOwnerInputActivity() }
-            try rendererHostStorage.ensureHostingWindowForSurface()
+            try rendererHostStorage.startSessionIfNeeded()
             try startControlServer()
             try startStateStreamServer()
             startRuntimeStateTimer()
@@ -270,10 +247,12 @@ extension Notification.Name {
         try startIfNeeded()
         let activeAttachments = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
         let currentAttachment = activeAttachments.first { $0.clientID == client.id }
+        let previousOwnerClientID = activeAttachments.first { $0.mode == .owner }?.clientID
         if currentAttachment?.mode != mode {
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths,
                 attachedAt: ISO8601DateFormatter().string(from: Date()))
+            if mode == .owner, previousOwnerClientID != client.id { advanceOwnerEpoch(reason: "attach") }
             postAttachmentStateDidChange()
         }
         refreshRuntimeState(force: true)
@@ -288,11 +267,12 @@ extension Notification.Name {
             try TerminalSessionPersistence.transferOwnership(
                 sessionID: launchConfiguration.sessionID, newOwnerClientID: localOwnerClientID, paths: paths, transferredAt: transferredAt)
             remainingOwnerClientID = localOwnerClientID
+            advanceOwnerEpoch(reason: "detach_transfer")
         }
         if Self.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: detachedClientWasOwner, remainingOwnerClientID: remainingOwnerClientID) {
             rendererHostStorage.setSurfaceFocused(false)
         }
-        if remainingOwnerClientID == nil, rendererHostStorage.hasRenderableSurface() { rendererHostStorage.parkSurfaceInHiddenHostWindow() }
+        if remainingOwnerClientID == nil, rendererHostStorage.hasRenderableSurface() { rendererHostStorage.releaseRendererSurface() }
         postAttachmentStateDidChange()
         refreshRuntimeState(force: true)
     }
@@ -318,7 +298,7 @@ extension Notification.Name {
         }.first?.id
     }
 
-    public var rendererHost: GhosttyEmbeddedRendererHost { rendererHostStorage }
+    public var rendererHost: any TerminalGhosttyRendererHosting { rendererHostStorage }
     public func terminate() {
         let now = ISO8601DateFormatter().string(from: Date())
         let childPID = observedChildPID()
@@ -388,8 +368,50 @@ extension Notification.Name {
         case "key": controlResponseForKeyRequest(request)
         case "takeover": controlResponseForTakeoverRequest(request)
         case "resize": controlResponseForResizeRequest(request)
+        case "scroll": controlResponseForScrollRequest(request)
         default: TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
         }
+    }
+
+    private func ownerRequestRejection(for request: TerminalControlRequest, commandName: String, startedAt: Date) -> TerminalControlResponse? {
+        guard let clientID = request.clientID else { return nil }
+        guard isOwner(clientID: clientID) else {
+            TerminalPerformance.logMetric(
+                "terminal_control_\(commandName)", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "owner=stale")
+            return TerminalControlResponse(ok: false, message: "Only the active owner can \(commandName) the terminal.")
+        }
+        guard let requestedOwnerEpoch = request.ownerEpoch else { return nil }
+        guard requestedOwnerEpoch == ownerEpoch else {
+            TerminalPerformance.logMetric(
+                "terminal_control_\(commandName)", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false,
+                detail: "owner_epoch=\(requestedOwnerEpoch) current_owner_epoch=\(ownerEpoch)")
+            return TerminalControlResponse(
+                ok: false, message: "Ignoring stale owner epoch \(requestedOwnerEpoch); current owner epoch is \(ownerEpoch).")
+        }
+        return nil
+    }
+
+    private func staleResizeSerialRejection(for request: TerminalControlRequest, startedAt: Date) -> TerminalControlResponse? {
+        guard let clientID = request.clientID, let resizeSerial = request.resizeSerial else { return nil }
+        guard let lastResizeSerial = lastResizeSerialByClientID[clientID], resizeSerial <= lastResizeSerial else { return nil }
+        TerminalPerformance.logMetric(
+            "terminal_control_resize", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            success: false, detail: "resize_serial=\(resizeSerial) last_resize_serial=\(lastResizeSerial)")
+        return TerminalControlResponse(
+            ok: false, message: "Ignoring stale resize serial \(resizeSerial); latest accepted serial is \(lastResizeSerial).")
+    }
+
+    private func recordAcceptedResizeSerial(from request: TerminalControlRequest) {
+        guard let clientID = request.clientID, let resizeSerial = request.resizeSerial else { return }
+        lastResizeSerialByClientID[clientID] = resizeSerial
+    }
+
+    private func advanceOwnerEpoch(reason: String) {
+        ownerEpoch &+= 1
+        lastResizeSerialByClientID.removeAll(keepingCapacity: true)
+        trace("owner_epoch_advanced reason=\(reason) owner_epoch=\(ownerEpoch) owner=\(activeOwnerClientID() ?? "nil")")
     }
 
     private func controlResponseForAttachRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -404,11 +426,13 @@ extension Notification.Name {
         let attachedAt = nowISO8601()
         let authoritativeClient = Self.clientForAttachLease(client, attachedAt: attachedAt)
         do {
+            let previousOwnerClientID = activeOwnerClientID()
             try TerminalSessionPersistence.upsertClient(authoritativeClient, paths: paths)
             let currentAttachment = try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == authoritativeClient.id }
             if currentAttachment?.mode != mode {
                 try TerminalSessionPersistence.attachClient(
                     sessionID: launchConfiguration.sessionID, client: authoritativeClient, mode: mode, paths: paths, attachedAt: attachedAt)
+                if mode == .owner, previousOwnerClientID != authoritativeClient.id { advanceOwnerEpoch(reason: "control_attach") }
                 postAttachmentStateDidChange()
             }
             refreshRuntimeState(force: true)
@@ -472,12 +496,7 @@ extension Notification.Name {
     private func controlResponseForSendRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
         let startedAt = Date()
         if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
-        if let clientID = request.clientID, !isOwner(clientID: clientID) {
-            TerminalPerformance.logMetric(
-                "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-            return TerminalControlResponse(ok: false, message: "Only the active owner can send input.")
-        }
+        if let rejection = ownerRequestRejection(for: request, commandName: "send", startedAt: startedAt) { return rejection }
         guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
         let payload = text + (request.appendNewline ? "\n" : "")
         rendererHostStorage.sendRawBytes(Data(payload.utf8))
@@ -490,12 +509,7 @@ extension Notification.Name {
     private func controlResponseForKeyRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
         let startedAt = Date()
         if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
-        if let clientID = request.clientID, !isOwner(clientID: clientID) {
-            TerminalPerformance.logMetric(
-                "terminal_control_key", target: "session=\(launchConfiguration.sessionID)",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-            return TerminalControlResponse(ok: false, message: "Only the active owner can send keys.")
-        }
+        if let rejection = ownerRequestRejection(for: request, commandName: "key", startedAt: startedAt) { return rejection }
         guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
             TerminalPerformance.logMetric(
                 "terminal_control_key", target: "session=\(launchConfiguration.sessionID)",
@@ -509,16 +523,32 @@ extension Notification.Name {
         return TerminalControlResponse(ok: true, message: "Sent key.")
     }
 
+    private func controlResponseForScrollRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        let startedAt = Date()
+        if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
+        if let rejection = ownerRequestRejection(for: request, commandName: "scroll", startedAt: startedAt) { return rejection }
+        let horizontal = CGFloat(request.scrollHorizontal ?? 0)
+        let vertical = CGFloat(request.scrollVertical ?? 0)
+        guard horizontal != 0 || vertical != 0 else { return TerminalControlResponse(ok: false, message: "Missing scroll delta.") }
+        let scrolled = rendererHostStorage.sendScroll(horizontal: horizontal, vertical: vertical)
+        if scrolled { broadcastCurrentState(reason: TerminalRemoteSessionStateReason.scroll) }
+        TerminalPerformance.logMetric(
+            "terminal_control_scroll", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            success: scrolled)
+        return TerminalControlResponse(ok: scrolled, message: scrolled ? "Scrolled terminal." : "Unable to scroll terminal.")
+    }
+
     private func controlResponseForTakeoverRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
         let startedAt = Date()
         guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
         do {
             try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
             flushPendingIncomingOutputForStateExport()
-            refreshCachedOwnerBootstrapSnapshotBeforeRemoteTakeover()
+            let previousOwnerClientID = activeOwnerClientID()
             try TerminalSessionPersistence.transferOwnership(
                 sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths,
                 transferredAt: ISO8601DateFormatter().string(from: Date()))
+            if previousOwnerClientID != clientID { advanceOwnerEpoch(reason: "takeover") }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.postAttachmentStateDidChange()
@@ -536,29 +566,27 @@ extension Notification.Name {
         }
     }
 
-    private func refreshCachedOwnerBootstrapSnapshotBeforeRemoteTakeover() {
-        guard activeOwnerClient()?.kind == .localWindow else { return }
-        let refreshedState = captureLiveSessionScreenState()
-        logMobileTakeoverPerformance(
-            name: "owner_bootstrap_cache_refresh",
-            attributes: ["snapshot": refreshedState.snapshot == nil ? "0" : "1", "snapshot_text": refreshedState.snapshotText == nil ? "0" : "1"])
-        trace("takeover_cached_owner_bootstrap_refreshed")
-    }
-
     private func controlResponseForResizeRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
         let startedAt = Date()
         if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
-        if let clientID = request.clientID, !isOwner(clientID: clientID) {
-            TerminalPerformance.logMetric(
-                "terminal_control_resize", target: "session=\(launchConfiguration.sessionID)",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-            return TerminalControlResponse(ok: false, message: "Only the active owner can resize the terminal.")
-        }
+        if let rejection = ownerRequestRejection(for: request, commandName: "resize", startedAt: startedAt) { return rejection }
+        if let rejection = staleResizeSerialRejection(for: request, startedAt: startedAt) { return rejection }
         guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
             return TerminalControlResponse(ok: false, message: "Missing terminal size.")
         }
+        let currentSize = observedSurfaceSize()
+        if currentSize?.columns == columns, currentSize?.rows == rows {
+            trace(
+                "resize_request_noop client=\(request.clientID ?? "nil") columns=\(columns) rows=\(rows) runtime=\(traceSize(currentSize)) owner=\(activeOwnerClientID() ?? "nil")"
+            )
+            TerminalPerformance.logMetric(
+                "terminal_control_resize", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "columns=\(columns) rows=\(rows) noop=1")
+            recordAcceptedResizeSerial(from: request)
+            return TerminalControlResponse(ok: true, message: "Terminal already matches the requested size.")
+        }
         trace(
-            "resize_request client=\(request.clientID ?? "nil") columns=\(columns) rows=\(rows) runtime_before=\(traceSize(observedSurfaceSize())) owner=\(activeOwnerClientID() ?? "nil")"
+            "resize_request client=\(request.clientID ?? "nil") columns=\(columns) rows=\(rows) runtime_before=\(traceSize(currentSize)) owner=\(activeOwnerClientID() ?? "nil")"
         )
         let resized = rendererHostStorage.resizeCellGrid(columns: columns, rows: rows)
         refreshRuntimeState(force: true)
@@ -566,7 +594,10 @@ extension Notification.Name {
         TerminalPerformance.logMetric(
             "terminal_control_resize", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: resized, detail: "columns=\(columns) rows=\(rows)")
-        broadcastCurrentState(reason: "resize")
+        if resized {
+            recordAcceptedResizeSerial(from: request)
+            broadcastCurrentState(reason: "resize")
+        }
         return TerminalControlResponse(ok: resized, message: resized ? "Resized terminal." : "Unable to match the requested terminal size.")
     }
 
@@ -621,11 +652,12 @@ extension Notification.Name {
             try? TerminalSessionPersistence.transferOwnership(
                 sessionID: launchConfiguration.sessionID, newOwnerClientID: localOwnerClientID, paths: paths, transferredAt: detachedAt)
             remainingOwnerClientID = localOwnerClientID
+            advanceOwnerEpoch(reason: "stale_client_transfer")
         }
         if Self.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: false, remainingOwnerClientID: remainingOwnerClientID) {
             rendererHostStorage.setSurfaceFocused(false)
         }
-        if remainingOwnerClientID == nil, rendererHostStorage.hasRenderableSurface() { rendererHostStorage.parkSurfaceInHiddenHostWindow() }
+        if remainingOwnerClientID == nil, rendererHostStorage.hasRenderableSurface() { rendererHostStorage.releaseRendererSurface() }
         postAttachmentStateDidChange()
         refreshRuntimeState(force: true)
         return staleClientIDs
@@ -680,6 +712,7 @@ extension Notification.Name {
         lastSessionStateRevision = change.revision
         lastSessionStateFlags = change.flags
         if change.flags.contains(.screen) { lastScreenStateRevision = change.revision }
+        if change.flags.contains(.screen) { requestSurfaceRefreshAction() }
         var metadataChanged = false
 
         if change.flags.contains(.title) {
@@ -747,7 +780,7 @@ extension Notification.Name {
             pendingInputOutputResync = false
             scheduleInputOutputResync()
         }
-        broadcastCurrentState(reason: "output", outputByteCount: data.count, outputData: data, outputEndByteOffset: outputEndByteOffset)
+        broadcastCurrentState(reason: "output", outputByteCount: data.count, outputEndByteOffset: outputEndByteOffset)
     }
 
     private func handleOwnerInputActivity() {
@@ -853,7 +886,9 @@ extension Notification.Name {
         appendOutput(coalescedData)
     }
 
-    private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputData: Data? = nil, outputEndByteOffset: Int? = nil) {
+    func prepareRenderStateExport() { flushPendingIncomingOutputForStateExport() }
+
+    private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil) {
         let startedAt = Date()
         let ownerClient = activeOwnerClient()
         let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason, ownerKind: ownerClient?.kind)
@@ -861,42 +896,51 @@ extension Notification.Name {
             "broadcast_state_begin reason=\(reason) include_screen=\(includeScreenState ? 1 : 0) runtime=\(traceSize(observedSurfaceSize())) output_bytes=\(outputByteCount ?? 0)"
         )
         guard let stateStreamServer,
-            let payload = currentRemoteSessionState(
-                reason: reason, outputByteCount: outputByteCount, outputData: outputData, outputEndByteOffset: outputEndByteOffset)
+            let payload = currentRemoteSessionState(reason: reason, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset)
         else { return }
+        let payloadEncodeStartedAt = Date()
+        let encodedPayload = try? GhosttyRemoteSessionStateCodec.encodeLine(payload)
+        let payloadEncodeMS = TerminalPerformance.elapsedMS(since: payloadEncodeStartedAt)
         stateStreamServer.broadcast(payload)
-        let payloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(payload).count) ?? 0
+        let payloadBytes = encodedPayload?.count ?? 0
+        let decodedFrame = payload.decodedRenderFrame
+        let renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
+            reason: reason, frame: decodedFrame, frameByteCount: payload.renderFrame?.count, payloadByteCount: payloadBytes,
+            payloadEncodeMS: payloadEncodeMS, outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision)
         logMobileTakeoverPerformance(
             name: "remote_state_publish", count: payloadBytes,
             attributes: [
-                "reason": reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "snapshot": payload.snapshot == nil ? "0" : "1",
-                "output_bytes": String(payload.outputData?.count ?? 0),
+                "reason": reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "render_frame": payload.renderFrame == nil ? "0" : "1",
+                "output_bytes": String(outputByteCount ?? 0), "payload_bytes": String(payloadBytes),
+                "frame_bytes": String(payload.renderFrame?.count ?? 0),
             ])
+        logMobileTakeoverPerformance(
+            name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: payloadBytes,
+            attributes: renderFrameAttributes)
         trace(
-            "broadcast_state_end reason=\(reason) snapshot=\(payload.snapshot == nil ? 0 : 1) snapshot_text=\(payload.snapshotText == nil ? 0 : 1) runtime=\(traceSize(columns: payload.runtimeState?.columns, rows: payload.runtimeState?.rows))"
+            "broadcast_state_end reason=\(reason) render_frame=\(payload.renderFrame == nil ? 0 : 1) runtime=\(traceSize(columns: payload.runtimeState?.columns, rows: payload.runtimeState?.rows)) owner_epoch=\(ownerEpoch)"
         )
         TerminalPerformance.logMetric(
             "terminal_remote_state_publish", target: "session=\(launchConfiguration.sessionID)",
             elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
             detail:
-                "reason=\(reason) snapshot=\(payload.snapshot == nil ? 0 : 1) snapshot_text=\(payload.snapshotText == nil ? 0 : 1) bytes=\(outputByteCount ?? 0) streamed=\(payload.outputData?.count ?? 0)"
+                "reason=\(reason) render_frame=\(payload.renderFrame == nil ? 0 : 1) bytes=\(outputByteCount ?? 0) payload_bytes=\(payloadBytes) frame_bytes=\(payload.renderFrame?.count ?? 0)"
         )
+        TerminalPerformance.logMetric(
+            "terminal_render_frame_payload_publish", target: "session=\(launchConfiguration.sessionID)",
+            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
+            detail: GhosttyRenderFrameMetrics.detailString(renderFrameAttributes))
     }
 
-    private func currentRemoteSessionState(reason: String, outputByteCount: Int?, outputData: Data? = nil, outputEndByteOffset: Int? = nil)
+    private func currentRemoteSessionState(reason: String, outputByteCount: Int?, outputEndByteOffset: Int? = nil)
         -> GhosttyRemoteSessionStatePayload?
     {
         let runtimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastPersistedRuntimeState
         let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
         let ownerClient = activeOwnerClient()
         let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason, ownerKind: ownerClient?.kind)
-        let includeTranscriptTail = Self.remoteStateShouldIncludeTranscriptTail(reason: reason, runtimeState: runtimeState)
-        let bootstrapHistorySeed =
-            outputData == nil && Self.remoteStateShouldIncludeOwnerBootstrapHistory(reason: reason, ownerKind: ownerClient?.kind)
-            ? TerminalReplayOutputHistory.load(path: paths.outputPath) : nil
-        let bootstrapOutputData = outputData ?? bootstrapHistorySeed?.data
-        let bootstrapOutputByteCount = outputByteCount ?? bootstrapHistorySeed?.totalByteCount ?? bootstrapOutputData?.count
-        let bootstrapOutputEndByteOffset = outputEndByteOffset ?? (bootstrapHistorySeed?.data == nil ? nil : bootstrapHistorySeed?.totalByteCount)
+        let bootstrapOutputByteCount = outputByteCount
+        let bootstrapOutputEndByteOffset = outputEndByteOffset
         if includeScreenState {
             let snapshotExportStartedAt = Date()
             trace(
@@ -910,59 +954,43 @@ extension Notification.Name {
                 ])
             let resolvedScreenState = resolveRemoteScreenState(runtimeState: runtimeState, reason: reason, ownerKind: ownerClient?.kind)
             let snapshot = resolvedScreenState.snapshot
-            let snapshotText = resolvedScreenState.snapshotText
+            let frame = snapshot.map { GhosttyRenderFrame(sessionRevision: lastSessionStateRevision, ownerEpoch: ownerEpoch, snapshot: $0) }
+            let renderFrameEncodeStartedAt = Date()
+            let renderFrame = frame.flatMap { try? GhosttyRenderFrame.encode($0) }
+            let renderFrameEncodeMS = TerminalPerformance.elapsedMS(since: renderFrameEncodeStartedAt)
             trace(
-                "snapshot_export_end reason=\(reason) snapshot=\(snapshot == nil ? 0 : 1) snapshot_text=\(snapshotText == nil ? 0 : 1) snapshot_size=\(traceSize(columns: snapshot?.columns, rows: snapshot?.rows)) source=\(resolvedScreenState.source)"
+                "render_frame_export_end reason=\(reason) render_frame=\(renderFrame == nil ? 0 : 1) frame_size=\(traceSize(columns: snapshot?.columns, rows: snapshot?.rows)) source=\(resolvedScreenState.source) owner_epoch=\(ownerEpoch)"
             )
+            var renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
+                reason: reason, frame: frame, frameByteCount: renderFrame?.count, frameEncodeMS: renderFrameEncodeMS,
+                outputByteCount: outputByteCount, screenStateRevision: lastScreenStateRevision)
+            renderFrameAttributes["source"] = resolvedScreenState.source
+            renderFrameAttributes["owner_kind"] = ownerClient?.kind.rawValue ?? "nil"
             logMobileTakeoverPerformance(
-                name: "snapshot_export_end", elapsedMS: TerminalPerformance.elapsedMS(since: snapshotExportStartedAt),
-                attributes: [
-                    "reason": reason, "source": resolvedScreenState.source, "snapshot": snapshot == nil ? "0" : "1",
-                    "snapshot_columns": String(snapshot?.columns ?? 0), "snapshot_rows": String(snapshot?.rows ?? 0),
-                ])
-            let transcriptTail =
-                includeTranscriptTail
-                ? ((try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: Self.remoteTranscriptLineCount)) ?? nil) : nil
+                name: "render_frame_export_end", elapsedMS: TerminalPerformance.elapsedMS(since: snapshotExportStartedAt), count: renderFrame?.count,
+                attributes: renderFrameAttributes)
+            TerminalPerformance.logMetric(
+                "terminal_render_frame_export", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: snapshotExportStartedAt), success: renderFrame != nil,
+                detail: GhosttyRenderFrameMetrics.detailString(renderFrameAttributes))
             return GhosttyRemoteSessionStatePayload(
                 sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()),
                 sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
                 screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
-                title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, snapshot: snapshot, snapshotText: snapshotText,
-                transcriptTail: transcriptTail, outputByteCount: bootstrapOutputByteCount, outputData: bootstrapOutputData,
-                outputEndByteOffset: bootstrapOutputEndByteOffset)
+                title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, renderFrame: renderFrame,
+                outputByteCount: bootstrapOutputByteCount, outputEndByteOffset: bootstrapOutputEndByteOffset)
         }
-        let snapshot: GhosttyTerminalSnapshot? = nil
-        let snapshotText: String? = nil
-        let transcriptTail =
-            includeTranscriptTail ? ((try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: Self.remoteTranscriptLineCount)) ?? nil) : nil
         return GhosttyRemoteSessionStatePayload(
             sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()),
             sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
             screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, title: effectiveTitle,
-            workingDirectory: effectiveWorkingDirectory, snapshot: snapshot, snapshotText: snapshotText, transcriptTail: transcriptTail,
-            outputByteCount: bootstrapOutputByteCount, outputData: bootstrapOutputData, outputEndByteOffset: bootstrapOutputEndByteOffset)
+            workingDirectory: effectiveWorkingDirectory, renderFrame: nil, outputByteCount: bootstrapOutputByteCount,
+            outputEndByteOffset: bootstrapOutputEndByteOffset)
     }
 
     private func resolveRemoteScreenState(runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?) -> (
         snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, source: String
     ) {
-        if Self.remoteStateShouldUseCachedSessionSnapshot(reason: reason, ownerKind: ownerKind) {
-            let liveSessionScreenState = captureLiveSessionScreenState()
-            if Self.remoteScreenStateHasVisibleContent(snapshot: liveSessionScreenState.snapshot, snapshotText: liveSessionScreenState.snapshotText) {
-                return (snapshot: liveSessionScreenState.snapshot, snapshotText: liveSessionScreenState.snapshotText, source: "session")
-            }
-
-            let fallbackScreenState = remoteSnapshotStreamScreenState(runtimeState: runtimeState)
-            if Self.remoteScreenStateHasVisibleContent(snapshot: fallbackScreenState.snapshot, snapshotText: fallbackScreenState.snapshotText) {
-                return (snapshot: fallbackScreenState.snapshot, snapshotText: fallbackScreenState.snapshotText, source: "vt_stream")
-            }
-
-            if Self.remoteScreenStateHasVisibleContent(snapshot: lastCachedSessionSnapshot, snapshotText: lastCachedSessionSnapshotText) {
-                return (snapshot: lastCachedSessionSnapshot, snapshotText: lastCachedSessionSnapshotText, source: "session_cached")
-            }
-            return (snapshot: nil, snapshotText: nil, source: "session_cached_empty")
-        }
-
         let liveSessionScreenState = captureLiveSessionScreenState()
         let sessionSnapshot = liveSessionScreenState.snapshot
         let sessionSnapshotText = liveSessionScreenState.snapshotText
@@ -971,31 +999,14 @@ extension Notification.Name {
         }
 
         let isLiveRuntime = runtimeState?.state == .running || runtimeState?.state == .starting
-        guard !isLiveRuntime else { return (snapshot: nil, snapshotText: nil, source: "session_empty") }
-
-        let fallbackScreenState = remoteSnapshotStreamScreenState(runtimeState: runtimeState)
-        if Self.remoteScreenStateHasVisibleContent(snapshot: fallbackScreenState.snapshot, snapshotText: fallbackScreenState.snapshotText) {
-            return (snapshot: fallbackScreenState.snapshot, snapshotText: fallbackScreenState.snapshotText, source: "vt_stream")
-        }
-
-        return (snapshot: nil, snapshotText: nil, source: "vt_stream_empty")
-    }
-
-    private func remoteSnapshotStreamScreenState(runtimeState: TerminalSessionRuntimeState?) -> (
-        snapshot: GhosttyTerminalSnapshot?, snapshotText: String?
-    ) {
-        let snapshot = remoteSnapshotStream.snapshot(columns: runtimeState?.columns, rows: runtimeState?.rows)
-        let snapshotText = snapshot == nil ? remoteSnapshotStream.snapshotText(columns: runtimeState?.columns, rows: runtimeState?.rows) : nil
-        return (snapshot: snapshot, snapshotText: snapshotText)
+        return (snapshot: nil, snapshotText: nil, source: isLiveRuntime ? "session_empty" : "session_unavailable")
     }
 
     private func captureLiveSessionScreenState() -> (snapshot: GhosttyTerminalSnapshot?, snapshotText: String?) {
+        flushPendingIncomingOutputForStateExport()
+        rendererHostStorage.prepareRenderStateExport()
         let sessionSnapshot = rendererHostStorage.sessionSnapshot()
         let sessionSnapshotText = sessionSnapshot == nil ? rendererHostStorage.sessionSnapshotText() : nil
-        if Self.remoteScreenStateHasVisibleContent(snapshot: sessionSnapshot, snapshotText: sessionSnapshotText) {
-            lastCachedSessionSnapshot = sessionSnapshot
-            lastCachedSessionSnapshotText = sessionSnapshotText
-        }
         return (snapshot: sessionSnapshot, snapshotText: sessionSnapshotText)
     }
 
@@ -1003,27 +1014,8 @@ extension Notification.Name {
         TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: reason, ownerKind: ownerKind)
     }
 
-    static func remoteStateShouldUseCachedSessionSnapshot(reason: String, ownerKind: TerminalClientKind? = nil) -> Bool {
-        TerminalRemoteSessionStatePolicy.shouldUseCachedSessionSnapshot(reason: reason, ownerKind: ownerKind)
-    }
-
     static func remoteScreenStateHasVisibleContent(snapshot: GhosttyTerminalSnapshot?, snapshotText: String?) -> Bool {
         TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: snapshot, snapshotText: snapshotText)
-    }
-
-    private static func remoteStateShouldIncludeTranscriptTail(reason: String, runtimeState: TerminalSessionRuntimeState?) -> Bool {
-        switch reason {
-        case "terminated": return true
-        case "initial":
-            let state = runtimeState?.state
-            return state != .running && state != .starting
-        default: return false
-        }
-    }
-
-    private static func remoteStateShouldIncludeOwnerBootstrapHistory(reason: String, ownerKind: TerminalClientKind?) -> Bool {
-        guard ownerKind == .remoteViewer else { return false }
-        return reason == TerminalRemoteSessionStateReason.initial || reason == TerminalRemoteSessionStateReason.attachmentState
     }
 
     var debugCurrentTitle: String? { currentTitle }
@@ -1035,6 +1027,7 @@ extension Notification.Name {
     func debugHandleOwnerInputActivity() { handleOwnerInputActivity() }
     func debugPersistRuntimeState(force: Bool = true) { refreshRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
+    func debugSetLastKnownSurfaceSize(columns: Int, rows: Int) { lastKnownSurfaceSize = (columns, rows) }
     func debugHandleSessionClosed() { handleSessionClosed() }
     func debugMarkStartedForTesting() { started = true }
 
@@ -1101,11 +1094,13 @@ extension Notification.Name {
 
     public func takeover(client: TerminalClient, into container: NSView?) throws { try attach(client: client, mode: .owner, into: container) }
 
-    public func parkSurfaceInHiddenHostWindow() { core.rendererHost.parkSurfaceInHiddenHostWindow() }
+    public func releaseRendererSurface() { core.rendererHost.releaseRendererSurface() }
 
     public func setFocused(_ focused: Bool, for clientID: String) { core.rendererHost.setFocused(focused, for: clientID) }
 
     public func focusWindow(_ window: NSWindow?) { core.rendererHost.focusWindow(window) }
+
+    @discardableResult public func synchronizeSurfaceGeometry() -> Bool { core.rendererHost.synchronizeSurfaceGeometry() }
 
     public func isOwner(clientID: String) -> Bool { core.isOwner(clientID: clientID) }
 
@@ -1113,26 +1108,28 @@ extension Notification.Name {
 
     public func hasRenderableSurface() -> Bool { core.rendererHost.hasRenderableSurface() }
 
-    public var prefersOutputFallbackWhenSurfaceUnavailable: Bool { core.rendererHost.prefersOutputFallbackWhenSurfaceUnavailable }
+    public func requestSurfaceRefresh() { core.rendererHost.requestSurfaceRefresh() }
 
-    public func snapshot() -> GhosttyTerminalSnapshot? { core.rendererHost.snapshot() }
+    public func prepareRenderStateExport() { core.rendererHost.prepareRenderStateExport() }
 
-    public func snapshotText() -> String? { core.rendererHost.snapshotText() }
+    public func snapshot() -> GhosttyTerminalSnapshot? { return core.rendererHost.snapshot() }
 
-    public func sessionSnapshot() -> GhosttyTerminalSnapshot? { core.rendererHost.sessionSnapshot() }
+    public func snapshotText() -> String? { return core.rendererHost.snapshotText() }
 
-    public func sessionSnapshotText() -> String? { core.rendererHost.sessionSnapshotText() }
+    public func sessionSnapshot() -> GhosttyTerminalSnapshot? { return core.rendererHost.sessionSnapshot() }
+
+    public func sessionSnapshotText() -> String? { return core.rendererHost.sessionSnapshotText() }
 
     public func copySelectionToPasteboard() -> Bool { core.rendererHost.copySelectionToPasteboard() }
 
     public func pasteClipboardContents() -> Bool { core.rendererHost.pasteClipboardContents() }
 
-    @discardableResult public func debugSendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
-        core.rendererHost.debugSendScroll(horizontal: horizontal, vertical: vertical)
+    @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+        core.rendererHost.sendScroll(horizontal: horizontal, vertical: vertical)
     }
 
     public var debugSurfaceRefreshRequestCount: Int { core.rendererHost.debugSurfaceRefreshRequestCount }
-    public func debugVisibleSurfaceText() -> String? { core.rendererHost.debugVisibleSurfaceText() }
+    public func debugVisibleSurfaceText() -> String? { return core.rendererHost.debugVisibleSurfaceText() }
 
     public func terminate() { core.terminate() }
 

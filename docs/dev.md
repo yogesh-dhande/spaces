@@ -39,7 +39,7 @@ scripts/verify.sh
 `scripts/format-staged-swift.sh` formats staged macOS Swift source and test files in place and re-stages them.
 `scripts/lint.sh` runs `scripts/format-staged-swift.sh` and then `SwiftLint` when `swiftlint` is available.
 `scripts/coverage.sh` runs SwiftPM tests in parallel by default and caps auto-detected workers at `8` unless you override it with `SPACES_TEST_WORKERS` or change the cap with `SPACES_TEST_MAX_AUTO_WORKERS`.
-`scripts/verify.sh` is the canonical sequential local verification path: staged formatting and lint, build, then coverage.
+`scripts/verify.sh` is the canonical sequential local verification path: staged formatting and lint, build, coverage, then iOS unit tests. Set `SPACES_IOS_TEST_DESTINATION` to override the simulator destination used for the iOS unit test pass, or `SPACES_IOS_DERIVED_DATA` to override its DerivedData directory.
 `scripts/swiftpm.sh` also uses a fail-fast lock around SwiftPM itself so overlapping build, test, or coverage commands stop immediately with a clear message instead of silently contending on the shared `.build` directory.
 
 Useful local entry points:
@@ -79,7 +79,7 @@ That installs `GhosttyKit.xcframework`, Ghostty resources, `libghostty-vt` heade
 
 The Ghostty fork is tracked as the submodule at `apps/macos/vendor/ghostty`. The parent repo's submodule pointer is the single source of truth for the Ghostty commit used by both `GhosttyKit.xcframework` and `libghostty-vt`.
 By default, `setup_ghostty.sh` reuses local artifacts only when `apps/macos/.local/ghostty-artifacts/manifest.json` matches the submodule SHA. Otherwise it downloads the Spaces-owned GitHub release named `ghostty-artifacts-<full-ghostty-sha>`.
-The setup flow finishes by running `apps/macos/scripts/verify_ghosttykit.sh`, which checks that the artifact declares and exports the embedded terminal APIs that Spaces uses for raw I/O, host rebinding, session state callbacks, renderer attachment, and live snapshot capture. Passive-viewer attachment exports are not part of the required contract.
+The setup flow finishes by running `apps/macos/scripts/verify_ghosttykit.sh`, which checks that the artifact declares and exports the embedded terminal APIs that Spaces uses for raw I/O, host rebinding, session state callbacks, renderer attachment, headless session creation, render-frame export, and mirror renderer surfaces. Passive-viewer attachment exports are not part of the required contract.
 
 When a Spaces branch depends on Ghostty fork work, edit and commit the fork change inside the submodule, push it to the fork's `spaces` branch, and update the parent repo's submodule pointer:
 
@@ -116,7 +116,7 @@ When the app launches built-in Spaces terminals itself, `SpacesTerminalService` 
 - Launch a coding agent from the workspace detail pane.
 
 Close one of those owner windows and reopen it from the app. Quit and relaunch `SpacesApp`, then reopen the same session from the app. The shell or long-running process should stay attached to the same service-owned Ghostty session without restarting.
-CLI-created sessions such as `spaces terminal command` and CLI-managed `spaces start` use the same daemon-owned snapshot-stream path. The service publishes live Ghostty snapshots to native client windows over the per-session subscription socket, while `output.log` remains the transcript fallback and `spaces terminal tail` source.
+CLI-created sessions such as `spaces terminal command` and CLI-managed `spaces start` use the same daemon-owned render-frame stream. The service publishes live Ghostty render frames to native client windows over the per-session subscription socket, while `output.log` remains the `spaces terminal tail` source.
 For scripted real-system checks against the running app, `spacese2e` exposes `open-workspace-terminal`, `run-workspace-process`, and `launch-workspace-agent` so the manual harness can exercise the same app launch path without accessibility scripting.
 
 To verify the embedded Ghostty backend on an isolated database root:
@@ -151,7 +151,7 @@ apps/macos/Tests/e2e_mobile.sh
 
 The mobile suite builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack, and then runs the selected scenarios with `test-without-building` against that shared stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, `--keep-root` to preserve the shared demo root, and `--port <port>` to pin the daemon bridge port. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again.
 
-The daemon-hosted mobile bridge is the current first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spaces mobile serve` remains available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spaces mobile request` so local scripts use the same TLS-PSK transport as the iOS app.
+The daemon-hosted mobile bridge is the first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spaces mobile serve` remains available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spaces mobile request` so local scripts use the same TLS-PSK transport as the iOS app.
 
 For direct CLI verification of Spaces terminal commands:
 
@@ -202,8 +202,8 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces mobile statu
 xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
-On first launch, the iOS client opens its connection sheet. Open Mobile Connection in the Mac sidebar, open a pairing window, then scan the QR code or paste the full `spacesmobile://` link. The `run_mobile_terminal_demo.sh` harness opens one daemon pairing window per simulator and seeds both the iPad and iPhone simulator settings automatically. After pairing, the iOS client stores the issued credential and transport key and reconnects automatically on later launches. The current client is terminal-only: it lists workspaces and live terminal sessions, auto-attempts takeover when a session detail is opened, mounts the Ghostty surface only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
-For the iOS simulator, a pairing link with `127.0.0.1` still works because the daemon bridge binds all IPv4 interfaces by default. A real device can scan the Mac QR code or open the deep link from the Mobile Connection panel. The current iOS terminal detail path renders the owner-bootstrap terminal-grid snapshot through a local iOS Ghostty surface, so the simulator should show a terminal-like view after takeover rather than the earlier plain-text fallback.
+On first launch, the iOS client opens its connection sheet. Open Mobile Connection in the Mac sidebar, open a pairing window, then scan the QR code or paste the full `spacesmobile://` link. The `run_mobile_terminal_demo.sh` harness opens one daemon pairing window per simulator and seeds both the iPad and iPhone simulator settings automatically. After pairing, the iOS client stores the issued credential and transport key and reconnects automatically on later launches. The client is terminal-only: it lists workspaces and live terminal sessions, auto-attempts takeover when a session detail is opened, renders service-published Ghostty render frames only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
+For the iOS simulator, a pairing link with `127.0.0.1` still works because the daemon bridge binds all IPv4 interfaces by default. A real device can scan the Mac QR code or open the deep link from the Mobile Connection panel. The iOS terminal detail path renders the owner-bootstrap Ghostty render frame through the same terminal-grid compatibility data as macOS, so the simulator should show a terminal-like view after takeover rather than a plain-text fallback.
 
 For manual real-device verification of the iOS client:
 
@@ -229,15 +229,17 @@ For a disposable one-command demo stack that launches the macOS app, uses the da
 apps/macos/Tests/run_mobile_terminal_demo.sh
 ```
 
-The launcher expects the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds the repo-local macOS debug products, builds a fresh simulator `SpacesMobile.app` into a disposable DerivedData directory under the demo temp root, then installs that same app bundle on both the iPad and iPhone simulators. It provisions two live workspace terminal sessions before launching the mobile clients so list-navigation and second-session takeover flows can be reproduced without extra manual setup. It refuses to start if another `SpacesApp` instance or bridge listener is already running so the global hotkey and mobile port stay unambiguous, then reads the daemon bridge details through `spaces mobile status`. It prints the disposable temp root, PIDs, logs, screenshots, both terminal session IDs, the iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
-The same demo root also contains `mobile-terminal-performance.jsonl`, and the printed JSON includes its `performanceLogPath`. The mobile E2E suite consumes that file directly when it asserts one bootstrap epoch, first render timing, input-ready timing, and scrollback history seeding behavior.
+The launcher expects the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds the repo-local macOS debug products, builds a fresh simulator `SpacesMobile.app` into a DerivedData directory under the demo root, then installs that same app bundle on both the iPad and iPhone simulators. Demo runs use the current user's `HOME` and `XDG_CONFIG_HOME` so Ghostty themes and user settings match normal local debugging. By default, the demo uses isolated Spaces profile mode, which keeps the database and runtime under the demo root without moving user-level settings into a temporary home. Use `SPACES_MOBILE_DEMO_PROFILE_MODE=user` when the demo should attach to the repo-local Spaces profile instead. The launcher provisions two live Mac-owned workspace terminal sessions and waits for their owner attachments before launching the mobile clients so list-navigation and second-session takeover flows can be reproduced without exposing not-yet-owned sessions to iOS. It refuses to start if another `SpacesApp` instance or bridge listener is already running so the global hotkey and mobile port stay unambiguous, then reads the daemon bridge details through `spaces mobile status`. It prints the demo root, profile mode, PIDs, logs, screenshots, both terminal session IDs, the iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
+The same demo root also contains `mobile-terminal-performance.jsonl`, and the printed JSON includes its `performanceLogPath`. The mobile E2E suite consumes that file directly when it asserts one bootstrap epoch, first render timing, input-ready timing, and scrollback behavior.
 
 Useful overrides:
-- `SPACES_MOBILE_DEMO_KEEP_ROOT=1` keeps the temp root after shutdown for log inspection.
+- `SPACES_MOBILE_DEMO_KEEP_ROOT=1` keeps the demo root after shutdown for log inspection.
+- `SPACES_MOBILE_DEMO_PROFILE_MODE=isolated|user` selects the Spaces profile mode; demo and E2E runs default to isolated database/runtime paths.
+- `SPACES_MOBILE_DEMO_ROOT_PARENT=...` changes the parent directory for demo roots; the default is `~/.spaces-dev/mobile-demo`.
 - `SPACES_MOBILE_DEMO_BUILD_MACOS=0` skips the scripted macOS debug build when the existing repo-local binaries should be used.
 - `SPACES_MOBILE_DEMO_IPAD_NAME=...` and `SPACES_MOBILE_DEMO_IPHONE_NAME=...` target different simulator names when the defaults are unavailable.
 - `SPACES_MOBILE_DEMO_APP_PATH=...` skips the scripted `xcodebuild` and installs an explicit `SpacesMobile.app` bundle.
-- `SPACES_MOBILE_DEMO_PORT=...` sets the daemon bridge port for that disposable profile.
+- `SPACES_MOBILE_DEMO_PORT=...` sets the daemon bridge port for the demo profile.
 - `SPACES_MOBILE_E2E_DEVICE_KEY=iphone|ipad` and `SPACES_MOBILE_E2E_DEVICE_NAME=...` select the simulator used by `e2e_mobile.sh`; the default E2E target is `iPhone 17 Pro`.
 
 For targeted mobile E2E runs, use `--scenario`:
@@ -251,13 +253,15 @@ apps/macos/Tests/e2e_mobile.sh --scenario two-session
 apps/macos/Tests/e2e_mobile.sh --scenario ownership-guard
 ```
 
-`codex` starts real Codex in a fresh Mac-owned terminal session, accepts the Codex trust prompt when needed, and verifies iPhone takeover against the already-running simulator app. `codex-resume-reopen` runs `codex resume 019e380a-9def-7852-9834-74c67b2da894`, takes over on iPhone, returns to the terminal list, and repeatedly reopens the same session. `roundtrip` drives the Mac/iPhone/Mac/iPhone/Mac ownership path with rendered-content assertions at each handoff. `scrollback` fills the Mac-owned terminal with long output, transfers ownership to iPhone, scrolls away from bottom, runs an owner command while still scrolled up, and checks the owner epoch and prompt rendering. `two-session` takes over two fresh terminal sessions through list navigation. `ownership-guard` exercises the mobile bridge ownership rules without UI automation.
+`codex` starts real Codex in a fresh Mac-owned terminal session and verifies iPhone takeover against the already-running simulator app. Codex scenarios build a generated Codex home inside the demo root by copying the current user's config, linking signed-in auth files, and marking the demo project trusted so the test exercises the TUI instead of the directory-trust prompt. If Codex shows its startup update prompt, the harness selects `Skip` and continues waiting for the TUI. `codex-resume-reopen` runs `codex resume 019e380a-9def-7852-9834-74c67b2da894`, takes over on iPhone, returns to the terminal list, and repeatedly reopens the same session. `roundtrip` drives the Mac/iPhone/Mac/iPhone/Mac ownership path with rendered-content assertions at each handoff. `scrollback` fills the Mac-owned terminal with long output, transfers ownership to iPhone, scrolls away from bottom, runs an owner command while still scrolled up, and checks the owner epoch and prompt rendering. `two-session` takes over two fresh terminal sessions through list navigation. `ownership-guard` exercises the mobile bridge ownership rules without UI automation.
 
 Useful overrides:
 - `SPACES_MOBILE_CODEX_COMMAND='codex resume <thread-id>'` replaces the default `codex` startup command for the `codex` scenario.
 - `SPACES_MOBILE_CODEX_RESUME_THREAD_ID=<thread-id>` changes the thread used by `codex-resume-reopen`.
+- `SPACES_MOBILE_CODEX_HOME=<path>` changes the source Codex home used by Codex scenarios; by default they use the current user's `CODEX_HOME` or `~/.codex`. The harness creates a demo-local Codex home from that source so signed-in Codex runs the real TUI without mutating the user's config.
+- `SPACES_MOBILE_GHOSTTY_XDG_CONFIG_HOME=<path>` changes the source Ghostty XDG config root used by the mobile E2E harness; by default it uses the current user's `XDG_CONFIG_HOME` or `~/.config`.
 
-When debugging mobile owner render dumps, keep the mobile live-output path snapshot-free after owner bootstrap. `GhosttyRemoteTerminalView` must not call `ghostty_session_export_snapshot` on its local renderer after applying live output, mobile owner bootstrap must use the cached Ghostty session snapshot rather than the VT snapshot stream, and macOS owner attach or takeover must use the same service-published snapshot policy instead of relying on transcript replay for first paint. The Mac host may refresh the cached handoff snapshot immediately before transferring ownership to a remote mobile owner, but it must not force a Ghostty surface refresh or synthesize a second visual path from transcript data. Use the bootstrap snapshot, screenshots, event logs, and history-seed performance events for E2E assertions.
+When debugging mobile owner render dumps, keep terminal UI rendering frame-based. `GhosttyRemoteTerminalView` must not render from raw output bytes, must not call local session export APIs to reconstruct another owner, mobile owner bootstrap must use the service-published live Ghostty render frame, and macOS owner attach or takeover must use the same service-published frame policy. Do not use VT replay, snapshot-to-VT encoding, raw output, or `output.log` as a terminal-rendering fallback. Use the bootstrap frame, screenshots, event logs, and rendered-content dumps for E2E assertions.
 
 For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
 

@@ -64,17 +64,12 @@ struct TerminalDetailView: View {
                                 model.setInputSurfaceReady(ready)
                                 writeE2EEventIfNeeded(kind: "input_readiness", detail: ready ? "ready" : "pending")
                             },
-                            onOutputBatchApplied: { batchID in
-                                model.markOwnerRenderOutputApplied(batchID)
-                            },
-                            onHistorySeedApplied: { batchID in
-                                model.markOwnerHistorySeedApplied(batchID)
-                            },
                             onScrollGestureApplied: {
                                 writeE2EEventIfNeeded(kind: "e2e_scroll_gesture_applied", detail: nil)
                             },
                             onRenderedTextChanged: shouldCaptureRenderedText ? { text in
                                 renderedText = text
+                                model.recordRenderedText(text)
                             } : nil,
                             onViewportSizeChanged: { columns, rows in
                                 model.updateViewportSize(columns: columns, rows: rows)
@@ -84,6 +79,9 @@ struct TerminalDetailView: View {
                             },
                             onSendKey: { key in
                                 sendTerminalKey(key)
+                            },
+                            onSendScroll: { horizontal, vertical in
+                                sendTerminalScroll(horizontal: horizontal, vertical: vertical)
                             }
                         )
                         .accessibilityIdentifier("terminal.surface")
@@ -131,6 +129,11 @@ struct TerminalDetailView: View {
     private func sendTerminalKey(_ key: String) {
         writeE2EEventIfNeeded(kind: "send_key", detail: key)
         Task { await model.sendKey(key) }
+    }
+
+    private func sendTerminalScroll(horizontal: Double, vertical: Double) {
+        writeE2EEventIfNeeded(kind: "send_scroll", detail: "\(horizontal),\(vertical)")
+        Task { await model.sendScroll(horizontal: horizontal, vertical: vertical) }
     }
 
     private var topOverlay: some View {
@@ -280,7 +283,7 @@ struct TerminalDetailView: View {
     private var e2eDumpStateKey: String {
         [
             model.title,
-            model.replayStateKey,
+            model.renderStateKey,
             model.isOwner ? "owner" : "viewer",
             model.showsTerminalSurface ? "surface" : "status",
             model.isConnecting ? "connecting" : "steady",
@@ -318,11 +321,10 @@ struct TerminalDetailView: View {
                 snapshotColumns: model.snapshotColumns,
                 snapshotRows: model.snapshotRows,
                 snapshotText: model.snapshotText,
-                transcriptTail: model.transcriptTail,
                 errorMessage: model.errorMessage,
                 visibleText: model.visibleText,
                 renderedText: renderedText,
-                replayStateKey: model.replayStateKey,
+                renderStateKey: model.renderStateKey,
                 emittedAt: model.latestState?.emittedAt ?? ISO8601DateFormatter().string(from: Date())
             ),
             config: e2eConfig

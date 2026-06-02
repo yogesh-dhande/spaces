@@ -36,6 +36,7 @@ import GhosttyKit
 
         guard let config = ghostty_config_new() else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_config_new failed") }
         ghostty_config_load_default_files(config)
+        ghostty_config_load_recursive_files(config)
         ghostty_config_finalize(config)
 
         var runtimeConfig = ghostty_runtime_config_s()
@@ -92,7 +93,7 @@ import GhosttyKit
     private func surfaceKey(_ surface: ghostty_surface_t) -> UInt { UInt(bitPattern: surface) }
 
     private static func currentColorScheme() -> ghostty_color_scheme_e {
-        let bestMatch = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
+        let bestMatch = (NSApp?.effectiveAppearance ?? NSAppearance(named: .aqua))?.bestMatch(from: [.darkAqua, .aqua])
         return bestMatch == .darkAqua ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT
     }
 }
