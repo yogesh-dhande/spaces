@@ -298,6 +298,8 @@
 
         func testRemoteTerminalAccessoryToolbarKeepsTrailingControlsPinned() throws {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            XCTAssertNil(hostView.inputAccessoryView)
+
             hostView.setAcceptsTerminalInput(true)
 
             let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
@@ -306,12 +308,18 @@
             XCTAssertEqual(accessoryView.sizeThatFits(CGSize(width: 320, height: 0)).height, 58)
             XCTAssertTrue(accessoryView.autoresizingMask.contains(.flexibleHeight))
 
-            let labels = hostView.accessoryToolbarButtonAccessibilityLabelsForTesting
-            XCTAssertEqual(labels.scrollable, ["tab", "/", "~", "|", "-", "_", "esc", "Control"])
-            XCTAssertEqual(labels.pinned, ["Arrow key joystick", "Hide keyboard"])
+            let scrollView = try XCTUnwrap(descendants(of: accessoryView, matching: UIScrollView.self).first)
+            let buttons = descendants(of: accessoryView, matching: UIButton.self)
+            let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) }
+            let pinnedButtons = buttons.filter { !$0.isDescendant(of: scrollView) }
+            XCTAssertEqual(scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Control"])
+            XCTAssertEqual(pinnedButtons.compactMap(\.accessibilityLabel), ["Arrow key joystick", "Hide keyboard"])
+            let joystickButton = try XCTUnwrap(pinnedButtons.first)
+            XCTAssertEqual(joystickButton.accessibilityCustomActions?.map(\.name) ?? [], ["Up arrow", "Down arrow", "Left arrow", "Right arrow"])
 
             let phoneFrames = hostView.accessoryToolbarLayoutFramesForTesting(width: 320, userInterfaceIdiom: .phone)
             XCTAssertGreaterThan(phoneFrames.scrollView.width, 0)
+            XCTAssertGreaterThan(phoneFrames.scrollContentSize.width, phoneFrames.scrollView.width)
             XCTAssertGreaterThanOrEqual(phoneFrames.joystickButton.minX, phoneFrames.scrollView.maxX + 5.5)
             XCTAssertGreaterThanOrEqual(phoneFrames.keyboardButton.minX, phoneFrames.joystickButton.maxX + 5.5)
             XCTAssertLessThanOrEqual(phoneFrames.keyboardButton.maxX, 312.5)
@@ -321,8 +329,12 @@
             for width in phoneWidths.scrollable {
                 XCTAssertEqual(width, 50, accuracy: 0.5)
             }
+            for width in phoneWidths.pinned {
+                XCTAssertEqual(width, 46, accuracy: 0.5)
+            }
 
             let padFrames = hostView.accessoryToolbarLayoutFramesForTesting(width: 320, userInterfaceIdiom: .pad)
+            XCTAssertGreaterThan(padFrames.scrollContentSize.width, padFrames.scrollView.width)
             XCTAssertGreaterThanOrEqual(padFrames.joystickButton.minX, padFrames.scrollView.maxX + 7.5)
             XCTAssertGreaterThanOrEqual(padFrames.keyboardButton.minX, padFrames.joystickButton.maxX + 7.5)
             XCTAssertLessThanOrEqual(padFrames.keyboardButton.maxX, 308.5)
@@ -332,9 +344,15 @@
             for width in padWidths.scrollable {
                 XCTAssertEqual(width, 64, accuracy: 0.5)
             }
+            for width in padWidths.pinned {
+                XCTAssertEqual(width, 56, accuracy: 0.5)
+            }
 
             hostView.setSoftwareKeyboardVisible(false)
             XCTAssertEqual(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned, ["Arrow key joystick", "Show keyboard"])
+
+            hostView.setAcceptsTerminalInput(false)
+            XCTAssertNil(hostView.inputAccessoryView)
         }
 
         func testRemoteTerminalAccessoryJoystickRequiresDirectionalRelease() {
@@ -351,10 +369,13 @@
             }
 
             XCTAssertNil(direction(x: bounds.midX, y: bounds.midY))
-            XCTAssertEqual(direction(x: bounds.midX + 12, y: bounds.midY), "right")
-            XCTAssertEqual(direction(x: bounds.midX - 12, y: bounds.midY), "left")
-            XCTAssertEqual(direction(x: bounds.midX, y: bounds.midY - 12), "up")
-            XCTAssertEqual(direction(x: bounds.midX, y: bounds.midY + 12), "down")
+            XCTAssertNil(direction(x: bounds.midX + 4, y: bounds.midY))
+            XCTAssertEqual(direction(x: bounds.midX + 5, y: bounds.midY), "right")
+            XCTAssertEqual(direction(x: bounds.midX - 5, y: bounds.midY), "left")
+            XCTAssertEqual(direction(x: bounds.midX, y: bounds.midY - 5), "up")
+            XCTAssertEqual(direction(x: bounds.midX, y: bounds.midY + 5), "down")
+            XCTAssertTrue(acceptsActivation(x: bounds.minX - 7, y: bounds.midY))
+            XCTAssertFalse(acceptsActivation(x: bounds.minX - 9, y: bounds.midY))
             XCTAssertTrue(acceptsActivation(x: bounds.midX, y: bounds.minY - 11))
             XCTAssertFalse(acceptsActivation(x: bounds.midX, y: bounds.minY - 13))
             XCTAssertTrue(acceptsRelease(x: bounds.maxX + 99, y: bounds.midY))
@@ -413,6 +434,106 @@
 
             let renderedSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
             XCTAssertEqual(renderedSnapshot.columns, GhosttyRemoteTerminalViewport.readablePhoneColumns(bounds: phoneBounds))
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewUsesKeyboardVisibleViewportForRenderedSnapshot() throws {
+            let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 640)
+            let window = UIWindow(frame: phoneBounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: phoneBounds)
+            hostView.userInterfaceIdiomOverrideForTesting = .phone
+            var reportedViewports: [(columns: Int, rows: Int)] = []
+            hostView.onViewportSizeChanged = { columns, rows in
+                reportedViewports.append((columns: columns, rows: rows))
+            }
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            let fullViewport = hostView.viewportSizeForTesting()
+            let keyboardHeight: CGFloat = 260
+            hostView.setKeyboardOccludedHeightForTesting(keyboardHeight)
+            let keyboardOnlyViewport = hostView.viewportSizeForTesting()
+
+            XCTAssertGreaterThan(fullViewport.rows, keyboardOnlyViewport.rows)
+            XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, 380, accuracy: 0.5)
+
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setKeyboardOccludedHeightForTesting(keyboardHeight)
+            viewController.view.layoutIfNeeded()
+            let keyboardViewport = hostView.viewportSizeForTesting()
+
+            XCTAssertLessThan(keyboardViewport.rows, keyboardOnlyViewport.rows)
+            XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, 322, accuracy: 0.5)
+            XCTAssertEqual(hostView.surfaceHostFrameForTesting().height, phoneBounds.height, accuracy: 0.5)
+            XCTAssertEqual(try XCTUnwrap(reportedViewports.last).rows, keyboardViewport.rows)
+
+            let longSnapshot = promptAtBottomSnapshot(columns: 80, rows: fullViewport.rows + 20)
+            hostView.update(
+                snapshot: longSnapshot,
+                renderStateKey: "viewer|runtime=80x\(longSnapshot.rows)|snapshot=80x\(longSnapshot.rows)|interactive=0",
+                fallbackText: "Waiting for terminal state..."
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            let renderedSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let renderedText = GhosttyTerminalSnapshotLayout.plainText(for: renderedSnapshot)
+            XCTAssertEqual(renderedSnapshot.rows, keyboardViewport.rows)
+            XCTAssertTrue(renderedText.localizedStandardContains("shell %"), renderedText)
+            XCTAssertFalse(renderedText.localizedStandardContains("SEQ 000000"), renderedText)
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewUsesSurfaceRowsForKeyboardHiddenPrompt() throws {
+            let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 700)
+            let window = UIWindow(frame: phoneBounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: phoneBounds)
+            hostView.userInterfaceIdiomOverrideForTesting = .phone
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.setAcceptsTerminalInput(true)
+            XCTAssertTrue(hostView.becomeFirstResponder())
+            hostView.setSoftwareKeyboardVisible(false)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+            XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, phoneBounds.height - 58, accuracy: 0.5)
+            let fallbackViewport = hostView.viewportSizeForTesting()
+            let surfaceRows = max(fallbackViewport.rows - 12, 1)
+            hostView.setSurfaceViewportSizeForTesting(columns: 80, rows: surfaceRows)
+
+            let surfaceViewport = hostView.viewportSizeForTesting()
+            XCTAssertEqual(surfaceViewport.columns, GhosttyRemoteTerminalViewport.readablePhoneColumns(bounds: hostView.visibleRenderBoundsForTesting()))
+            XCTAssertEqual(surfaceViewport.rows, surfaceRows)
+
+            let longSnapshot = promptAtBottomSnapshot(columns: 80, rows: surfaceRows + 20)
+            hostView.update(
+                snapshot: longSnapshot,
+                renderStateKey: "viewer|runtime=80x\(longSnapshot.rows)|snapshot=80x\(longSnapshot.rows)|interactive=0|keyboard=hidden",
+                fallbackText: "Waiting for terminal state..."
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            let renderedSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let renderedText = GhosttyTerminalSnapshotLayout.plainText(for: renderedSnapshot)
+            XCTAssertEqual(renderedSnapshot.rows, surfaceRows)
+            XCTAssertTrue(renderedText.localizedStandardContains("shell %"), renderedText)
+            XCTAssertFalse(renderedText.localizedStandardContains("SEQ 000000"), renderedText)
 
             window.isHidden = true
         }
@@ -1251,6 +1372,12 @@
             return snapshot(columns: 80, rows: lineCount, text: lines.joined(separator: "\n"))
         }
 
+        private func promptAtBottomSnapshot(columns: Int, rows: Int) -> GhosttyTerminalSnapshot {
+            let historyRows = max(rows - 1, 0)
+            let lines = (0..<historyRows).map { index in "SEQ \(String(format: "%06d", index)) keyboard-safe-row-\(index)" }
+            return snapshot(columns: columns, rows: rows, text: (lines + ["shell %"]).joined(separator: "\n"))
+        }
+
         private func snapshotSignature(_ snapshot: GhosttyTerminalSnapshot?) -> String {
             guard let snapshot else { return "nil" }
             let sampleCells = snapshot.cells.prefix(12).map { "\($0.codepoint):\($0.flags)" }.joined(separator: ",")
@@ -1298,6 +1425,15 @@
             )
         }
 
+    }
+
+    private func descendants<ViewType: UIView>(of view: UIView, matching type: ViewType.Type) -> [ViewType] {
+        var matches: [ViewType] = []
+        if let typedView = view as? ViewType { matches.append(typedView) }
+        for subview in view.subviews {
+            matches.append(contentsOf: descendants(of: subview, matching: type))
+        }
+        return matches
     }
 
     private extension GhosttyRemoteTerminalHostView {
