@@ -30,7 +30,7 @@
             XCTAssertFalse(runtimeConfig.supports_selection_clipboard)
         }
 
-        func testPhoneViewportReportsReadableColumns() {
+        func testPhoneViewportKeepsRenderableSurfaceColumns() {
             let viewport = GhosttyRemoteTerminalViewport.reportedSize(
                 rawColumns: 80,
                 rawRows: 24,
@@ -38,7 +38,7 @@
                 idiom: .phone
             )
 
-            XCTAssertEqual(viewport.columns, 39)
+            XCTAssertEqual(viewport.columns, 80)
             XCTAssertEqual(viewport.rows, 24)
         }
 
@@ -446,7 +446,7 @@
             window.isHidden = true
         }
 
-        func testRemoteTerminalHostViewMatchesPhoneReportedColumnsLocally() throws {
+        func testRemoteTerminalHostViewKeepsPhoneSurfaceColumnsVisible() throws {
             let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 700)
             let window = UIWindow(frame: phoneBounds)
             let viewController = UIViewController()
@@ -459,9 +459,11 @@
             viewController.view.frame = window.bounds
             hostView.frame = viewController.view.bounds
             viewController.view.layoutIfNeeded()
+            hostView.setSurfaceViewportSizeForTesting(columns: 80, rows: 24)
 
+            let wideText = String(repeating: ".", count: 42) + "WIDE"
             hostView.update(
-                snapshot: snapshot(columns: 80, rows: 24, text: "shell % which tailscale"),
+                snapshot: snapshot(columns: 80, rows: 24, text: wideText),
                 renderStateKey: "viewer|runtime=80x24|snapshot=80x24|interactive=0",
                 fallbackText: "Waiting for terminal state…"
             )
@@ -469,7 +471,9 @@
             RunLoop.main.run(until: Date().addingTimeInterval(0.5))
 
             let renderedSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
-            XCTAssertEqual(renderedSnapshot.columns, GhosttyRemoteTerminalViewport.readablePhoneColumns(bounds: phoneBounds))
+            let renderedText = GhosttyTerminalSnapshotLayout.plainText(for: renderedSnapshot)
+            XCTAssertEqual(renderedSnapshot.columns, 80)
+            XCTAssertTrue(renderedText.localizedStandardContains("WIDE"), renderedText)
 
             window.isHidden = true
         }
@@ -553,7 +557,7 @@
             hostView.setSurfaceViewportSizeForTesting(columns: 80, rows: surfaceRows)
 
             let surfaceViewport = hostView.viewportSizeForTesting()
-            XCTAssertEqual(surfaceViewport.columns, GhosttyRemoteTerminalViewport.readablePhoneColumns(bounds: hostView.visibleRenderBoundsForTesting()))
+            XCTAssertEqual(surfaceViewport.columns, 80)
             XCTAssertEqual(surfaceViewport.rows, surfaceRows)
 
             let longSnapshot = promptAtBottomSnapshot(columns: 80, rows: surfaceRows + 20)
