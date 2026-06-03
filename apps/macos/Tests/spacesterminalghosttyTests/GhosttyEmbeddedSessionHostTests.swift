@@ -224,6 +224,43 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         _ = try GhosttyRenderUpdateApplier.apply(secondResizeUpdate, to: initialBaseline)
     }
 
+    @MainActor func testScrollRenderUpdateAdvancesRevisionWithoutSessionStateChange() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-scroll-render-revision-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-06-03T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        let owner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-03T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-06-03T00:00:00Z")
+
+        var snapshotText = "frame one"
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in self.snapshot(text: snapshotText) }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
+        let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial))
+        let initialBaseline = try renderBaseline(from: initialPayload, baseline: nil)
+
+        snapshotText = "frame two"
+        let scrollPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.scroll))
+        let scrollUpdate = try XCTUnwrap(scrollPayload.decodedRenderUpdate)
+
+        XCTAssertEqual(scrollPayload.screenStateRevision, 1)
+        XCTAssertEqual(scrollUpdate.kind, .delta)
+        XCTAssertEqual(scrollUpdate.baseRevision, initialBaseline.sessionRevision)
+        XCTAssertNotEqual(scrollUpdate.targetRevision, scrollUpdate.baseRevision)
+
+        let applied = try GhosttyRenderUpdateApplier.apply(scrollUpdate, to: initialBaseline)
+        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: applied.snapshot), "frame two")
+    }
+
     @MainActor func testRemoteScreenStateVisibleContentIgnoresBlankSnapshotsAndText() {
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: snapshot(text: "   \n  "), snapshotText: nil))
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: nil, snapshotText: " \n\t "))
@@ -923,6 +960,38 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(scrollRect.columnCount, 20)
         XCTAssertLessThan(scrollRect.deltaRows, 0)
         XCTAssertGreaterThan(scrollRect.deltaRows, -4)
+        XCTAssertEqual(scrollRect.deltaColumns, 0)
+    }
+
+    @MainActor func testHeadlessDriverExportsNativeScrollRectAfterViewportScrollback() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "host-managed-scrollback-scrollrect-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh",
+                command: "sleep 0.2; for i in 1 2 3 4 5 6 7 8; do printf \"line$i\\n\"; done; sleep 1", createdAt: "2026-06-03T00:00:00Z"))
+        defer { sessionDriver.terminate() }
+        let transcript = TranscriptBuffer()
+        sessionDriver.setOutputHandler { data in transcript.append(data) }
+
+        try sessionDriver.startIfNeeded()
+        XCTAssertTrue(sessionDriver.resizeCellGrid(columns: 20, rows: 4))
+
+        try waitUntil { transcript.string().contains("line8") }
+        _ = sessionDriver.renderStateSnapshot()
+
+        XCTAssertTrue(sessionDriver.sendScroll(horizontal: 0, vertical: 1))
+        let captured = try XCTUnwrap(sessionDriver.renderStateSnapshot())
+        let scrollRect = try XCTUnwrap(captured.scrollRects.first)
+
+        XCTAssertEqual(scrollRect.rowStart, 0)
+        XCTAssertEqual(scrollRect.rowCount, 4)
+        XCTAssertEqual(scrollRect.columnStart, 0)
+        XCTAssertEqual(scrollRect.columnCount, 20)
+        XCTAssertGreaterThan(scrollRect.deltaRows, 0)
+        XCTAssertLessThan(scrollRect.deltaRows, 4)
         XCTAssertEqual(scrollRect.deltaColumns, 0)
     }
 

@@ -255,6 +255,7 @@ extension TerminalGhosttyRendererHosting {
     private var lastScreenStateRevision: UInt64?
     private var lastExportedScreenStateRevision: UInt64?
     private var lastRenderUpdateBaseline: GhosttyRenderUpdateBaseline?
+    private var renderUpdateRevision: UInt64 = 0
     private var forceNextBroadcastFullRenderUpdate = false
     private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
     private var lastRuntimeStateWriteAt: Date?
@@ -1104,7 +1105,7 @@ extension TerminalGhosttyRendererHosting {
                 ])
             let resolvedScreenState = resolveRemoteScreenState(runtimeState: runtimeState, reason: reason, ownerKind: ownerClient?.kind)
             let snapshot = resolvedScreenState.snapshot
-            let frame = snapshot.map { GhosttyRenderFrame(sessionRevision: lastSessionStateRevision, ownerEpoch: ownerEpoch, snapshot: $0) }
+            let frame = snapshot.map { GhosttyRenderFrame(sessionRevision: renderFrameRevision(for: $0), ownerEpoch: ownerEpoch, snapshot: $0) }
             let renderUpdateEncodeStartedAt = Date()
             let renderUpdateValue = frame.map {
                 makeRenderUpdate(for: $0, reason: reason, nativeScrollRects: resolvedScreenState.scrollRects, broadcastExport: broadcastExport)
@@ -1181,6 +1182,26 @@ extension TerminalGhosttyRendererHosting {
         }
         if forceFullForSubscriberBaseline { forceNextBroadcastFullRenderUpdate = false }
         return update
+    }
+
+    private func renderFrameRevision(for snapshot: GhosttyTerminalSnapshot) -> UInt64 {
+        if let lastScreenStateRevision, lastScreenStateRevision > renderUpdateRevision {
+            renderUpdateRevision = lastScreenStateRevision
+        } else if renderUpdateRevision == 0, let lastSessionStateRevision {
+            renderUpdateRevision = lastSessionStateRevision
+        } else if renderUpdateRevision == 0 {
+            renderUpdateRevision = 1
+        }
+
+        if let baselineRevision = lastRenderUpdateBaseline?.sessionRevision, baselineRevision > renderUpdateRevision {
+            renderUpdateRevision = baselineRevision
+        }
+        if let lastRenderUpdateBaseline, lastRenderUpdateBaseline.sessionRevision == Optional(renderUpdateRevision),
+            lastRenderUpdateBaseline.snapshot != snapshot
+        {
+            if renderUpdateRevision < UInt64.max { renderUpdateRevision += 1 }
+        }
+        return renderUpdateRevision
     }
 
     private func resolveRemoteScreenState(runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?) -> (
