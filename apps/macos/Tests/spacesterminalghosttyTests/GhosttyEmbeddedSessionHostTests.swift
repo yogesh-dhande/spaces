@@ -549,6 +549,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
+        try waitUntil(timeout: 2) { receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        receivedPayloads.removeAll()
 
         let output = Data("e".utf8)
         host.debugHandleOwnerInputActivity(byteCount: output.count)
@@ -584,6 +586,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
+        try waitUntil(timeout: 2) { receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        receivedPayloads.removeAll()
 
         let output = Data("echo hello\n".utf8)
         host.debugHandleOwnerInputActivity(byteCount: 4096)
@@ -1088,6 +1092,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "Cleared terminal screen and scrollback."))
         try waitUntil {
+            host.prepareRenderStateExport()
             guard let snapshot = host.snapshot() else { return false }
             return !GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains(marker)
         }
@@ -1125,6 +1130,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         XCTAssertTrue(host.handleKeyEvent(commandKEvent, for: owner.id))
         try waitUntil {
+            host.prepareRenderStateExport()
             guard let snapshot = host.snapshot() else { return false }
             return !GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains(marker)
         }

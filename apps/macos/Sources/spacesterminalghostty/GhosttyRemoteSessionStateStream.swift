@@ -207,7 +207,7 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
     private var socketFD: Int32 = -1
     private var readSource: DispatchSourceRead?
     private var readBuffer = Data()
-    private var pendingEvent: GhosttyRemoteSessionStatePayload?
+    private var pendingEvents: [GhosttyRemoteSessionStatePayload] = []
     private var eventDeliveryScheduled = false
 
     init(
@@ -257,7 +257,7 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         self.socketFD = -1
         readBuffer.removeAll(keepingCapacity: false)
         eventLock.lock()
-        pendingEvent = nil
+        pendingEvents.removeAll(keepingCapacity: false)
         eventDeliveryScheduled = false
         eventLock.unlock()
         source?.cancel()
@@ -292,10 +292,10 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
 
     private func enqueueEvent(_ payload: GhosttyRemoteSessionStatePayload) {
         eventLock.lock()
-        if let pendingEvent, pendingEvent.sessionID == payload.sessionID {
-            self.pendingEvent = pendingEvent.merged(with: payload)
+        if let pendingIndex = pendingEvents.indices.last, Self.canCoalescePendingEvent(pendingEvents[pendingIndex], with: payload) {
+            pendingEvents[pendingIndex] = pendingEvents[pendingIndex].merged(with: payload)
         } else {
-            pendingEvent = payload
+            pendingEvents.append(payload)
         }
         guard !eventDeliveryScheduled else {
             eventLock.unlock()
@@ -315,12 +315,21 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
     private func takePendingEvent() -> GhosttyRemoteSessionStatePayload? {
         eventLock.lock()
         defer { eventLock.unlock() }
-        guard let payload = pendingEvent else {
+        guard !pendingEvents.isEmpty else {
             eventDeliveryScheduled = false
             return nil
         }
-        pendingEvent = nil
-        return payload
+        return pendingEvents.removeFirst()
+    }
+
+    private static func canCoalescePendingEvent(_ pending: GhosttyRemoteSessionStatePayload, with update: GhosttyRemoteSessionStatePayload) -> Bool {
+        guard pending.sessionID == update.sessionID, pending.reason == update.reason else { return false }
+        switch update.reason {
+        case TerminalRemoteSessionStateReason.initial, TerminalRemoteSessionStateReason.runtimeState, TerminalRemoteSessionStateReason.resize,
+            TerminalRemoteSessionStateReason.stateChange:
+            return true
+        default: return false
+        }
     }
 }
 

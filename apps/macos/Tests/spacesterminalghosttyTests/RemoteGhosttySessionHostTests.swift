@@ -91,6 +91,40 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 runtimeSize: (columns: 60, rows: 20), force: true))
     }
 
+    @MainActor func testStateStreamClientPreservesOutputBeforeInputOutputResync() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let queue = DispatchQueue(label: "spaces.remote-state-stream-preserve-events")
+        let initialPayload = remoteStatePayload(sessionID: "stream-preserve-events", reason: TerminalRemoteSessionStateReason.initial)
+        let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        var receivedPayloads: [GhosttyRemoteSessionStatePayload] = []
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+
+        waitForCondition("initial stream payload") { receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        receivedPayloads.removeAll()
+
+        server.broadcast(
+            remoteStatePayload(
+                sessionID: "stream-preserve-events", reason: TerminalRemoteSessionStateReason.output, outputByteCount: 11, outputEndByteOffset: 42))
+        server.broadcast(remoteStatePayload(sessionID: "stream-preserve-events", reason: TerminalRemoteSessionStateReason.inputOutput))
+
+        waitForCondition("output before input-output resync") {
+            receivedPayloads.count >= 2 && receivedPayloads[0].reason == TerminalRemoteSessionStateReason.output
+                && receivedPayloads[1].reason == TerminalRemoteSessionStateReason.inputOutput
+        }
+        XCTAssertEqual(receivedPayloads[0].outputByteCount, 11)
+        XCTAssertEqual(receivedPayloads[0].outputEndByteOffset, 42)
+    }
+
     @MainActor func testRemoteHostPrefersRenderFrameSnapshotWhenAvailable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -669,6 +703,15 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
     private func renderFrame(text: String, sessionRevision: UInt64? = nil, ownerEpoch: UInt64 = 0) throws -> Data {
         try GhosttyRenderFrame.encode(.init(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text)))
+    }
+
+    private func remoteStatePayload(sessionID: String, reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil)
+        -> GhosttyRemoteSessionStatePayload
+    {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: reason, emittedAt: "2026-06-03T00:00:00Z", sessionStateRevision: nil, sessionStateFlags: nil,
+            screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: "live", workingDirectory: "/tmp/live", renderFrame: nil,
+            outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset)
     }
 
     private func normalize(_ text: String?) -> String {
