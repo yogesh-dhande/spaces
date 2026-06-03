@@ -1151,16 +1151,19 @@ extension TerminalGhosttyRendererHosting {
         for frame: GhosttyRenderFrame, reason: String, nativeScrollRects: [GhosttyRenderScrollRectOperation] = [], broadcastExport: Bool = false
     ) -> GhosttyRenderUpdate {
         let forceFullForSubscriberBaseline = broadcastExport && forceNextBroadcastFullRenderUpdate
-        let forceFull =
+        let forceFullForExplicitResync =
             reason == TerminalRemoteSessionStateReason.initial || reason == TerminalRemoteSessionStateReason.stateChange
-            || reason == TerminalRemoteSessionStateReason.inputOutput || lastRenderUpdateBaseline?.sessionRevision == frame.sessionRevision
-            || forceFullForSubscriberBaseline
+            || reason == TerminalRemoteSessionStateReason.inputOutput || reason == TerminalRemoteSessionStateReason.resize
+        let forceFull =
+            forceFullForExplicitResync || lastRenderUpdateBaseline?.sessionRevision == frame.sessionRevision || forceFullForSubscriberBaseline
         let forceFullReason =
             if reason == TerminalRemoteSessionStateReason.initial {
                 "initial_baseline"
             } else if reason == TerminalRemoteSessionStateReason.stateChange || reason == TerminalRemoteSessionStateReason.inputOutput {
                 "explicit_resync"
-            } else if forceFullForSubscriberBaseline { "subscriber_baseline_reset" } else { "baseline_already_current" }
+            } else if reason == TerminalRemoteSessionStateReason.resize { "resize_self_contained" } else if forceFullForSubscriberBaseline {
+                "subscriber_baseline_reset"
+            } else { "baseline_already_current" }
         let update = GhosttyRenderUpdateFactory.makeUpdate(
             target: frame, baseline: lastRenderUpdateBaseline, forceFull: forceFull, forceFullReason: forceFullReason,
             nativeScrollRects: nativeScrollRects)
@@ -1217,6 +1220,9 @@ extension TerminalGhosttyRendererHosting {
     var debugCurrentWorkingDirectory: String? { currentWorkingDirectory }
     func debugHandleIncomingOutput(_ data: Data) { appendOutput(data, interactiveResync: interactiveOutputGate.consumeIfActive()) }
     func debugHandleOwnerInputActivity(byteCount: Int = 1) { handleOwnerInputActivity(byteCount: byteCount) }
+    func debugCurrentRemoteSessionState(reason: String) -> GhosttyRemoteSessionStatePayload? {
+        currentRemoteSessionState(reason: reason, outputByteCount: nil, broadcastExport: true)
+    }
     func debugPersistRuntimeState(force: Bool = true) { refreshRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
     func debugSetLastKnownSurfaceSize(columns: Int, rows: Int) { lastKnownSurfaceSize = (columns, rows) }
@@ -1351,6 +1357,7 @@ extension TerminalGhosttyRendererHosting {
     var debugCurrentWorkingDirectory: String? { core.debugCurrentWorkingDirectory }
     func debugHandleIncomingOutput(_ data: Data) { core.debugHandleIncomingOutput(data) }
     func debugHandleOwnerInputActivity(byteCount: Int = 1) { core.debugHandleOwnerInputActivity(byteCount: byteCount) }
+    func debugCurrentRemoteSessionState(reason: String) -> GhosttyRemoteSessionStatePayload? { core.debugCurrentRemoteSessionState(reason: reason) }
     func debugPersistRuntimeState(force: Bool = true) { core.debugPersistRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { core.debugSetLastKnownChildPID(pid) }
     func debugHandleSessionClosed() { core.debugHandleSessionClosed() }

@@ -183,6 +183,47 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: applied.snapshot), "state changed")
     }
 
+    @MainActor func testResizeRenderUpdatesStaySelfContainedWhenCoalesced() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-resize-self-contained-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-06-03T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        let owner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-03T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-06-03T00:00:00Z")
+
+        var snapshotText = "resize frame one"
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in self.snapshot(text: snapshotText) }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
+        let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial))
+        let initialBaseline = try renderBaseline(from: initialPayload, baseline: nil)
+
+        snapshotText = "resize frame two"
+        host.applySessionStateChange(.init(flags: [.screen], revision: 2, title: nil, workingDirectory: nil))
+        let firstResizePayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.resize))
+        let firstResizeUpdate = try XCTUnwrap(firstResizePayload.decodedRenderUpdate)
+        XCTAssertEqual(firstResizeUpdate.kind, .full)
+        XCTAssertEqual(firstResizeUpdate.fallbackReason, "resize_self_contained")
+
+        snapshotText = "resize frame six"
+        host.applySessionStateChange(.init(flags: [.screen], revision: 3, title: nil, workingDirectory: nil))
+        let secondResizePayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.resize))
+        let secondResizeUpdate = try XCTUnwrap(secondResizePayload.decodedRenderUpdate)
+        XCTAssertEqual(secondResizeUpdate.kind, .full)
+        XCTAssertEqual(secondResizeUpdate.fallbackReason, "resize_self_contained")
+
+        _ = try GhosttyRenderUpdateApplier.apply(secondResizeUpdate, to: initialBaseline)
+    }
+
     @MainActor func testRemoteScreenStateVisibleContentIgnoresBlankSnapshotsAndText() {
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: snapshot(text: "   \n  "), snapshotText: nil))
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteScreenStateHasVisibleContent(snapshot: nil, snapshotText: " \n\t "))
