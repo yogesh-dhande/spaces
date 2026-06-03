@@ -137,6 +137,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private struct StreamRelay {
         let sessionID: String
         let installationID: String
+        let supportsRenderUpdateV2: Bool
         let relaySocketFD: Int32
         let relayQueue: DispatchQueue
         let relaySource: DispatchSourceRead
@@ -548,7 +549,9 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         let payload = try loadCurrentState(sessionID: sessionID)
         TerminalPerformance.logMetric(
             "mobile_bridge_state", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
-        return SpacesMobileBridgeResponse(ok: true, message: "Loaded terminal state.", sessionState: payload)
+        return SpacesMobileBridgeResponse(
+            ok: true, message: "Loaded terminal state.",
+            sessionState: Self.payloadForClient(payload, supportsRenderUpdateV2: Self.requestSupportsRenderUpdateV2(request)))
     }
 
     private func handleSubscribeRequest(_ request: SpacesMobileBridgeRequest, connection: NWConnection) throws {
@@ -594,8 +597,9 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         }
 
         streamRelays[ObjectIdentifier(connection)] = StreamRelay(
-            sessionID: sessionID, installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource,
-            heartbeatTimer: heartbeatTimer, connection: connection, sendSequencer: StreamSendSequencer())
+            sessionID: sessionID, installationID: installationID, supportsRenderUpdateV2: Self.requestSupportsRenderUpdateV2(request),
+            relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource, heartbeatTimer: heartbeatTimer, connection: connection,
+            sendSequencer: StreamSendSequencer())
 
         relaySource.resume()
         heartbeatTimer?.resume()
@@ -647,19 +651,23 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
 
     private func sendRelayedStateData(_ data: Data, firstReadUptimeNanoseconds: UInt64?, to connection: NWConnection) {
         guard let relay = streamRelays[ObjectIdentifier(connection)] else { return }
-        let attributes = streamRelayAttributes(for: data)
+        let outboundData = Self.stateStreamDataForClient(data, supportsRenderUpdateV2: relay.supportsRenderUpdateV2)
+        let attributes = streamRelayAttributes(for: outboundData)
         logBridgePerformance(
             sessionID: relay.sessionID, name: "stream_relay_read",
-            emittedUptimeNanoseconds: firstReadUptimeNanoseconds ?? DispatchTime.now().uptimeNanoseconds, count: data.count, attributes: attributes)
-        relay.sendSequencer.enqueue { [weak self, weak connection, sessionID = relay.sessionID, attributes, data] finish in
+            emittedUptimeNanoseconds: firstReadUptimeNanoseconds ?? DispatchTime.now().uptimeNanoseconds, count: outboundData.count,
+            attributes: attributes)
+        relay.sendSequencer.enqueue { [weak self, weak connection, sessionID = relay.sessionID, attributes, outboundData] finish in
             guard let self, let connection else {
                 finish(nil)
                 return
             }
             self.networkShaper.send(
-                content: data, to: connection, on: self.queue,
-                onSendBegin: { [weak self, sessionID, attributes, count = data.count] in
-                    self?.logBridgePerformance(sessionID: sessionID, name: "stream_network_send_begin", count: count, attributes: attributes)
+                content: outboundData, to: connection, on: self.queue,
+                onSendBegin: { [weak self, sessionID, attributes, count = outboundData.count] in
+                    var sendAttributes = attributes
+                    sendAttributes["network_send_bytes"] = String(count)
+                    self?.logBridgePerformance(sessionID: sessionID, name: "stream_network_send_begin", count: count, attributes: sendAttributes)
                 }
             ) { [weak self, weak connection] error in
                 self?.queue.async { [weak self, weak connection] in
@@ -671,6 +679,47 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    private static func requestSupportsRenderUpdateV2(_ request: SpacesMobileBridgeRequest) -> Bool {
+        request.renderUpdateProtocols?.contains(GhosttyRenderUpdate.binaryEncoding) == true
+    }
+
+    static func stateStreamDataForClient(_ data: Data, supportsRenderUpdateV2: Bool) -> Data {
+        var output = Data()
+        var cursor = data.startIndex
+        while cursor < data.endIndex {
+            guard let newlineIndex = data[cursor..<data.endIndex].firstIndex(of: 0x0A) else {
+                output.append(data[cursor..<data.endIndex])
+                break
+            }
+            let line = Data(data[cursor..<newlineIndex])
+            let transformedLine = stateStreamLineForClient(line, supportsRenderUpdateV2: supportsRenderUpdateV2)
+            output.append(transformedLine)
+            output.append(0x0A)
+            cursor = data.index(after: newlineIndex)
+        }
+        return output
+    }
+
+    private static func stateStreamLineForClient(_ line: Data, supportsRenderUpdateV2: Bool) -> Data {
+        guard !line.isEmpty, let payload = try? GhosttyRemoteSessionStateCodec.decodeLine(line) else { return line }
+        let transformed = payloadForClient(payload, supportsRenderUpdateV2: supportsRenderUpdateV2)
+        guard var encoded = try? GhosttyRemoteSessionStateCodec.encodeLine(transformed) else { return line }
+        if encoded.last == 0x0A { encoded.removeLast() }
+        return encoded
+    }
+
+    private static func payloadForClient(_ payload: GhosttyRemoteSessionStatePayload, supportsRenderUpdateV2: Bool)
+        -> GhosttyRemoteSessionStatePayload
+    {
+        if supportsRenderUpdateV2 {
+            guard payload.renderUpdate != nil else { return payload }
+            return payload.replacingRenderState(
+                renderFrame: nil, renderUpdate: payload.renderUpdate, renderUpdateEncoding: payload.renderUpdateEncoding)
+        }
+        guard payload.renderUpdate != nil else { return payload }
+        return payload.replacingRenderState(renderFrame: payload.renderFrame, renderUpdate: nil, renderUpdateEncoding: nil)
     }
 
     private func streamRelayAttributes(for data: Data) -> [String: String] {
@@ -686,6 +735,16 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         attributes["reason"] = payload.reason
         attributes["render_frame"] = payload.renderFrame == nil ? "0" : "1"
         attributes["frame_bytes"] = String(payload.renderFrame?.count ?? 0)
+        attributes["render_update"] = payload.renderUpdate == nil ? "0" : "1"
+        attributes["render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
+        if let update = payload.decodedRenderUpdate {
+            attributes["frame_kind"] = update.frameKindMetricValue
+            attributes["operation_count"] = String(update.operationCount)
+            attributes["changed_cell_count"] = String(update.changedCellCount)
+            attributes["scroll_operation_count"] = String(update.scrollOperationCount)
+            attributes["base_revision"] = update.baseRevision.map(String.init) ?? "nil"
+            attributes["full_frame_fallback_reason"] = update.fallbackReason ?? "none"
+        }
         attributes["target_revision"] = payload.screenStateRevision.map(String.init) ?? "nil"
         return attributes
     }

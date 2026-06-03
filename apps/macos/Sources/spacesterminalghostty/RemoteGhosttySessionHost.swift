@@ -7,6 +7,7 @@ import spacesterminalcore
     private let paths: TerminalSessionPaths
     private let terminalView: GhosttyMirrorTerminalView
     private var latestState: GhosttyRemoteSessionStatePayload?
+    private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
     private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
     private var lastSubscriptionAttemptAt: Date?
     private var attachedClient: TerminalClient?
@@ -186,9 +187,12 @@ import spacesterminalcore
         lastSubscriptionAttemptAt = Date()
     }
 
-    private func applyRemoteState(_ payload: GhosttyRemoteSessionStatePayload) {
+    private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
         let decodeStartedAt = Date()
+        let resolvedRenderState = payloadByResolvingRenderUpdate(incomingPayload)
+        let payload = resolvedRenderState.payload
         let decodedFrame = payload.decodedRenderFrame
+        let decodedUpdate = resolvedRenderState.decodedUpdate
         let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
         let dropReason = renderFrameDropReason(for: payload, decodedFrame: decodedFrame)
         latestState = latestState?.merged(with: payload) ?? payload
@@ -202,12 +206,17 @@ import spacesterminalcore
         if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
         let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
         let payloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(payload).count) ?? 0
-        let renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
+        var renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
             reason: payload.reason, frame: decodedFrame, frameByteCount: payload.renderFrame?.count, payloadByteCount: payloadBytes,
             decodeMS: decodeMS, outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
-            dropped: payload.renderFrame == nil ? nil : dropReason != nil, dropReason: dropReason, renderMode: "ghostty-mirror",
-            targetRevision: payload.screenStateRevision,
-            appliedRevision: frameForUpdate == nil ? nil : (payload.screenStateRevision ?? frameForUpdate?.sessionRevision), applyMS: applyMS)
+            dropped: payload.renderFrame == nil ? nil : dropReason != nil, dropReason: resolvedRenderState.dropReason ?? dropReason,
+            renderMode: "ghostty-mirror", frameKind: decodedUpdate?.frameKindMetricValue ?? "full", baseRevision: decodedUpdate?.baseRevision,
+            targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
+            appliedRevision: frameForUpdate == nil ? nil : (payload.screenStateRevision ?? frameForUpdate?.sessionRevision), applyMS: applyMS,
+            operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
+            scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)
+        renderFrameAttributes["render_update"] = payload.renderUpdate == nil ? "0" : "1"
+        renderFrameAttributes["render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
         SpacesMobileTerminalPerformanceLogger.emit(
             .init(
                 sessionID: payload.sessionID, source: "mac-mirror", name: "render_frame_payload_receive",
@@ -232,6 +241,46 @@ import spacesterminalcore
             return "stale_resize_grid"
         }
         return nil
+    }
+
+    private func payloadByResolvingRenderUpdate(_ payload: GhosttyRemoteSessionStatePayload) -> (
+        payload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?, dropReason: String?
+    ) {
+        guard payload.renderUpdate != nil else {
+            if let decodedFrame = payload.decodedRenderFrame { renderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: decodedFrame) }
+            return (payload, nil, nil)
+        }
+        guard let decodedUpdate = payload.decodedRenderUpdate else { return (payload, nil, "render_update_decode_failed") }
+        do {
+            let baseline = try GhosttyRenderUpdateApplier.apply(decodedUpdate, to: renderUpdateBaseline)
+            renderUpdateBaseline = baseline
+            let frame = GhosttyRenderFrame(sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
+            let renderFrame = try? GhosttyRenderFrame.encode(frame)
+            return (
+                payload.replacingRenderState(
+                    renderFrame: renderFrame, renderUpdate: payload.renderUpdate, renderUpdateEncoding: payload.renderUpdateEncoding), decodedUpdate,
+                nil
+            )
+        } catch {
+            renderUpdateBaseline = nil
+            if let decodedFrame = payload.decodedRenderFrame { renderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: decodedFrame) }
+            return (payload, decodedUpdate, Self.renderUpdateDropReason(for: error))
+        }
+    }
+
+    private static func renderUpdateDropReason(for error: Error) -> String {
+        switch error as? GhosttyRenderUpdateApplyError {
+        case .missingBaseline: "missing_baseline"
+        case .versionMismatch: "version_mismatch"
+        case .missingFullFrame: "missing_full_frame"
+        case .missingDelta: "missing_delta"
+        case .resyncRequired: "resync_required"
+        case .baseRevisionMismatch: "base_revision_mismatch"
+        case .ownerEpochMismatch: "owner_epoch_mismatch"
+        case .dimensionMismatch: "dimension_mismatch"
+        case .invalidOperation: "invalid_operation"
+        case nil: "render_update_apply_failed"
+        }
     }
 
     private func postLocalNotifications(for payload: GhosttyRemoteSessionStatePayload) {

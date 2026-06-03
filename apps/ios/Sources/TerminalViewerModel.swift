@@ -83,6 +83,7 @@ private enum TerminalViewerRenderMode: String {
     private var hasConfirmedOwnerInputReadiness = false
     private var ownerRecoveryGraceDeadline: Date?
     private var ownerRenderEpochState: GhosttyRemoteTerminalOwnerEpoch?
+    private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
     private var reportedOwnerReadyEpochID: String?
     private var reportedOwnerNonblankEpochID: String?
     @ObservationIgnored private lazy var scrollCoalescer = TerminalScrollCoalescer(frameInterval: Self.scrollCoalescingInterval) { [weak self] batch, finish in
@@ -214,6 +215,7 @@ private enum TerminalViewerRenderMode: String {
         resizeSerial = 0
         needsOwnershipSynchronizationAfterCurrentRun = false
         ownerRenderEpochState = nil
+        renderUpdateBaseline = nil
         ownerRecoveryGraceDeadline = nil
         reportedOwnerReadyEpochID = nil
         reportedOwnerNonblankEpochID = nil
@@ -1077,10 +1079,13 @@ private enum TerminalViewerRenderMode: String {
         )
     }
 
-    private func applyLatestState(_ payload: GhosttyRemoteSessionStatePayload) {
+    private func applyLatestState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
         let applyStartedAt = Date()
         let decodeStartedAt = Date()
+        let resolvedRenderState = payloadByResolvingRenderUpdate(incomingPayload)
+        let payload = resolvedRenderState.payload
         let decodedFrame = payload.decodedRenderFrame
+        let decodedUpdate = resolvedRenderState.decodedUpdate
         let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
         let wasOwner = isOwner
         let wasTakingOver = isBusy || isAwaitingTakeoverConfirmation
@@ -1106,6 +1111,7 @@ private enum TerminalViewerRenderMode: String {
             if wasOwner, let latestState {
                 self.latestState = payloadByClearingScreenState(latestState)
             }
+            if wasOwner { renderUpdateBaseline = nil }
             hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
             lastSentResizeSize = nil
@@ -1129,17 +1135,27 @@ private enum TerminalViewerRenderMode: String {
             outputByteCount: payload.outputByteCount,
             screenStateRevision: payload.screenStateRevision,
             dropped: payload.renderFrame == nil ? nil : decodedFrame == nil,
-            dropReason: payload.renderFrame != nil && decodedFrame == nil ? "decode_failed" : nil,
+            dropReason: resolvedRenderState.dropReason ?? (payload.renderFrame != nil && decodedFrame == nil ? "decode_failed" : nil),
             renderMode: renderMode,
-            targetRevision: payload.screenStateRevision,
+            frameKind: decodedUpdate?.frameKindMetricValue ?? "full",
+            baseRevision: decodedUpdate?.baseRevision,
+            targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
             appliedRevision: decodedFrame == nil && payload.renderFrame != nil ? nil : payload.screenStateRevision,
-            applyMS: TerminalPerformance.elapsedMS(since: applyStartedAt))
+            applyMS: TerminalPerformance.elapsedMS(since: applyStartedAt),
+            operationCount: decodedUpdate?.operationCount,
+            changedCellCount: decodedUpdate?.changedCellCount,
+            scrollOperationCount: decodedUpdate?.scrollOperationCount,
+            fullFrameFallbackReason: decodedUpdate?.fallbackReason,
+            droppedDeltaCount: resolvedRenderState.dropReason == nil ? nil : 1,
+            resyncCount: resolvedRenderState.didRequestResync ? 1 : nil)
         renderFrameAttributes["owner_before"] = wasOwner ? "1" : "0"
         renderFrameAttributes["owner_after"] = isOwnerAfterMerge ? "1" : "0"
+        renderFrameAttributes["render_update"] = payload.renderUpdate == nil ? "0" : "1"
+        renderFrameAttributes["render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
         logPerformanceEvent(
             name: "render_frame_payload_receive",
             elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
-            count: payload.renderFrame?.count,
+            count: payload.renderUpdate?.count ?? payload.renderFrame?.count,
             attributes: renderFrameAttributes)
         trace(
             "apply_state reason=\(payload.reason) owner_before=\(wasOwner ? 1 : 0) owner_after=\(isOwnerAfterMerge ? 1 : 0) awaiting_takeover=\(isAwaitingTakeoverConfirmation ? 1 : 0) runtime=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows)) frame=\(traceSize(columns: latestState?.renderFrameSnapshot?.columns, rows: latestState?.renderFrameSnapshot?.rows)) screen_revision=\(latestState?.screenStateRevision.map(String.init) ?? "nil") owner_client=\(traceOwnerID(latestState?.attachmentSnapshot))")
@@ -1148,6 +1164,60 @@ private enum TerminalViewerRenderMode: String {
             scheduleOwnershipSynchronization()
         }
         attemptAutomaticTakeoverIfNeeded()
+    }
+
+    private func payloadByResolvingRenderUpdate(
+        _ payload: GhosttyRemoteSessionStatePayload
+    ) -> (payload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?, dropReason: String?, didRequestResync: Bool) {
+        guard payload.renderUpdate != nil else {
+            if let decodedFrame = payload.decodedRenderFrame {
+                renderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: decodedFrame)
+            }
+            return (payload, nil, nil, false)
+        }
+        guard let decodedUpdate = payload.decodedRenderUpdate else {
+            return (payload, nil, "render_update_decode_failed", false)
+        }
+        do {
+            let baseline = try GhosttyRenderUpdateApplier.apply(decodedUpdate, to: renderUpdateBaseline)
+            renderUpdateBaseline = baseline
+            let frame = GhosttyRenderFrame(sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
+            let renderFrame = try? GhosttyRenderFrame.encode(frame)
+            return (
+                payload.replacingRenderState(
+                    renderFrame: renderFrame, renderUpdate: payload.renderUpdate, renderUpdateEncoding: payload.renderUpdateEncoding),
+                decodedUpdate,
+                nil,
+                false
+            )
+        } catch {
+            renderUpdateBaseline = nil
+            if let decodedFrame = payload.decodedRenderFrame {
+                renderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: decodedFrame)
+            }
+            let shouldRequestResync = payload.renderFrame == nil
+            if shouldRequestResync {
+                Task { [weak self] in
+                    await self?.refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "render_update_resync")
+                }
+            }
+            return (payload, decodedUpdate, Self.renderUpdateDropReason(for: error), shouldRequestResync)
+        }
+    }
+
+    private static func renderUpdateDropReason(for error: Error) -> String {
+        switch error as? GhosttyRenderUpdateApplyError {
+        case .missingBaseline: "missing_baseline"
+        case .versionMismatch: "version_mismatch"
+        case .missingFullFrame: "missing_full_frame"
+        case .missingDelta: "missing_delta"
+        case .resyncRequired: "resync_required"
+        case .baseRevisionMismatch: "base_revision_mismatch"
+        case .ownerEpochMismatch: "owner_epoch_mismatch"
+        case .dimensionMismatch: "dimension_mismatch"
+        case .invalidOperation: "invalid_operation"
+        case nil: "render_update_apply_failed"
+        }
     }
 
     func setInputSurfaceReady(_ ready: Bool) {

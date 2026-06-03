@@ -76,7 +76,8 @@ struct SpacesMobileBridgeClient: Sendable {
             command: "state",
             authToken: settings.trimmedAuthToken,
             clientApp: clientAppIdentity,
-            sessionID: sessionID
+            sessionID: sessionID,
+            renderUpdateProtocols: Self.renderUpdateProtocols
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
@@ -259,7 +260,8 @@ struct SpacesMobileBridgeClient: Sendable {
     ) throws -> SpacesMobileBridgeStreamHandle {
         let endpoint = try makeConnection()
         let request = SpacesMobileBridgeRequest(
-            command: "subscribe", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID, clientID: clientID
+            command: "subscribe", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID, clientID: clientID,
+            renderUpdateProtocols: Self.renderUpdateProtocols
         )
         let queue = DispatchQueue(label: "spaces.mobile.bridge.stream.\(sessionID).\(clientID)")
         StreamSubscription(
@@ -311,6 +313,8 @@ struct SpacesMobileBridgeClient: Sendable {
         )
     }
 
+    private static var renderUpdateProtocols: [String] { [GhosttyRenderUpdate.binaryEncoding] }
+
 }
 
 actor SpacesMobileBridgeCommandChannel {
@@ -358,6 +362,7 @@ actor SpacesMobileBridgeCommandChannel {
                 scrollHorizontal: request.scrollHorizontal,
                 scrollVertical: request.scrollVertical,
                 scrollMods: request.scrollMods,
+                renderUpdateProtocols: request.renderUpdateProtocols,
                 appendNewline: request.appendNewline
             )
         }

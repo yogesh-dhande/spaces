@@ -240,6 +240,11 @@ base_env = os.environ.copy()
 events: list[dict] = []
 stream_records: list[dict] = []
 decode_failures = 0
+render_update_encoding = "spaces.terminal.render-update.v2.binary"
+render_update_mode = os.environ.get("SPACES_TERMINAL_RENDER_UPDATE_MODE", "full").strip().lower()
+request_render_updates = render_update_mode in {"delta", "auto"}
+render_update_protocols = [render_update_encoding] if request_render_updates else []
+render_update_baselines: dict[str, dict] = {}
 
 budgets = {
     ("ios-input-latency", "local"): {"gross_p95_ms": 1000, "target_p95_ms": 150},
@@ -314,7 +319,8 @@ def last_performance_event(
                 continue
             attributes = record.get("attributes") or {}
             if require_render_frame:
-                if attributes.get("render_frame") != "1" or attributes.get("drop_reason") not in (None, "none"):
+                has_render_payload = attributes.get("render_frame") == "1" or attributes.get("render_update") == "1"
+                if not has_render_payload or attributes.get("drop_reason") not in (None, "none"):
                     continue
             candidates.append((emitted_ns, record))
         if candidates:
@@ -421,6 +427,292 @@ def decode_frame(payload: dict) -> dict | None:
         return None
 
 
+class RenderUpdateReader:
+    nil_revision = (1 << 64) - 1
+
+    def __init__(self, data: bytes):
+        self.data = data
+        self.offset = 0
+
+    def read(self, count: int) -> bytes:
+        if count < 0 or self.offset + count > len(self.data):
+            raise ValueError("truncated render update")
+        value = self.data[self.offset : self.offset + count]
+        self.offset += count
+        return value
+
+    def u8(self) -> int:
+        return self.read(1)[0]
+
+    def u16(self) -> int:
+        return int.from_bytes(self.read(2), "little", signed=False)
+
+    def u32(self) -> int:
+        return int.from_bytes(self.read(4), "little", signed=False)
+
+    def u64(self) -> int:
+        return int.from_bytes(self.read(8), "little", signed=False)
+
+    def i32(self) -> int:
+        return int.from_bytes(self.read(4), "little", signed=True)
+
+    def revision(self) -> int | None:
+        value = self.u64()
+        return None if value == self.nil_revision else value
+
+    def string(self) -> str:
+        return self.read(self.u16()).decode("utf-8")
+
+
+def decode_render_update(payload: dict) -> dict | None:
+    encoded = payload.get("renderUpdate")
+    if not encoded:
+        return None
+    reader = RenderUpdateReader(base64.b64decode(encoded))
+    if reader.read(4) != b"GRTU":
+        raise ValueError("invalid render update magic")
+    version = reader.u8()
+    if version != 2:
+        raise ValueError(f"unsupported render update version {version}")
+    kind_byte = reader.u8()
+    _ = reader.u16()
+    session_revision = reader.revision()
+    base_revision = reader.revision()
+    target_revision = reader.revision()
+    owner_epoch = reader.u64()
+    columns = reader.u16()
+    rows = reader.u16()
+    fallback_reason = reader.string() or None
+    if kind_byte == 1:
+        snapshot = read_render_update_snapshot(reader, columns, rows)
+        kind = "full"
+    elif kind_byte == 2:
+        snapshot = None
+        kind = "delta"
+    elif kind_byte == 3:
+        return {
+            "kind": "resync_required",
+            "sessionRevision": session_revision,
+            "baseRevision": base_revision,
+            "targetRevision": target_revision,
+            "ownerEpoch": owner_epoch,
+            "columns": columns,
+            "rows": rows,
+            "fallbackReason": fallback_reason,
+        }
+    else:
+        raise ValueError(f"invalid render update kind {kind_byte}")
+    update = {
+        "kind": kind,
+        "sessionRevision": session_revision,
+        "baseRevision": base_revision,
+        "targetRevision": target_revision,
+        "ownerEpoch": owner_epoch,
+        "columns": columns,
+        "rows": rows,
+        "fallbackReason": fallback_reason,
+        "snapshot": snapshot,
+    }
+    if kind == "delta":
+        update["delta"] = read_render_update_delta(reader, base_revision, target_revision, owner_epoch, columns, rows)
+    return update
+
+
+def read_render_update_cell(reader: RenderUpdateReader) -> dict:
+    return {
+        "codepoint": reader.u32(),
+        "foregroundRGB": reader.u32(),
+        "backgroundRGB": reader.u32(),
+        "flags": reader.u16(),
+    }
+
+
+def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: int) -> dict:
+    cursor_column = reader.u16()
+    cursor_row = reader.u16()
+    cursor_visible = reader.u8() != 0
+    default_foreground_rgb = reader.u32()
+    default_background_rgb = reader.u32()
+    cell_count = reader.u32()
+    return {
+        "columns": columns,
+        "rows": rows,
+        "cursorColumn": cursor_column,
+        "cursorRow": cursor_row,
+        "cursorVisible": cursor_visible,
+        "defaultForegroundRGB": default_foreground_rgb,
+        "defaultBackgroundRGB": default_background_rgb,
+        "cells": [read_render_update_cell(reader) for _ in range(cell_count)],
+    }
+
+
+def read_render_update_delta(
+    reader: RenderUpdateReader, base_revision: int | None, target_revision: int | None, owner_epoch: int, columns: int, rows: int
+) -> dict:
+    delta = {
+        "baseRevision": base_revision,
+        "targetRevision": target_revision,
+        "ownerEpoch": owner_epoch,
+        "columns": columns,
+        "rows": rows,
+        "cursorColumn": reader.u16(),
+        "cursorRow": reader.u16(),
+        "cursorVisible": reader.u8() != 0,
+        "defaultForegroundRGB": reader.u32(),
+        "defaultBackgroundRGB": reader.u32(),
+        "changedCellCount": reader.u32(),
+        "scrollRects": [],
+        "replaceCellRuns": [],
+    }
+    for _ in range(reader.u32()):
+        delta["scrollRects"].append(
+            {
+                "rowStart": reader.u16(),
+                "rowCount": reader.u16(),
+                "columnStart": reader.u16(),
+                "columnCount": reader.u16(),
+                "deltaRows": reader.i32(),
+                "deltaColumns": reader.i32(),
+            }
+        )
+    for _ in range(reader.u32()):
+        row = reader.u16()
+        column = reader.u16()
+        cell_count = reader.u16()
+        delta["replaceCellRuns"].append(
+            {
+                "row": row,
+                "column": column,
+                "cells": [read_render_update_cell(reader) for _ in range(cell_count)],
+            }
+        )
+    return delta
+
+
+def render_update_blank_cell(delta: dict) -> dict:
+    return {
+        "codepoint": 0,
+        "foregroundRGB": delta["defaultForegroundRGB"],
+        "backgroundRGB": delta["defaultBackgroundRGB"],
+        "flags": 0,
+    }
+
+
+def render_update_cell_index(row: int, column: int, columns: int) -> int:
+    return row * columns + column
+
+
+def apply_render_update_delta(delta: dict, snapshot: dict) -> dict:
+    columns = int(snapshot.get("columns") or 0)
+    rows = int(snapshot.get("rows") or 0)
+    if columns != delta["columns"] or rows != delta["rows"]:
+        raise ValueError("render update dimension mismatch")
+    cells = list(snapshot.get("cells") or [])
+    if len(cells) < columns * rows:
+        raise ValueError("render update baseline grid is incomplete")
+    cells = cells[: columns * rows]
+    blank = render_update_blank_cell(delta)
+    for operation in delta["scrollRects"]:
+        row_start = operation["rowStart"]
+        row_count = operation["rowCount"]
+        column_start = operation["columnStart"]
+        column_count = operation["columnCount"]
+        if row_start < 0 or column_start < 0 or row_start + row_count > rows or column_start + column_count > columns:
+            raise ValueError("invalid render update scroll rect")
+        original = list(cells)
+        for row in range(row_start, row_start + row_count):
+            for column in range(column_start, column_start + column_count):
+                cells[render_update_cell_index(row, column, columns)] = blank
+        for source_row in range(row_start, row_start + row_count):
+            for source_column in range(column_start, column_start + column_count):
+                destination_row = source_row + operation["deltaRows"]
+                destination_column = source_column + operation["deltaColumns"]
+                if (
+                    destination_row < row_start
+                    or destination_row >= row_start + row_count
+                    or destination_column < column_start
+                    or destination_column >= column_start + column_count
+                ):
+                    continue
+                cells[render_update_cell_index(destination_row, destination_column, columns)] = original[
+                    render_update_cell_index(source_row, source_column, columns)
+                ]
+    for run in delta["replaceCellRuns"]:
+        row = run["row"]
+        column = run["column"]
+        run_cells = run["cells"]
+        if row < 0 or row >= rows or column < 0 or column + len(run_cells) > columns:
+            raise ValueError("invalid render update cell run")
+        start = render_update_cell_index(row, column, columns)
+        cells[start : start + len(run_cells)] = run_cells
+    return {
+        "columns": columns,
+        "rows": rows,
+        "cursorColumn": delta["cursorColumn"],
+        "cursorRow": delta["cursorRow"],
+        "cursorVisible": delta["cursorVisible"],
+        "defaultForegroundRGB": delta["defaultForegroundRGB"],
+        "defaultBackgroundRGB": delta["defaultBackgroundRGB"],
+        "cells": cells,
+    }
+
+
+def encoded_render_frame(session_revision: int | None, owner_epoch: int, snapshot: dict) -> str:
+    frame = {
+        "version": 1,
+        "sessionRevision": session_revision,
+        "ownerEpoch": owner_epoch,
+        "snapshot": snapshot,
+    }
+    return base64.b64encode(json.dumps(frame, separators=(",", ":")).encode("utf-8")).decode("ascii")
+
+
+def materialize_render_update(payload: dict) -> dict:
+    session_id = payload.get("sessionID")
+    decoded_frame = decode_frame(payload)
+    if session_id and decoded_frame and decoded_frame.get("snapshot"):
+        render_update_baselines[session_id] = {
+            "sessionRevision": decoded_frame.get("sessionRevision"),
+            "ownerEpoch": decoded_frame.get("ownerEpoch") or 0,
+            "snapshot": decoded_frame["snapshot"],
+        }
+        return payload
+    if not session_id or not payload.get("renderUpdate"):
+        return payload
+    try:
+        update = decode_render_update(payload)
+    except Exception:
+        return payload
+    if update is None or update["kind"] == "resync_required":
+        return payload
+    if update["kind"] == "full":
+        baseline = {
+            "sessionRevision": update["sessionRevision"],
+            "ownerEpoch": update["ownerEpoch"],
+            "snapshot": update["snapshot"],
+        }
+    else:
+        baseline = render_update_baselines.get(session_id)
+        if not baseline:
+            return payload
+        delta = update["delta"]
+        if baseline.get("sessionRevision") != delta["baseRevision"] or baseline.get("ownerEpoch") != delta["ownerEpoch"]:
+            return payload
+        try:
+            snapshot = apply_render_update_delta(delta, baseline["snapshot"])
+        except Exception:
+            return payload
+        baseline = {
+            "sessionRevision": delta["targetRevision"],
+            "ownerEpoch": delta["ownerEpoch"],
+            "snapshot": snapshot,
+        }
+    render_update_baselines[session_id] = baseline
+    materialized = dict(payload)
+    materialized["renderFrame"] = encoded_render_frame(baseline["sessionRevision"], baseline["ownerEpoch"], baseline["snapshot"])
+    return materialized
+
+
 def plain_text(payload: dict) -> str:
     frame = decode_frame(payload)
     if not frame:
@@ -462,14 +754,20 @@ def wait_for_line(stream: subprocess.Popen, predicate, timeout: float = 10) -> t
             decode_failures += 1
             stream_records.append({"received_ns": received_ns, "bytes": line_bytes, "decode_failed": True})
             continue
+        raw_render_frame = bool(payload.get("renderFrame"))
+        raw_render_update = bool(payload.get("renderUpdate"))
+        payload = materialize_render_update(payload)
         stream_records.append(
             {
                 "received_ns": received_ns,
                 "bytes": line_bytes,
                 "decode_failed": False,
                 "reason": payload.get("reason"),
-                "render_frame": bool(payload.get("renderFrame")),
+                "render_frame": raw_render_frame,
+                "materialized_render_frame": bool(payload.get("renderFrame")),
                 "render_frame_bytes": len((payload.get("renderFrame") or "").encode("utf-8")),
+                "render_update": raw_render_update,
+                "render_update_bytes": len((payload.get("renderUpdate") or "").encode("utf-8")),
             }
         )
         if predicate(payload):
@@ -544,6 +842,7 @@ def attach_pair(session_id: str) -> tuple[str, str, subprocess.Popen]:
             "clientApp": client_app,
             "sessionID": session_id,
             "clientID": mobile_client_id,
+            "renderUpdateProtocols": render_update_protocols or None,
         }
     )
     wait_for_line(stream, lambda payload: payload.get("sessionID") == session_id, timeout=10)
@@ -581,10 +880,11 @@ def fetch_state(session_id: str) -> dict:
             "authToken": auth_token,
             "clientApp": client_app,
             "sessionID": session_id,
+            "renderUpdateProtocols": render_update_protocols or None,
         }
     )
     assert response["ok"], response
-    return response["sessionState"]
+    return materialize_render_update(response["sessionState"])
 
 
 def poll_state_contains(session_id: str, needle: str, timeout: float = 10) -> tuple[dict, int]:
@@ -926,6 +1226,7 @@ def payload_rate_summary(records: list[dict]) -> dict:
             "stale_drops": 0,
             "render_mode": "ghostty-mirror",
             "render_frame_count": 0,
+            "render_update_count": 0,
             "render_cadence_ms": summarize_values([]),
         }
     first_ns = good_records[0]["received_ns"]
@@ -946,7 +1247,8 @@ def payload_rate_summary(records: list[dict]) -> dict:
             peak_bytes = max(peak_bytes, running)
         return int(peak_bytes / window_seconds)
 
-    frame_records = [record for record in good_records if record.get("render_frame")]
+    frame_records = [record for record in good_records if record.get("render_frame") or record.get("materialized_render_frame")]
+    update_records = [record for record in good_records if record.get("render_update")]
     frame_intervals_ms = [
         round((frame_records[index]["received_ns"] - frame_records[index - 1]["received_ns"]) / 1_000_000, 3)
         for index in range(1, len(frame_records))
@@ -959,7 +1261,10 @@ def payload_rate_summary(records: list[dict]) -> dict:
         "decode_failures": decode_failures,
         "stale_drops": 0,
         "render_mode": "ghostty-mirror",
-        "render_frame_count": len(frame_records),
+        "render_frame_count": sum(1 for record in good_records if record.get("render_frame")),
+        "materialized_render_frame_count": len(frame_records),
+        "render_update_count": len(update_records),
+        "render_update_bytes": sum(record.get("render_update_bytes") or 0 for record in good_records),
         "render_cadence_ms": summarize_values(frame_intervals_ms),
     }
 
@@ -1031,7 +1336,9 @@ print(
     f"peak1s={payload_metrics['peak_1s_bytes_per_second']} B/s "
     f"peak10s={payload_metrics['peak_10s_bytes_per_second']} B/s "
     f"decode_failures={payload_metrics['decode_failures']} "
-    f"render_frames={payload_metrics['render_frame_count']}"
+    f"render_frames={payload_metrics['render_frame_count']} "
+    f"materialized_frames={payload_metrics['materialized_render_frame_count']} "
+    f"render_updates={payload_metrics['render_update_count']}"
 )
 if failures:
     for failure in failures:

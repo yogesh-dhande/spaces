@@ -252,6 +252,7 @@ extension TerminalGhosttyRendererHosting {
     private var lastSessionStateFlags: GhosttyEmbeddedSessionStateChange.Flags?
     private var lastScreenStateRevision: UInt64?
     private var lastExportedScreenStateRevision: UInt64?
+    private var lastRenderUpdateBaseline: GhosttyRenderUpdateBaseline?
     private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
     private var lastRuntimeStateWriteAt: Date?
     private var sessionStartedAt: Date?
@@ -488,6 +489,7 @@ extension TerminalGhosttyRendererHosting {
     private func advanceOwnerEpoch(reason: String) {
         ownerEpoch &+= 1
         lastResizeSerialByClientID.removeAll(keepingCapacity: true)
+        lastRenderUpdateBaseline = nil
         trace("owner_epoch_advanced reason=\(reason) owner_epoch=\(ownerEpoch) owner=\(activeOwnerClientID() ?? "nil")")
     }
 
@@ -1042,16 +1044,21 @@ extension TerminalGhosttyRendererHosting {
         stateStreamServer.broadcast(payload)
         let payloadBytes = encodedPayload?.count ?? 0
         let decodedFrame = payload.decodedRenderFrame
+        let decodedUpdate = payload.decodedRenderUpdate
         let renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
             reason: reason, frame: decodedFrame, frameByteCount: payload.renderFrame?.count, payloadByteCount: payloadBytes,
             payloadEncodeMS: payloadEncodeMS, outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision,
-            targetRevision: payload.screenStateRevision)
+            frameKind: decodedUpdate?.frameKindMetricValue ?? "full", baseRevision: decodedUpdate?.baseRevision,
+            targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision, operationCount: decodedUpdate?.operationCount,
+            changedCellCount: decodedUpdate?.changedCellCount, scrollOperationCount: decodedUpdate?.scrollOperationCount,
+            fullFrameFallbackReason: decodedUpdate?.fallbackReason)
         logMobileTakeoverPerformance(
             name: "remote_state_publish", count: payloadBytes,
             attributes: [
                 "reason": reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "render_frame": payload.renderFrame == nil ? "0" : "1",
                 "output_bytes": String(outputByteCount ?? 0), "payload_bytes": String(payloadBytes),
-                "frame_bytes": String(payload.renderFrame?.count ?? 0),
+                "frame_bytes": String(payload.renderFrame?.count ?? 0), "render_update": payload.renderUpdate == nil ? "0" : "1",
+                "render_update_bytes": String(payload.renderUpdate?.count ?? 0),
             ])
         logMobileTakeoverPerformance(
             name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: payloadBytes,
@@ -1097,15 +1104,25 @@ extension TerminalGhosttyRendererHosting {
             let renderFrameEncodeStartedAt = Date()
             let renderFrame = frame.flatMap { try? GhosttyRenderFrame.encode($0) }
             let renderFrameEncodeMS = TerminalPerformance.elapsedMS(since: renderFrameEncodeStartedAt)
+            let renderUpdateEncodeStartedAt = Date()
+            let renderUpdateValue = frame.map { makeRenderUpdate(for: $0, reason: reason) }
+            let renderUpdate = renderUpdateValue.flatMap { try? GhosttyRenderUpdateBinaryCodec.encode($0) }
+            let renderUpdateEncodeMS = TerminalPerformance.elapsedMS(since: renderUpdateEncodeStartedAt)
             if renderFrame != nil, let lastScreenStateRevision { lastExportedScreenStateRevision = lastScreenStateRevision }
             trace(
-                "render_frame_export_end reason=\(reason) render_frame=\(renderFrame == nil ? 0 : 1) frame_size=\(traceSize(columns: snapshot?.columns, rows: snapshot?.rows)) source=\(resolvedScreenState.source) owner_epoch=\(ownerEpoch)"
+                "render_frame_export_end reason=\(reason) render_frame=\(renderFrame == nil ? 0 : 1) render_update=\(renderUpdate == nil ? 0 : 1) frame_size=\(traceSize(columns: snapshot?.columns, rows: snapshot?.rows)) source=\(resolvedScreenState.source) owner_epoch=\(ownerEpoch)"
             )
             var renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
                 reason: reason, frame: frame, frameByteCount: renderFrame?.count, frameEncodeMS: renderFrameEncodeMS,
-                outputByteCount: outputByteCount, screenStateRevision: lastScreenStateRevision, targetRevision: lastScreenStateRevision)
+                outputByteCount: outputByteCount, screenStateRevision: lastScreenStateRevision,
+                frameKind: renderUpdateValue?.frameKindMetricValue ?? "full", baseRevision: renderUpdateValue?.baseRevision,
+                targetRevision: renderUpdateValue?.targetRevision ?? lastScreenStateRevision, operationCount: renderUpdateValue?.operationCount,
+                changedCellCount: renderUpdateValue?.changedCellCount, scrollOperationCount: renderUpdateValue?.scrollOperationCount,
+                fullFrameFallbackReason: renderUpdateValue?.fallbackReason)
             renderFrameAttributes["source"] = resolvedScreenState.source
             renderFrameAttributes["owner_kind"] = ownerClient?.kind.rawValue ?? "nil"
+            renderFrameAttributes["render_update_bytes"] = String(renderUpdate?.count ?? 0)
+            renderFrameAttributes["render_update_encode_ms"] = String(renderUpdateEncodeMS)
             logMobileTakeoverPerformance(
                 name: "render_frame_export_end", elapsedMS: TerminalPerformance.elapsedMS(since: snapshotExportStartedAt), count: renderFrame?.count,
                 attributes: renderFrameAttributes)
@@ -1118,7 +1135,8 @@ extension TerminalGhosttyRendererHosting {
                 sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
                 screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                 title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, renderFrame: renderFrame,
-                outputByteCount: bootstrapOutputByteCount, outputEndByteOffset: bootstrapOutputEndByteOffset)
+                outputByteCount: bootstrapOutputByteCount, outputEndByteOffset: bootstrapOutputEndByteOffset, renderUpdate: renderUpdate,
+                renderUpdateEncoding: renderUpdate == nil ? nil : GhosttyRenderUpdate.binaryEncoding)
         }
         return GhosttyRemoteSessionStatePayload(
             sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()),
@@ -1126,6 +1144,24 @@ extension TerminalGhosttyRendererHosting {
             screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, title: effectiveTitle,
             workingDirectory: effectiveWorkingDirectory, renderFrame: nil, outputByteCount: bootstrapOutputByteCount,
             outputEndByteOffset: bootstrapOutputEndByteOffset)
+    }
+
+    private func makeRenderUpdate(for frame: GhosttyRenderFrame, reason: String) -> GhosttyRenderUpdate {
+        let mode = reason == TerminalRemoteSessionStateReason.initial ? .full : GhosttyRenderUpdateMode.resolved()
+        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: lastRenderUpdateBaseline, mode: mode)
+        switch update.kind {
+        case .full: if let fullFrame = update.fullFrame { lastRenderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: fullFrame) }
+        case .delta:
+            if let appliedBaseline = try? GhosttyRenderUpdateApplier.apply(update, to: lastRenderUpdateBaseline) {
+                lastRenderUpdateBaseline = appliedBaseline
+            } else {
+                let fullUpdate = GhosttyRenderUpdate.full(frame, fallbackReason: "local_delta_apply_failed")
+                lastRenderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: frame)
+                return fullUpdate
+            }
+        case .resyncRequired: lastRenderUpdateBaseline = nil
+        }
+        return update
     }
 
     private func resolveRemoteScreenState(runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?) -> (
