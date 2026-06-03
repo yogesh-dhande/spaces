@@ -369,7 +369,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.window?.title, "session title")
         XCTAssertFalse(controller.debugShowsTerminalSurface)
         XCTAssertTrue(controller.debugShowsTextRenderer)
-        XCTAssertEqual(normalizedRenderedOutput(controller.debugRenderedOutput), "Preparing the live terminal renderer…")
+        XCTAssertEqual(normalizedRenderedOutput(controller.debugRenderedOutput), "")
         XCTAssertFalse(controller.debugRenderedOutput.contains("echo hello"))
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: preparing owner surface")
     }
@@ -836,7 +836,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
                 updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
         let controller = makeGhosttyController(sessionID: "session-owner-status", paths: paths)
 
-        XCTAssertTrue(controller.debugShowsHeader)
+        XCTAssertFalse(controller.debugShowsHeader)
         XCTAssertTrue(controller.debugShowsSummaryLabel)
         XCTAssertTrue(controller.debugShowsStateLabel)
         XCTAssertEqual(controller.debugState, "state: exited    child: 22")
@@ -1313,7 +1313,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         controller.debugForceRefreshSkippingOwnerAttach()
 
-        XCTAssertTrue(focusVisibilityStates.isEmpty)
+        XCTAssertEqual(focusVisibilityStates, [false])
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror")
     }
 

@@ -352,11 +352,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case open(hidesApp: Bool)
     }
 
-    private struct OpenWorkspaceTerminalSnapshotResult: Sendable {
-        let sessionID: String
-        let action: ExternalWindowAction
-    }
-
     private enum WindowShortcutExecutionOutcome: Sendable {
         case focused(kind: String, recentFocusIdentity: String, hidesApp: Bool)
         case opened(kind: String, hidesApp: Bool)
@@ -872,7 +867,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } catch {}
     }
 
-    private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) {
+    @discardableResult private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) -> Int? {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
@@ -921,12 +916,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
                     detail: "route=summoned_owner request_id=\(requestID)")
             }
+            return controller.window?.windowNumber
         } catch {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
                 detail: "mode=\(mode.rawValue)\(requestDetail)")
             showError(error)
-            return
+            return nil
         }
     }
 
@@ -1514,18 +1510,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     notice = outcome.notice
                 }
                 return .success(.init(notice: notice))
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func openWorkspaceTerminalSnapshot(workspaceID: String) async -> Result<OpenWorkspaceTerminalSnapshotResult, Error> {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowOpener: { _, _ in })
-                let sessionID = try orchestrator.openWorkspaceTerminal(workspaceID: workspaceID)
-                return .success(.init(sessionID: sessionID, action: .open(hidesApp: false)))
             } catch { return .failure(error) }
         }.value
     }
@@ -7366,20 +7350,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { completion?() }
-            let result = await Self.openWorkspaceTerminalSnapshot(workspaceID: workspaceID)
-            let elapsedMS = windowShortcutElapsedMS(since: startedAt)
-            switch result {
-            case .success(let result):
-                logPerfMetric(
-                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: true,
-                    detail: "route=\(route.rawValue)")
-                openTerminalSessionWindow(sessionID: result.sessionID, mode: .owner)
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspaceID)
+                Task.detached(priority: .userInitiated) {
+                    do {
+                        let store = try SQLiteStore(path: db)
+                        let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowOpener: { _, _ in })
+                        try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation)
+                    } catch { NSLog("spaces: workspace terminal launch failed: \(String(describing: error))") }
+                }
+                if let windowID = openTerminalSessionWindow(sessionID: reservation.sessionID, mode: .owner) {
+                    try? orchestrator.persistBuiltInTerminalWindowID(sessionID: reservation.sessionID, windowID: windowID)
+                }
                 reloadData()
-                hideAfterSuccessfulExternalWindowAction(result.action)
-            case .failure(let error):
+                hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
                 logPerfMetric(
-                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,
-                    detail: "route=\(route.rawValue)")
+                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: true, detail: "route=\(route.rawValue)")
+            } catch {
+                logPerfMetric(
+                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: false, detail: "route=\(route.rawValue)")
                 showError(error)
             }
         }

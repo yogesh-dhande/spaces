@@ -2537,10 +2537,20 @@ final class OrchestratorTests: XCTestCase {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
             FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: timestamp),
+                paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
-                    state: .running, updatedAt: "now"), paths: paths)
+                    state: .running, updatedAt: timestamp), paths: paths)
+            let ownerClient = TerminalClient(
+                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+                connectedAt: timestamp)
+            try TerminalSessionPersistence.attachClient(sessionID: sessionID, client: ownerClient, mode: .owner, paths: paths, attachedAt: timestamp)
+            try TerminalSessionPersistence.detachClient(id: ownerClient.id, paths: paths, detachedAt: timestamp)
 
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
                 try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
@@ -3522,7 +3532,6 @@ final class OrchestratorTests: XCTestCase {
         }
 
         let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
-        XCTAssertNil(runningProcess.pid)
         XCTAssertEqual(runningProcess.terminalApp, TerminalHost.spaces.appName)
         XCTAssertEqual(runningProcess.terminalTrackingID, runningProcess.terminalNativeID)
 

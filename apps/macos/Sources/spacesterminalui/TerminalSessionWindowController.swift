@@ -153,6 +153,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var pendingFocusObservationStartedAt: Date?
     private var pendingFocusObservationRequestID: String?
     private var pendingFocusObservationRoute: String?
+    private var deferredInitialPresentationTask: Task<Void, Never>?
+    private var isDeferringInitialOwnerPresentation = false
+    private static let deferredInitialOwnerPresentationTimeout: TimeInterval = 5
 
     public convenience init(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
@@ -281,6 +284,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             restorePersistedWindowFrame(window)
             constrainWindowToVisibleFrame(window)
         }
+        if shouldDeferInitialOwnerPresentation(wasVisible: wasVisible) {
+            startDeferredInitialOwnerPresentation(window: window, startedAt: startedAt, requestID: requestID, route: route)
+            return
+        }
         let presentStartedAt = Date()
         presentWindow(window, forceFrontmost: !wasVisible)
         logShowStage(startedAt: presentStartedAt, requestID: requestID, detail: "stage=present_window visible=\(wasVisible ? 1 : 0)")
@@ -297,6 +304,92 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         assignPreferredFirstResponder()
         logShowStage(startedAt: firstResponderStartedAt, requestID: requestID, detail: "stage=assign_first_responder")
         logFocusMetric("terminal_window_show", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "show")")
+    }
+
+    private func shouldDeferInitialOwnerPresentation(wasVisible: Bool) -> Bool {
+        !Self.isRunningUnderXCTest && !wasVisible && launchConfiguration != nil && backend == .ghosttyEmbedded && preferredAttachmentMode == .owner
+            && !ownerRendererReadyForInitialPresentation()
+    }
+
+    private func ownerRendererReadyForInitialPresentation() -> Bool {
+        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner else { return true }
+        return visibleRenderer == .ghosttyOwner && ghosttyRendererHost?.hasRenderableSurface() == true
+    }
+
+    private func startDeferredInitialOwnerPresentation(window: NSWindow, startedAt: Date, requestID: String?, route: String?) {
+        deferredInitialPresentationTask?.cancel()
+        isDeferringInitialOwnerPresentation = true
+        updateRendererVisibility()
+        let attachSurfaceStartedAt = Date()
+        ensureGhosttyHostAttached(requestID: requestID, reason: "deferred_show_prepare", requestWindowFocus: false)
+        logShowStage(startedAt: attachSurfaceStartedAt, requestID: requestID, detail: "stage=attach_surface deferred=1")
+        let refreshStartedAt = Date()
+        refreshNow(allowGhosttyOwnerAttach: false)
+        logShowStage(startedAt: refreshStartedAt, requestID: requestID, detail: "stage=refresh_deferred")
+        if ownerRendererReadyForInitialPresentation() {
+            completeDeferredInitialOwnerPresentation(window: window, startedAt: startedAt, requestID: requestID, route: route)
+            return
+        }
+        let deadline = Date().addingTimeInterval(Self.deferredInitialOwnerPresentationTimeout)
+        deferredInitialPresentationTask = Task { @MainActor [weak self, weak window] in
+            while !Task.isCancelled {
+                guard let self, let window, !self.didCloseWindow else { return }
+                self.attachLocalClientIfNeeded()
+                self.ensureGhosttyHostAttached(requestID: requestID, reason: "deferred_show_wait", requestWindowFocus: false)
+                self.refreshNow(allowGhosttyOwnerAttach: false)
+                if self.ownerRendererReadyForInitialPresentation() {
+                    self.completeDeferredInitialOwnerPresentation(window: window, startedAt: startedAt, requestID: requestID, route: route)
+                    return
+                }
+                if Date() >= deadline {
+                    self.presentDeferredInitialOwnerPresentationError(window: window, startedAt: startedAt, requestID: requestID, route: route)
+                    return
+                }
+                do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+            }
+        }
+    }
+
+    private func completeDeferredInitialOwnerPresentation(window: NSWindow, startedAt: Date, requestID: String?, route: String?) {
+        deferredInitialPresentationTask?.cancel()
+        deferredInitialPresentationTask = nil
+        isDeferringInitialOwnerPresentation = false
+        let postRefreshStartedAt = Date()
+        refreshNow()
+        window.contentView?.layoutSubtreeIfNeeded()
+        terminalContainer.layoutSubtreeIfNeeded()
+        logShowStage(startedAt: postRefreshStartedAt, requestID: requestID, detail: "stage=refresh_before_present deferred=1")
+        let presentStartedAt = Date()
+        presentWindow(window, forceFrontmost: true)
+        logShowStage(startedAt: presentStartedAt, requestID: requestID, detail: "stage=present_window visible=0 deferred=1")
+        syncGhosttyOwnerFocus(reason: "deferred_show_present", requestWindowFocus: true)
+        let startRefreshingStartedAt = Date()
+        startRefreshing()
+        logShowStage(startedAt: startRefreshingStartedAt, requestID: requestID, detail: "stage=start_refresh deferred=1")
+        let firstResponderStartedAt = Date()
+        assignPreferredFirstResponder()
+        logShowStage(startedAt: firstResponderStartedAt, requestID: requestID, detail: "stage=assign_first_responder deferred=1")
+        logFocusMetric("terminal_window_show", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "show") deferred=1")
+    }
+
+    private func presentDeferredInitialOwnerPresentationError(window: NSWindow, startedAt: Date, requestID: String?, route: String?) {
+        deferredInitialPresentationTask?.cancel()
+        deferredInitialPresentationTask = nil
+        isDeferringInitialOwnerPresentation = false
+        let message =
+            "The live terminal renderer did not become ready within \(Int(Self.deferredInitialOwnerPresentationTimeout)) seconds.\n\nThe terminal session may still be running, but Spaces could not attach the native renderer. Close this window and reopen the terminal to retry."
+        shouldShowOwnerStateLabel = true
+        visibleRenderer = .textView
+        updateOutputPlainText(message)
+        updateInputStatus(message: "Live terminal renderer failed to become ready.", isError: true)
+        updateRendererVisibility()
+        let presentStartedAt = Date()
+        presentWindow(window, forceFrontmost: true)
+        logShowStage(startedAt: presentStartedAt, requestID: requestID, detail: "stage=present_window_error deferred=1")
+        assignPreferredFirstResponder()
+        logFocusMetric(
+            "terminal_window_show", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "show") deferred=1 error=renderer_not_ready"
+        )
     }
 
     public func focusWindow(requestID: String? = nil, route: String? = nil) {
@@ -706,7 +799,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         updateRendererVisibility()
     }
 
-    private func ensureGhosttyHostAttached(requestID: String? = nil, reason: String) {
+    private func ensureGhosttyHostAttached(requestID: String? = nil, reason: String, requestWindowFocus: Bool = true) {
         guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, let launchConfiguration else { return }
         let startedAt = Date()
         do {
@@ -715,10 +808,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             let host = resolvedGhosttySessionHost(for: launchConfiguration)
             switchGhosttySessionHostIfNeeded(host)
             try host.attach(client: client, mode: preferredAttachmentMode, into: terminalContainer)
-            isClientAttached = true
+            if !usesCustomAttachClientAction { isClientAttached = true }
             lastObservedAttachmentMode = preferredAttachmentMode
             lastObservedOwnerClientID = host.activeOwnerClientID()
-            syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: preferredAttachmentMode == .owner)
+            syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: requestWindowFocus && preferredAttachmentMode == .owner)
             completeOwnershipTransitionIfNeeded(target: .owner, renderer: "ghostty_owner")
             updateRendererVisibility()
             logFocusMetric(
@@ -832,6 +925,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
             lastObservedRuntimeState = runtimeState
             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
+            if backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, allowGhosttyOwnerAttach { attachLocalClientIfNeeded() }
             let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
             let currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
             let isOwner = currentOwnerClient?.id == client.id || (currentOwnerClient == nil && preferredAttachmentMode == .owner)
@@ -1108,20 +1202,27 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             terminalContainer.isHidden = true
         }
         let isGhosttyOwner = visibleRenderer == .ghosttyOwner && preferredAttachmentMode == .owner
+        let isFullBleedOwnerPreparation = isDeferringInitialOwnerPresentation && preferredAttachmentMode == .owner
+        if isFullBleedOwnerPreparation { outputView.string = "" }
         let shouldCollapseOwnerChrome = isGhosttyOwner && !shouldShowOwnerStateLabel
         titleLabel.isHidden = isGhosttyOwner
         summaryLabel.isHidden = shouldCollapseOwnerChrome
         rendererLabel.isHidden = isGhosttyOwner
         stateLabel.isHidden = shouldCollapseOwnerChrome
-        outputScrollView.borderType = backend == .ghosttyEmbedded && visibleRenderer != .textView ? .noBorder : .bezelBorder
-        bodyStackView.spacing = isGhosttyOwner ? 0 : 12
-        bodyLeadingConstraint?.constant = isGhosttyOwner ? 0 : 16
-        bodyTrailingConstraint?.constant = isGhosttyOwner ? 0 : -16
-        bodyTopToContentConstraint?.constant = isGhosttyOwner ? 0 : 12
-        bodyBottomToContentConstraint?.constant = isGhosttyOwner ? 0 : -16
+        let isFullBleed = isGhosttyOwner || isFullBleedOwnerPreparation
+        outputScrollView.borderType = isFullBleed || (backend == .ghosttyEmbedded && visibleRenderer != .textView) ? .noBorder : .bezelBorder
+        outputScrollView.drawsBackground = !isFullBleedOwnerPreparation
+        outputView.drawsBackground = !isFullBleedOwnerPreparation
+        bodyStackView.spacing = isFullBleed ? 0 : 12
+        bodyLeadingConstraint?.constant = isFullBleed ? 0 : 16
+        bodyTrailingConstraint?.constant = isFullBleed ? 0 : -16
+        bodyTopToContentConstraint?.constant = isFullBleed ? 0 : 12
+        bodyBottomToContentConstraint?.constant = isFullBleed ? 0 : -16
         outputView.textContainerInset =
-            backend == .ghosttyEmbedded && visibleRenderer != .textView ? NSSize(width: 14, height: 14) : NSSize(width: 8, height: 10)
-        outputView.textContainer?.lineFragmentPadding = backend == .ghosttyEmbedded && visibleRenderer != .textView ? 0 : 5
+            isFullBleedOwnerPreparation
+            ? .zero : backend == .ghosttyEmbedded && visibleRenderer != .textView ? NSSize(width: 14, height: 14) : NSSize(width: 8, height: 10)
+        outputView.textContainer?.lineFragmentPadding =
+            isFullBleedOwnerPreparation ? 0 : backend == .ghosttyEmbedded && visibleRenderer != .textView ? 0 : 5
         updateHeaderLayoutVisibility()
     }
 
@@ -1155,8 +1256,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     }
 
     private func updateHeaderLayoutVisibility() {
-        // In the simplified viewer takeover shell, hide the detail header and the
-        // output body entirely so only the centered message and Take Over button show.
+        // Session metadata remains available through debug accessors, but regular
+        // terminal windows do not show a detail header.
         if isViewerTakeoverShellActive {
             headerStackView.isHidden = true
             bodyStackView.isHidden = true
@@ -1168,12 +1269,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             return
         }
         bodyStackView.isHidden = false
-        let hasVisibleHeaderContent = [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel].contains {
-            !$0.isHidden
-        }
-        headerStackView.isHidden = !hasVisibleHeaderContent
-        bodyTopToHeaderConstraint?.isActive = hasVisibleHeaderContent
-        bodyTopToContentConstraint?.isActive = !hasVisibleHeaderContent
+        headerStackView.isHidden = true
+        bodyTopToHeaderConstraint?.isActive = false
+        bodyTopToContentConstraint?.isActive = true
         bodyBottomToTakeoverConstraint?.isActive = !takeoverContainerView.isHidden
         bodyBottomToContentConstraint?.isActive = takeoverContainerView.isHidden
     }
@@ -1341,7 +1439,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     private func currentGhosttyStatusMessage(isOwner: Bool, runtimeState: TerminalSessionRuntimeState?, ownerClient: TerminalClient?) -> String {
         if isInteractiveRuntimeState(runtimeState) {
-            if isOwner { return "Preparing the live terminal renderer…" }
+            if isOwner { return "" }
             let ownerLabel = ownerClient.map(Self.displayLabel(for:)) ?? "another client"
             if takeoverTask != nil || preferredAttachmentMode == .owner { return "Waiting for terminal ownership…\nCurrent owner: \(ownerLabel)" }
             return "Live terminal rendering is limited to the active owner.\nCurrent owner: \(ownerLabel)"

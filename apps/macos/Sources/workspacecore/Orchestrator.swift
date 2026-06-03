@@ -144,6 +144,17 @@ public final class WorkspaceOrchestrator {
         let outputPath: String
     }
 
+    public struct WorkspaceTerminalLaunchReservation: Sendable {
+        public let sessionID: String
+        let workspaceID: String
+        let windowRecordID: String
+        let appName: String
+        let title: String
+        let launchConfiguration: TerminalSessionLaunchConfiguration
+        let createdAt: String
+        let orderIndex: Int
+    }
+
     private enum ManagedTerminalFocusResult {
         case existingWindow
         case trackedTerminal
@@ -1482,7 +1493,7 @@ public final class WorkspaceOrchestrator {
             guard let windowID = window.windowID, let liveWindow = liveWindowsByID[windowID] else { continue }
             let refreshedName = window.name
             let refreshedDetail = liveWindow.title
-            let refreshedApp = liveWindow.app
+            let refreshedApp = terminalHost(for: window.app) == .spaces ? TerminalHost.spaces.appName : liveWindow.app
             guard window.name != refreshedName || window.detail != refreshedDetail || window.app != refreshedApp else { continue }
             let refreshedWindow = WindowRecord(
                 id: window.id, workspaceID: window.workspaceID, app: refreshedApp, name: refreshedName, detail: refreshedDetail,
@@ -1525,29 +1536,90 @@ public final class WorkspaceOrchestrator {
     }
 
     @discardableResult public func openWorkspaceTerminal(workspaceID: String) throws -> String {
+        let reservation = try reserveWorkspaceTerminalLaunch(workspaceID: workspaceID)
+        try finishReservedWorkspaceTerminalLaunch(reservation)
+        return reservation.sessionID
+    }
+
+    public func reserveWorkspaceTerminalLaunch(workspaceID: String) throws -> WorkspaceTerminalLaunchReservation {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         let terminalHost = try configuredTerminalHost()
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
+        let sessionID = UUID().uuidString
         let env = terminalLaunchEnvironment(
-            base: buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts), terminalHost: terminalHost,
-            includeInheritedPath: false)
+            base: buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts).merging([Self.terminalTrackingIDEnvVar: sessionID]
+            ) { _, new in new }, terminalHost: terminalHost, includeInheritedPath: false)
         let generatedTitle = try generatedAdHocTerminalWindowName(workspaceID: workspace.id)
         let command = commandPrefixedWithShellEnvironment(interactiveShellCommand(cwd: workspace.dir), env: env)
-        let session = try launchSpacesTerminalSession(
-            title: generatedTitle, workingDirectory: workspace.dir, command: command, showMode: .owner, lifetimePolicy: .persistent)
+        let createdAt = nowISO8601()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: generatedTitle, workingDirectory: workspace.dir,
+            shell: terminalShellPathOverride() ?? "/bin/zsh", command: command, createdAt: createdAt)
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+        FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
         let existing = try store.windows(workspaceID: workspace.id)
         let nextOrder = Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200)
+        let windowRecordID = UUID().uuidString
+        let appName = terminalAppName(for: terminalHost)
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: generatedTitle, detail: nil,
-                targetURL: nil, windowID: session.windowID, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID,
-                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
+                id: windowRecordID, workspaceID: workspace.id, app: appName, name: generatedTitle, detail: nil, targetURL: nil, windowID: nil,
+                terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil,
+                role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
         if !workspace.isRunning {
             let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
             try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
         }
-        return session.sessionID
+        return WorkspaceTerminalLaunchReservation(
+            sessionID: sessionID, workspaceID: workspace.id, windowRecordID: windowRecordID, appName: appName, title: generatedTitle,
+            launchConfiguration: launchConfiguration, createdAt: createdAt, orderIndex: nextOrder)
+    }
+
+    @discardableResult public func finishReservedWorkspaceTerminalLaunch(_ reservation: WorkspaceTerminalLaunchReservation) throws -> String {
+        do {
+            guard try reservedWorkspaceTerminalWindowExists(reservation) else { return reservation.sessionID }
+            let session = try launchSpacesTerminalSession(
+                title: reservation.launchConfiguration.title, workingDirectory: reservation.launchConfiguration.workingDirectory,
+                command: reservation.launchConfiguration.command, showMode: .owner, backend: reservation.launchConfiguration.backend,
+                readinessPolicy: .stableChildPID, sessionID: reservation.sessionID, lifetimePolicy: reservation.launchConfiguration.lifetimePolicy)
+            guard try reservedWorkspaceTerminalWindowExists(reservation) else {
+                builtInTerminalSessionTerminator(reservation.sessionID)
+                return session.sessionID
+            }
+            let existingWindow = try store.windows(workspaceID: reservation.workspaceID).first { $0.id == reservation.windowRecordID }
+            try store.upsert(
+                window: WindowRecord(
+                    id: reservation.windowRecordID, workspaceID: reservation.workspaceID, app: reservation.appName, name: reservation.title,
+                    detail: nil, targetURL: nil, windowID: session.windowID ?? existingWindow?.windowID, terminalTrackingID: session.sessionID,
+                    terminalNativeID: session.sessionID, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
+                    orderIndex: reservation.orderIndex, lastSeenAt: nowISO8601()))
+            return session.sessionID
+        } catch {
+            try? store.deleteWindow(id: reservation.windowRecordID)
+            builtInTerminalWindowCloser(reservation.sessionID)
+            throw error
+        }
+    }
+
+    private func reservedWorkspaceTerminalWindowExists(_ reservation: WorkspaceTerminalLaunchReservation) throws -> Bool {
+        try store.windows(workspaceID: reservation.workspaceID).contains { $0.id == reservation.windowRecordID }
+    }
+
+    public func persistBuiltInTerminalWindowID(sessionID: String, windowID: Int) throws {
+        guard windowID > 0, let workspaceID = try store.workspaceIDForTerminalSession(sessionID) else { return }
+        guard (try? yabai.listWindows().contains { $0.id == windowID }) ?? false else { return }
+        let now = nowISO8601()
+        for window in try store.windows(workspaceID: workspaceID) where (window.terminalNativeID ?? window.terminalTrackingID) == sessionID {
+            try store.upsert(
+                window: WindowRecord(
+                    id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail,
+                    targetURL: window.targetURL, windowID: windowID, terminalTrackingID: window.terminalTrackingID,
+                    terminalNativeID: window.terminalNativeID, terminalContainerID: window.terminalContainerID, itermTabIndex: window.itermTabIndex,
+                    tmuxWindowID: window.tmuxWindowID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: now))
+        }
     }
 
     public func focusWorkspace(workspaceID: String) throws {
@@ -2901,6 +2973,7 @@ public final class WorkspaceOrchestrator {
             shell: terminalShellPathOverride() ?? "/bin/zsh", command: command, createdAt: nowISO8601())
 
         let snapshot = bestEffortYabaiWindowSnapshot()
+        builtInTerminalWindowOpener(sessionID, showMode)
         let waitStartedAt = currentDate()
         let sessionSummary: TerminalServiceSessionSummary
         do {
@@ -2914,12 +2987,17 @@ public final class WorkspaceOrchestrator {
             logTerminalPerfMetric(
                 "terminal_session_wait_ready", target: "session=\(sessionID)", detail: "policy=\(readinessPolicy.rawValue)",
                 elapsedMS: elapsedMS(since: waitStartedAt), success: false)
+            builtInTerminalWindowCloser(sessionID)
             throw error
         }
-        builtInTerminalWindowOpener(sessionID, showMode)
+        let windowCaptureDeadline = Date().addingTimeInterval(2)
+        var windowID = bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: TerminalHost.spaces.appName)
+        while windowID == nil, Date() < windowCaptureDeadline {
+            Thread.sleep(forTimeInterval: 0.05)
+            windowID = bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: TerminalHost.spaces.appName)
+        }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         let refreshedRuntimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
-        let windowID = bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: TerminalHost.spaces.appName)
         return SpacesTerminalSessionHandle(
             sessionID: sessionID, childPID: (refreshedRuntimeState?.childPID ?? sessionSummary.childPID).map(Int.init), windowID: windowID,
             outputPath: sessionSummary.outputPath)
@@ -4548,9 +4626,10 @@ public final class WorkspaceOrchestrator {
         guard window.role == "terminal", terminalHost(for: window.app) == .spaces else { return false }
         guard let sessionID = window.terminalNativeID ?? window.terminalTrackingID, !sessionID.isEmpty else { return false }
         if builtInSessionBelongsToRunningProcess(sessionID: sessionID, workspaceID: window.workspaceID) {
-            return builtInSessionIsStillLive(sessionID: sessionID)
+            return builtInSessionIsStillLive(sessionID: sessionID) || builtInSessionLaunchIsPending(sessionID: sessionID)
         }
-        return builtInSessionIsStillLive(sessionID: sessionID) && builtInSessionHasActiveAttachments(sessionID: sessionID)
+        if builtInSessionIsStillLive(sessionID: sessionID) && builtInSessionHasActiveAttachments(sessionID: sessionID) { return true }
+        return builtInSessionLaunchIsPendingBeforeOwnerAttachment(sessionID: sessionID)
     }
 
     private func builtInSessionIsStillLive(sessionID: String) -> Bool {
@@ -4561,6 +4640,31 @@ public final class WorkspaceOrchestrator {
         guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return false }
         guard runtimeState.state == .starting || runtimeState.state == .running else { return false }
         return isProcessAlive(pid: Int(runtimeState.servicePID))
+    }
+
+    private func builtInSessionLaunchIsPending(sessionID: String, now: Date = Date()) -> Bool {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
+        if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths),
+            runtimeState.state != .starting && runtimeState.state != .running
+        {
+            return false
+        }
+        guard let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
+            let createdAt = ISO8601DateFormatter().date(from: launchConfiguration.createdAt)
+        else { return false }
+        let age = now.timeIntervalSince(createdAt)
+        return age >= -5 && age < 60
+    }
+
+    private func builtInSessionLaunchIsPendingBeforeOwnerAttachment(sessionID: String, now: Date = Date()) -> Bool {
+        guard !builtInSessionHasRecordedOwnerAttachment(sessionID: sessionID) else { return false }
+        return builtInSessionLaunchIsPending(sessionID: sessionID, now: now)
+    }
+
+    private func builtInSessionHasRecordedOwnerAttachment(sessionID: String) -> Bool {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
+        guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) else { return false }
+        return snapshot.attachments.contains { $0.mode == .owner }
     }
 
     private func builtInAgentSessionIsStillLive(_ record: AgentWindowRecord) -> Bool {
@@ -5239,6 +5343,22 @@ public final class WorkspaceOrchestrator {
         return nil
     }
 
+    private func ignoresUntrustedSpacesAgentYabaiWindowID(provider: AgentProvider, terminalTrackingID: String?, terminalNativeID: String?) -> Bool {
+        func isBuiltInSpacesTerminalIdentity(_ value: String?) -> Bool {
+            guard let value, !value.isEmpty else { return false }
+            return UUID(uuidString: value) != nil
+        }
+
+        return provider == .spaces && [terminalTrackingID, terminalNativeID].contains(where: isBuiltInSpacesTerminalIdentity)
+    }
+
+    private func trustedAgentYabaiWindowID(provider: AgentProvider, terminalTrackingID: String?, terminalNativeID: String?, yabaiWindowID: Int?)
+        -> Int?
+    {
+        ignoresUntrustedSpacesAgentYabaiWindowID(provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID)
+            ? nil : yabaiWindowID
+    }
+
     private func matchedWorkspaceProcessForAgent(
         workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, yabaiWindowID: Int?, tmuxWindowID: String?
     ) throws -> RunningProcessRecord? {
@@ -5296,12 +5416,15 @@ public final class WorkspaceOrchestrator {
         workspaceID: String, provider: AgentProvider, label: String?, terminalTrackingID: String?, terminalNativeID: String?, yabaiWindowID: Int?,
         tmuxWindowID: String?
     ) throws -> WindowRecord? {
+        let trustedYabaiWindowID = trustedAgentYabaiWindowID(
+            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID, yabaiWindowID: yabaiWindowID)
+
         if let trackedWindow = try matchedTrackedWindowForAgent(
-            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID,
+            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: trustedYabaiWindowID,
             tmuxWindowID: tmuxWindowID)
         {
-            let liveWindow = yabaiWindowID.flatMap { (try? yabai.window(id: $0)) ?? nil }
-            let resolvedWindowID = yabaiWindowID ?? trackedWindow.windowID
+            let liveWindow = trustedYabaiWindowID.flatMap { (try? yabai.window(id: $0)) ?? nil }
+            let resolvedWindowID = trustedYabaiWindowID ?? trackedWindow.windowID
             let resolvedSessionID = terminalTrackingID ?? trackedWindow.terminalTrackingID
             let resolvedNativeID = terminalNativeID ?? trackedWindow.terminalNativeID
             let resolvedTmuxWindowID = tmuxWindowID ?? trackedWindow.tmuxWindowID
@@ -5319,7 +5442,7 @@ public final class WorkspaceOrchestrator {
             }
             return trackedWindow
         }
-        guard let yabaiWindowID else { return nil }
+        guard let yabaiWindowID = trustedYabaiWindowID else { return nil }
         let liveWindow = (try? yabai.window(id: yabaiWindowID)) ?? nil
         let existing = try store.windows(workspaceID: workspaceID)
         let record = WindowRecord(
@@ -5399,15 +5522,19 @@ public final class WorkspaceOrchestrator {
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let existingAgentWindows = try store.agentWindows(workspaceID: workspaceID)
+        let trustedYabaiWindowID = trustedAgentYabaiWindowID(
+            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID, yabaiWindowID: yabaiWindowID)
         let matchedProcess = try matchedWorkspaceProcessForAgent(
-            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID,
+            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: trustedYabaiWindowID,
             tmuxWindowID: tmuxWindowID)
         let resolvedTmuxWindowID = tmuxWindowID ?? matchedProcess?.tmuxWindowID
         let resolvedTerminalNativeID = matchedProcess?.terminalNativeID ?? terminalNativeID
+        let resolvedTrustedYabaiWindowID = trustedAgentYabaiWindowID(
+            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: resolvedTerminalNativeID, yabaiWindowID: yabaiWindowID)
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: resolvedTerminalNativeID, yabaiWindowID: yabaiWindowID, tmuxWindowID: resolvedTmuxWindowID)
-        let resolvedWindowID = trackedWindow?.windowID ?? yabaiWindowID
+            terminalNativeID: resolvedTerminalNativeID, yabaiWindowID: resolvedTrustedYabaiWindowID, tmuxWindowID: resolvedTmuxWindowID)
+        let resolvedWindowID = trackedWindow?.windowID ?? resolvedTrustedYabaiWindowID
         let finalTerminalNativeID = trackedWindow?.terminalNativeID ?? resolvedTerminalNativeID
         let allowConfiguredSpacesLabelFallback: Bool
         if provider == .spaces {
@@ -5428,7 +5555,11 @@ public final class WorkspaceOrchestrator {
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
-                    runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, windowID: resolvedWindowID ?? existing.windowID,
+                    runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
+                    windowID: resolvedWindowID
+                        ?? (ignoresUntrustedSpacesAgentYabaiWindowID(
+                            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: finalTerminalNativeID)
+                            ? nil : existing.windowID),
                     trackingID: terminalTrackingID ?? finalTerminalNativeID ?? resolvedTmuxWindowID ?? existing.terminalTrackingID),
                 sessionKey: codexThreadID ?? existing.codexThreadID,
                 claimedLauncherName: claimedLauncherName ?? existing.claimedLauncherName ?? existing.label, status: status,
@@ -5473,15 +5604,19 @@ public final class WorkspaceOrchestrator {
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
+        let trustedYabaiWindowID = trustedAgentYabaiWindowID(
+            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID, yabaiWindowID: yabaiWindowID)
         let matchedProcess = try matchedWorkspaceProcessForAgent(
-            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID,
+            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: trustedYabaiWindowID,
             tmuxWindowID: tmuxWindowID)
         let resolvedTmuxWindowID = tmuxWindowID ?? matchedProcess?.tmuxWindowID
         let resolvedTerminalNativeID = matchedProcess?.terminalNativeID ?? terminalNativeID
+        let resolvedTrustedYabaiWindowID = trustedAgentYabaiWindowID(
+            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: resolvedTerminalNativeID, yabaiWindowID: yabaiWindowID)
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: resolvedTerminalNativeID, yabaiWindowID: yabaiWindowID, tmuxWindowID: resolvedTmuxWindowID)
-        let resolvedWindowID = trackedWindow?.windowID ?? yabaiWindowID
+            terminalNativeID: resolvedTerminalNativeID, yabaiWindowID: resolvedTrustedYabaiWindowID, tmuxWindowID: resolvedTmuxWindowID)
+        let resolvedWindowID = trackedWindow?.windowID ?? resolvedTrustedYabaiWindowID
         let finalTerminalNativeID = trackedWindow?.terminalNativeID ?? resolvedTerminalNativeID
         let existing = try matchingAgentWindow(
             workspaceID: workspaceID, tmuxWindowID: resolvedTmuxWindowID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID,
@@ -5494,7 +5629,11 @@ public final class WorkspaceOrchestrator {
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
-                    runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, windowID: resolvedWindowID ?? existing.windowID,
+                    runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
+                    windowID: resolvedWindowID
+                        ?? (ignoresUntrustedSpacesAgentYabaiWindowID(
+                            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: finalTerminalNativeID)
+                            ? nil : existing.windowID),
                     trackingID: terminalTrackingID ?? finalTerminalNativeID ?? resolvedTmuxWindowID ?? existing.terminalTrackingID),
                 sessionKey: codexThreadID ?? existing.codexThreadID,
                 claimedLauncherName: claimedLauncherName ?? existing.claimedLauncherName ?? existing.label, status: status,
@@ -5514,7 +5653,7 @@ public final class WorkspaceOrchestrator {
         }
         return try registerAgentWindow(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID, tmuxWindowID: resolvedTmuxWindowID,
-            terminalNativeID: resolvedTerminalNativeID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID, status: status,
+            terminalNativeID: resolvedTerminalNativeID, codexThreadID: codexThreadID, yabaiWindowID: resolvedTrustedYabaiWindowID, status: status,
             claimedLauncherName: claimedLauncherName, eventType: eventType ?? status.rawValue, eventSource: eventSource,
             environmentKeys: environmentKeys)
     }

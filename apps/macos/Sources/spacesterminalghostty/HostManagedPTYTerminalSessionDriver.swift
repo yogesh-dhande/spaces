@@ -91,7 +91,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             kill(pid, SIGHUP)
         }
         if fd >= 0 { close(fd) }
-        if let pid { reap(childPID: pid) }
+        if let pid { reapWhenTerminated(childPID: pid) }
     }
 
     func sendRawBytes(_ data: Data) {
@@ -200,6 +200,13 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private func reap(childPID: Int32) {
         var status: Int32 = 0
         while waitpid(childPID, &status, WNOHANG) == -1, errno == EINTR {}
+    }
+
+    private func reapWhenTerminated(childPID: Int32) {
+        Task.detached(priority: .utility) {
+            var status: Int32 = 0
+            while waitpid(childPID, &status, 0) == -1, errno == EINTR {}
+        }
     }
 
     static func readLoopOwnsDescriptor(currentFD: Int32, currentGeneration: UInt64, readFD: Int32, readGeneration: UInt64) -> Bool {

@@ -16,11 +16,12 @@ import Foundation
             let socketPath = try TerminalServicePaths.socketPath()
             let requestStartedAt = Date()
             let requestTimeout = createSessionRequestTimeout()
+            let rpcTimeout = min(requestTimeout, createSessionRPCResponseTimeout())
             let response: TerminalServiceResponse
             do {
                 response = try TerminalServiceClient.send(
                     request: TerminalServiceRequest(command: "create", launchConfiguration: launchConfiguration), socketPath: socketPath,
-                    timeout: requestTimeout)
+                    timeout: rpcTimeout)
             } catch {
                 if let recovered = waitForCreatedSessionSummary(launchConfiguration, timeout: requestTimeout) {
                     TerminalPerformance.logMetric(
@@ -191,6 +192,10 @@ import Foundation
 
         static func createSessionRequestTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
             positiveTimeout(environment["SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT"], defaultValue: 30)
+        }
+
+        static func createSessionRPCResponseTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
+            positiveTimeout(environment["SPACES_TERMINAL_SERVICE_CREATE_RPC_TIMEOUT"], defaultValue: 2)
         }
 
         private static func positiveTimeout(_ rawValue: String?, defaultValue: TimeInterval) -> TimeInterval {
