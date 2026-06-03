@@ -161,6 +161,7 @@ runtime_dir = Path(runtime_dir)
 work_root = Path(work_root)
 performance_log_path = Path(performance_log_path)
 summary_json = Path(summary_json)
+profile_root = Path(os.environ["SPACES_DB_PATH"]).expanduser().resolve().parent
 app_executable_name = "SpacesApp"
 base_env = os.environ.copy()
 
@@ -343,7 +344,7 @@ def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
                 (title,),
             ).fetchall()
         for session_id, root_directory in rows:
-            if control_socket_path(work_root, session_id).exists():
+            if control_socket_path(profile_root, session_id).exists():
                 return session_id.upper()
         time.sleep(0.1)
     raise TimeoutError(f"timed out recovering session id for title {title}")
