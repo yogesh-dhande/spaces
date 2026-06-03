@@ -92,6 +92,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
     private final class ClientCapture: @unchecked Sendable {
         var attachedClientID: String?
+        var attachedMode: TerminalAttachmentMode?
         var detachedClientID: String?
     }
 
@@ -642,6 +643,49 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: Owner Mac"))
     }
 
+    @MainActor func testOwnerSeekingCustomAttachRegistersViewerWhenAnotherClientOwnsSession() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-owner-seeking-custom", backend: .ghosttyEmbedded, title: "owner-seeking", workingDirectory: "/tmp/work",
+                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-owner-seeking-custom", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-20T00:00:01Z"), paths: paths)
+
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-owner-seeking-custom", client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let capture = ClientCapture()
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        let controller = makeGhosttyController(
+            sessionID: "session-owner-seeking-custom", paths: paths, host: fakeHost,
+            attachClientAction: { client, mode in
+                capture.attachedClientID = client.id
+                capture.attachedMode = mode
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: "session-owner-seeking-custom", client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:01Z")
+            }, detachClientAction: { _ in })
+
+        controller.show()
+
+        let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+        XCTAssertEqual(capture.attachedClientID, controller.clientID)
+        XCTAssertEqual(capture.attachedMode, .viewer)
+        XCTAssertEqual(activeAttachments.first { $0.mode == .owner }?.clientID, remoteOwner.id)
+        XCTAssertEqual(activeAttachments.first { $0.clientID == controller.clientID }?.mode, .viewer)
+        XCTAssertEqual(controller.attachmentMode, .viewer)
+    }
+
     @MainActor func testOwnerSeekingWindowRequestsTakeoverAfterShowWhenAnotherClientOwnsSession() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -668,11 +712,6 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         let controller = makeGhosttyController(
             sessionID: "session-owner-seeking", paths: paths, host: fakeHost,
-            attachClientAction: { client, requestedMode in
-                XCTAssertEqual(requestedMode, .owner)
-                try TerminalSessionPersistence.attachClient(
-                    sessionID: "session-owner-seeking", client: client, mode: .viewer, paths: paths, attachedAt: "2026-05-20T00:00:01Z")
-            },
             takeoverAction: { clientID in
                 try TerminalSessionPersistence.transferOwnership(
                     sessionID: "session-owner-seeking", newOwnerClientID: clientID, paths: paths, transferredAt: "2026-05-20T00:00:02Z")
@@ -685,6 +724,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugShowsTerminalSurface)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
         XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: iPad Pro 13-inch (M5)"))
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .viewer)
 
         controller.requestOwnershipIfNeeded()
 
