@@ -54,6 +54,38 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertEqual(applied.snapshot, target)
     }
 
+    func testScrollRectDeltaIsSmallerThanCellRunOnlyOneRowScrollFixture() throws {
+        let columns = 80
+        let rows = 24
+        let previous = makeUniformRowSnapshot(columns: columns, rows: rows, firstScalar: 65)
+        let target = makeUniformRowSnapshot(columns: columns, rows: rows, firstScalar: 66)
+        let frame = GhosttyRenderFrame(sessionRevision: 12, ownerEpoch: 5, snapshot: target)
+        let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 11, ownerEpoch: 5)
+
+        let scrollRectUpdate = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline, mode: .delta)
+        let scrollRectDelta = try XCTUnwrap(scrollRectUpdate.delta)
+        let cellRunOnlyUpdate = GhosttyRenderUpdate.delta(
+            GhosttyRenderDeltaFrame(
+                baseRevision: baseline.sessionRevision, targetRevision: frame.sessionRevision, ownerEpoch: frame.ownerEpoch, columns: columns,
+                rows: rows, cursorColumn: target.cursorColumn, cursorRow: target.cursorRow, cursorVisible: target.cursorVisible,
+                defaultForegroundRGB: target.defaultForegroundRGB, defaultBackgroundRGB: target.defaultBackgroundRGB, scrollRects: [],
+                replaceCellRuns: (0..<rows).map { row in
+                    let start = row * columns
+                    return GhosttyRenderCellRun(row: row, column: 0, cells: Array(target.cells[start..<(start + columns)]))
+                }, changedCellCount: rows * columns))
+
+        let scrollRectBytes = try GhosttyRenderUpdateBinaryCodec.encode(scrollRectUpdate).count
+        let cellRunOnlyBytes = try GhosttyRenderUpdateBinaryCodec.encode(cellRunOnlyUpdate).count
+
+        XCTAssertEqual(scrollRectDelta.scrollRects.count, 1)
+        XCTAssertEqual(scrollRectDelta.replaceCellRuns.count, 1)
+        XCTAssertEqual(scrollRectDelta.changedCellCount, columns)
+        XCTAssertEqual(try GhosttyRenderUpdateApplier.apply(scrollRectUpdate, to: baseline).snapshot, target)
+        XCTAssertEqual(scrollRectBytes, 1_213)
+        XCTAssertEqual(cellRunOnlyBytes, 27_095)
+        XCTAssertLessThan(scrollRectBytes, cellRunOnlyBytes)
+    }
+
     func testDeltaRejectsBaseRevisionMismatch() throws {
         let previous = makeSnapshot(lines: ["abc"])
         let target = makeSnapshot(lines: ["abd"])
@@ -87,6 +119,17 @@ final class GhosttyRenderUpdateTests: XCTestCase {
             lines.isEmpty ? [String(repeating: " ", count: columns)] : lines.map { $0.padding(toLength: columns, withPad: " ", startingAt: 0) }
         let cells = paddedLines.flatMap { line in
             line.unicodeScalars.map { GhosttyTerminalSnapshot.Cell(codepoint: $0.value, foregroundRGB: 0xEEEEEE, backgroundRGB: 0x101010, flags: 0) }
+        }
+        return GhosttyTerminalSnapshot(
+            columns: columns, rows: rows, cursorColumn: 0, cursorRow: rows - 1, cursorVisible: false, defaultForegroundRGB: 0xEEEEEE,
+            defaultBackgroundRGB: 0x101010, cells: cells)
+    }
+
+    private func makeUniformRowSnapshot(columns: Int, rows: Int, firstScalar: UInt32) -> GhosttyTerminalSnapshot {
+        let cells = (0..<rows).flatMap { row in
+            Array(
+                repeating: GhosttyTerminalSnapshot.Cell(
+                    codepoint: firstScalar + UInt32(row), foregroundRGB: 0xEEEEEE, backgroundRGB: 0x101010, flags: 0), count: columns)
         }
         return GhosttyTerminalSnapshot(
             columns: columns, rows: rows, cursorColumn: 0, cursorRow: rows - 1, cursorVisible: false, defaultForegroundRGB: 0xEEEEEE,

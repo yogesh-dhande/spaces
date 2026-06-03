@@ -171,8 +171,11 @@ def peak_bytes_per_second(records: list[dict[str, Any]], window_seconds: int) ->
 def latency_values(summary: dict[str, Any]) -> list[float]:
     values: list[float] = []
     for scenario in (summary.get("scenarios") or {}).values():
+        summary_metric = scenario.get("summary_metric")
         for measurement in scenario.get("measurements") or []:
-            value = number(measurement.get("visible_latency_ms") or measurement.get("event_to_visible_ms"))
+            value = number(measurement.get(summary_metric)) if summary_metric else None
+            if value is None:
+                value = number(measurement.get("visible_latency_ms") or measurement.get("event_to_visible_ms"))
             if value is not None:
                 values.append(value)
     return values

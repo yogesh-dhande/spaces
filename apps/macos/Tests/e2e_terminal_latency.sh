@@ -917,7 +917,8 @@ def run_mac_command_output_catchup() -> dict:
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        "summary": summarize_latencies(measurements),
+        "summary": summarize_latencies(measurements, "command_submit_to_render_visible_ms"),
+        "summary_metric": "command_submit_to_render_visible_ms",
         "phase_summaries": summarize_phases(measurements),
         "budget_enforced": True,
     }
@@ -984,7 +985,7 @@ for name, result in scenario_results.items():
             f"event_to_visible p95={format_ms(phases['event_to_visible_total']['p95_ms'])}"
         )
     if result.get("measurements"):
-        print(f"  samples: {sample_series(result['measurements'])}")
+        print(f"  samples: {sample_series(result['measurements'], result.get('summary_metric', 'event_to_visible_ms'))}")
     if "no_op_gestures" in result:
         print(f"  scroll movement: rendered_changes={result['rendered_change_count']} no_ops={result['no_op_gestures']}")
 if failures:
