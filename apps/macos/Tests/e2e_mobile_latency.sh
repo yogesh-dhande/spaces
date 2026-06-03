@@ -332,6 +332,13 @@ def extract_session_id(output: str) -> str:
     return match[-1].upper()
 
 
+def control_socket_path(profile_root: Path, session_id: str) -> Path:
+    hash_value = 5381
+    for byte in f"{profile_root}|{session_id}".encode("utf-8"):
+        hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
+    return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
+
+
 def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -341,7 +348,7 @@ def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
                 (title,),
             ).fetchall()
         for session_id, root_directory in rows:
-            if (Path(root_directory) / "control.sock").exists():
+            if control_socket_path(work_root, session_id).exists():
                 return session_id.upper()
         time.sleep(0.1)
     raise TimeoutError(f"timed out recovering session id for title {title}")
