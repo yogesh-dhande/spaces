@@ -312,7 +312,7 @@
             let buttons = descendants(of: accessoryView, matching: UIButton.self)
             let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) }
             let pinnedButtons = buttons.filter { !$0.isDescendant(of: scrollView) }
-            XCTAssertEqual(scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Control"])
+            XCTAssertEqual(scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Control", "Command", "Option"])
             XCTAssertEqual(pinnedButtons.compactMap(\.accessibilityLabel), ["Arrow key joystick", "Hide keyboard"])
             let joystickButton = try XCTUnwrap(pinnedButtons.first)
             XCTAssertEqual(joystickButton.accessibilityCustomActions?.map(\.name) ?? [], ["Up arrow", "Down arrow", "Left arrow", "Right arrow"])
@@ -353,6 +353,42 @@
 
             hostView.setAcceptsTerminalInput(false)
             XCTAssertNil(hostView.inputAccessoryView)
+        }
+
+        func testRemoteTerminalAccessoryModifiersApplyToInput() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentKeys: [String] = []
+            var sentText: [String] = []
+            hostView.onSendKey = { sentKeys.append($0) }
+            hostView.onSendText = { sentText.append($0) }
+            hostView.setAcceptsTerminalInput(true)
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let buttons = descendants(of: accessoryView, matching: UIButton.self)
+            func tapButton(_ accessibilityLabel: String) throws {
+                let button = try XCTUnwrap(buttons.first { $0.accessibilityLabel == accessibilityLabel })
+                button.sendActions(for: .touchUpInside)
+            }
+
+            try tapButton("Control")
+            hostView.insertText("c")
+
+            try tapButton("Command")
+            let joystickButton = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Arrow key joystick" })
+            let leftArrowAction = try XCTUnwrap(joystickButton.accessibilityCustomActions?.first { $0.name == "Left arrow" })
+            XCTAssertTrue(leftArrowAction.actionHandler?(leftArrowAction) ?? false)
+
+            try tapButton("Command")
+            hostView.deleteBackward()
+
+            try tapButton("Option")
+            hostView.deleteBackward()
+
+            try tapButton("Command")
+            hostView.insertText("k")
+
+            XCTAssertEqual(sentKeys, ["ctrl+c", "cmd+left", "cmd+backspace", "opt+backspace", "cmd+k"])
+            XCTAssertEqual(sentText, [])
         }
 
         func testRemoteTerminalAccessoryJoystickRequiresDirectionalRelease() {

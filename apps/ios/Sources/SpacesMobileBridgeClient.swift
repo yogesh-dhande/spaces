@@ -182,6 +182,25 @@ struct SpacesMobileBridgeClient: Sendable {
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
+    func clearScreen(
+        sessionID: String,
+        clientID: String,
+        ownerEpoch: UInt64?,
+        timeout: Duration = .seconds(3),
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws {
+        let request = SpacesMobileBridgeRequest(
+            command: "clearScreen",
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity,
+            sessionID: sessionID,
+            clientID: clientID,
+            ownerEpoch: ownerEpoch
+        )
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+    }
+
     func resize(
         sessionID: String,
         clientID: String,

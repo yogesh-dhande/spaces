@@ -32,9 +32,26 @@ final class TerminalKeyInputTests: XCTestCase {
         XCTAssertEqual(TerminalKeyInput.bytes(for: "ctrl-z"), [0x1A])
     }
 
+    func testMacLineEditingChordsEncodeExpectedBytes() {
+        XCTAssertEqual(TerminalKeyInput.bytes(for: "cmd+left"), [0x01])
+        XCTAssertEqual(TerminalKeyInput.bytes(for: "command+right"), [0x05])
+        XCTAssertEqual(TerminalKeyInput.bytes(for: "cmd+backspace"), [0x15])
+        XCTAssertEqual(TerminalKeyInput.bytes(for: "opt+left"), Array("\u{1B}b".utf8))
+        XCTAssertEqual(TerminalKeyInput.bytes(for: "option+right"), Array("\u{1B}f".utf8))
+        XCTAssertEqual(TerminalKeyInput.bytes(for: "alt+backspace"), [0x17])
+    }
+
+    func testCommandKIsHostClearScreenAction() {
+        XCTAssertNil(TerminalKeyInput.bytes(for: "cmd+k"))
+        XCTAssertEqual(TerminalKeyInput.hostAction(for: "cmd+k"), .clearScreenAndScrollback)
+        XCTAssertEqual(TerminalKeyInput.hostAction(for: "command-k"), .clearScreenAndScrollback)
+        XCTAssertTrue(TerminalKeyInput.isSupportedSpec("cmd+k"))
+    }
+
     func testUnsupportedKeyReturnsNil() {
         XCTAssertNil(TerminalKeyInput.bytes(for: ""))
         XCTAssertNil(TerminalKeyInput.bytes(for: "ctrl+1"))
+        XCTAssertNil(TerminalKeyInput.bytes(for: "cmd+z"))
         XCTAssertNil(TerminalKeyInput.bytes(for: "f13"))
     }
 }

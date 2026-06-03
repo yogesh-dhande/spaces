@@ -8,6 +8,7 @@ public enum TerminalRemoteSessionStateReason {
     public static let output = "output"
     public static let stateChange = "state_change"
     public static let scroll = "scroll"
+    public static let clearScreen = "clear_screen"
     public static let runtimeState = "runtime_state"
     public static let resize = "resize"
     public static let terminated = "terminated"
@@ -22,6 +23,7 @@ public enum TerminalRemoteSessionStatePolicy {
         case TerminalRemoteSessionStateReason.output: return ownerKind == .localWindow || ownerKind == .remoteViewer
         case TerminalRemoteSessionStateReason.stateChange: return ownerKind == .localWindow
         case TerminalRemoteSessionStateReason.scroll: return true
+        case TerminalRemoteSessionStateReason.clearScreen: return true
         case TerminalRemoteSessionStateReason.terminated: return true
         case TerminalRemoteSessionStateReason.input: return false
         case TerminalRemoteSessionStateReason.inputOutput: return ownerKind == .localWindow

@@ -134,7 +134,7 @@ struct TerminalKeyCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "key", abstract: "Send a named key or control chord to a Spaces terminal session.")
 
     @Argument(help: "Terminal session ID.") var sessionID: String
-    @Argument(help: "Key spec such as enter, esc, up, down, or ctrl+c.") var key: String
+    @Argument(help: "Key spec such as enter, esc, up, down, ctrl+c, cmd+left, or cmd+k.") var key: String
 
     func run() throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)

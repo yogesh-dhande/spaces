@@ -113,6 +113,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize"))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize", ownerKind: .remoteViewer))
         XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize", ownerKind: .localWindow))
+        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "clear_screen"))
         XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "runtime_state"))
     }
 
@@ -237,13 +238,47 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: f5Event), "f5")
     }
 
-    @MainActor func testTerminalInputTranslatorDoesNotInventModifiedNavigationFallbacks() {
+    @MainActor func testTerminalInputTranslatorMapsModifiedLineNavigationFallbacks() {
+        let commandLeftEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F702}",
+                charactersIgnoringModifiers: "\u{F702}", isARepeat: false, keyCode: UInt16(kVK_LeftArrow)))
+        let commandRightEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F703}",
+                charactersIgnoringModifiers: "\u{F703}", isARepeat: false, keyCode: UInt16(kVK_RightArrow)))
         let optionLeftEvent = try! XCTUnwrap(
             NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: [.option], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F702}",
                 charactersIgnoringModifiers: "\u{F702}", isARepeat: false, keyCode: UInt16(kVK_LeftArrow)))
+        let optionRightEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.option], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F703}",
+                charactersIgnoringModifiers: "\u{F703}", isARepeat: false, keyCode: UInt16(kVK_RightArrow)))
 
-        XCTAssertNil(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: optionLeftEvent))
+        XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: commandLeftEvent), "cmd+left")
+        XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: commandRightEvent), "cmd+right")
+        XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: optionLeftEvent), "opt+left")
+        XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: optionRightEvent), "opt+right")
+    }
+
+    @MainActor func testMirrorTerminalViewMapsCommandKToHostClearAction() {
+        let commandKEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil, characters: "k",
+                charactersIgnoringModifiers: "k", isARepeat: false, keyCode: UInt16(kVK_ANSI_K)))
+        let commandDeleteEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{7F}",
+                charactersIgnoringModifiers: "\u{7F}", isARepeat: false, keyCode: UInt16(kVK_Delete)))
+        let optionDeleteEvent = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.option], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{7F}",
+                charactersIgnoringModifiers: "\u{7F}", isARepeat: false, keyCode: UInt16(kVK_Delete)))
+
+        XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: commandKEvent), "cmd+k")
+        XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: commandDeleteEvent), "cmd+backspace")
+        XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: optionDeleteEvent), "opt+backspace")
     }
 
     @MainActor func testTerminalInputTranslatorUsesPrintableTextForControlKeyEvents() {
@@ -752,6 +787,34 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    @MainActor func testHeadlessDriverClearScreenActionClearsVisibleOutput() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "host-managed-clear-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "host-managed-clear",
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-06-03T00:00:00Z"))
+        defer { sessionDriver.terminate() }
+        let transcript = TranscriptBuffer()
+        sessionDriver.setOutputHandler { data in transcript.append(data) }
+
+        try sessionDriver.startIfNeeded()
+        let marker = "host managed clear marker"
+        sessionDriver.sendRawBytes(Data("\(marker)\n".utf8))
+        try waitUntil { transcript.string().contains(marker) }
+        try waitUntil {
+            guard let snapshot = sessionDriver.snapshot() else { return false }
+            return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains(marker)
+        }
+
+        XCTAssertTrue(sessionDriver.clearScreenAndScrollback())
+        try waitUntil {
+            guard let snapshot = sessionDriver.snapshot() else { return false }
+            return !GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains(marker)
+        }
+    }
+
     @MainActor func testHeadlessDriverExportsHostManagedSnapshotAfterOutputAndResize() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
@@ -993,6 +1056,78 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         XCTAssertFalse(response.ok)
         XCTAssertEqual(response.message, "Ignoring stale owner epoch 1; current owner epoch is 0.")
+    }
+
+    @MainActor func testControlKeyCommandKClearsScreenThroughHostAction() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-command-k-clear-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-06-03T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        defer { host.terminate() }
+        let owner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-06-03T00:00:00Z")
+        try host.attach(client: owner, mode: .owner, into: nil)
+
+        let marker = "command k clear marker"
+        XCTAssertTrue(host.handleControlRequest(.init(command: "send", text: "\(marker)\n", clientID: owner.id)).ok)
+        try waitUntil {
+            guard let snapshot = host.snapshot() else { return false }
+            return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains(marker)
+        }
+
+        let response = host.handleControlRequest(.init(command: "key", key: "cmd+k", clientID: owner.id))
+
+        XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "Cleared terminal screen and scrollback."))
+        try waitUntil {
+            guard let snapshot = host.snapshot() else { return false }
+            return !GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains(marker)
+        }
+    }
+
+    @MainActor func testLocalMacCommandKClearsScreenThroughHostAction() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-local-command-k-clear-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-06-03T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        defer { host.terminate() }
+        let owner = TerminalClient(id: "local-owner", kind: .localWindow, identity: .init(label: "Mac"), connectedAt: "2026-06-03T00:00:00Z")
+        try host.attach(client: owner, mode: .owner, into: nil)
+
+        let marker = "local command k clear marker"
+        XCTAssertTrue(host.handleControlRequest(.init(command: "send", text: "\(marker)\n", clientID: owner.id)).ok)
+        try waitUntil {
+            guard let snapshot = host.snapshot() else { return false }
+            return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains(marker)
+        }
+
+        let commandKEvent = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil, characters: "k",
+                charactersIgnoringModifiers: "k", isARepeat: false, keyCode: UInt16(kVK_ANSI_K)))
+
+        XCTAssertTrue(host.handleKeyEvent(commandKEvent, for: owner.id))
+        try waitUntil {
+            guard let snapshot = host.snapshot() else { return false }
+            return !GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains(marker)
+        }
     }
 
     @MainActor func testControlRejectsInputFromDemotedOwner() throws {

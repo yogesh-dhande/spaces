@@ -39,6 +39,10 @@ enum GhosttyTerminalInputTranslator {
         case kVK_DownArrow where navigationFlags.isEmpty: return "down"
         case kVK_LeftArrow where navigationFlags.isEmpty: return "left"
         case kVK_RightArrow where navigationFlags.isEmpty: return "right"
+        case kVK_LeftArrow where navigationFlags == [.command]: return "cmd+left"
+        case kVK_RightArrow where navigationFlags == [.command]: return "cmd+right"
+        case kVK_LeftArrow where navigationFlags == [.option]: return "opt+left"
+        case kVK_RightArrow where navigationFlags == [.option]: return "opt+right"
         case kVK_Home where navigationFlags.isEmpty: return "home"
         case kVK_End where navigationFlags.isEmpty: return "end"
         case kVK_PageUp where navigationFlags.isEmpty: return "pageup"
@@ -62,5 +66,32 @@ enum GhosttyTerminalInputTranslator {
         }
     }
 
+    static func keySpecifier(for event: NSEvent) -> String? {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let semanticFlags = flags.subtracting([.function, .numericPad])
+        if let fallback = rawKeyFallbackSpecifier(for: event) { return fallback }
+        switch Int(event.keyCode) {
+        case kVK_Return, kVK_ANSI_KeypadEnter: return "enter"
+        case kVK_ANSI_K where semanticFlags == [.command]: return "cmd+k"
+        case kVK_Delete where semanticFlags == [.command]: return "cmd+backspace"
+        case kVK_Delete where semanticFlags == [.option]: return "opt+backspace"
+        case kVK_Delete: return "backspace"
+        case kVK_Escape: return "esc"
+        case kVK_Tab where flags == [.shift]: return "backtab"
+        case kVK_Tab: return "tab"
+        default: break
+        }
+        if flags.contains(.control), let flag = controlKeySpecifier(for: event), !flags.contains(.command), !flags.contains(.option) { return flag }
+        return nil
+    }
+
     private static func isPrivateUseFunctionKeyScalar(_ value: UInt32) -> Bool { (0xF700...0xF8FF).contains(value) }
+
+    private static func controlKeySpecifier(for event: NSEvent) -> String? {
+        guard let flaglessCharacters = event.charactersIgnoringModifiers, flaglessCharacters.count == 1,
+            let scalar = flaglessCharacters.unicodeScalars.first
+        else { return nil }
+        guard scalar.properties.isAlphabetic else { return nil }
+        return "ctrl+\(String(scalar).lowercased())"
+    }
 }

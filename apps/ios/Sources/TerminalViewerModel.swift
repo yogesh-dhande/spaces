@@ -393,6 +393,18 @@ private enum TerminalViewerRenderMode: String {
 
     private func performSendKeyRequest(_ key: String) async throws {
         let ownerEpoch = currentOwnerEpoch
+        if TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
+            try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
+                try await bridgeClient.clearScreen(
+                    sessionID: sessionID,
+                    clientID: clientID,
+                    ownerEpoch: ownerEpoch,
+                    timeout: Self.inputRequestTimeout,
+                    commandChannel: commandChannel
+                )
+            }
+            return
+        }
         try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
             try await bridgeClient.sendKey(
                 sessionID: sessionID,

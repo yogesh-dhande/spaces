@@ -144,6 +144,12 @@ import spacesterminalcore
         terminalView.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
     }
 
+    @discardableResult public func clearScreenAndScrollback() -> Bool {
+        guard attachedClient != nil, attachedMode == .owner else { return false }
+        sendRemoteClearScreenAndScrollback()
+        return true
+    }
+
     public var debugSurfaceRefreshRequestCount: Int { 0 }
     public func debugVisibleSurfaceText() -> String? {
         if let renderedSnapshotText = terminalView.renderedSnapshotText(), !renderedSnapshotText.isEmpty { return renderedSnapshotText }
@@ -299,6 +305,10 @@ import spacesterminalcore
     }
 
     private func sendRemoteKey(_ key: String) {
+        if TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
+            sendRemoteClearScreenAndScrollback()
+            return
+        }
         guard let client = attachedClient else { return }
         scrollCoalescer.flush()
         let socketPath = paths.controlSocketPath
@@ -307,6 +317,18 @@ import spacesterminalcore
         inputQueue.enqueue(priority: .userInitiated) {
             _ = try TerminalControlClient.send(
                 request: TerminalControlRequest(command: "key", key: key, clientID: clientID, ownerEpoch: ownerEpoch), socketPath: socketPath)
+        }
+    }
+
+    private func sendRemoteClearScreenAndScrollback() {
+        guard let client = attachedClient else { return }
+        scrollCoalescer.flush()
+        let socketPath = paths.controlSocketPath
+        let clientID = client.id
+        let ownerEpoch = latestState?.renderFrameOwnerEpoch
+        inputQueue.enqueue(priority: .userInitiated) {
+            _ = try TerminalControlClient.send(
+                request: TerminalControlRequest(command: "clearScreen", clientID: clientID, ownerEpoch: ownerEpoch), socketPath: socketPath)
         }
     }
 

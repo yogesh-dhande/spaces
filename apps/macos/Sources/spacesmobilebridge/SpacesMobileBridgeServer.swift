@@ -18,7 +18,7 @@ protocol SpacesMobilePairingStoreProtocol: Sendable {
 extension SpacesMobilePairingStore: SpacesMobilePairingStoreProtocol {}
 
 public final class SpacesMobileBridgeServer: @unchecked Sendable {
-    private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "resize", "scroll"]
+    private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll"]
     private static let streamRelayReadBufferSize = 256 * 1024
 
     private struct NetworkShaper: Sendable {
@@ -485,6 +485,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         case "takeover": return try handleTerminalControlRequest(request, command: "takeover")
         case "send": return try handleTerminalControlRequest(request, command: "send")
         case "key": return try handleTerminalControlRequest(request, command: "key")
+        case "clearScreen": return try handleTerminalControlRequest(request, command: "clearScreen")
         case "resize": return try handleTerminalControlRequest(request, command: "resize")
         case "scroll": return try handleTerminalControlRequest(request, command: "scroll")
         default: return SpacesMobileBridgeResponse(ok: false, message: "Unsupported mobile bridge command '\(request.command)'.")

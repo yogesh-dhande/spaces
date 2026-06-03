@@ -259,6 +259,17 @@ private final class GhosttyHostManagedOutputPipe: @unchecked Sendable {
         return true
     }
 
+    @discardableResult func clearScreenAndScrollback() -> Bool {
+        guard let surface else { return false }
+        let action = "clear_screen"
+        let cleared = action.withCString { pointer in ghostty_surface_binding_action(surface, pointer, UInt(action.lengthOfBytes(using: .utf8))) }
+        guard cleared else { return false }
+        GhosttyEmbeddedAppService.shared.tick()
+        requestSurfaceRefresh()
+        GhosttyEmbeddedAppService.shared.tick()
+        return true
+    }
+
     func snapshot() -> GhosttyTerminalSnapshot? { GhosttyTerminalSnapshotCapture.captureFromSession(session) }
 
     func snapshotText() -> String? {

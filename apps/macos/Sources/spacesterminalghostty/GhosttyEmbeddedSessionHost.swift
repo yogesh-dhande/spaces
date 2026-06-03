@@ -43,6 +43,7 @@ extension Notification.Name {
     func copySelectionToPasteboard() -> Bool
     func pasteClipboardContents() -> Bool
     @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool
+    @discardableResult func clearScreenAndScrollback() -> Bool
     var debugSurfaceRefreshRequestCount: Int { get }
     func debugVisibleSurfaceText() -> String?
 }
@@ -110,9 +111,19 @@ extension TerminalGhosttyRendererHosting {
     }
 
     @discardableResult public func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool {
-        _ = event
-        _ = clientID
-        return false
+        guard isOwnerClient?(clientID) == true else { return false }
+        if GhosttyTerminalInputTranslator.shouldDeferToSystemShortcut(keyCode: event.keyCode, modifierFlags: event.modifierFlags) { return false }
+        if let keySpec = GhosttyTerminalInputTranslator.keySpecifier(for: event) {
+            if TerminalKeyInput.hostAction(for: keySpec) == .clearScreenAndScrollback { return clearScreenAndScrollback() }
+            guard let bytes = TerminalKeyInput.bytes(for: keySpec) else { return false }
+            sendRawBytes(Data(bytes))
+            return true
+        }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.command) { return false }
+        guard let characters = GhosttyTerminalInputTranslator.ghosttyText(for: event), !characters.isEmpty else { return false }
+        sendRawBytes(Data(characters.utf8))
+        return true
     }
 
     @discardableResult public func synchronizeSurfaceGeometry() -> Bool { false }
@@ -138,6 +149,8 @@ extension TerminalGhosttyRendererHosting {
     @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
         sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
     }
+
+    @discardableResult public func clearScreenAndScrollback() -> Bool { sessionDriver.clearScreenAndScrollback() }
 
     public var debugSurfaceRefreshRequestCount: Int { sessionDriver.debugRefreshRequestCount }
 
@@ -429,6 +442,7 @@ extension TerminalGhosttyRendererHosting {
         case "heartbeat": controlResponseForHeartbeatRequest(request)
         case "send": controlResponseForSendRequest(request)
         case "key": controlResponseForKeyRequest(request)
+        case "clearScreen": controlResponseForClearScreenRequest(request)
         case "takeover": controlResponseForTakeoverRequest(request)
         case "resize": controlResponseForResizeRequest(request)
         case "scroll": controlResponseForScrollRequest(request)
@@ -573,6 +587,9 @@ extension TerminalGhosttyRendererHosting {
         let startedAt = Date()
         if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
         if let rejection = ownerRequestRejection(for: request, commandName: "key", startedAt: startedAt) { return rejection }
+        if let key = request.key, TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
+            return controlResponseForClearScreenRequest(request, startedAt: startedAt, touchClient: false)
+        }
         guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
             TerminalPerformance.logMetric(
                 "terminal_control_key", target: "session=\(launchConfiguration.sessionID)",
@@ -584,6 +601,21 @@ extension TerminalGhosttyRendererHosting {
             "terminal_control_key", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: true, detail: "key=\(key)")
         return TerminalControlResponse(ok: true, message: "Sent key.")
+    }
+
+    private func controlResponseForClearScreenRequest(_ request: TerminalControlRequest, startedAt: Date = Date(), touchClient: Bool = true)
+        -> TerminalControlResponse
+    {
+        if touchClient, let clientID = request.clientID {
+            try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+        }
+        if let rejection = ownerRequestRejection(for: request, commandName: "clear", startedAt: startedAt) { return rejection }
+        let cleared = rendererHostStorage.clearScreenAndScrollback()
+        if cleared { broadcastCurrentState(reason: TerminalRemoteSessionStateReason.clearScreen) }
+        TerminalPerformance.logMetric(
+            "terminal_control_clear_screen", target: "session=\(launchConfiguration.sessionID)",
+            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: cleared)
+        return TerminalControlResponse(ok: cleared, message: cleared ? "Cleared terminal screen and scrollback." : "Unable to clear terminal screen.")
     }
 
     private func controlResponseForScrollRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -1236,6 +1268,8 @@ extension TerminalGhosttyRendererHosting {
     @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
         core.rendererHost.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
     }
+
+    @discardableResult public func clearScreenAndScrollback() -> Bool { core.rendererHost.clearScreenAndScrollback() }
 
     public var debugSurfaceRefreshRequestCount: Int { core.rendererHost.debugSurfaceRefreshRequestCount }
     public func debugVisibleSurfaceText() -> String? { return core.rendererHost.debugVisibleSurfaceText() }

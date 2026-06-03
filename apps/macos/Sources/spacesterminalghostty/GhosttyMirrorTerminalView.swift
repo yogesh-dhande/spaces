@@ -1,5 +1,4 @@
 import AppKit
-import Carbon
 import Foundation
 import GhosttyKit
 import spacesterminalcore
@@ -389,30 +388,5 @@ import spacesterminalcore
         return CellMetrics(width: max(width, 1), height: max(height, 1))
     }
 
-    static func remoteKeySpecifier(for event: NSEvent) -> String? {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let semanticFlags = flags.subtracting([.function, .numericPad])
-        if let fallback = GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: event) { return fallback }
-        switch Int(event.keyCode) {
-        case kVK_Return, kVK_ANSI_KeypadEnter: return "enter"
-        case kVK_ANSI_K where semanticFlags == [.command]: return "ctrl+l"
-        case kVK_Delete where semanticFlags == [.command]: return "ctrl+u"
-        case kVK_Delete where semanticFlags == [.option]: return "ctrl+w"
-        case kVK_Delete: return "backspace"
-        case kVK_Escape: return "esc"
-        case kVK_Tab where flags == [.shift]: return "backtab"
-        case kVK_Tab: return "tab"
-        default: break
-        }
-        if flags.contains(.control), let flag = controlKeySpecifier(for: event), !flags.contains(.command), !flags.contains(.option) { return flag }
-        return nil
-    }
-
-    private static func controlKeySpecifier(for event: NSEvent) -> String? {
-        guard let flaglessCharacters = event.charactersIgnoringModifiers, flaglessCharacters.count == 1,
-            let scalar = flaglessCharacters.unicodeScalars.first
-        else { return nil }
-        guard scalar.properties.isAlphabetic else { return nil }
-        return "ctrl+\(String(scalar).lowercased())"
-    }
+    static func remoteKeySpecifier(for event: NSEvent) -> String? { GhosttyTerminalInputTranslator.keySpecifier(for: event) }
 }

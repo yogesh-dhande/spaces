@@ -63,6 +63,10 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             debugSurfaceRefreshRequestCount += 1
             return true
         }
+        @discardableResult func clearScreenAndScrollback() -> Bool {
+            debugSurfaceRefreshRequestCount += 1
+            return true
+        }
         func debugVisibleSurfaceText() -> String? { debugVisibleSurfaceTextValue ?? snapshotTextValue }
     }
 

@@ -144,6 +144,20 @@ import Foundation
             let scale: Double
         }
 
+        private enum AccessoryModifier: String, CaseIterable {
+            case control = "ctrl"
+            case command = "cmd"
+            case option = "opt"
+
+            var accessibilityLabel: String {
+                switch self {
+                case .control: return "Control"
+                case .command: return "Command"
+                case .option: return "Option"
+                }
+            }
+        }
+
         struct AccessoryToolbarButtonLabels: Equatable {
             let scrollable: [String]
             let pinned: [String]
@@ -191,7 +205,7 @@ import Foundation
         private var momentumDisplayLink: CADisplayLink?
         private var momentumVelocity = CGPoint.zero
         private var lastMomentumTimestamp: CFTimeInterval = 0
-        private var accessoryControlModifierPending = false
+        private var pendingAccessoryModifiers: Set<AccessoryModifier> = []
         private var suppressesSoftwareKeyboard = false
         private var surfaceViewportSizeOverrideForTesting: (columns: Int, rows: Int)?
         var userInterfaceIdiomOverrideForTesting: UIUserInterfaceIdiom?
@@ -201,7 +215,7 @@ import Foundation
         private lazy var scrollPanRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan))
         private lazy var terminalAccessoryView = TerminalAccessoryToolbar(
             onText: { [weak self] text in self?.sendAccessoryText(text) }, onKey: { [weak self] key in self?.sendAccessoryKey(key) },
-            onControl: { [weak self] in self?.toggleAccessoryControlModifier() },
+            onModifier: { [weak self] modifier in self?.toggleAccessoryModifier(modifier) },
             onKeyboardToggle: { [weak self] in self?.toggleAccessorySoftwareKeyboard() })
 
         public private(set) var acceptsTerminalInput = false
@@ -346,7 +360,7 @@ import Foundation
                 terminalAccessoryView.isKeyboardVisible = !suppressesSoftwareKeyboard
                 scheduleFirstResponderRequest()
             } else {
-                clearAccessoryControlModifier()
+                clearAccessoryModifiers()
                 resignFirstResponder()
             }
             reloadInputViews()
@@ -396,15 +410,11 @@ import Foundation
 
         public func insertText(_ text: String) {
             guard acceptsTerminalInput, !text.isEmpty else { return }
-            if sendPendingControlModifierIfNeeded(for: text) { return }
+            if sendPendingAccessoryModifiersIfNeeded(for: text) { return }
             if text == "\n" || text == "\r" { onSendKey?("enter") } else { onSendText?(text) }
         }
 
-        public func deleteBackward() {
-            guard acceptsTerminalInput else { return }
-            clearAccessoryControlModifier()
-            onSendKey?("backspace")
-        }
+        public func deleteBackward() { sendAccessoryKey("backspace") }
 
         public override var keyCommands: [UIKeyCommand]? {
             [
@@ -412,6 +422,11 @@ import Foundation
                 UIKeyCommand(input: UIKeyCommand.inputDownArrow, modifierFlags: [], action: #selector(sendArrowDown)),
                 UIKeyCommand(input: UIKeyCommand.inputLeftArrow, modifierFlags: [], action: #selector(sendArrowLeft)),
                 UIKeyCommand(input: UIKeyCommand.inputRightArrow, modifierFlags: [], action: #selector(sendArrowRight)),
+                UIKeyCommand(input: UIKeyCommand.inputLeftArrow, modifierFlags: .command, action: #selector(sendCommandArrowLeft)),
+                UIKeyCommand(input: UIKeyCommand.inputRightArrow, modifierFlags: .command, action: #selector(sendCommandArrowRight)),
+                UIKeyCommand(input: UIKeyCommand.inputLeftArrow, modifierFlags: .alternate, action: #selector(sendOptionArrowLeft)),
+                UIKeyCommand(input: UIKeyCommand.inputRightArrow, modifierFlags: .alternate, action: #selector(sendOptionArrowRight)),
+                UIKeyCommand(input: "k", modifierFlags: .command, action: #selector(sendCommandK)),
                 UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(sendTab)),
                 UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(sendEscape)),
             ]
@@ -513,6 +528,11 @@ import Foundation
         @objc private func sendArrowDown() { sendAccessoryKey("down") }
         @objc private func sendArrowLeft() { sendAccessoryKey("left") }
         @objc private func sendArrowRight() { sendAccessoryKey("right") }
+        @objc private func sendCommandArrowLeft() { sendAccessoryKey("cmd+left") }
+        @objc private func sendCommandArrowRight() { sendAccessoryKey("cmd+right") }
+        @objc private func sendOptionArrowLeft() { sendAccessoryKey("opt+left") }
+        @objc private func sendOptionArrowRight() { sendAccessoryKey("opt+right") }
+        @objc private func sendCommandK() { sendAccessoryKey("cmd+k") }
         @objc private func sendTab() { sendAccessoryKey("tab") }
         @objc private func sendEscape() { sendAccessoryKey("esc") }
 
@@ -829,37 +849,51 @@ import Foundation
             return CellMetrics(width: max(width, 1), height: max(height, 1))
         }
 
-        private func sendPendingControlModifierIfNeeded(for text: String) -> Bool {
-            guard accessoryControlModifierPending else { return false }
-            defer { clearAccessoryControlModifier() }
+        private func sendPendingAccessoryModifiersIfNeeded(for text: String) -> Bool {
+            guard !pendingAccessoryModifiers.isEmpty else { return false }
+            defer { clearAccessoryModifiers() }
             guard text.count == 1, let scalar = text.unicodeScalars.first, scalar.properties.isAlphabetic else { return false }
-            onSendKey?("ctrl+\(String(scalar).lowercased())")
+            guard let keySpec = modifiedKeySpec(for: String(scalar).lowercased()) else { return false }
+            onSendKey?(keySpec)
             return true
         }
 
         private func sendAccessoryText(_ text: String) {
             guard acceptsTerminalInput, !text.isEmpty else { return }
-            if sendPendingControlModifierIfNeeded(for: text) { return }
-            clearAccessoryControlModifier()
+            if sendPendingAccessoryModifiersIfNeeded(for: text) { return }
+            clearAccessoryModifiers()
             onSendText?(text)
         }
 
         private func sendAccessoryKey(_ key: String) {
             guard acceptsTerminalInput else { return }
-            clearAccessoryControlModifier()
-            onSendKey?(key)
+            let keySpec = modifiedKeySpec(for: key) ?? key
+            clearAccessoryModifiers()
+            onSendKey?(keySpec)
         }
 
-        private func toggleAccessoryControlModifier() {
+        private func modifiedKeySpec(for key: String) -> String? {
+            guard !pendingAccessoryModifiers.isEmpty else { return nil }
+            let modifierPrefix = AccessoryModifier.allCases.filter { pendingAccessoryModifiers.contains($0) }.map(\.rawValue).joined(separator: "+")
+            let spec = "\(modifierPrefix)+\(key)"
+            guard TerminalKeyInput.isSupportedSpec(spec) else { return nil }
+            return spec
+        }
+
+        private func toggleAccessoryModifier(_ modifier: AccessoryModifier) {
             guard acceptsTerminalInput else { return }
-            accessoryControlModifierPending.toggle()
-            terminalAccessoryView.isControlPending = accessoryControlModifierPending
+            if pendingAccessoryModifiers.contains(modifier) {
+                pendingAccessoryModifiers.remove(modifier)
+            } else {
+                pendingAccessoryModifiers.insert(modifier)
+            }
+            terminalAccessoryView.pendingModifiers = pendingAccessoryModifiers
         }
 
-        private func clearAccessoryControlModifier() {
-            guard accessoryControlModifierPending else { return }
-            accessoryControlModifierPending = false
-            terminalAccessoryView.isControlPending = false
+        private func clearAccessoryModifiers() {
+            guard !pendingAccessoryModifiers.isEmpty else { return }
+            pendingAccessoryModifiers.removeAll()
+            terminalAccessoryView.pendingModifiers = []
         }
 
         private func toggleAccessorySoftwareKeyboard() { setSoftwareKeyboardVisible(suppressesSoftwareKeyboard) }
@@ -970,18 +1004,18 @@ import Foundation
                     fontSize: 16)
             }
 
-            var isControlPending = false { didSet { updateControlButtonAppearance() } }
+            var pendingModifiers: Set<AccessoryModifier> = [] { didSet { updateModifierButtonAppearances() } }
             var isKeyboardVisible = true { didSet { updateKeyboardButtonImage() } }
 
             private let onText: (String) -> Void
             private let onKey: (String) -> Void
-            private let onControl: () -> Void
+            private let onModifier: (AccessoryModifier) -> Void
             private let onKeyboardToggle: () -> Void
             private let toolbarStackView = UIStackView()
             private let scrollView = UIScrollView()
             private let contentStackView = UIStackView()
             private let pinnedStackView = UIStackView()
-            private let controlButton = UIButton(type: .system)
+            private var modifierButtons: [AccessoryModifier: UIButton] = [:]
             private let joystickButton = DirectionalPadButton(type: .system)
             private let keyboardButton = UIButton(type: .system)
             private var metrics = TerminalAccessoryToolbar.metrics(for: UIDevice.current.userInterfaceIdiom)
@@ -999,12 +1033,12 @@ import Foundation
             override func sizeThatFits(_ size: CGSize) -> CGSize { CGSize(width: size.width, height: Self.toolbarHeight) }
 
             init(
-                onText: @escaping (String) -> Void, onKey: @escaping (String) -> Void, onControl: @escaping () -> Void,
+                onText: @escaping (String) -> Void, onKey: @escaping (String) -> Void, onModifier: @escaping (AccessoryModifier) -> Void,
                 onKeyboardToggle: @escaping () -> Void
             ) {
                 self.onText = onText
                 self.onKey = onKey
-                self.onControl = onControl
+                self.onModifier = onModifier
                 self.onKeyboardToggle = onKeyboardToggle
                 super.init(frame: CGRect(x: 0, y: 0, width: 0, height: Self.toolbarHeight))
                 configureView()
@@ -1073,11 +1107,9 @@ import Foundation
                 addTextButton("-") { [weak self] in self?.onText("-") }
                 addTextButton("_") { [weak self] in self?.onText("_") }
                 addTextButton("esc") { [weak self] in self?.onKey("esc") }
-
-                configureButton(controlButton, title: "ctrl")
-                controlButton.accessibilityLabel = "Control"
-                controlButton.addAction(UIAction { [weak self] _ in self?.onControl() }, for: .touchUpInside)
-                contentStackView.addArrangedSubview(controlButton)
+                addModifierButton(.control)
+                addModifierButton(.command)
+                addModifierButton(.option)
 
                 configureButton(joystickButton, imageName: "arrow.up.and.down.and.arrow.left.and.right")
                 joystickButton.accessibilityIdentifier = "terminal.accessory.arrow-joystick"
@@ -1116,6 +1148,15 @@ import Foundation
                 configureButton(button, title: title)
                 button.accessibilityLabel = title
                 button.addAction(UIAction { _ in action() }, for: .touchUpInside)
+                contentStackView.addArrangedSubview(button)
+            }
+
+            private func addModifierButton(_ modifier: AccessoryModifier) {
+                let button = UIButton(type: .system)
+                configureButton(button, title: modifier.rawValue)
+                button.accessibilityLabel = modifier.accessibilityLabel
+                button.addAction(UIAction { [weak self] _ in self?.onModifier(modifier) }, for: .touchUpInside)
+                modifierButtons[modifier] = button
                 contentStackView.addArrangedSubview(button)
             }
 
@@ -1171,10 +1212,13 @@ import Foundation
                 invalidateIntrinsicContentSize()
             }
 
-            private func updateControlButtonAppearance() {
-                controlButton.backgroundColor = isControlPending ? .white : UIColor.white.withAlphaComponent(0.13)
-                controlButton.setTitleColor(isControlPending ? .black : .white, for: .normal)
-                controlButton.layer.borderColor = UIColor.white.withAlphaComponent(isControlPending ? 0 : 0.14).cgColor
+            private func updateModifierButtonAppearances() {
+                for (modifier, button) in modifierButtons {
+                    let isPending = pendingModifiers.contains(modifier)
+                    button.backgroundColor = isPending ? .white : UIColor.white.withAlphaComponent(0.13)
+                    button.setTitleColor(isPending ? .black : .white, for: .normal)
+                    button.layer.borderColor = UIColor.white.withAlphaComponent(isPending ? 0 : 0.14).cgColor
+                }
             }
 
             private func updateKeyboardButtonImage() {

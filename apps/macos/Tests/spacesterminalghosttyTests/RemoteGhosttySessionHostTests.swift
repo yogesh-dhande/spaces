@@ -11,17 +11,19 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor private final class FocusableView: NSView { override var acceptsFirstResponder: Bool { true } }
     @MainActor private final class KeyTestWindow: NSWindow { override var isKeyWindow: Bool { true } }
 
-    @MainActor func testRemoteMirrorMapsModifiedBackspaceToShellEditingControls() throws {
+    @MainActor func testRemoteMirrorForwardsModifiedBackspaceSpecs() throws {
         XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_Delete))), "backspace")
-        XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_Delete), modifierFlags: .option)), "ctrl+w")
-        XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_Delete), modifierFlags: .command)), "ctrl+u")
+        XCTAssertEqual(
+            GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_Delete), modifierFlags: .option)), "opt+backspace")
+        XCTAssertEqual(
+            GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_Delete), modifierFlags: .command)), "cmd+backspace")
         XCTAssertEqual(
             GhosttyMirrorTerminalView.remoteKeySpecifier(
-                for: keyEvent(keyCode: UInt16(kVK_Delete), modifierFlags: [.command, .numericPad, .function])), "ctrl+u")
+                for: keyEvent(keyCode: UInt16(kVK_Delete), modifierFlags: [.command, .numericPad, .function])), "cmd+backspace")
     }
 
     @MainActor func testRemoteMirrorMapsCommandKToClearScreenControl() throws {
-        XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_ANSI_K), modifierFlags: .command)), "ctrl+l")
+        XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_ANSI_K), modifierFlags: .command)), "cmd+k")
     }
 
     @MainActor func testRemoteMirrorEncodesPreciseScrollMods() {
