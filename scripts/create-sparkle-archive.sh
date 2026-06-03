@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ $# -ne 3 ]; then
-  echo "Usage: $0 <Spaces-app-path> <spaces-cli-path> <version>" >&2
+if [ $# -ne 4 ]; then
+  echo "Usage: $0 <Spaces-app-path> <spaces-cli-path> <terminal-service-path> <version>" >&2
   exit 1
 fi
 
 SPACES_APP="$1"
 SPACES_CLI="$2"
-VERSION="$3"
+TERMINAL_SERVICE="$3"
+VERSION="$4"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASES_DIR="$REPO_ROOT/dist/releases/$VERSION"
 ARCHIVE_NAME="Spaces-${VERSION}.zip"
@@ -22,7 +23,7 @@ staging="$(mktemp -d)"
 trap 'rm -rf "$staging"' EXIT
 app_bundle="$staging/Spaces.app"
 
-"$REPO_ROOT/scripts/create-app-bundle.sh" "$SPACES_APP" "$SPACES_CLI" "$app_bundle"
+"$REPO_ROOT/scripts/create-app-bundle.sh" "$SPACES_APP" "$SPACES_CLI" "$TERMINAL_SERVICE" "$app_bundle"
 
 echo "Signing Sparkle app bundle with identity: $IDENTITY"
 codesign --force --deep --timestamp --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$app_bundle"

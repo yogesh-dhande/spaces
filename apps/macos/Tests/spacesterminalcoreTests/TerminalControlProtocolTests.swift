@@ -11,7 +11,7 @@ final class TerminalControlProtocolTests: XCTestCase {
             connectedAt: "2026-05-15T00:00:00Z")
         let request = TerminalControlRequest(
             command: "attach", authToken: "SECRET", text: "hello", clientID: "client-1", client: client, attachmentMode: .viewer, lineCount: 20,
-            appendNewline: true)
+            columns: 80, rows: 24, ownerEpoch: 7, resizeSerial: 3, scrollHorizontal: 1.5, scrollVertical: -2.5, scrollMods: 7, appendNewline: true)
         let response = TerminalControlResponse(ok: true, message: "ok")
 
         XCTAssertEqual(try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request)), request)
@@ -24,6 +24,15 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(
             try TerminalControlCodec.decodeRequest(payload),
             TerminalControlRequest(command: "takeover", clientID: "remote-client", appendNewline: false))
+    }
+
+    func testLegacyScrollRequestDecodesWithoutScrollMods() throws {
+        let payload = #"{"command":"scroll","clientID":"remote-client","scrollHorizontal":1.5,"scrollVertical":-2.5}"#.data(using: .utf8)!
+        let request = try TerminalControlCodec.decodeRequest(payload)
+
+        XCTAssertEqual(request.scrollHorizontal, 1.5)
+        XCTAssertEqual(request.scrollVertical, -2.5)
+        XCTAssertNil(request.scrollMods)
     }
 
     func testClientCanSendRequestToSessionSocket() throws {

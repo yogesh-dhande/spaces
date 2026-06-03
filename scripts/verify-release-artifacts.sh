@@ -103,5 +103,22 @@ require_universal_binary \
 require_universal_binary \
   "$mountpoint/Spaces.app/Contents/Resources/spaces" \
   "Spaces.app bundled CLI"
+require_universal_binary \
+  "$mountpoint/Spaces.app/Contents/Resources/SpacesTerminalService" \
+  "Spaces.app bundled terminal service"
+
+ghostty_vt_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.dylib"
+ghostty_vt_real_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.0.1.0.dylib"
+if [[ ! -e "$ghostty_vt_dylib" && ! -L "$ghostty_vt_dylib" ]]; then
+  echo "Error: Missing bundled libghostty-vt dylib at $ghostty_vt_dylib" >&2
+  exit 1
+fi
+if [[ ! -f "$ghostty_vt_real_dylib" ]]; then
+  echo "Error: Missing bundled libghostty-vt real dylib at $ghostty_vt_real_dylib" >&2
+  exit 1
+fi
+require_universal_binary \
+  "$ghostty_vt_real_dylib" \
+  "Spaces.app bundled libghostty-vt"
 
 echo "✓ Release artifacts verified"

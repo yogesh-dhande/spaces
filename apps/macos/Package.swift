@@ -3,22 +3,27 @@ import Foundation
 import PackageDescription
 
 let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
-let ghosttyVTIncludeDirectory = "\(packageDirectory)/.local/ghosttyvt/src/zig-out/include"
+let ghosttyVTIncludeDirectory = "\(packageDirectory)/.local/ghosttyvt/include"
 
 let package = Package(
     name: "spaces",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v14),
+        .iOS(.v17)
     ],
     products: [
         .library(name: "systembridge", targets: ["systembridge"]),
         .library(name: "spacesterminalcore", targets: ["spacesterminalcore"]),
         .library(name: "spacesterminalghostty", targets: ["spacesterminalghostty"]),
+        .library(name: "spacesterminalmobileghostty", targets: ["spacesterminalmobileghostty"]),
         .library(name: "spacesterminalui", targets: ["spacesterminalui"]),
+        .library(name: "spacesmobilecore", targets: ["spacesmobilecore"]),
+        .library(name: "spacesmobilebridge", targets: ["spacesmobilebridge"]),
         .library(name: "workspacecore", targets: ["workspacecore"]),
         .library(name: "spacesui", targets: ["spacesui"]),
         .library(name: "spacescli", targets: ["spacescli"]),
         .executable(name: "spacese2e", targets: ["spacese2e"]),
+        .executable(name: "SpacesTerminalService", targets: ["SpacesTerminalService"]),
         .executable(name: "spaces", targets: ["spaces"]),
         .executable(name: "SpacesApp", targets: ["SpacesApp"])
     ],
@@ -39,8 +44,18 @@ let package = Package(
         ),
         .target(name: "systembridge"),
         .target(name: "spacesterminalcore", dependencies: ["ghosttyvtshim"]),
+        .target(name: "spacesmobilecore", dependencies: ["spacesterminalcore"]),
+        .target(
+            name: "spacesmobilebridge",
+            dependencies: ["spacesmobilecore", "workspacecore", "spacesterminalcore"]
+        ),
         .target(
             name: "spacesterminalghostty",
+            dependencies: ["spacesterminalcore", "ghosttyvtshim", "GhosttyKit"],
+            linkerSettings: [.linkedLibrary("c++")]
+        ),
+        .target(
+            name: "spacesterminalmobileghostty",
             dependencies: ["spacesterminalcore", "GhosttyKit"],
             linkerSettings: [.linkedLibrary("c++")]
         ),
@@ -58,6 +73,7 @@ let package = Package(
             dependencies: [
                 "workspacecore",
                 "systembridge",
+                "spacesmobilebridge",
                 "spacesterminalui",
                 .product(name: "Sparkle", package: "Sparkle"),
             ]
@@ -65,6 +81,8 @@ let package = Package(
         .target(
             name: "spacescli",
             dependencies: [
+                "spacesmobilebridge",
+                "spacesmobilecore",
                 "workspacecore",
                 "spacesterminalcore",
                 "spacesterminalghostty",
@@ -77,9 +95,16 @@ let package = Package(
             dependencies: [
                 "workspacecore",
                 "systembridge",
+                "spacesmobilebridge",
+                "spacesmobilecore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ],
             path: "Sources/spacese2e"
+        ),
+        .executableTarget(
+            name: "SpacesTerminalService",
+            dependencies: ["spacesterminalcore", "spacesterminalghostty", "spacesmobilebridge"],
+            path: "Sources/SpacesTerminalService"
         ),
         .executableTarget(name: "spaces", dependencies: ["spacescli"], path: "Sources/spaces"),
         .executableTarget(
@@ -108,6 +133,7 @@ let package = Package(
             name: "spacescliTests",
             dependencies: [
                 "spacescli",
+                "spacesmobilebridge",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
         )

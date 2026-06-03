@@ -2,6 +2,7 @@ import ArgumentParser
 import Darwin
 import Foundation
 import XCTest
+import spacesmobilebridge
 import spacesterminalcore
 import spacesterminalghostty
 import systembridge
@@ -138,6 +139,19 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(command.backend, .ghosttyEmbedded)
     }
 
+    func testTerminalCommandLaunchConfigurationUsesPersistentLifetime() throws {
+        let launchConfiguration = terminalCommandLaunchConfiguration(
+            sessionID: "session-cli", backend: .ghosttyEmbedded, command: "cat", title: "session", cwd: "/tmp", shell: "/bin/sh",
+            createdAt: "2026-05-26T00:00:00Z")
+
+        XCTAssertEqual(launchConfiguration.lifetimePolicy, .persistent)
+        XCTAssertEqual(launchConfiguration.sessionID, "session-cli")
+        XCTAssertEqual(launchConfiguration.command, "cat")
+        XCTAssertEqual(launchConfiguration.title, "session")
+        XCTAssertEqual(launchConfiguration.workingDirectory, "/tmp")
+        XCTAssertEqual(launchConfiguration.shell, "/bin/sh")
+    }
+
     func testTerminalSendParsesSessionAndText() throws {
         let command = try TerminalSendCommand.parse(["session-1", "hello", "--newline"])
 
@@ -164,14 +178,6 @@ final class MXCommandTests: XCTestCase {
         let command = try TerminalShowCommand.parse(["session-1"])
 
         XCTAssertEqual(command.sessionID, "session-1")
-        XCTAssertFalse(command.viewer)
-    }
-
-    func testTerminalShowParsesViewerFlag() throws {
-        let command = try TerminalShowCommand.parse(["session-1", "--viewer"])
-
-        XCTAssertEqual(command.sessionID, "session-1")
-        XCTAssertTrue(command.viewer)
     }
 
     func testTerminalTakeoverParsesSessionAndClient() throws {
@@ -190,11 +196,86 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(command.authToken, "SECRET")
     }
 
+    func testMobileServeParsesHostPortPairingCodeAndWindowCount() throws {
+        let command = try MobileServeCommand.parse([
+            "--host", "0.0.0.0", "--port", "47847", "--pairing-code", "246810", "--pairing-window-count", "2",
+        ])
+
+        XCTAssertEqual(command.host, "0.0.0.0")
+        XCTAssertEqual(command.port, 47_847)
+        XCTAssertEqual(command.pairingCode, "246810")
+        XCTAssertEqual(command.pairingWindowCount, 2)
+    }
+
+    func testMobileServeDefaultsAreLanReachableAndStable() throws {
+        let command = try MobileServeCommand.parse([])
+
+        XCTAssertEqual(command.host, SpacesMobileBridgeDefaults.host)
+        XCTAssertEqual(command.port, SpacesMobileBridgeDefaults.port)
+    }
+
+    func testMobileServePairingLinkHostTreatsIPv6WildcardAsWildcard() {
+        let host = mobileServePairingLinkHost(host: "::")
+
+        XCTAssertNotEqual(host, "::")
+        XCTAssertFalse(SpacesMobileBridgeDefaults.isWildcardHost(host))
+    }
+
+    func testMobileStatusPropagatesControlLookupFailure() {
+        XCTAssertThrowsError(try mobileStatusLines(loadControlResponse: { throw POSIXError(.ECONNREFUSED) })) { error in
+            XCTAssertEqual((error as? POSIXError)?.code, .ECONNREFUSED)
+        }
+    }
+
+    func testMobileStatusRejectsFailedControlResponseWithoutUsingStoredSettings() {
+        XCTAssertThrowsError(
+            try mobileStatusLines(loadControlResponse: { SpacesMobileBridgeControlResponse(ok: false, message: "Mobile bridge is not running.") })
+        ) { error in
+            guard case WorkspaceError.invalidArgument(let message) = error else {
+                XCTFail("Expected WorkspaceError.invalidArgument, got \(error)")
+                return
+            }
+            XCTAssertEqual(message, "Mobile bridge is not running.")
+        }
+    }
+
+    func testMobileStatusRejectsMissingStatusPayloadWithoutUsingStoredSettings() {
+        XCTAssertThrowsError(
+            try mobileStatusLines(loadControlResponse: { SpacesMobileBridgeControlResponse(ok: true, message: "Loaded mobile bridge status.") })
+        ) { error in
+            guard case WorkspaceError.invalidArgument(let message) = error else {
+                XCTFail("Expected WorkspaceError.invalidArgument, got \(error)")
+                return
+            }
+            XCTAssertEqual(message, "Mobile bridge status response did not include address details.")
+        }
+    }
+
+    func testMobileStatusFormatsControlStatus() throws {
+        let lines = try mobileStatusLines(loadControlResponse: {
+            SpacesMobileBridgeControlResponse(
+                ok: true, message: "Loaded mobile bridge status.",
+                status: SpacesMobileBridgeStatus(
+                    host: "0.0.0.0", port: 47_847, bonjourServiceName: "Spaces Mac", bonjourServiceType: "_spaces-mobile._tcp.",
+                    networkAddresses: ["192.168.1.20"]))
+        })
+
+        XCTAssertEqual(
+            lines,
+            [
+                "Spaces mobile bridge", "port=47847", "bonjour=Spaces Mac\ttype=_spaces-mobile._tcp.", "addresses=192.168.1.20:47847",
+                "iphone=Open Mobile Connection in the Mac app to show a QR code or pairing link.",
+            ])
+    }
+
     func testSpacesCommandListsFlattenedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
         XCTAssertEqual(
             subcommands,
-            ["ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "SignalCommand", "TerminalCommand", "ProfileCommand"])
+            [
+                "ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "SignalCommand", "TerminalCommand",
+                "MobileCommand", "ProfileCommand",
+            ])
     }
 
     func testProfileShowShellOutputIncludesDatabaseAndRuntimeExports() throws {

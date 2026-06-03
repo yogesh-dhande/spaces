@@ -1,16 +1,36 @@
 import Foundation
 
 public enum TerminalKeyInput {
+    public enum HostAction: Equatable, Sendable { case clearScreenAndScrollback }
+
+    private enum KeyModifier: Hashable {
+        case control
+        case command
+        case option
+    }
+
+    public static func isSupportedSpec(_ spec: String) -> Bool { bytes(for: spec) != nil || hostAction(for: spec) != nil }
+
+    public static func hostAction(for spec: String) -> HostAction? {
+        let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let normalized = trimmed.replacingOccurrences(of: "-", with: "+")
+        let parts = normalized.split(separator: "+").map { String($0).lowercased() }
+        guard parts.count == 2, keyModifier(for: parts[0]) == .command, parts[1] == "k" else { return nil }
+        return .clearScreenAndScrollback
+    }
+
     public static func bytes(for spec: String) -> [UInt8]? {
         let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+        guard hostAction(for: trimmed) == nil else { return nil }
 
         switch trimmed.lowercased() {
         case "enter", "return": return [0x0D]
         case "tab": return [0x09]
         case "backtab": return Array("\u{1B}[Z".utf8)
         case "escape", "esc": return [0x1B]
-        case "backspace": return [0x7F]
+        case "backspace", "delete": return [0x7F]
         case "up": return Array("\u{1B}[A".utf8)
         case "down": return Array("\u{1B}[B".utf8)
         case "right": return Array("\u{1B}[C".utf8)
@@ -37,12 +57,56 @@ public enum TerminalKeyInput {
         }
 
         let normalized = trimmed.replacingOccurrences(of: "-", with: "+")
-        let parts = normalized.split(separator: "+").map { $0.lowercased() }
-        guard parts.count == 2, parts[0] == "ctrl", let scalar = parts[1].unicodeScalars.only else { return nil }
-        guard scalar.properties.isAlphabetic else { return nil }
-        let uppercase = String(parts[1]).uppercased().unicodeScalars.first?.value ?? scalar.value
+        let parts = normalized.split(separator: "+").map { String($0).lowercased() }
+        guard parts.count >= 2 else { return nil }
+        let key = parts[parts.count - 1]
+        let modifiers = parts.dropLast().compactMap(keyModifier)
+        guard modifiers.count == parts.count - 1 else { return nil }
+
+        let modifierSet = Set(modifiers)
+        guard modifierSet.count == modifiers.count else { return nil }
+        switch modifierSet {
+        case [.control]: return controlBytes(for: key)
+        case [.command]: return commandBytes(for: key)
+        case [.option]: return optionBytes(for: key)
+        default: return nil
+        }
+    }
+
+    private static func keyModifier(for token: String) -> KeyModifier? {
+        switch token {
+        case "ctrl", "control": return .control
+        case "cmd", "command": return .command
+        case "opt", "option", "alt", "meta": return .option
+        default: return nil
+        }
+    }
+
+    private static func controlBytes(for key: String) -> [UInt8]? {
+        guard let scalar = key.unicodeScalars.only, scalar.properties.isAlphabetic else { return nil }
+        let uppercase = key.uppercased().unicodeScalars.first?.value ?? scalar.value
         let controlValue = uppercase & 0x1F
         return [UInt8(controlValue)]
+    }
+
+    private static func commandBytes(for key: String) -> [UInt8]? {
+        switch key {
+        case "left": return controlBytes(for: "a")
+        case "right": return controlBytes(for: "e")
+        case "backspace", "delete": return controlBytes(for: "u")
+        default: return nil
+        }
+    }
+
+    private static func optionBytes(for key: String) -> [UInt8]? {
+        switch key {
+        case "left": return Array("\u{1B}b".utf8)
+        case "right": return Array("\u{1B}f".utf8)
+        case "backspace", "delete": return controlBytes(for: "w")
+        default:
+            guard key.unicodeScalars.count == 1 else { return nil }
+            return [0x1B] + Array(key.utf8)
+        }
     }
 }
 

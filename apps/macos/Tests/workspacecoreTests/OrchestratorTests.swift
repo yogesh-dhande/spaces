@@ -22,12 +22,31 @@ private final class TerminalOpenCapture: @unchecked Sendable {
     var modes: [TerminalAttachmentMode] = []
 }
 
+private final class TerminalLaunchConfigurationCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var configurations: [TerminalSessionLaunchConfiguration] = []
+
+    func append(_ configuration: TerminalSessionLaunchConfiguration) {
+        lock.lock()
+        configurations.append(configuration)
+        lock.unlock()
+    }
+
+    func snapshot() -> [TerminalSessionLaunchConfiguration] {
+        lock.lock()
+        defer { lock.unlock() }
+        return configurations
+    }
+}
+
 private final class TerminalFocusCapture: @unchecked Sendable {
     var sessionIDs: [String] = []
     var requestIDs: [String?] = []
 }
 
 private final class TerminalCloseCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
+
+private final class TerminalTerminateCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
 
 private func managedProjectStorageDirname(namespace: String, source: String, preferredName: String) -> String {
     let digest = SHA256.hash(data: Data("\(namespace)\u{0}\(source)".utf8)).map { String(format: "%02x", $0) }.joined()
@@ -221,6 +240,25 @@ final class OrchestratorTests: XCTestCase {
 
         let store = try makeTemporaryStore()
         let openCapture = TerminalOpenCapture()
+        let terminateCapture = TerminalTerminateCapture()
+        let launchedConfigurations = TerminalLaunchConfigurationCapture()
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher { configuration in
+            launchedConfigurations.append(configuration)
+            let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                .init(
+                    sessionID: configuration.sessionID, backend: configuration.backend, servicePID: Int32(ProcessInfo.processInfo.processIdentifier),
+                    childPID: 5432, state: .running, updatedAt: "2026-05-18T18:00:00Z", title: configuration.title,
+                    workingDirectory: configuration.workingDirectory), paths: paths)
+            return TerminalServiceSessionSummary(
+                id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running,
+                servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 5432, controlSocketPath: paths.controlSocketPath,
+                outputPath: paths.outputPath)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil) }
         let orchestrator = WorkspaceOrchestrator(
             store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
             builtInTerminalWindowOpener: { sessionID, mode in
@@ -233,7 +271,7 @@ final class OrchestratorTests: XCTestCase {
                     .init(
                         sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 101, childPID: 5432, state: .running,
                         updatedAt: "2026-05-10T18:00:00Z"), paths: paths)
-            })
+            }, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
         try orchestrator.updateProjectConfig(projectID: project.id) { project in
@@ -252,6 +290,11 @@ final class OrchestratorTests: XCTestCase {
         }
 
         XCTAssertEqual(openCapture.modes, [.owner])
+        let launchedConfiguration = try XCTUnwrap(launchedConfigurations.snapshot().first)
+        let launchedCommand = try XCTUnwrap(launchedConfiguration.command)
+        XCTAssertTrue(launchedCommand.contains(" -ilc "))
+        XCTAssertTrue(launchedCommand.contains("\\033]0;Codex\\007"))
+        XCTAssertTrue(launchedCommand.contains("codex --dangerously-skip-permissions"))
         let agentWindows = try store.agentWindows(workspaceID: workspace.id)
         XCTAssertEqual(agentWindows.count, 1)
         XCTAssertEqual(agentWindows.first?.provider, .spaces)
@@ -269,6 +312,7 @@ final class OrchestratorTests: XCTestCase {
 
         let store = try makeTemporaryStore()
         let openCapture = TerminalOpenCapture()
+        let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
             store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
             builtInTerminalWindowOpener: { sessionID, mode in
@@ -281,7 +325,7 @@ final class OrchestratorTests: XCTestCase {
                     .init(
                         sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 101, childPID: 5432, state: .running,
                         updatedAt: "2026-05-10T18:00:00Z"), paths: paths)
-            })
+            }, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
         try orchestrator.updateProjectConfig(projectID: project.id) { project in
@@ -304,6 +348,7 @@ final class OrchestratorTests: XCTestCase {
         }
 
         XCTAssertEqual(openCapture.modes, [.owner])
+        XCTAssertEqual(terminateCapture.sessionIDs, ["stale-session"])
         let agentWindows = try store.agentWindows(workspaceID: workspace.id)
         XCTAssertEqual(agentWindows.count, 1)
         XCTAssertEqual(agentWindows.first?.label, "Codex")
@@ -1593,6 +1638,60 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.appConfig().processShell, .zsh)
     }
 
+    func testOpenWorkspaceTerminalUsesProcessWideBuiltInSessionLauncherOverride() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let dbPath = root.appendingPathComponent("spaces.db").path
+
+        let store = try makeTemporaryStore()
+        let openCapture = TerminalOpenCapture()
+        let launchedConfigurations = TerminalLaunchConfigurationCapture()
+
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher { configuration in
+            launchedConfigurations.append(configuration)
+            let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+            FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+            FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+            try TerminalSessionPersistence.writeRuntimeState(
+                .init(
+                    sessionID: configuration.sessionID, backend: configuration.backend, servicePID: Int32(ProcessInfo.processInfo.processIdentifier),
+                    childPID: 4321, state: .running, updatedAt: "2026-05-18T18:00:00Z", title: configuration.title,
+                    workingDirectory: configuration.workingDirectory), paths: paths)
+            return TerminalServiceSessionSummary(
+                id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running,
+                servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 4321, controlSocketPath: paths.controlSocketPath,
+                outputPath: paths.outputPath)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil) }
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { sessionID, mode in
+                openCapture.sessionIDs.append(sessionID)
+                openCapture.modes.append(mode)
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
+            }
+        }
+
+        let launchedConfigurationSnapshot = launchedConfigurations.snapshot()
+        XCTAssertEqual(launchedConfigurationSnapshot.count, 1)
+        XCTAssertEqual(launchedConfigurationSnapshot.first?.workingDirectory, workspace.dir)
+        XCTAssertEqual(launchedConfigurationSnapshot.first?.lifetimePolicy, .persistent)
+        XCTAssertEqual(openCapture.modes, [.owner])
+        let terminalWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
+        XCTAssertEqual(terminalWindow.app, TerminalHost.spaces.appName)
+        XCTAssertEqual(terminalWindow.terminalTrackingID, launchedConfigurationSnapshot.first?.sessionID)
+    }
+
     func testWorkspaceIDForTerminalSessionUsesTrackedBuiltInSessionID() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -2438,10 +2537,20 @@ final class OrchestratorTests: XCTestCase {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
             FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: timestamp),
+                paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
-                    state: .running, updatedAt: "now"), paths: paths)
+                    state: .running, updatedAt: timestamp), paths: paths)
+            let ownerClient = TerminalClient(
+                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+                connectedAt: timestamp)
+            try TerminalSessionPersistence.attachClient(sessionID: sessionID, client: ownerClient, mode: .owner, paths: paths, attachedAt: timestamp)
+            try TerminalSessionPersistence.detachClient(id: ownerClient.id, paths: paths, detachedAt: timestamp)
 
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
                 try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
@@ -2798,6 +2907,7 @@ final class OrchestratorTests: XCTestCase {
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try makeTemporaryStore()
         let capture = TerminalOpenCapture()
+        let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
             store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
             builtInTerminalWindowOpener: { sessionID, mode in
@@ -2812,7 +2922,7 @@ final class OrchestratorTests: XCTestCase {
                             updatedAt: "2026-05-11T09:00:00Z"), paths: paths)
                     try? "process restarted\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
                 }
-            })
+            }, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -2837,10 +2947,11 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(capture.modes, [.owner])
         XCTAssertEqual(capture.sessionIDs.count, 1)
+        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
         let restartedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == "process-api" }))
         XCTAssertEqual(restartedProcess.terminalApp, TerminalHost.spaces.appName)
         XCTAssertEqual(restartedProcess.terminalTrackingID, capture.sessionIDs.first)
-        XCTAssertEqual(restartedProcess.status, .running)
+        XCTAssertEqual(restartedProcess.status, RunningProcessState.running)
 
         let restartedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
         XCTAssertEqual(restartedWindow.app, TerminalHost.spaces.appName)
@@ -3421,7 +3532,6 @@ final class OrchestratorTests: XCTestCase {
         }
 
         let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
-        XCTAssertNil(runningProcess.pid)
         XCTAssertEqual(runningProcess.terminalApp, TerminalHost.spaces.appName)
         XCTAssertEqual(runningProcess.terminalTrackingID, runningProcess.terminalNativeID)
 
@@ -4032,10 +4142,10 @@ final class OrchestratorTests: XCTestCase {
 
     func testStopWorkspaceClosesBuiltInTerminalSessionWithoutTrackedYabaiWindowID() throws {
         let store = try makeTemporaryStore()
-        let closeCapture = TerminalCloseCapture()
+        let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
             store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalWindowCloser: { sessionID in closeCapture.sessionIDs.append(sessionID) })
+            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -4060,7 +4170,7 @@ final class OrchestratorTests: XCTestCase {
         let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
 
         XCTAssertFalse(outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)
-        XCTAssertEqual(closeCapture.sessionIDs, [sessionID])
+        XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
@@ -5224,6 +5334,76 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
         XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
         XCTAssertFalse(mockTmux.hasSession(named: sessionName))
+    }
+
+    func testStopWorkspaceProcessDoesNotTerminateBuiltInSessionForNonSpacesTerminalProcess() throws {
+        let store = try makeTemporaryStore()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        let processID = UUID().uuidString
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 559,
+                terminalTrackingID: "iterm-session", terminalNativeID: nil, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil,
+                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 559, terminalTrackingID: "iterm-session",
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
+        }
+
+        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
+    }
+
+    func testStopWorkspaceProcessTerminatesBuiltInSession() throws {
+        let store = try makeTemporaryStore()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        let sessionID = "spaces-session-stop-process-1"
+        let processID = UUID().uuidString
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
+                windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil,
+                tmuxWindowID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
+                targetURL: nil, windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil,
+                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
+        }
+
+        XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
     }
 
     // Tests focus terminal window triggers overlay pulse for iTerm2 by arranging representative inputs and asserting the expected result.

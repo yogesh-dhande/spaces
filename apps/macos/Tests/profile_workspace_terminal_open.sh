@@ -21,14 +21,24 @@ WORKSPACE_INFO_JSON="$WORK_ROOT/workspace.json"
 SUMMARY_PATH="$WORK_ROOT/summary.txt"
 METRICS_PATH="$WORK_ROOT/metrics.json"
 PROJECT_DIR="$WORK_ROOT/repo"
+WORKSPACE_DIR=""
 APP_PID=""
 
+stop_profile_workspace() {
+  if [[ -z "$WORKSPACE_DIR" || ! -e "$DB_PATH" ]]; then
+    return
+  fi
+
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$MX_E2E_BIN" stop-workspace --workspace-dir "$WORKSPACE_DIR" >/dev/null 2>&1 || true
+}
+
 cleanup() {
-  release_terminal_harness_lock
+  stop_profile_workspace
   if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" >/dev/null 2>&1; then
     kill "$APP_PID" >/dev/null 2>&1 || true
     wait "$APP_PID" >/dev/null 2>&1 || true
   fi
+  release_terminal_harness_lock
 }
 trap cleanup EXIT
 

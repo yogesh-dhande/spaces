@@ -2,7 +2,7 @@
 
 Multiplex your work. Not just the terminal.
 
-Native macOS app and CLI for orchestrating parallel coding sessions. Groups terminals, editors, browser windows, and CLI coding agents (Claude Code, Codex, etc.) into per-branch workspaces with isolated ports, environment, and process trees.
+Native macOS app and CLI for orchestrating parallel coding sessions, plus a paired first-party iOS terminal client. Groups terminals, editors, browser windows, and CLI coding agents (Claude Code, Codex, etc.) into per-branch workspaces with isolated ports, environment, and process trees.
 
 [usespaces.dev](https://usespaces.dev) · [Download](https://github.com/yogesh-dhande/spaces/releases/latest) · [Docs](https://usespaces.dev/docs)
 
@@ -40,9 +40,9 @@ spaces terminal list                      # inspect live session IDs and working
 spaces terminal send <session> "hello"    # write input to a session
 spaces terminal key <session> ctrl+c      # send a named key or control chord
 spaces terminal tail <session> --lines 20 # read recent output
-spaces terminal show <session>            # open the owner window for a session
-spaces terminal show <session> --viewer   # open a passive viewer window
+spaces terminal show <session>            # open an owner-seeking window for a session
 spaces terminal takeover <session> <id>   # hand input ownership to another client
+spaces mobile status                      # show iPhone bridge details
 ```
 
 Coding agents emit `spaces signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).
@@ -65,7 +65,8 @@ Coding agents emit `spaces signal` events from their terminals so the GUI knows 
 ## How it works
 
 - [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
-- Built-in process and ad hoc terminals run inside the Spaces app through the built-in Spaces terminal runtime, so session lifetime, takeover, and `spaces terminal` controls share one session boundary.
+- Built-in process and ad hoc terminals run through `SpacesTerminalService`, so sessions survive app quits and lifetime, takeover, and `spaces terminal` controls share one service-owned boundary.
+- The first-party iOS client discovers the Mac bridge advertised by the terminal service, pairs through a Mac-approved QR/deep link, then browses live Spaces terminal sessions and auto-takes ownership when opening one for live rendering.
 - Browser sessions automate Google Chrome so you can quickly switch to view output without typing the URL or clicking through tabs.
 
 ## Requirements
@@ -81,7 +82,7 @@ Download the signed DMG from [GitHub Releases](https://github.com/yogesh-dhande/
 
 ## Development
 
-Full build, test, lint, coverage, manual E2E, and release workflows: [`dev.md`](dev.md).
+Full build, test, lint, coverage, manual E2E, and release workflows: [`docs/dev.md`](docs/dev.md).
 
 ## License
 

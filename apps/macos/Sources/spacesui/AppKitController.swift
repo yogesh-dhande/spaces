@@ -1,7 +1,9 @@
 import AppKit
 import Carbon
+import CoreImage
 import Foundation
 import Sparkle
+import spacesmobilebridge
 import spacesterminalcore
 import spacesterminalghostty
 import spacesterminalui
@@ -46,11 +48,35 @@ private final class CommandPalettePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+protocol ProcessLifecyclePolicyController {
+    func disableAutomaticTermination(_ reason: String)
+    func disableSuddenTermination()
+}
+
+extension ProcessInfo: ProcessLifecyclePolicyController {}
+
 @MainActor
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate,
     NSWindowDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSComboBoxDelegate, NSTableViewDelegate, NSTableViewDataSource
 {
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
+    private final class MainThreadResultBox<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<T, Error>?
+
+        func set(_ result: Result<T, Error>) {
+            lock.lock()
+            self.result = result
+            lock.unlock()
+        }
+
+        func get() -> Result<T, Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return result
+        }
+    }
 
     private enum AlertsIconTint: Sendable {
         case browser
@@ -117,6 +143,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     enum SidebarArrowSelectionTarget: Equatable, Sendable {
         case alerts
         case workspace(String)
+    }
+
+    enum TerminalQuitPolicy: Equatable, Sendable {
+        case quitImmediately
+        case promptForLiveSessions(count: Int)
+    }
+
+    enum TerminalQuitDialogChoice: Equatable, Sendable {
+        case keepRunning
+        case stopAll
+        case cancel
     }
 
     private struct HotkeyPerfContext {
@@ -198,6 +235,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var isDismissingCommandPalette = false
     private var pendingCommandPalettePresentation: PendingCommandPalettePresentation?
     private var commandPaletteMainWindowVisibility: Bool?
+    private var mobileConnectionPanel: NSPanel?
+    private var mobileConnectionTimer: Timer?
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private lazy var updaterController: SPUStandardUpdaterController? = {
@@ -211,9 +250,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var showWindowIssueModalIPCObserver: NSObjectProtocol?
     private var cycleWorkspaceWindowIPCObserver: NSObjectProtocol?
     private var openWorkspaceTerminalIPCObserver: NSObjectProtocol?
+    private var runWorkspaceProcessIPCObserver: NSObjectProtocol?
+    private var stopWorkspaceProcessIPCObserver: NSObjectProtocol?
+    private var restartWorkspaceProcessIPCObserver: NSObjectProtocol?
+    private var launchWorkspaceAgentIPCObserver: NSObjectProtocol?
     private var openTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var focusTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var closeTerminalSessionWindowIPCObserver: NSObjectProtocol?
+    private var dumpTerminalSessionWindowStateIPCObserver: NSObjectProtocol?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var workspaceDidTerminateApplicationObserver: NSObjectProtocol?
@@ -262,8 +306,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var recentCommandPaletteFocusIdentities: [String] = []
-    private var terminalSessionWindowControllers: [String: [TerminalSessionWindowController]] = [:]
+    private var terminalSessionWindowControllers: [String: TerminalSessionWindowController] = [:]
     private var lastFocusedBuiltInTerminalSessionID: String?
+    private var keepsTerminalSessionsRunningDuringTermination = false
     private var appToggleReturnTerminalSessionID: String?
     private var appToggleReturnApplicationProcessID: pid_t?
     private var commandPaletteReturnTerminalSessionID: String?
@@ -273,6 +318,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let index: Int
         let startedAt: Date
         var routeCompletedAt: Date?
+    }
+
+    private struct TerminalSessionWindowStateDump: Codable {
+        let sessionID: String
+        let requestedMode: String
+        let found: Bool
+        let windowTitle: String?
+        let rendererSummary: String?
+        let renderedOutput: String?
+        let summary: String?
+        let state: String?
+        let showsTerminalSurface: Bool?
+        let showsTextRenderer: Bool?
+        let didClose: Bool?
+        let surfaceColumns: Int?
+        let surfaceRows: Int?
+        let windowIsKey: Bool?
+        let firstResponderTypeName: String?
     }
 
     enum WindowFocusRequest: Sendable {
@@ -337,6 +400,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.applyPersistentTerminationPolicy()
         logStartupProfile(
             "did_finish_launching",
             details:
@@ -370,12 +434,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupCycleWorkspaceWindowIPCObserver()
         setupSelectWorkspaceDetailIPCObserver()
         setupOpenWorkspaceTerminalIPCObserver()
+        setupRunWorkspaceProcessIPCObserver()
+        setupStopWorkspaceProcessIPCObserver()
+        setupRestartWorkspaceProcessIPCObserver()
+        setupLaunchWorkspaceAgentIPCObserver()
         setupOpenTerminalSessionWindowIPCObserver()
         setupFocusTerminalSessionWindowIPCObserver()
         setupCloseTerminalSessionWindowIPCObserver()
+        setupDumpTerminalSessionWindowStateIPCObserver()
         setupAppActivationObservers()
         setupWorkspaceApplicationObservers()
         setupTerminalAttachmentStateObserver()
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(Self.terminateBuiltInTerminalSession)
         logStartupProfile("ipc_observers_ready")
         Self.scheduleAfterNextRunLoopTurn { [weak self] in
             Task { @MainActor [weak self] in
@@ -387,7 +457,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 self.ensureMainWindowVisibleOnLaunch()
             }
         }
+        prewarmTerminalServiceAfterStartup()
         Task { @MainActor in WorkspaceOrchestrator.prepareUserNotificationAuthorization() }
+    }
+
+    nonisolated static func persistentTerminationPolicyReason() -> String {
+        "Spaces coordinates long-lived workspace windows, terminal sessions, and mobile bridge clients."
+    }
+
+    nonisolated static func applyPersistentTerminationPolicy(processInfo: any ProcessLifecyclePolicyController = ProcessInfo.processInfo) {
+        let reason = persistentTerminationPolicyReason()
+        processInfo.disableAutomaticTermination(reason)
+        processInfo.disableSuddenTermination()
     }
 
     private func makeUIOrchestrator(store: SQLiteStore) -> WorkspaceOrchestrator {
@@ -401,13 +482,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             },
             builtInTerminalWindowCloser: { [weak self] sessionID in
                 Self.dispatchBuiltInTerminalWindowActionOnMainThread { self?.closeTerminalSessionWindows(sessionID: sessionID) }
-            })
+            }, builtInTerminalSessionTerminator: Self.terminateBuiltInTerminalSession,
+            builtInTerminalSessionLauncher: Self.launchServiceBuiltInTerminalSession)
     }
 
     nonisolated static func dispatchBuiltInTerminalWindowActionOnMainThread(
         isMainThread: Bool = Thread.isMainThread,
         scheduler: (@escaping @MainActor () -> Void) -> Void = { action in Task { @MainActor in action() } }, action: @escaping @MainActor () -> Void
     ) { if isMainThread { MainActor.assumeIsolated { action() } } else { scheduler(action) } }
+
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let liveSessions = Self.liveBuiltInTerminalSessions()
+        switch Self.terminalQuitPolicy(liveTerminalSessionCount: liveSessions.count) {
+        case .quitImmediately:
+            keepsTerminalSessionsRunningDuringTermination = true
+            return .terminateNow
+        case .promptForLiveSessions:
+            switch presentTerminalQuitDialog(liveSessionCount: liveSessions.count) {
+            case .keepRunning:
+                keepsTerminalSessionsRunningDuringTermination = true
+                return .terminateNow
+            case .stopAll:
+                keepsTerminalSessionsRunningDuringTermination = false
+                let stoppedCount = Self.stopAllBuiltInTerminalSessions(liveSessions: liveSessions)
+                guard stoppedCount == liveSessions.count else {
+                    showError(WorkspaceError.invalidArgument(message: "Unable to stop all terminal sessions before quitting."))
+                    return .terminateCancel
+                }
+                return .terminateNow
+            case .cancel: return .terminateCancel
+            }
+        }
+    }
 
     public func applicationWillTerminate(_ notification: Notification) {
         periodicWorkspaceRefreshTask?.cancel()
@@ -416,6 +522,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         periodicSidebarMetadataRefreshTask?.cancel()
         deferredHotkeySelectionRefreshTask?.cancel()
         sidebarReloadTask?.cancel()
+        mobileConnectionTimer?.invalidate()
+        mobileConnectionTimer = nil
         teardownInlineWorkspaceOutsideClickMonitor()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
@@ -447,6 +555,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             DistributedNotificationCenter.default().removeObserver(openWorkspaceTerminalIPCObserver)
             self.openWorkspaceTerminalIPCObserver = nil
         }
+        if let runWorkspaceProcessIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(runWorkspaceProcessIPCObserver)
+            self.runWorkspaceProcessIPCObserver = nil
+        }
+        if let stopWorkspaceProcessIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(stopWorkspaceProcessIPCObserver)
+            self.stopWorkspaceProcessIPCObserver = nil
+        }
+        if let restartWorkspaceProcessIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(restartWorkspaceProcessIPCObserver)
+            self.restartWorkspaceProcessIPCObserver = nil
+        }
+        if let launchWorkspaceAgentIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(launchWorkspaceAgentIPCObserver)
+            self.launchWorkspaceAgentIPCObserver = nil
+        }
         if let openTerminalSessionWindowIPCObserver {
             DistributedNotificationCenter.default().removeObserver(openTerminalSessionWindowIPCObserver)
             self.openTerminalSessionWindowIPCObserver = nil
@@ -458,6 +582,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let closeTerminalSessionWindowIPCObserver {
             DistributedNotificationCenter.default().removeObserver(closeTerminalSessionWindowIPCObserver)
             self.closeTerminalSessionWindowIPCObserver = nil
+        }
+        if let dumpTerminalSessionWindowStateIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(dumpTerminalSessionWindowStateIPCObserver)
+            self.dumpTerminalSessionWindowStateIPCObserver = nil
         }
         if let appDidBecomeActiveObserver {
             NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
@@ -478,6 +606,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         commandPaletteLoadTask?.cancel()
         commandPaletteLoadTask = nil
         commandPalettePanel?.close()
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil)
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(nil)
         releaseLaunchLeases()
     }
 
@@ -604,6 +734,58 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func setupRunWorkspaceProcessIPCObserver() {
+        runWorkspaceProcessIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.runWorkspaceProcess, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+            guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, workspaceID, processName] in
+                guard let self else { return }
+                self.runWorkspaceProcess(workspaceID: workspaceID, processName: processName)
+            }
+        }
+    }
+
+    private func setupStopWorkspaceProcessIPCObserver() {
+        stopWorkspaceProcessIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.stopWorkspaceProcess, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+            guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, workspaceID, processName] in
+                guard let self else { return }
+                self.stopWorkspaceProcess(workspaceID: workspaceID, processName: processName)
+            }
+        }
+    }
+
+    private func setupRestartWorkspaceProcessIPCObserver() {
+        restartWorkspaceProcessIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.restartWorkspaceProcess, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+            guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, workspaceID, processName] in
+                guard let self else { return }
+                self.restartWorkspaceProcess(workspaceID: workspaceID, processName: processName)
+            }
+        }
+    }
+
+    private func setupLaunchWorkspaceAgentIPCObserver() {
+        launchWorkspaceAgentIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.launchWorkspaceAgent, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+            guard let launcherName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, workspaceID, launcherName] in
+                guard let self else { return }
+                self.launchWorkspaceAgent(workspaceID: workspaceID, launcherName: launcherName)
+            }
+        }
+    }
+
     private func setupOpenTerminalSessionWindowIPCObserver() {
         openTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
             forName: IPCNotification.openTerminalSessionWindow, object: ipcNotificationObject, queue: .main
@@ -631,6 +813,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func setupDumpTerminalSessionWindowStateIPCObserver() {
+        dumpTerminalSessionWindowStateIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.dumpTerminalSessionWindowState, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+            guard let outputPath = notification.userInfo?[IPCNotification.outputPathUserInfoKey] as? String else { return }
+            let modeRawValue = notification.userInfo?[IPCNotification.terminalAttachmentModeUserInfoKey] as? String
+            let mode = modeRawValue.flatMap(TerminalAttachmentMode.init(rawValue:))
+            Task { @MainActor [weak self, sessionID, outputPath, mode] in
+                guard let self else { return }
+                self.dumpTerminalSessionWindowState(sessionID: sessionID, mode: mode, outputPath: outputPath)
+            }
+        }
+    }
+
     private func setupFocusTerminalSessionWindowIPCObserver() {
         focusTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
             forName: IPCNotification.focusTerminalSessionWindow, object: ipcNotificationObject, queue: .main
@@ -644,40 +841,73 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) {
+    private func dumpTerminalSessionWindowState(sessionID: String, mode: TerminalAttachmentMode?, outputPath: String) {
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+        let requestedMode = mode?.rawValue ?? "any"
+        let controller = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID])
+        if let controller { controller.debugRefreshStateForTesting(skipOwnerAttach: mode == .viewer) }
+        let debugState = controller?.debugStateDump()
+        let payload = TerminalSessionWindowStateDump(
+            sessionID: sessionID, requestedMode: requestedMode, found: controller != nil, windowTitle: debugState?.windowTitle,
+            rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput, summary: debugState?.summary,
+            state: debugState?.state, showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
+            didClose: debugState?.didCloseWindow, surfaceColumns: debugState?.surfaceColumns, surfaceRows: debugState?.surfaceRows,
+            windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName)
+        writeTerminalSessionWindowStateDump(payload, to: outputPath)
+    }
+
+    private func writeTerminalSessionWindowStateDump(_ payload: TerminalSessionWindowStateDump, to outputPath: String) {
+        let url = URL(fileURLWithPath: outputPath)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(payload)
+            try data.write(to: url, options: [.atomic])
+        } catch {}
+    }
+
+    @discardableResult private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) -> Int? {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
         do {
             pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-            let existingControllers = terminalSessionWindowControllers[sessionID] ?? []
             let controller: TerminalSessionWindowController
             let reusedExistingWindow: Bool
-            if mode == .owner, let existing = Self.inMemoryOwnerTerminalSessionWindowController(existingControllers) {
+            if let existing = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) {
                 controller = existing
                 reusedExistingWindow = true
             } else {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
-                if mode == .owner,
-                    let existing = Self.reusableTerminalSessionWindowController(
-                        existingControllers, mode: .owner, activeOwnerClientID: Self.activeOwnerClientID(paths: paths))
-                {
-                    controller = existing
-                    reusedExistingWindow = true
-                } else {
-                    let created = TerminalSessionWindowController(
-                        sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false,
-                        onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
-                        onWindowClose: { [weak self] sessionID, clientID in
-                            if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
-                            self?.removeTerminalSessionWindowController(sessionID: sessionID, clientID: clientID)
-                        })
-                    terminalSessionWindowControllers[sessionID, default: []].append(created)
-                    controller = created
-                    reusedExistingWindow = false
+                let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void = { client, attachmentMode in
+                    let response = try TerminalControlClient.send(
+                        request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
+                        socketPath: paths.controlSocketPath)
+                    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
                 }
+                let detachClientAction: @Sendable (String) throws -> Void = { clientID in
+                    let response = try TerminalControlClient.send(
+                        request: TerminalControlRequest(command: "detach", clientID: clientID), socketPath: paths.controlSocketPath)
+                    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                }
+                let created = TerminalSessionWindowController(
+                    sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false,
+                    attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
+                    onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
+                    onWindowClose: { [weak self] sessionID, clientID in
+                        if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
+                        self?.removeTerminalSessionWindowController(sessionID: sessionID, clientID: clientID)
+                    },
+                    sessionHostProvider: { launchConfiguration, paths in
+                        Self.terminalSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+                    })
+                terminalSessionWindowControllers[sessionID] = created
+                controller = created
+                reusedExistingWindow = false
             }
             controller.show(requestID: requestID, route: reusedExistingWindow ? "reuse_existing_window" : "create_window")
+            if mode == .owner { controller.requestOwnershipIfNeeded() }
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
                 detail: "mode=\(mode.rawValue) reused=\(reusedExistingWindow ? 1 : 0)\(requestDetail)")
@@ -686,29 +916,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
                     detail: "route=summoned_owner request_id=\(requestID)")
             }
+            return controller.window?.windowNumber
         } catch {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
                 detail: "mode=\(mode.rawValue)\(requestDetail)")
             showError(error)
-            return
+            return nil
         }
     }
 
     private func pruneClosedTerminalSessionWindowControllers(sessionID: String) {
-        guard var controllers = terminalSessionWindowControllers[sessionID] else { return }
-        controllers.removeAll(where: \.didClose)
-        if controllers.isEmpty {
-            terminalSessionWindowControllers.removeValue(forKey: sessionID)
-        } else {
-            terminalSessionWindowControllers[sessionID] = controllers
-        }
+        guard let controller = terminalSessionWindowControllers[sessionID] else { return }
+        if controller.didClose { terminalSessionWindowControllers.removeValue(forKey: sessionID) }
     }
 
-    private func closeTerminalSessionWindows(sessionID: String) {
+    private func closeTerminalSessionWindows(sessionID: String, sessionIsTerminating: Bool = false) {
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-        guard let controllers = terminalSessionWindowControllers[sessionID], !controllers.isEmpty else { return }
-        for controller in controllers where !controller.didClose { controller.window?.close() }
+        guard let controller = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) else { return }
+        if sessionIsTerminating { controller.closeForSessionTermination() } else { controller.window?.close() }
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
     }
 
@@ -719,17 +945,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         logPerfMetric(
             "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: 0, success: true, detail: "stage=start\(requestDetail)")
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-        let existingControllers = terminalSessionWindowControllers[sessionID] ?? []
         let controllerAndRoute: (controller: TerminalSessionWindowController, route: String)?
-        if let resolved = Self.focusableTerminalSessionWindowController(existingControllers, sessionID: sessionID) {
+        if let resolved = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID) {
             controllerAndRoute = resolved
         } else {
             openTerminalSessionWindow(sessionID: sessionID, mode: .owner, requestID: requestID)
             pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-            let refreshedControllers = terminalSessionWindowControllers[sessionID] ?? []
-            controllerAndRoute = Self.focusableTerminalSessionWindowController(refreshedControllers, sessionID: sessionID).map {
-                ($0.controller, "summoned_owner")
-            }
+            controllerAndRoute = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID).map
+            { ($0.controller, "summoned_owner") }
         }
         guard let (controller, route) = controllerAndRoute else {
             logPerfMetric(
@@ -746,30 +969,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             detail: "route=\(route)\(requestDetail)")
     }
 
-    static func inMemoryOwnerTerminalSessionWindowController(_ controllers: [TerminalSessionWindowController]) -> TerminalSessionWindowController? {
-        let liveOwnerControllers = controllers.filter { !$0.didClose && $0.attachmentMode == .owner }
-        guard liveOwnerControllers.count == 1 else { return nil }
-        return liveOwnerControllers[0]
+    static func liveTerminalSessionWindowController(_ controller: TerminalSessionWindowController?) -> TerminalSessionWindowController? {
+        guard let controller, !controller.didClose else { return nil }
+        return controller
     }
 
-    static func reusableTerminalSessionWindowController(
-        _ controllers: [TerminalSessionWindowController], mode: TerminalAttachmentMode, activeOwnerClientID: String?
-    ) -> TerminalSessionWindowController? {
-        guard mode == .owner, let activeOwnerClientID else { return nil }
-        return controllers.first { !$0.didClose && $0.clientID == activeOwnerClientID }
-    }
-
-    static func focusableTerminalSessionWindowController(_ controllers: [TerminalSessionWindowController], sessionID: String) -> (
+    static func focusableTerminalSessionWindowController(_ controller: TerminalSessionWindowController?, sessionID: String) -> (
         controller: TerminalSessionWindowController, route: String
     )? {
-        if let controller = inMemoryOwnerTerminalSessionWindowController(controllers) { return (controller, "in_memory_owner") }
-        guard !controllers.isEmpty else { return nil }
-        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
-        guard
-            let controller = reusableTerminalSessionWindowController(
-                controllers, mode: .owner, activeOwnerClientID: activeOwnerClientID(paths: paths))
-        else { return nil }
-        return (controller, "persisted_owner")
+        guard let controller = liveTerminalSessionWindowController(controller) else { return nil }
+        return (controller, "existing_window")
     }
 
     static func activeOwnerClientID(paths: TerminalSessionPaths) -> String? {
@@ -779,22 +988,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return ownerAttachment.clientID
     }
 
-    static func shouldTerminateAdHocBuiltInTerminalSession(paths: TerminalSessionPaths?, isConfiguredProcessSession: Bool, now: Date = Date()) -> Bool
-    {
+    nonisolated static func shouldTerminateAdHocBuiltInTerminalSession(
+        paths: TerminalSessionPaths?, isConfiguredProcessSession: Bool, isAppTerminatingAndKeepingSessions: Bool = false, now: Date = Date()
+    ) -> Bool {
+        guard !isAppTerminatingAndKeepingSessions else { return false }
         guard !isConfiguredProcessSession, let paths, let activeAttachments = try? TerminalSessionPersistence.liveAttachments(paths: paths, now: now)
         else { return false }
         return activeAttachments.isEmpty
     }
 
     private func removeTerminalSessionWindowController(sessionID: String, clientID: String) {
-        guard var controllers = terminalSessionWindowControllers[sessionID] else { return }
-        controllers.removeAll { $0.clientID == clientID }
-        if controllers.isEmpty {
-            terminalSessionWindowControllers.removeValue(forKey: sessionID)
-            terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
-        } else {
-            terminalSessionWindowControllers[sessionID] = controllers
-        }
+        guard let controller = terminalSessionWindowControllers[sessionID] else { return }
+        guard controller.clientID == clientID else { return }
+        terminalSessionWindowControllers.removeValue(forKey: sessionID)
+        terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
     }
 
     private func terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: String, now: Date = Date()) {
@@ -804,10 +1011,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
         }
         let paths = try? TerminalSessionPaths.forSession(id: sessionID)
-        guard Self.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: isConfiguredProcessSession, now: now) else {
-            return
-        }
-        GhosttyEmbeddedSessionRegistry.shared.terminate(sessionID: sessionID)
+        guard
+            Self.shouldTerminateAdHocBuiltInTerminalSession(
+                paths: paths, isConfiguredProcessSession: isConfiguredProcessSession,
+                isAppTerminatingAndKeepingSessions: keepsTerminalSessionsRunningDuringTermination, now: now)
+        else { return }
+        try? TerminalService.terminateSession(id: sessionID)
         if (try? orchestrator.removeAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
     }
 
@@ -1037,6 +1246,101 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private static var clickTargetAssocKey: UInt8 = 0
 
+    @MainActor static func terminalSessionHost(launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths)
+        -> any TerminalGhosttySessionHosting
+    { RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths) }
+
+    nonisolated static func launchServiceBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
+        -> TerminalServiceSessionSummary
+    { try appBuiltInTerminalSessionLauncher()(launchConfiguration) }
+
+    nonisolated static func appBuiltInTerminalSessionLauncher(
+        createSession: @escaping @Sendable (TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary = {
+            try TerminalService.createSession($0)
+        }
+    ) -> WorkspaceOrchestrator.BuiltInTerminalSessionLauncher { { launchConfiguration in try createSession(launchConfiguration) } }
+
+    nonisolated static func terminateBuiltInTerminalSession(sessionID: String) {
+        try? performBuiltInTerminalSessionWorkOnMainThread {
+            (NSApp.delegate as? AppKitController)?.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: true)
+            try? TerminalService.terminateSession(id: sessionID)
+        }
+    }
+
+    nonisolated static func performBuiltInTerminalSessionWorkOnMainThread<T: Sendable>(
+        isMainThread: Bool = Thread.isMainThread,
+        scheduler: @escaping (@escaping @Sendable () -> Void) -> Void = { action in DispatchQueue.main.async(execute: action) },
+        work: @escaping @MainActor () throws -> T
+    ) throws -> T {
+        if isMainThread { return try MainActor.assumeIsolated { try work() } }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let resultBox = MainThreadResultBox<T>()
+        scheduler {
+            resultBox.set(Result { try MainActor.assumeIsolated { try work() } })
+            semaphore.signal()
+        }
+        semaphore.wait()
+        guard let result = resultBox.get() else {
+            throw WorkspaceError.invalidArgument(message: "Built-in terminal main-thread work did not return a result.")
+        }
+        return try result.get()
+    }
+
+    nonisolated static func terminalQuitPolicy(liveTerminalSessionCount: Int) -> TerminalQuitPolicy {
+        liveTerminalSessionCount > 0 ? .promptForLiveSessions(count: liveTerminalSessionCount) : .quitImmediately
+    }
+
+    nonisolated static func liveBuiltInTerminalSessions(listSessions: () throws -> [TerminalServiceSessionSummary] = TerminalService.listSessions)
+        -> [TerminalServiceSessionSummary]
+    { (try? listSessions()) ?? [] }
+
+    @discardableResult nonisolated static func stopAllBuiltInTerminalSessions(
+        liveSessions: [TerminalServiceSessionSummary], terminateSession: (String) throws -> Void = { try TerminalService.terminateSession(id: $0) }
+    ) -> Int {
+        var stoppedCount = 0
+        for session in liveSessions {
+            do {
+                try terminateSession(session.id)
+                stoppedCount += 1
+            } catch { fputs("spaces: failed to stop terminal session \(session.id): \(error)\n", stderr) }
+        }
+        return stoppedCount
+    }
+
+    private func presentTerminalQuitDialog(liveSessionCount: Int) -> TerminalQuitDialogChoice {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Quit Spaces?"
+        let sessionWord = liveSessionCount == 1 ? "terminal session is" : "terminal sessions are"
+        alert.informativeText =
+            "\(liveSessionCount) \(sessionWord) still running. Quit and keep them running, stop all terminal sessions before quitting, or cancel."
+
+        let keepButton = alert.addButton(withTitle: "Quit and Keep Running")
+        keepButton.keyEquivalent = "\r"
+        keepButton.keyEquivalentModifierMask = []
+        alert.addButton(withTitle: "Stop All and Quit")
+        let cancelButton = alert.addButton(withTitle: "Cancel")
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.keyEquivalentModifierMask = []
+
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn: return .keepRunning
+        case .alertSecondButtonReturn: return .stopAll
+        default: return .cancel
+        }
+    }
+
+    private func prewarmTerminalServiceAfterStartup() {
+        Task.detached(priority: .utility) {
+            do {
+                _ = try TerminalService.ensureRunning(timeout: 5)
+                Task { @MainActor [weak self] in self?.logStartupProfile("terminal_service_prewarmed") }
+            } catch { if Self.hotkeyDebugEnabled() { fputs("spaces: terminal service prewarm failed: \(error)\n", stderr) } }
+        }
+    }
+
     nonisolated private static func startupProfileEnabled() -> Bool { ProcessInfo.processInfo.environment["SPACES_STARTUP_PROFILE"] == "1" }
 
     nonisolated private static func startupElapsedMS() -> Int { Int((ProcessInfo.processInfo.systemUptime - startupProfileBaselineUptime) * 1000) }
@@ -1094,7 +1398,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func rawMainWindowVisibility() -> Bool { window?.isVisible == true && window?.isMiniaturized != true }
 
     private func hasVisibleTerminalSessionWindowsForHotkeyState() -> Bool {
-        terminalSessionWindowControllers.values.joined().contains { controller in
+        terminalSessionWindowControllers.values.contains { controller in
             controller.window?.isVisible == true && controller.window?.isMiniaturized != true
         }
     }
@@ -1105,10 +1409,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func focusedTerminalSessionIDForToggle() -> String? {
-        for (sessionID, controllers) in terminalSessionWindowControllers {
-            if controllers.contains(where: { !$0.didClose && ($0.window?.isKeyWindow == true || $0.window?.isMainWindow == true) }) {
-                return sessionID
-            }
+        for (sessionID, controller) in terminalSessionWindowControllers {
+            if !controller.didClose && (controller.window?.isKeyWindow == true || controller.window?.isMainWindow == true) { return sessionID }
         }
         return nil
     }
@@ -1208,18 +1510,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     notice = outcome.notice
                 }
                 return .success(.init(notice: notice))
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func openWorkspaceTerminalSnapshot(workspaceID: String) async -> Result<ExternalWindowAction, Error> {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                try orchestrator.openWorkspaceTerminal(workspaceID: workspaceID)
-                return .success(.open(hidesApp: false))
             } catch { return .failure(error) }
         }.value
     }
@@ -2372,6 +2662,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
 
+        let mobileButton = sidebarRowIconButton(
+            symbol: "iphone.gen3.radiowaves.left.and.right", tooltip: "Mobile connection", action: #selector(showMobileConnection))
         let settingsButton = sidebarRowIconButton(symbol: "gearshape", tooltip: "User settings", action: #selector(showSettings))
         let reloadButton = sidebarRowIconButton(symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped))
 
@@ -2383,6 +2675,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(iconView)
         stack.addArrangedSubview(NSView())
+        stack.addArrangedSubview(mobileButton)
         stack.addArrangedSubview(settingsButton)
         stack.addArrangedSubview(reloadButton)
 
@@ -3383,6 +3676,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(pulseCard)
         constrainFormFieldToFillWidth(pulseCard, in: stack)
 
+        // --- Mobile section ---
+        let mobileCard = settingsMobileSection()
+        stack.addArrangedSubview(mobileCard)
+        constrainFormFieldToFillWidth(mobileCard, in: stack)
+
         // --- Keyboard shortcuts section ---
         let shortcutContainer = buildShortcutRowsContainer()
         let shortcutCard = formSectionCard(
@@ -3449,6 +3747,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         row.addArrangedSubview(labelStack)
         row.addArrangedSubview(control)
         return row
+    }
+
+    private func settingsMobileSection() -> NSView {
+        let response: SpacesMobileBridgeControlResponse? = { try? SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService(timeout: 2) }()
+        let devices = response?.devices ?? []
+        let resetButton = actionButton(
+            title: "Reset All Pairings", symbol: "trash", tooltip: "Remove all paired mobile devices and rotate the transport key",
+            action: #selector(resetAllMobilePairings), primary: false)
+        var rows: [NSView] = [
+            settingsSettingRow(
+                name: "Paired devices",
+                hint: response == nil ? "Mobile bridge status unavailable" : "\(devices.count) device\(devices.count == 1 ? "" : "s") paired",
+                control: resetButton)
+        ]
+        if !devices.isEmpty { rows.append(contentsOf: devices.map { mobileDeviceRow($0) }) }
+        return formSectionCard(icon: "iphone", title: "Mobile", contentViews: rows)
     }
 
     private func buildShortcutRowsContainer() -> NSView {
@@ -5891,6 +6205,414 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func reloadTapped() { reloadData() }
 
+    @objc private func showMobileConnection() {
+        presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService() }
+    }
+
+    private func presentMobileConnectionPanelOrShowError(_ loadResponse: () throws -> SpacesMobileBridgeControlResponse) {
+        do { presentMobileConnectionPanel(try loadResponse()) } catch {
+            if let unavailableResponse = mobileConnectionUnavailableResponse(for: error) {
+                presentMobileConnectionPanel(unavailableResponse)
+            } else {
+                showError(error)
+            }
+        }
+    }
+
+    private func mobileConnectionUnavailableResponse(for error: Error) -> SpacesMobileBridgeControlResponse? {
+        guard SpacesMobileBridgeControlClient.isControlEndpointUnavailable(error) else { return nil }
+        return SpacesMobileBridgeControlResponse(
+            ok: false,
+            message:
+                "Mobile bridge control is unavailable for this profile. Relaunch Spaces without the disabled bridge environment override, or use the standalone bridge from a terminal."
+        )
+    }
+
+    private func presentMobileConnectionPanel(_ response: SpacesMobileBridgeControlResponse) {
+        let pairingWindow = visibleMobilePairingWindow(for: response)
+        let panel: NSPanel
+        if let existing = mobileConnectionPanel {
+            panel = existing
+        } else {
+            let created = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 540, height: 680), styleMask: [.titled, .closable, .utilityWindow], backing: .buffered,
+                defer: false)
+            created.title = "Mobile Connection"
+            created.isReleasedWhenClosed = false
+            created.minSize = NSSize(width: 500, height: 520)
+            created.center()
+            mobileConnectionPanel = created
+            panel = created
+        }
+        panel.contentView = buildMobileConnectionPanelContent(response: response, pairingWindow: pairingWindow)
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        startMobileConnectionTimer()
+    }
+
+    private func refreshVisibleMobileConnectionPanel(_ response: SpacesMobileBridgeControlResponse) {
+        guard let panel = mobileConnectionPanel, panel.isVisible else { return }
+        let pairingWindow = visibleMobilePairingWindow(for: response)
+        panel.contentView = buildMobileConnectionPanelContent(response: response, pairingWindow: pairingWindow)
+    }
+
+    private func visibleMobilePairingWindow(for response: SpacesMobileBridgeControlResponse) -> SpacesMobilePairingWindowSnapshot? {
+        if let pairingWindow = response.pairingWindow, pairingWindow.expiresAt > Date() { return pairingWindow }
+        return nil
+    }
+
+    private func buildMobileConnectionPanelContent(response: SpacesMobileBridgeControlResponse, pairingWindow: SpacesMobilePairingWindowSnapshot?)
+        -> NSView
+    {
+        let root = NSView()
+        root.translatesAutoresizingMaskIntoConstraints = false
+        root.wantsLayer = true
+        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = content
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.distribution = .fill
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(stack)
+
+        let title = NSTextField(labelWithString: "Mobile Connection")
+        title.font = .systemFont(ofSize: 17, weight: .semibold)
+        title.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        stack.addArrangedSubview(title)
+
+        let pairingSection = mobilePairingSection(response: response, pairingWindow: pairingWindow)
+        stack.addArrangedSubview(pairingSection)
+        constrainFormFieldToFillWidth(pairingSection, in: stack)
+
+        let devicesSection = mobileDevicesSection(devices: response.devices ?? [])
+        stack.addArrangedSubview(devicesSection)
+        constrainFormFieldToFillWidth(devicesSection, in: stack)
+
+        // Flexible trailing spacer absorbs any extra vertical space so the sections
+        // keep their natural height instead of one card stretching to fill the panel.
+        let bottomSpacer = NSView()
+        bottomSpacer.translatesAutoresizingMaskIntoConstraints = false
+        bottomSpacer.setContentHuggingPriority(.defaultLow, for: .vertical)
+        bottomSpacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        stack.addArrangedSubview(bottomSpacer)
+        constrainFormFieldToFillWidth(bottomSpacer, in: stack)
+
+        root.addSubview(scroll)
+        let contentBottomFollowsStack = content.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: 24)
+        contentBottomFollowsStack.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: root.topAnchor), scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            content.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            content.bottomAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.bottomAnchor),
+            content.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -24), contentBottomFollowsStack,
+        ])
+        return root
+    }
+
+    private func mobilePairingSection(response: SpacesMobileBridgeControlResponse, pairingWindow: SpacesMobilePairingWindowSnapshot?) -> NSView {
+        var rows: [NSView] = []
+
+        if let window = pairingWindow, window.expiresAt > Date() {
+            rows.append(mobilePairingInstructionLabel("Scan this QR code with the Spaces app on your phone to pair it."))
+            rows.append(mobileQRCodeView(link: window.linkString))
+            rows.append(mobilePairingCodeRow(code: window.code, expiresAt: window.expiresAt))
+            let newCodeButton = actionButton(
+                title: "New Code", symbol: "arrow.clockwise", tooltip: "Replace the current code with a fresh one",
+                action: #selector(openMobilePairingWindow), primary: false)
+            rows.append(mobilePanelButtonRow([newCodeButton]))
+        } else {
+            rows.append(mobilePairingInstructionLabel("Start pairing to show a QR code you can scan with the Spaces app on your phone."))
+            let pairButton = actionButton(
+                title: "Pair a Device", symbol: "qrcode", tooltip: "Show a QR code to pair a phone", action: #selector(openMobilePairingWindow),
+                primary: true)
+            pairButton.isEnabled = response.ok || response.status != nil
+            rows.append(mobilePanelButtonRow([pairButton]))
+            if !response.ok { rows.append(helpTextLabel(response.message)) }
+        }
+
+        return mobilePanelSection(icon: "qrcode", title: "Pair a Device", rows: rows)
+    }
+
+    private func mobilePairingInstructionLabel(_ text: String) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = .secondaryLabelColor
+        label.maximumNumberOfLines = 0
+        return label
+    }
+
+    private func mobilePairingCodeRow(code: String, expiresAt: Date) -> NSView {
+        let codeLabel = NSTextField(labelWithString: code)
+        codeLabel.font = .monospacedSystemFont(ofSize: 15, weight: .medium)
+        codeLabel.textColor = Theme.text
+
+        let expiresLabel = NSTextField(labelWithString: "Expires in \(mobileCountdownText(expiresAt: expiresAt))")
+        expiresLabel.font = .systemFont(ofSize: 11)
+        expiresLabel.textColor = .secondaryLabelColor
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        stack.addArrangedSubview(codeLabel)
+        stack.addArrangedSubview(expiresLabel)
+        return stack
+    }
+
+    private func mobileQRCodeView(link: String) -> NSView {
+        let qrSize: CGFloat = 200
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let qrView = NSImageView()
+        qrView.image = qrImage(for: link, size: qrSize)
+        qrView.imageScaling = .scaleProportionallyUpOrDown
+        qrView.translatesAutoresizingMaskIntoConstraints = false
+        qrView.wantsLayer = true
+        qrView.layer?.backgroundColor = NSColor.white.cgColor
+        qrView.layer?.cornerRadius = 4
+        qrView.layer?.masksToBounds = true
+        container.addSubview(qrView)
+
+        NSLayoutConstraint.activate([
+            container.heightAnchor.constraint(equalToConstant: qrSize), qrView.widthAnchor.constraint(equalToConstant: qrSize),
+            qrView.heightAnchor.constraint(equalToConstant: qrSize), qrView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            qrView.topAnchor.constraint(equalTo: container.topAnchor), qrView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        return container
+    }
+
+    private func mobileDevicesSection(devices: [SpacesMobilePairedDevice]) -> NSView {
+        var rows: [NSView] = []
+        if devices.isEmpty {
+            rows.append(helpTextLabel("No devices are paired yet."))
+        } else {
+            rows.append(contentsOf: devices.map { mobileDeviceRow($0) })
+            let resetButton = actionButton(
+                title: "Remove All", symbol: "trash", tooltip: "Remove all paired mobile devices and rotate the transport key",
+                action: #selector(resetAllMobilePairings), primary: false)
+            rows.append(mobilePanelButtonRow([resetButton]))
+        }
+        return mobilePanelSection(icon: "iphone", title: "Paired Devices", rows: rows)
+    }
+
+    private func mobilePanelSection(icon: String, title: String, rows: [NSView]) -> NSView {
+        let section = NSView()
+        section.translatesAutoresizingMaskIntoConstraints = false
+        section.setContentHuggingPriority(.required, for: .vertical)
+
+        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let iconView = NSImageView()
+        if let image = NSImage(systemSymbolName: icon, accessibilityDescription: title) {
+            iconView.image = image.withSymbolConfiguration(.init(paletteColors: [accentColor]))
+        }
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.textColor = Theme.text
+
+        let header = NSStackView()
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 10
+        header.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+        header.addArrangedSubview(iconView)
+        header.addArrangedSubview(titleLabel)
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(header)
+        header.translatesAutoresizingMaskIntoConstraints = false
+        header.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        if !rows.isEmpty { stack.addArrangedSubview(mobilePanelDivider()) }
+        for row in rows {
+            let paddedRow = mobilePanelPaddedRow(row)
+            stack.addArrangedSubview(paddedRow)
+            paddedRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+
+        section.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: section.leadingAnchor), stack.trailingAnchor.constraint(equalTo: section.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: section.topAnchor), stack.bottomAnchor.constraint(equalTo: section.bottomAnchor),
+        ])
+        return section
+    }
+
+    private func mobilePanelPaddedRow(_ view: NSView) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        view.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+            view.topAnchor.constraint(equalTo: container.topAnchor, constant: 9),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -9),
+        ])
+        return container
+    }
+
+    private func mobilePanelDivider(indent: CGFloat = 0) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        let divider = NSView()
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = Theme.border.cgColor
+        container.addSubview(divider)
+        NSLayoutConstraint.activate([
+            container.heightAnchor.constraint(equalToConstant: 1),
+            divider.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: indent),
+            divider.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -indent),
+            divider.topAnchor.constraint(equalTo: container.topAnchor), divider.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        return container
+    }
+
+    private func mobilePanelButtonRow(_ buttons: [NSButton]) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        for button in buttons {
+            button.setContentHuggingPriority(.required, for: .horizontal)
+            row.addArrangedSubview(button)
+        }
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        row.addArrangedSubview(spacer)
+        return row
+    }
+
+    private func mobileDeviceRow(_ device: SpacesMobilePairedDevice) -> NSView {
+        let titleLabel = NSTextField(labelWithString: device.deviceName)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.maximumNumberOfLines = 1
+
+        let platformText = [device.platform, device.appVersion].compactMap { value -> String? in
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        }.joined(separator: " ")
+        let detailPrefix = platformText.isEmpty ? "" : "\(platformText) · "
+        let detailLabel = NSTextField(labelWithString: "\(detailPrefix)Last used \(mobilePanelDateText(device.lastUsedAt))")
+        detailLabel.font = .systemFont(ofSize: 11)
+        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.lineBreakMode = .byTruncatingTail
+        detailLabel.maximumNumberOfLines = 1
+
+        let textStack = NSStackView()
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.addArrangedSubview(titleLabel)
+        textStack.addArrangedSubview(detailLabel)
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let revokeButton = iconButton(symbol: "xmark.circle", tooltip: "Remove this device", action: #selector(revokeMobileDevice(_:)))
+        revokeButton.identifier = NSUserInterfaceItemIdentifier(device.installationID)
+        revokeButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 12
+        row.addArrangedSubview(textStack)
+        row.addArrangedSubview(revokeButton)
+        return row
+    }
+
+    private func mobilePanelDateText(_ value: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        guard let date = formatter.date(from: value) else { return value }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func mobileCountdownText(expiresAt: Date) -> String {
+        let remaining = max(Int(expiresAt.timeIntervalSince(Date()).rounded(.down)), 0)
+        let minutes = remaining / 60
+        let seconds = remaining % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func startMobileConnectionTimer() {
+        mobileConnectionTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            MainActor.assumeIsolated { self.refreshMobileConnectionPanelIfVisible() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        mobileConnectionTimer = timer
+    }
+
+    private func refreshMobileConnectionPanelIfVisible() {
+        guard mobileConnectionPanel?.isVisible == true else {
+            mobileConnectionTimer?.invalidate()
+            mobileConnectionTimer = nil
+            return
+        }
+        do { refreshVisibleMobileConnectionPanel(try SpacesMobileBridgeControlClient.status(timeout: 1)) } catch {}
+    }
+
+    @objc private func openMobilePairingWindow() {
+        presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.openPairingWindow() }
+    }
+
+    @objc private func revokeMobileDevice(_ sender: NSButton) {
+        guard let installationID = sender.identifier?.rawValue else { return }
+        presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.revokeDevice(installationID: installationID) }
+    }
+
+    @objc private func resetAllMobilePairings() { presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.resetAllPairings() } }
+
+    private func qrImage(for value: String, size: CGFloat) -> NSImage? {
+        let filter = CIFilter(name: "CIQRCodeGenerator")
+        filter?.setValue(Data(value.utf8), forKey: "inputMessage")
+        filter?.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter?.outputImage else { return nil }
+        let quietZone: CGFloat = 16
+        let availableSize = max(size - (quietZone * 2), 1)
+        let scale = max(floor(availableSize / output.extent.width), 1)
+        let transformed = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        guard let cgImage = CIContext().createCGImage(transformed, from: transformed.extent) else { return nil }
+        let qrSize = transformed.extent.size
+        let image = NSImage(size: NSSize(width: size, height: size))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: image.size).fill()
+        NSGraphicsContext.current?.imageInterpolation = .none
+        NSImage(cgImage: cgImage, size: qrSize).draw(
+            in: NSRect(x: (size - qrSize.width) / 2, y: (size - qrSize.height) / 2, width: qrSize.width, height: qrSize.height),
+            from: NSRect(origin: .zero, size: qrSize), operation: .sourceOver, fraction: 1)
+        image.unlockFocus()
+        return image
+    }
+
     @objc private func showSettings() {
         if projectHasUnsavedChanges {
             let response = unsavedChangesPrompt()
@@ -5907,6 +6629,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         selectedWorkspaceID = nil
         lastSelectedRow = -1
         showSettingsDetail()
+    }
+
+    private func copyToPasteboard(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
     }
 
     @objc private func openWorkspaceEditor(_ sender: NSButton) {
@@ -6623,19 +7350,116 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { completion?() }
-            let result = await Self.openWorkspaceTerminalSnapshot(workspaceID: workspaceID)
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspaceID)
+                Task.detached(priority: .userInitiated) {
+                    do {
+                        let store = try SQLiteStore(path: db)
+                        let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowOpener: { _, _ in })
+                        try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation)
+                    } catch { NSLog("spaces: workspace terminal launch failed: \(String(describing: error))") }
+                }
+                if let windowID = openTerminalSessionWindow(sessionID: reservation.sessionID, mode: .owner) {
+                    try? orchestrator.persistBuiltInTerminalWindowID(sessionID: reservation.sessionID, windowID: windowID)
+                }
+                reloadData()
+                hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
+                logPerfMetric(
+                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: true, detail: "route=\(route.rawValue)")
+            } catch {
+                logPerfMetric(
+                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: false, detail: "route=\(route.rawValue)")
+                showError(error)
+            }
+        }
+    }
+
+    private func runWorkspaceProcess(workspaceID: String, processName: String) {
+        let startedAt = Date()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.performWindowFocusSnapshot(.workspaceMissingConfiguredProcess(workspaceID: workspaceID, processKey: processName))
             let elapsedMS = windowShortcutElapsedMS(since: startedAt)
             switch result {
             case .success(let action):
                 logPerfMetric(
-                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: true,
-                    detail: "route=\(route.rawValue)")
+                    "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: true,
+                    detail: "route=ipc name=\(processName)")
                 reloadData()
                 hideAfterSuccessfulExternalWindowAction(action)
             case .failure(let error):
                 logPerfMetric(
-                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,
-                    detail: "route=\(route.rawValue)")
+                    "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,
+                    detail: "route=ipc name=\(processName)")
+                showError(error)
+            }
+        }
+    }
+
+    private func stopWorkspaceProcess(workspaceID: String, processName: String) {
+        let startedAt = Date()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let process = try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.templateName == processName })
+                else { throw WorkspaceError.invalidArgument(message: "Configured process not found.") }
+                try orchestrator.stopWorkspaceProcess(workspaceID: workspaceID, processID: process.id)
+                logPerfMetric(
+                    "workspace_process_stop_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: true, detail: "route=ipc name=\(processName)")
+                reloadData()
+            } catch {
+                logPerfMetric(
+                    "workspace_process_stop_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: false, detail: "route=ipc name=\(processName)")
+                fputs("spaces: workspace process stop IPC failed for \(processName): \(error)\n", stderr)
+                showError(error)
+            }
+        }
+    }
+
+    private func restartWorkspaceProcess(workspaceID: String, processName: String) {
+        let startedAt = Date()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let process = try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.templateName == processName })
+                else { throw WorkspaceError.invalidArgument(message: "Configured process not found.") }
+                try orchestrator.restartWorkspaceProcess(workspaceID: workspaceID, processID: process.id)
+                logPerfMetric(
+                    "workspace_process_restart_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: true, detail: "route=ipc name=\(processName)")
+                reloadData()
+            } catch {
+                logPerfMetric(
+                    "workspace_process_restart_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: false, detail: "route=ipc name=\(processName)")
+                fputs("spaces: workspace process restart IPC failed for \(processName): \(error)\n", stderr)
+                showError(error)
+            }
+        }
+    }
+
+    private func launchWorkspaceAgent(workspaceID: String, launcherName: String) {
+        let startedAt = Date()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.performWindowFocusSnapshot(.workspaceAgentLauncher(workspaceID: workspaceID, name: launcherName))
+            let elapsedMS = windowShortcutElapsedMS(since: startedAt)
+            switch result {
+            case .success(let action):
+                logPerfMetric(
+                    "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: true,
+                    detail: "route=ipc name=\(launcherName)")
+                reloadData()
+                hideAfterSuccessfulExternalWindowAction(action)
+            case .failure(let error):
+                logPerfMetric(
+                    "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,
+                    detail: "route=ipc name=\(launcherName)")
                 showError(error)
             }
         }

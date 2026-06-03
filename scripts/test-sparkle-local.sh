@@ -54,6 +54,7 @@ BUILD_DIR="$REPO_ROOT/apps/macos/.build/apple/Products/Release"
 "$REPO_ROOT/scripts/create-dmg.sh" \
   "$BUILD_DIR/SpacesApp" \
   "$BUILD_DIR/spaces" \
+  "$BUILD_DIR/SpacesTerminalService" \
   "$BASE_VERSION"
 
 echo "Preparing update build $UPDATE_VERSION ($UPDATE_BUILD)..."
@@ -66,6 +67,7 @@ echo "Preparing update build $UPDATE_VERSION ($UPDATE_BUILD)..."
 "$REPO_ROOT/scripts/create-sparkle-archive.sh" \
   "$BUILD_DIR/SpacesApp" \
   "$BUILD_DIR/spaces" \
+  "$BUILD_DIR/SpacesTerminalService" \
   "$UPDATE_VERSION"
 
 SPARKLE_DOWNLOAD_URL_PREFIX="$LOCAL_DOWNLOAD_URL_PREFIX" \

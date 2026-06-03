@@ -31,6 +31,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -46,9 +48,7 @@ jobs:
       - name: Setup terminal build dependencies
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          apps/macos/scripts/setup_ghosttykit.sh
-          apps/macos/scripts/setup_ghosttyvt.sh
+        run: apps/macos/scripts/ensure_ghostty_artifacts.sh --publish-missing
 
       - name: Resolve SwiftPM dependencies
         run: scripts/swiftpm.sh package resolve
@@ -132,7 +132,8 @@ jobs:
         run: |
           scripts/codesign.sh \
             apps/macos/.build/apple/Products/Release/SpacesApp \
-            apps/macos/.build/apple/Products/Release/spaces
+            apps/macos/.build/apple/Products/Release/spaces \
+            apps/macos/.build/apple/Products/Release/SpacesTerminalService
 
       - name: Package DMG
         env:
@@ -141,6 +142,7 @@ jobs:
           scripts/create-dmg.sh \
             apps/macos/.build/apple/Products/Release/SpacesApp \
             apps/macos/.build/apple/Products/Release/spaces \
+            apps/macos/.build/apple/Products/Release/SpacesTerminalService \
             ${{ steps.version.outputs.version }}
           dmg_name="Spaces-${{ steps.version.outputs.version }}.dmg"
           echo "DMG_NAME=$dmg_name" >> "$GITHUB_ENV"
@@ -153,6 +155,7 @@ jobs:
           scripts/create-sparkle-archive.sh \
             apps/macos/.build/apple/Products/Release/SpacesApp \
             apps/macos/.build/apple/Products/Release/spaces \
+            apps/macos/.build/apple/Products/Release/SpacesTerminalService \
             ${{ steps.version.outputs.version }}
           zip_name="Spaces-${{ steps.version.outputs.version }}.zip"
           echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"

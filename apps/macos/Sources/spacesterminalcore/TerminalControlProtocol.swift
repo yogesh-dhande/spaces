@@ -9,11 +9,20 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let client: TerminalClient?
     public let attachmentMode: TerminalAttachmentMode?
     public let lineCount: Int?
+    public let columns: Int?
+    public let rows: Int?
+    public let ownerEpoch: UInt64?
+    public let resizeSerial: UInt64?
+    public let scrollHorizontal: Double?
+    public let scrollVertical: Double?
+    public let scrollMods: Int32?
     public let appendNewline: Bool
 
     public init(
         command: String, authToken: String? = nil, text: String? = nil, key: String? = nil, clientID: String? = nil, client: TerminalClient? = nil,
-        attachmentMode: TerminalAttachmentMode? = nil, lineCount: Int? = nil, appendNewline: Bool = false
+        attachmentMode: TerminalAttachmentMode? = nil, lineCount: Int? = nil, columns: Int? = nil, rows: Int? = nil, ownerEpoch: UInt64? = nil,
+        resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil, scrollMods: Int32? = nil,
+        appendNewline: Bool = false
     ) {
         self.command = command
         self.authToken = authToken
@@ -23,6 +32,13 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         self.client = client
         self.attachmentMode = attachmentMode
         self.lineCount = lineCount
+        self.columns = columns
+        self.rows = rows
+        self.ownerEpoch = ownerEpoch
+        self.resizeSerial = resizeSerial
+        self.scrollHorizontal = scrollHorizontal
+        self.scrollVertical = scrollVertical
+        self.scrollMods = scrollMods
         self.appendNewline = appendNewline
     }
 
@@ -35,6 +51,13 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         case client
         case attachmentMode
         case lineCount
+        case columns
+        case rows
+        case ownerEpoch
+        case resizeSerial
+        case scrollHorizontal
+        case scrollVertical
+        case scrollMods
         case appendNewline
     }
 
@@ -48,6 +71,13 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         client = try container.decodeIfPresent(TerminalClient.self, forKey: .client)
         attachmentMode = try container.decodeIfPresent(TerminalAttachmentMode.self, forKey: .attachmentMode)
         lineCount = try container.decodeIfPresent(Int.self, forKey: .lineCount)
+        columns = try container.decodeIfPresent(Int.self, forKey: .columns)
+        rows = try container.decodeIfPresent(Int.self, forKey: .rows)
+        ownerEpoch = try container.decodeIfPresent(UInt64.self, forKey: .ownerEpoch)
+        resizeSerial = try container.decodeIfPresent(UInt64.self, forKey: .resizeSerial)
+        scrollHorizontal = try container.decodeIfPresent(Double.self, forKey: .scrollHorizontal)
+        scrollVertical = try container.decodeIfPresent(Double.self, forKey: .scrollVertical)
+        scrollMods = try container.decodeIfPresent(Int32.self, forKey: .scrollMods)
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
     }
 
@@ -61,6 +91,13 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(client, forKey: .client)
         try container.encodeIfPresent(attachmentMode, forKey: .attachmentMode)
         try container.encodeIfPresent(lineCount, forKey: .lineCount)
+        try container.encodeIfPresent(columns, forKey: .columns)
+        try container.encodeIfPresent(rows, forKey: .rows)
+        try container.encodeIfPresent(ownerEpoch, forKey: .ownerEpoch)
+        try container.encodeIfPresent(resizeSerial, forKey: .resizeSerial)
+        try container.encodeIfPresent(scrollHorizontal, forKey: .scrollHorizontal)
+        try container.encodeIfPresent(scrollVertical, forKey: .scrollVertical)
+        try container.encodeIfPresent(scrollMods, forKey: .scrollMods)
         try container.encode(appendNewline, forKey: .appendNewline)
     }
 }

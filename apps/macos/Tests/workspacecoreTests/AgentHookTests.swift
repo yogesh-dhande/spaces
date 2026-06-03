@@ -152,6 +152,26 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
     }
 
+    func testUpdateAgentWindowStatusIgnoresYabaiWindowIDForBuiltInSpacesSessionIdentity() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let sessionID = UUID().uuidString
+
+        let existing = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: sessionID, terminalNativeID: sessionID,
+            codexThreadID: "thread-1", yabaiWindowID: 101, status: .idle)
+
+        let updated = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, codexThreadID: "thread-1", yabaiWindowID: 202,
+            label: "Claude Code CLI", status: .waiting)
+
+        XCTAssertEqual(updated.id, existing.id)
+        XCTAssertNil(updated.yabaiWindowID)
+        XCTAssertEqual(updated.status, .waiting)
+        XCTAssertFalse(try store.windows(workspaceID: workspace.id).contains { $0.windowID == 101 || $0.windowID == 202 })
+    }
+
     func testUpdateAgentWindowStatusFallsBackToCodexThreadMatch() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())

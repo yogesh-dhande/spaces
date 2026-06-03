@@ -2,6 +2,8 @@ import ArgumentParser
 import Darwin
 import Dispatch
 import Foundation
+import spacesmobilebridge
+import spacesmobilecore
 import spacesterminalcore
 import spacesterminalghostty
 import systembridge
@@ -28,7 +30,7 @@ public struct SpacesCommand: ParsableCommand {
             """, version: AppVersion.current,
         subcommands: [
             ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, OpenCommand.self, SignalCommand.self,
-            TerminalCommand.self, ProfileCommand.self,
+            TerminalCommand.self, MobileCommand.self, ProfileCommand.self,
         ])
 
     public init() {}
@@ -58,20 +60,9 @@ struct TerminalListCommand: ParsableCommand {
 }
 
 func availableTerminalSessionRows(fileManager: FileManager = .default) throws -> [String] {
-    try TerminalSessionPersistence.listKnownSessions(fileManager: fileManager).compactMap { session in
-        let paths = try TerminalSessionPaths.forSession(id: session.sessionID)
-        guard fileManager.fileExists(atPath: paths.controlSocketPath), fileManager.fileExists(atPath: paths.statePath) else { return nil }
-        guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
-        guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }
-        guard isProcessAlive(pid: runtimeState.servicePID) else { return nil }
-        return "\(session.sessionID)\tstate=\(runtimeState.state.rawValue)\tcwd=\(session.workingDirectory)"
+    try TerminalSessionCatalog.listLiveSessions(fileManager: fileManager).map { session in
+        "\(session.sessionID)\tstate=\(session.runtimeState.state.rawValue)\tcwd=\(session.effectiveWorkingDirectory)"
     }
-}
-
-private func isProcessAlive(pid: Int32) -> Bool {
-    guard pid > 0 else { return false }
-    if kill(pid, 0) == 0 { return true }
-    return errno == EPERM
 }
 
 struct TerminalCommandCommand: ParsableCommand {
@@ -92,18 +83,10 @@ struct TerminalCommandCommand: ParsableCommand {
             throw WorkspaceError.invalidArgument(message: "Terminal backend '\(backend.rawValue)' is not available in this build.")
         }
         let context = CLIContext()
-        let sessionID = UUID().uuidString
-        let workingDirectory = context.normalizePath(cwd ?? context.currentDirectoryPath())
-        let resolvedShell = terminalShellPath(shell)
-        let resolvedTitle = title ?? terminalDefaultTitle(command: command, cwd: workingDirectory)
-        let createdAt = ISO8601DateFormatter().string(from: Date())
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: sessionID, backend: backend, title: resolvedTitle, workingDirectory: workingDirectory, shell: resolvedShell, command: command,
-            createdAt: createdAt)
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        try paths.ensureDirectories()
-        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
-        FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
+        let launchConfiguration = terminalCommandLaunchConfiguration(
+            sessionID: UUID().uuidString, backend: backend, command: command, title: title, cwd: cwd, shell: shell, context: context)
+        let sessionID = launchConfiguration.sessionID
+        let session = try TerminalService.createSession(launchConfiguration)
 
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.openTerminalSessionWindow, object: try IPCNotification.currentObject(),
@@ -112,19 +95,20 @@ struct TerminalCommandCommand: ParsableCommand {
                 IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
             ], options: [.deliverImmediately])
 
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline {
-            if FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) { break }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-
-        guard FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) else {
-            throw WorkspaceError.invalidArgument(
-                message: "Timed out waiting for SpacesApp to create the Spaces terminal session. Ensure the app is running.")
-        }
-
-        print("Started terminal session \(sessionID)\ttitle=\(resolvedTitle)\tbackend=\(backend.rawValue)\tcwd=\(workingDirectory)")
+        print("Started terminal session \(session.id)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tcwd=\(session.workingDirectory)")
     }
+}
+
+func terminalCommandLaunchConfiguration(
+    sessionID: String, backend: TerminalSessionBackendKind, command: String?, title: String?, cwd: String?, shell: String?,
+    createdAt: String = ISO8601DateFormatter().string(from: Date()), context: CLIContext = CLIContext()
+) -> TerminalSessionLaunchConfiguration {
+    let workingDirectory = context.normalizePath(cwd ?? context.currentDirectoryPath())
+    let resolvedShell = terminalShellPath(shell)
+    let resolvedTitle = title ?? terminalDefaultTitle(command: command, cwd: workingDirectory)
+    return TerminalSessionLaunchConfiguration(
+        sessionID: sessionID, backend: backend, lifetimePolicy: .persistent, title: resolvedTitle, workingDirectory: workingDirectory,
+        shell: resolvedShell, command: command, createdAt: createdAt)
 }
 
 struct TerminalSendCommand: ParsableCommand {
@@ -150,7 +134,7 @@ struct TerminalKeyCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "key", abstract: "Send a named key or control chord to a Spaces terminal session.")
 
     @Argument(help: "Terminal session ID.") var sessionID: String
-    @Argument(help: "Key spec such as enter, esc, up, down, or ctrl+c.") var key: String
+    @Argument(help: "Key spec such as enter, esc, up, down, ctrl+c, cmd+left, or cmd+k.") var key: String
 
     func run() throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -187,19 +171,19 @@ struct TerminalShowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "show", abstract: "Open a native Spaces window for a terminal session.")
 
     @Argument(help: "Terminal session ID.") var sessionID: String
-    @Flag(name: .long, help: "Open the window as a passive viewer instead of the active owner.") var viewer = false
 
     func run() throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         guard FileManager.default.fileExists(atPath: paths.metadataPath) else {
             throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' does not exist.")
         }
-        let mode = viewer ? TerminalAttachmentMode.viewer : .owner
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.openTerminalSessionWindow, object: try IPCNotification.currentObject(),
-            userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalAttachmentModeUserInfoKey: mode.rawValue],
-            options: [.deliverImmediately])
-        print("Requested \(mode.rawValue) terminal window for session \(sessionID)")
+            userInfo: [
+                IPCNotification.terminalSessionIDUserInfoKey: sessionID,
+                IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+            ], options: [.deliverImmediately])
+        print("Requested owner terminal window for session \(sessionID)")
     }
 }
 
@@ -255,6 +239,110 @@ struct TerminalProxyCommand: ParsableCommand {
         dispatchMain()
     }
 }
+
+struct MobileCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mobile", abstract: "Expose first-party workspace and terminal browsing for the iOS client.",
+        subcommands: [MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self], defaultSubcommand: MobileStatusCommand.self)
+}
+
+struct MobileStatusCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "status", abstract: "Show the first-party mobile bridge address.")
+
+    func run() throws { for line in try mobileStatusLines() { print(line) } }
+}
+
+func mobileStatusLines(
+    loadControlResponse: () throws -> SpacesMobileBridgeControlResponse = {
+        try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService()
+    }
+) throws -> [String] {
+    let response = try loadControlResponse()
+    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+    guard let status = response.status else {
+        throw WorkspaceError.invalidArgument(message: "Mobile bridge status response did not include address details.")
+    }
+    return mobileStatusLines(status: status)
+}
+
+func mobileStatusLines(status: SpacesMobileBridgeStatus) -> [String] {
+    var lines = ["Spaces mobile bridge", "port=\(status.port)", "bonjour=\(status.bonjourServiceName)\ttype=\(status.bonjourServiceType)"]
+    if status.networkAddresses.isEmpty {
+        lines.append("addresses=(none)")
+    } else {
+        lines.append("addresses=\(status.networkAddresses.map { "\($0):\(status.port)" }.joined(separator: ","))")
+    }
+    lines.append("iphone=Open Mobile Connection in the Mac app to show a QR code or pairing link.")
+    return lines
+}
+
+struct MobileServeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "serve", abstract: "Run a standalone first-party mobile bridge for the iOS client.")
+
+    @Option(name: .long, help: "TCP host to bind. Defaults to all IPv4 interfaces for iPhone and simulator access.") var host =
+        SpacesMobileBridgeDefaults.host
+    @Option(name: .long, help: "TCP port to bind. Defaults to the stable first-party mobile bridge port.") var port = SpacesMobileBridgeDefaults.port
+    @Option(name: .long, help: "One-time pairing code accepted by the first-party iOS client. Defaults to a generated 8-digit code.") var pairingCode:
+        String?
+    @Option(name: .long, help: "Number of one-time pairing windows to emit in standalone harness mode.") var pairingWindowCount = 1
+
+    func run() throws {
+        guard pairingWindowCount > 0 else { throw ValidationError("--pairing-window-count must be greater than zero.") }
+        let trimmedPairingCode = pairingCode?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedPairingCode =
+            if let trimmedPairingCode, !trimmedPairingCode.isEmpty { trimmedPairingCode } else {
+                SpacesMobilePairingCoordinator.generatePairingCode()
+            }
+        let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+        let pairingWindowEmitter = MobileServePairingWindowEmitter(
+            bindHost: host, totalWindowCount: pairingWindowCount, firstPairingCode: resolvedPairingCode)
+        let server = try SpacesMobileBridgeServer(host: host, port: port, transportKey: transportKey) { _ in
+            pairingWindowEmitter.openNextWindow(label: "Spaces mobile pairing window")
+        }
+        pairingWindowEmitter.server = server
+        try server.start()
+        pairingWindowEmitter.linkHost = mobileServePairingLinkHost(host: host)
+        pairingWindowEmitter.openNextWindow(label: "Spaces mobile bridge ready")
+        withExtendedLifetime(server) { dispatchMain() }
+    }
+}
+
+private final class MobileServePairingWindowEmitter: @unchecked Sendable {
+    weak var server: SpacesMobileBridgeServer?
+    var linkHost = SpacesMobileBridgeDefaults.loopbackHost
+
+    private let lock = NSLock()
+    private let bindHost: String
+    private let totalWindowCount: Int
+    private var emittedWindowCount = 0
+    private var nextPairingCode: String?
+
+    init(bindHost: String, totalWindowCount: Int, firstPairingCode: String) {
+        self.bindHost = bindHost
+        self.totalWindowCount = totalWindowCount
+        nextPairingCode = firstPairingCode
+    }
+
+    func openNextWindow(label: String) {
+        lock.lock()
+        guard emittedWindowCount < totalWindowCount, let server else {
+            lock.unlock()
+            return
+        }
+        emittedWindowCount += 1
+        let code = nextPairingCode ?? SpacesMobilePairingCoordinator.generatePairingCode()
+        nextPairingCode = nil
+        lock.unlock()
+
+        let window = server.openPairingWindow(host: linkHost, name: "Spaces Standalone", code: code)
+        print(
+            "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(ISO8601DateFormatter().string(from: window.expiresAt))\tbundle=\(SpacesMobileFirstPartyPolicy.allowedBundleID)"
+        )
+        fflush(stdout)
+    }
+}
+
+func mobileServePairingLinkHost(host: String) -> String { SpacesMobileBridgeNetworkInterfaces.pairingLinkHost(boundHost: host) }
 
 struct ImportCommand: ParsableCommand {
     static let configuration = CommandConfiguration(

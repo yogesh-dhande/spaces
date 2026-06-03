@@ -1,7 +1,11 @@
 import AppKit
 import ApplicationServices
 import ArgumentParser
+import Carbon
+import Dispatch
 import Foundation
+import spacesmobilebridge
+import spacesmobilecore
 import spacesterminalcore
 import systembridge
 import workspacecore
@@ -14,11 +18,15 @@ struct MXE2ECommand: ParsableCommand {
         subcommands: [
             SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
             ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, SelectWorkspaceDetailCommand.self,
-            OpenWorkspaceTerminalCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
+            OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self, RestartWorkspaceProcessCommand.self,
+            LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
             StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
-            SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self,
-            CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
-            CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, RecordScreenCommand.self,
+            ClearWorkspaceAgentWindowsCommand.self, SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self,
+            RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self, CycleWorkspaceWindowCommand.self,
+            FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self,
+            SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
+            StartTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, OpenMobilePairingWindowCommand.self, RecordScreenCommand.self,
+            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
         ])
 }
 
@@ -39,6 +47,72 @@ private struct HideMainWindowCommand: ParsableCommand {
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.hideMainWindow, object: try IPCNotification.currentObject(), userInfo: nil, options: [.deliverImmediately])
         try emitJSON(["success": true])
+    }
+}
+
+private struct ScrollApplicationWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "scroll-application-window")
+
+    @Option(name: .long) var executableName: String
+    @Option(name: .long) var windowTitleContains: String?
+    @Option(name: .long) var normalizedX = 0.5
+    @Option(name: .long) var normalizedY = 0.5
+    @Option(name: .long) var deltaY = -120
+    @Option(name: .long) var repetitions = 1
+
+    func run() throws {
+        guard (0...1).contains(normalizedX), (0...1).contains(normalizedY) else {
+            throw ValidationError("Normalized coordinates must be between 0 and 1.")
+        }
+        guard repetitions > 0 else { throw ValidationError("Repetitions must be greater than zero.") }
+        let target = try targetApplicationWindow(executableName: executableName, windowTitleContains: windowTitleContains)
+
+        target.application.activate(options: [])
+        axPerformAction(target.window, action: kAXRaiseAction as String)
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let point = CGPoint(x: target.frame.minX + target.frame.width * normalizedX, y: target.frame.minY + target.frame.height * normalizedY)
+        let timing = try postScrollEvent(at: point, deltaY: deltaY, repetitions: repetitions)
+        try emitJSON(
+            ScrollApplicationWindowPayload(
+                executableName: executableName, windowTitle: target.title, pointX: point.x, pointY: point.y, deltaY: deltaY, repetitions: repetitions,
+                firstScrollEventUptimeNanoseconds: timing.firstScrollEventUptimeNanoseconds,
+                lastScrollEventUptimeNanoseconds: timing.lastScrollEventUptimeNanoseconds, success: true))
+    }
+}
+
+private struct TypeApplicationWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "type-application-window")
+
+    @Option(name: .long) var executableName: String
+    @Option(name: .long) var windowTitleContains: String?
+    @Option(name: .long) var normalizedX = 0.5
+    @Option(name: .long) var normalizedY = 0.5
+    @Option(name: .long) var text: String
+    @Flag(name: .long) var appendNewline = false
+    @Option(name: .long) var interKeyDelayMS = 5
+
+    func run() throws {
+        guard (0...1).contains(normalizedX), (0...1).contains(normalizedY) else {
+            throw ValidationError("Normalized coordinates must be between 0 and 1.")
+        }
+        let inputText = appendNewline ? "\(text)\n" : text
+        guard !inputText.isEmpty else { throw ValidationError("Missing text.") }
+        let target = try targetApplicationWindow(executableName: executableName, windowTitleContains: windowTitleContains)
+
+        target.application.activate(options: [])
+        axPerformAction(target.window, action: kAXRaiseAction as String)
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let point = CGPoint(x: target.frame.minX + target.frame.width * normalizedX, y: target.frame.minY + target.frame.height * normalizedY)
+        try postMouseClick(at: point)
+        Thread.sleep(forTimeInterval: 0.05)
+        let timing = try postKeyboardText(inputText, interKeyDelayMS: interKeyDelayMS)
+        try emitJSON(
+            TypeApplicationWindowPayload(
+                executableName: executableName, windowTitle: target.title, pointX: point.x, pointY: point.y, textByteCount: inputText.utf8.count,
+                firstKeyDownUptimeNanoseconds: timing.firstKeyDownUptimeNanoseconds, lastKeyUpUptimeNanoseconds: timing.lastKeyUpUptimeNanoseconds,
+                success: true))
     }
 }
 
@@ -102,6 +176,155 @@ private struct OpenWorkspaceTerminalCommand: ParsableCommand {
             WorkspaceSummaryPayload(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
                 notes: workspace.notes))
+    }
+}
+
+private struct StartTerminalSessionCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "start-terminal-session")
+
+    @Option(name: .long) var command: String?
+    @Option(name: .long) var title: String?
+    @Option(name: .long) var cwd: String?
+    @Option(name: .long) var shell: String?
+
+    /// Creates a built-in terminal session directly through TerminalService
+    /// without opening a macOS window. The helper always uses a persistent
+    /// lifetime so standalone mobile harnesses can attach later.
+    func run() throws {
+        let normalizedWorkingDirectory = normalizePath(cwd ?? FileManager.default.currentDirectoryPath)
+        let resolvedShell = terminalShellPath(shell)
+        let resolvedTitle = title ?? terminalDefaultTitle(command: command, cwd: normalizedWorkingDirectory)
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: UUID().uuidString, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: resolvedTitle,
+            workingDirectory: normalizedWorkingDirectory, shell: resolvedShell, command: command,
+            createdAt: ISO8601DateFormatter().string(from: Date()))
+        let session = try TerminalService.createSession(launchConfiguration)
+        try emitJSON(session)
+    }
+}
+
+private struct TerminateTerminalSessionCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "terminate-terminal-session")
+
+    @Argument(help: "Terminal session ID.") var sessionID: String
+
+    func run() throws {
+        let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session ID.") }
+        try TerminalService.terminateSession(id: trimmedSessionID)
+        try emitJSON(TerminatedTerminalSessionPayload(sessionID: trimmedSessionID, terminated: true))
+    }
+}
+
+private struct OpenMobilePairingWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "open-mobile-pairing-window")
+
+    @Option(name: .long) var timeoutSeconds: Double = 5
+
+    func run() throws {
+        _ = try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService(timeout: timeoutSeconds)
+        let response = try SpacesMobileBridgeControlClient.openPairingWindow(timeout: timeoutSeconds)
+        guard response.ok else { throw ValidationError(response.message) }
+        guard let status = response.status else { throw ValidationError("Mobile bridge response did not include address details.") }
+        guard let window = response.pairingWindow else { throw ValidationError("Mobile bridge response did not include a pairing window.") }
+        let link = try SpacesMobilePairingLink.parse(window.linkString)
+        try emitJSON(
+            MobilePairingWindowPayload(
+                host: status.host, port: status.port, bonjourServiceName: status.bonjourServiceName, pairingLink: window.linkString,
+                pairingCode: window.code, pairingNonce: window.nonce, transportKey: link.transportKey,
+                expiresAt: ISO8601DateFormatter().string(from: window.expiresAt), message: response.message))
+    }
+}
+
+private struct RunWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "run-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var processName: String
+
+    /// Tells the running Spaces app to launch one configured process through
+    /// the same app-side path used by GUI recovery or focus actions.
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.runWorkspaceProcess, object: nil,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName],
+            options: [.deliverImmediately])
+        try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
+    }
+}
+
+private struct StopWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "stop-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var processName: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.stopWorkspaceProcess, object: nil,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName],
+            options: [.deliverImmediately])
+        try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
+    }
+}
+
+private struct RestartWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "restart-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var processName: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.restartWorkspaceProcess, object: nil,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName],
+            options: [.deliverImmediately])
+        try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
+    }
+}
+
+private struct LaunchWorkspaceAgentCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "launch-workspace-agent")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var name: String
+
+    /// Tells the running Spaces app to launch one configured coding agent
+    /// through the same app-side path used by the GUI.
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw ValidationError("Missing coding agent name.") }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.launchWorkspaceAgent, object: nil,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedName],
+            options: [.deliverImmediately])
+        try emitJSON(["workspaceID": workspace.id, "name": trimmedName])
     }
 }
 
@@ -550,6 +773,30 @@ private struct CloseTerminalSessionWindowCommand: ParsableCommand {
     }
 }
 
+private struct DumpTerminalSessionWindowStateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "dump-terminal-session-window-state")
+
+    @Option(name: .long) var sessionID: String
+    @Option(name: .long) var outputPath: String
+    @Flag(name: .long) var viewer = false
+    @Flag(name: .long) var anyMode = false
+
+    func run() throws {
+        let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session id.") }
+        let trimmedOutputPath = outputPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedOutputPath.isEmpty else { throw ValidationError("Missing output path.") }
+        let attachmentMode: TerminalAttachmentMode? = anyMode ? nil : (viewer ? .viewer : .owner)
+        var userInfo: [String: String] = [
+            IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID, IPCNotification.outputPathUserInfoKey: trimmedOutputPath,
+        ]
+        if let attachmentMode { userInfo[IPCNotification.terminalAttachmentModeUserInfoKey] = attachmentMode.rawValue }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.dumpTerminalSessionWindowState, object: nil, userInfo: userInfo, options: [.deliverImmediately])
+        try emitJSON(["sessionID": trimmedSessionID, "mode": attachmentMode?.rawValue ?? "any", "outputPath": trimmedOutputPath])
+    }
+}
+
 private struct SurfaceSnapshotCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "surface-snapshot")
 
@@ -647,6 +894,22 @@ private struct ArchiveWorkspaceCommand: ParsableCommand {
             WorkspaceSummaryPayload(
                 id: updated.id, title: updated.title, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
                 notes: updated.notes))
+    }
+}
+
+private struct ClearWorkspaceAgentWindowsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "clear-workspace-agent-windows")
+
+    @Option(name: .long) var workspaceDir: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        try orchestrator.store.deleteAgentWindows(workspaceID: workspace.id)
+        try emitJSON(["workspaceID": workspace.id, "cleared": "true"])
     }
 }
 
@@ -749,6 +1012,35 @@ private struct AddWorkspaceProcessCommand: ParsableCommand {
     }
 }
 
+private struct RemoveWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "remove-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var name: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw ValidationError("Missing process name.") }
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes.removeAll { ($0.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == trimmedName }
+        }
+        guard let updated = try orchestrator.workspaceSettings(workspaceID: workspace.id) else {
+            throw ValidationError("Workspace settings missing at: \(normalizedWorkspaceDir)")
+        }
+        try emitJSON(
+            WorkspaceSettingsPayload(
+                stopScript: updated.stopScript, ports: updated.ports.map(\.name),
+                processes: updated.processes.map { .init(name: $0.name, command: $0.command) },
+                browserSessions: updated.browserSessions.map { .init(name: $0.name, url: $0.url) },
+                agentLaunchers: updated.agentLaunchers.map { .init(name: $0.name, command: $0.command) }))
+    }
+}
+
 private struct SeedFixturePayload: Codable {
     let projectID: String
     let defaultWorkspace: WorkspaceSummaryPayload?
@@ -760,6 +1052,23 @@ private struct WorkspaceDumpPayload: Codable {
     let runningProcesses: [RunningProcessPayload]
     let windows: [WindowPayload]
     let agentWindows: [AgentWindowPayload]
+}
+
+private struct TerminatedTerminalSessionPayload: Codable {
+    let sessionID: String
+    let terminated: Bool
+}
+
+private struct MobilePairingWindowPayload: Codable {
+    let host: String
+    let port: Int
+    let bonjourServiceName: String
+    let pairingLink: String
+    let pairingCode: String
+    let pairingNonce: String
+    let transportKey: String
+    let expiresAt: String
+    let message: String
 }
 
 private struct WorkspaceSummaryPayload: Codable {
@@ -845,6 +1154,51 @@ private struct SpacesSurfacePayload: Codable {
     let modalVisible: Bool
 }
 
+private struct ScrollApplicationWindowPayload: Codable {
+    let executableName: String
+    let windowTitle: String?
+    let pointX: CGFloat
+    let pointY: CGFloat
+    let deltaY: Int
+    let repetitions: Int
+    let firstScrollEventUptimeNanoseconds: UInt64
+    let lastScrollEventUptimeNanoseconds: UInt64
+    let success: Bool
+}
+
+private struct TypeApplicationWindowPayload: Codable {
+    let executableName: String
+    let windowTitle: String?
+    let pointX: CGFloat
+    let pointY: CGFloat
+    let textByteCount: Int
+    let firstKeyDownUptimeNanoseconds: UInt64
+    let lastKeyUpUptimeNanoseconds: UInt64
+    let success: Bool
+}
+
+private struct TargetApplicationWindow {
+    let application: NSRunningApplication
+    let window: AXUIElement
+    let title: String?
+    let frame: CGRect
+}
+
+private struct KeyboardTextTiming {
+    let firstKeyDownUptimeNanoseconds: UInt64
+    let lastKeyUpUptimeNanoseconds: UInt64
+}
+
+private struct KeyEventTiming {
+    let downUptimeNanoseconds: UInt64
+    let upUptimeNanoseconds: UInt64
+}
+
+private struct ScrollEventTiming {
+    let firstScrollEventUptimeNanoseconds: UInt64
+    let lastScrollEventUptimeNanoseconds: UInt64
+}
+
 /// Looks up one workspace by project directory and title, matching the GUI's
 /// visible naming semantics rather than internal IDs.
 private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: String, title: String) throws -> WorkspaceSummaryPayload? {
@@ -873,6 +1227,20 @@ private func makeOrchestrator() throws -> WorkspaceOrchestrator { try WorkspaceO
 /// Normalizes filesystem paths before lookups so shell callers can pass either
 /// relative or absolute values safely.
 private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
+
+private func terminalShellPath(_ explicitPath: String?) -> String {
+    if let explicitPath = explicitPath?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitPath.isEmpty { return explicitPath }
+    if let configured = ProcessInfo.processInfo.environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines), !configured.isEmpty {
+        return configured
+    }
+    return "/bin/zsh"
+}
+
+private func terminalDefaultTitle(command: String?, cwd: String) -> String {
+    if let command = command?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty { return command }
+    let name = URL(fileURLWithPath: cwd).lastPathComponent
+    return name.isEmpty ? "Terminal" : name
+}
 
 private func snapshotSpacesSurface(pid: Int32, frontmostPID: Int?) -> SpacesSurfacePayload {
     let appElement = AXUIElementCreateApplication(pid)
@@ -947,10 +1315,146 @@ private func axElementArrayAttribute(_ element: AXUIElement, attribute: String) 
     (axAttributeValue(element, attribute: attribute) as? [AXUIElement]) ?? []
 }
 
+@discardableResult private func axPerformAction(_ element: AXUIElement, action: String) -> Bool {
+    AXUIElementPerformAction(element, action as CFString) == .success
+}
+
 private func axStringAttribute(_ element: AXUIElement, attribute: String) -> String? { axAttributeValue(element, attribute: attribute) as? String }
 
 private func axBoolAttribute(_ element: AXUIElement, attribute: String) -> Bool? {
     (axAttributeValue(element, attribute: attribute) as? NSNumber)?.boolValue
+}
+
+private func axWindowFrame(_ element: AXUIElement) -> CGRect? {
+    guard let position = axCGPointAttribute(element, attribute: kAXPositionAttribute as String),
+        let size = axCGSizeAttribute(element, attribute: kAXSizeAttribute as String)
+    else { return nil }
+    return CGRect(origin: position, size: size)
+}
+
+private func axCGPointAttribute(_ element: AXUIElement, attribute: String) -> CGPoint? {
+    guard let value = axAttributeValue(element, attribute: attribute) else { return nil }
+    guard CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    let axValue = unsafeDowncast(value, to: AXValue.self)
+    guard AXValueGetType(axValue) == .cgPoint else { return nil }
+    var point = CGPoint.zero
+    guard AXValueGetValue(axValue, .cgPoint, &point) else { return nil }
+    return point
+}
+
+private func axCGSizeAttribute(_ element: AXUIElement, attribute: String) -> CGSize? {
+    guard let value = axAttributeValue(element, attribute: attribute) else { return nil }
+    guard CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    let axValue = unsafeDowncast(value, to: AXValue.self)
+    guard AXValueGetType(axValue) == .cgSize else { return nil }
+    var size = CGSize.zero
+    guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
+    return size
+}
+
+private func targetApplicationWindow(executableName: String, windowTitleContains: String?) throws -> TargetApplicationWindow {
+    let executableName = executableName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !executableName.isEmpty else { throw ValidationError("Missing executable name.") }
+    let titleFilter = windowTitleContains?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let applications = NSWorkspace.shared.runningApplications.filter { $0.executableURL?.lastPathComponent == executableName }
+    guard !applications.isEmpty else { throw ValidationError("Application not running: executable-name \(executableName)") }
+    for application in applications {
+        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        let windows = axElementArrayAttribute(appElement, attribute: kAXWindowsAttribute).filter(isVisibleWindow)
+        let window =
+            if let titleFilter, !titleFilter.isEmpty {
+                windows.first {
+                    guard let title = axStringAttribute($0, attribute: kAXTitleAttribute as String) else { return false }
+                    return title.localizedStandardContains(titleFilter)
+                }
+            } else {
+                axElementAttribute(appElement, attribute: kAXFocusedWindowAttribute) ?? axElementAttribute(
+                    appElement, attribute: kAXMainWindowAttribute) ?? windows.first
+            }
+        guard let window else { continue }
+        guard let frame = axWindowFrame(window) else { continue }
+        return TargetApplicationWindow(
+            application: application, window: window, title: axStringAttribute(window, attribute: kAXTitleAttribute as String), frame: frame)
+    }
+    throw ValidationError("No accessible window found for executable-name \(executableName)")
+}
+
+private func postMouseClick(at point: CGPoint) throws {
+    guard let downEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
+        let upEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+    else { throw ValidationError("Unable to create mouse click event.") }
+    downEvent.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.02)
+    upEvent.post(tap: .cghidEventTap)
+}
+
+private func postKeyboardText(_ text: String, interKeyDelayMS: Int) throws -> KeyboardTextTiming {
+    let source = CGEventSource(stateID: .hidSystemState)
+    var firstKeyDownUptimeNanoseconds: UInt64?
+    var lastKeyUpUptimeNanoseconds: UInt64?
+    for unit in text.utf16 {
+        let timing = if unit == 0x0A { try postVirtualKey(CGKeyCode(kVK_Return), source: source) } else { try postUnicodeKey(unit, source: source) }
+        firstKeyDownUptimeNanoseconds = firstKeyDownUptimeNanoseconds ?? timing.downUptimeNanoseconds
+        lastKeyUpUptimeNanoseconds = timing.upUptimeNanoseconds
+        if interKeyDelayMS > 0 { Thread.sleep(forTimeInterval: Double(interKeyDelayMS) / 1000.0) }
+    }
+    guard let firstKeyDownUptimeNanoseconds, let lastKeyUpUptimeNanoseconds else { throw ValidationError("No keyboard events were posted.") }
+    return KeyboardTextTiming(firstKeyDownUptimeNanoseconds: firstKeyDownUptimeNanoseconds, lastKeyUpUptimeNanoseconds: lastKeyUpUptimeNanoseconds)
+}
+
+private func postUnicodeKey(_ unit: UInt16, source: CGEventSource?) throws -> KeyEventTiming {
+    var character = UniChar(unit)
+    guard let downEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+        let upEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+    else { throw ValidationError("Unable to create keyboard event.") }
+    downEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &character)
+    upEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &character)
+    let downUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    downEvent.post(tap: .cghidEventTap)
+    upEvent.post(tap: .cghidEventTap)
+    return KeyEventTiming(downUptimeNanoseconds: downUptimeNanoseconds, upUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds)
+}
+
+private func postVirtualKey(_ keyCode: CGKeyCode, source: CGEventSource?) throws -> KeyEventTiming {
+    guard let downEvent = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+        let upEvent = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
+    else { throw ValidationError("Unable to create keyboard event.") }
+    let downUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    downEvent.post(tap: .cghidEventTap)
+    upEvent.post(tap: .cghidEventTap)
+    return KeyEventTiming(downUptimeNanoseconds: downUptimeNanoseconds, upUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds)
+}
+
+private func postScrollEvent(at point: CGPoint, deltaY: Int, repetitions: Int) throws -> ScrollEventTiming {
+    guard let moveEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
+        throw ValidationError("Unable to create mouse move event.")
+    }
+    moveEvent.post(tap: .cghidEventTap)
+
+    let phases: [NSEvent.Phase]
+    if repetitions <= 1 { phases = [.began, .ended] } else { phases = [.began] + Array(repeating: .changed, count: repetitions - 1) + [.ended] }
+
+    var firstScrollEventUptimeNanoseconds: UInt64?
+    var lastScrollEventUptimeNanoseconds: UInt64?
+    for phase in phases {
+        let phaseDeltaY = phase == .ended ? 0 : deltaY
+        guard let scrollEvent = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(phaseDeltaY), wheel2: 0, wheel3: 0)
+        else { throw ValidationError("Unable to create scroll event.") }
+        scrollEvent.location = point
+        scrollEvent.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        scrollEvent.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(phase.rawValue))
+        scrollEvent.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 0)
+        scrollEvent.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: Int64(phaseDeltaY))
+        scrollEvent.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: Int64(phaseDeltaY))
+        let scrollEventUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        scrollEvent.post(tap: .cghidEventTap)
+        firstScrollEventUptimeNanoseconds = firstScrollEventUptimeNanoseconds ?? scrollEventUptimeNanoseconds
+        lastScrollEventUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        Thread.sleep(forTimeInterval: 0.05)
+    }
+    guard let firstScrollEventUptimeNanoseconds, let lastScrollEventUptimeNanoseconds else { throw ValidationError("No scroll events were posted.") }
+    return ScrollEventTiming(
+        firstScrollEventUptimeNanoseconds: firstScrollEventUptimeNanoseconds, lastScrollEventUptimeNanoseconds: lastScrollEventUptimeNanoseconds)
 }
 
 MXE2ECommand.main()

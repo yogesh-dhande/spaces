@@ -108,4 +108,74 @@ final class TerminalOutputTailTests: XCTestCase {
 
         XCTAssertEqual(tailed, "EFGH\nIJ")
     }
+
+    func testStableTranscriptCollapsesPromptEOLMarkArtifactIntoPromptLine() throws {
+        let transcript = try TerminalOutputTail.stableTranscript(from: promptEOLMarkFixtureOutput(), columns: 80, rows: 24)
+
+        XCTAssertTrue(transcript.localizedStandardContains("Last login: Thu May 21 20:43:12 on ttys109"), transcript)
+        XCTAssertTrue(transcript.localizedStandardContains("Using Node v24.11.1"), transcript)
+        XCTAssertTrue(transcript.localizedStandardContains("shell % python3 /tmp/fixture.py --mode lines"), transcript)
+        XCTAssertFalse(
+            transcript.split(separator: "\n").contains { line in String(line).trimmingCharacters(in: .whitespacesAndNewlines) == "%" }, transcript)
+    }
+
+    func testStableTranscriptIncludesPromptOutputAfterTakeoverAppend() throws {
+        let transcript = try TerminalOutputTail.stableTranscript(from: promptAppendFixtureOutput(), columns: 96, rows: 53)
+
+        XCTAssertTrue(transcript.localizedStandardContains("shell % echo __roundtrip_ipad_one__"), transcript)
+        XCTAssertTrue(transcript.localizedStandardContains("__roundtrip_ipad_one__"), transcript)
+        XCTAssertFalse(
+            transcript.split(separator: "\n").contains { line in String(line).trimmingCharacters(in: .whitespacesAndNewlines) == "%" }, transcript)
+    }
+
+    func testStableTranscriptClearsAutosuggestionOverwrite() throws {
+        let transcript = try TerminalOutputTail.stableTranscript(from: autosuggestionEraseFixtureOutput(), columns: 80, rows: 8)
+
+        XCTAssertTrue(transcript.localizedStandardContains("t not found"), transcript)
+        XCTAssertFalse(transcript.localizedStandardContains("ailscale"), transcript)
+    }
+
+    private func promptEOLMarkFixtureOutput() -> Data {
+        let eolMark =
+            "\u{001B}[1m\u{001B}[7m%\u{001B}[27m\u{001B}[1m\u{001B}[0m" + String(repeating: " ", count: 96)
+            + "\r \r\r\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J"
+        let output = """
+            Last login: Thu May 21 20:43:12 on ttys109\r
+            Using Node \u{001B}[36mv24.11.1\u{001B}[0m\r
+            \(eolMark)shell % \u{001B}[K\u{001B}[?2004hpython3 /tmp/fixture.py --mode lines\r
+            FIXTURE_START mode=lines\r
+            SEQ 00000001 example-scrollback-line\r
+            FIXTURE_DONE mode=lines emitted=1\r
+            shell % 
+            """
+        return Data(output.utf8)
+    }
+
+    private func promptAppendFixtureOutput() -> Data {
+        let eolMark =
+            "\u{001B}[1m\u{001B}[7m%\u{001B}[27m\u{001B}[1m\u{001B}[0m" + String(repeating: " ", count: 96)
+            + "\r \r\r\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J"
+        let output = """
+            Last login: Fri May 22 11:03:38 on ttys260\r
+            Using Node \u{001B}[36mv24.11.1\u{001B}[0m\r
+            \(eolMark)shell % \u{001B}[K\u{001B}[?2004hprintf '__roundtrip_mac_before_takeover_two__\\n'\u{001B}[?2004l\r
+            __roundtrip_mac_before_takeover_two__\r
+            \(eolMark)shell % \u{001B}[K\u{001B}[?2004h\r
+            \u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[Jshell % \r
+            \u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[Jshell % e\u{0008}echo __roundtrip_ipad_one__\u{001B}[27D\u{001B}[32me\u{001B}[32mc\u{001B}[32mh\u{001B}[32mo\u{001B}[39m\u{001B}[23C\u{001B}[?2004l\r
+            __roundtrip_ipad_one__\r
+            \(eolMark)shell % \u{001B}[K\u{001B}[?2004h
+            """
+        return Data(output.utf8)
+    }
+
+    private func autosuggestionEraseFixtureOutput() -> Data {
+        let clearSuggestion = String(repeating: "\u{0008}", count: 8) + String(repeating: "\u{001B}[39m ", count: 8) + "\u{001B}[8D"
+        let output =
+            "Using Node v24.11.1\r\n" + "\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J" + "shell % \u{001B}[K\u{001B}[?2004h" + "w\u{0008}which t"
+            + String(repeating: "\u{0008}", count: 7) + "\u{001B}[32mw\u{001B}[32mh\u{001B}[32mi\u{001B}[32mc\u{001B}[32mh\u{001B}[39m"
+            + "\u{001B}[2C\u{001B}[90mailscale\u{001B}[39m" + clearSuggestion + "\u{001B}[?2004l\r\r\n" + "t not found\r\n"
+            + "\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J" + "shell % \u{001B}[K\u{001B}[?2004h"
+        return Data(output.utf8)
+    }
 }

@@ -65,6 +65,15 @@ public enum TerminalOutputTail {
         return result
     }
 
+    public static func stableTranscript(from data: Data, columns: Int, rows: Int) throws -> String {
+        guard !data.isEmpty else { return "" }
+        if !containsUnsafeTranscriptControls(data) {
+            if let text = String(data: data, encoding: .utf8) { return collapsedPromptEOLMarkLines(in: normalizedPlainTranscript(text)) }
+        }
+        let rendered = try TerminalOutputVTRenderer.renderPlain(data, columns: max(columns, 1), rows: max(rows, 1))
+        return collapsedPromptEOLMarkLines(in: rendered)
+    }
+
     private static func tailPlainTextIfPossible(fileHandle: FileHandle, fileSize: UInt64, lineCount: Int) throws -> PlainTailResult? {
         var offset = fileSize
         var startOffset: UInt64 = 0
@@ -167,6 +176,48 @@ public enum TerminalOutputTail {
         return false
     }
 
+    private static func containsUnsafeTranscriptControls(_ data: Data) -> Bool {
+        for index in data.indices {
+            switch data[index] {
+            case 0x1B, 0x08: return true
+            case 0x0D:
+                let nextIndex = index + 1
+                if nextIndex >= data.endIndex || data[nextIndex] != 0x0A { return true }
+            default: break
+            }
+        }
+        return false
+    }
+
+    private static func normalizedPlainTranscript(_ text: String) -> String { text.replacingOccurrences(of: "\r\n", with: "\n") }
+
+    private static func collapsedPromptEOLMarkLines(in text: String) -> String {
+        guard !text.isEmpty else { return text }
+        let hadTrailingNewline = text.last == "\n"
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var collapsed: [String] = []
+        collapsed.reserveCapacity(lines.count)
+
+        for (index, line) in lines.enumerated() {
+            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedLine == "%", let nextLine = lines[safe: index + 1]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                isPromptLikeTranscriptLine(nextLine)
+            {
+                continue
+            }
+            collapsed.append(line)
+        }
+
+        var result = collapsed.joined(separator: "\n")
+        if hadTrailingNewline { result.append("\n") }
+        return result
+    }
+
+    private static func isPromptLikeTranscriptLine(_ line: String) -> Bool {
+        guard !line.isEmpty else { return false }
+        return line.contains(" % ") || line.hasSuffix(" %")
+    }
+
     private static func isCRLF(in data: Data, index: Int, chunkOffset: UInt64, fileHandle: FileHandle, fileSize: UInt64) throws -> Bool {
         let nextIndex = index + 1
         if nextIndex < data.endIndex { return data[nextIndex] == 0x0A }
@@ -247,6 +298,8 @@ public enum TerminalOutputTail {
         return sequenceEnd + 1
     }
 }
+
+extension Array { fileprivate subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil } }
 
 private enum TerminalOutputVTRenderer {
     static func renderPlain(_ data: Data, columns: Int, rows: Int) throws -> String {

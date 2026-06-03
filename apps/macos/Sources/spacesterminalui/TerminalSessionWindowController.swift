@@ -5,6 +5,13 @@ import spacesterminalcore
 import spacesterminalghostty
 
 @MainActor private final class TerminalSessionWindow: NSWindow {
+    var terminalKeyEventHandler: ((NSEvent) -> Bool)?
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, terminalKeyEventHandler?(event) == true { return }
+        super.sendEvent(event)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.type == .keyDown else { return super.performKeyEquivalent(with: event) }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -19,18 +26,32 @@ import spacesterminalghostty
     }
 }
 
+public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
+    public let renderedOutput: String
+    public let showsTerminalSurface: Bool
+    public let showsTextRenderer: Bool
+    public let rendererSummary: String
+    public let summary: String
+    public let state: String
+    public let windowTitle: String
+    public let didCloseWindow: Bool
+    public let surfaceColumns: Int?
+    public let surfaceRows: Int?
+    public let windowIsKey: Bool
+    public let firstResponderTypeName: String?
+}
+
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
     private static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
     private static let fallbackRefreshInterval: Duration = .milliseconds(500)
-    private static let passiveOutputRefreshCoalescingInterval: Duration = .milliseconds(16)
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     private enum VisibleRenderer {
         case ghosttyOwner
-        case ghosttyViewerLoading
-        case ghosttyViewerSnapshot
-        case ghosttyViewerExitedOutput
-        case outputFallback
+        case ghosttyTakeoverStatus
+        case ghosttyEndedFinalRender
+        case unavailable
+        case textView
     }
 
     private enum OwnershipTransitionTarget: String {
@@ -62,6 +83,7 @@ import spacesterminalghostty
     private let interruptButton = NSButton(title: "Ctrl+C", target: nil, action: nil)
     private let newlineButton = NSButton(title: "Enter", target: nil, action: nil)
     private let takeoverButton = NSButton(title: "Take Over", target: nil, action: nil)
+    private let takeoverMessageLabel = NSTextField(labelWithString: "")
     private let inputRowStackView = NSStackView()
     private let actionButtonStackView = NSStackView()
     private let takeoverRowStackView = NSStackView()
@@ -79,11 +101,19 @@ import spacesterminalghostty
     private var bodyTrailingConstraint: NSLayoutConstraint?
     private var takeoverLeadingConstraint: NSLayoutConstraint?
     private var takeoverTrailingConstraint: NSLayoutConstraint?
+    private var takeoverBottomConstraint: NSLayoutConstraint?
+    private var takeoverCenterYConstraint: NSLayoutConstraint?
+    /// When a non-owner is viewing an interactive session, the window collapses
+    /// to a centered message plus the Take Over button instead of the full
+    /// header/output detail stack.
+    private var isViewerTakeoverShellActive = false
     private let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse
     private let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
     private let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void
     private let detachClientAction: @Sendable (String) throws -> Void
+    private let detachClientSynchronouslyOnClose: Bool
+    private let usesCustomAttachClientAction: Bool
     private let copySelectionAction: (@MainActor () -> Bool)?
     private let pasteClipboardAction: (@MainActor () -> Bool)?
     private let ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)?
@@ -93,15 +123,19 @@ import spacesterminalghostty
     private let loadWindowFrameAction: (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?
     private let saveWindowFrameAction: (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void
     private let sessionHostProvider: @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
+    private var clientGhosttySessionHost: (any TerminalGhosttySessionHosting)?
+    private var activeGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var refreshTask: Task<Void, Never>?
     private var takeoverTask: Task<Void, Never>?
     private var pendingWindowFramePersistTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
     private var isClientAttached = false
+    private var closesForSessionTermination = false
     private var didCloseWindow = false
     private var lastObservedAttachmentMode: TerminalAttachmentMode?
-    private var ghosttySessionHost: (any TerminalGhosttySessionHosting)?
-    private var visibleRenderer: VisibleRenderer = .outputFallback
+    private var ghosttyRendererHost: (any TerminalGhosttyRendererHosting)?
+    private var ghosttySessionInfoProvider: (any TerminalGhosttySessionInfoProviding)?
+    private var visibleRenderer: VisibleRenderer = .textView
     private var lastObservedOwnerClientID: String?
     private var lastObservedRuntimeState: TerminalSessionRuntimeState?
     private var shouldShowOwnerStateLabel = true
@@ -112,18 +146,16 @@ import spacesterminalghostty
     private var sessionMetadataDidChangeObserver: NSObjectProtocol?
     private var runtimeStateDidChangeObserver: NSObjectProtocol?
     private var outputDidChangeObserver: NSObjectProtocol?
-    private var hasHeadlessPresentation = false
-    private var pendingPassiveOutputRefreshTask: Task<Void, Never>?
-    private var pendingPassiveOutputStartedAt: Date?
-    private var pendingPassiveOutputByteCount = 0
-    private var pendingPassiveOutputNotificationCount = 0
-    private var lastGhosttyViewerSnapshotText: String?
+    private var hasTestWindowPresentation = false
     private var pendingOwnershipTransitionStartedAt: Date?
     private var pendingOwnershipTransitionTarget: OwnershipTransitionTarget?
     private var pendingOwnershipTransitionReason: String?
     private var pendingFocusObservationStartedAt: Date?
     private var pendingFocusObservationRequestID: String?
     private var pendingFocusObservationRoute: String?
+    private var deferredInitialPresentationTask: Task<Void, Never>?
+    private var isDeferringInitialOwnerPresentation = false
+    private static let deferredInitialOwnerPresentationTimeout: TimeInterval = 5
 
     public convenience init(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
@@ -132,19 +164,23 @@ import spacesterminalghostty
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
-        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
-        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
-        onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        detachClientSynchronouslyOnClose: Bool = true, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
+        ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
+        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil,
         loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
-        saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil
+        saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil,
+        sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
     ) {
         self.init(
             sessionID: sessionID, paths: paths, preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh,
             sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
-            detachClientAction: detachClientAction, copySelectionAction: copySelectionAction, pasteClipboardAction: pasteClipboardAction,
+            detachClientAction: detachClientAction, copySelectionAction: copySelectionAction,
+            detachClientSynchronouslyOnClose: detachClientSynchronouslyOnClose, pasteClipboardAction: pasteClipboardAction,
             ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowFocus: onWindowFocus,
             onWindowClose: onWindowClose, loadWindowFrameAction: loadWindowFrameAction, saveWindowFrameAction: saveWindowFrameAction,
-            sessionHostProvider: { launchConfiguration, paths in GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths) })
+            sessionHostProvider: sessionHostProvider ?? { launchConfiguration, paths in
+                RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            })
     }
 
     init(
@@ -154,9 +190,9 @@ import spacesterminalghostty
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
-        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
-        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
-        onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        detachClientSynchronouslyOnClose: Bool = true, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
+        ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
+        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil,
         loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
         saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil,
         sessionHostProvider: @escaping @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
@@ -189,6 +225,7 @@ import spacesterminalghostty
                 try TerminalControlClient.send(
                     request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
             }
+        usesCustomAttachClientAction = attachClientAction != nil
         self.attachClientAction =
             attachClientAction ?? { client, mode in
                 try TerminalSessionPersistence.attachClient(
@@ -198,6 +235,7 @@ import spacesterminalghostty
             detachClientAction ?? { clientID in
                 try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
             }
+        self.detachClientSynchronouslyOnClose = detachClientSynchronouslyOnClose
         self.copySelectionAction = copySelectionAction
         self.pasteClipboardAction = pasteClipboardAction
         self.ownerWindowFocusAction = ownerWindowFocusAction
@@ -219,6 +257,7 @@ import spacesterminalghostty
         window.minSize = NSSize(width: 760, height: 420)
         super.init(window: window)
         window.delegate = self
+        window.terminalKeyEventHandler = { [weak self] event in self?.handleTerminalWindowKeyEvent(event) ?? false }
         startObservingApplicationActivation()
         buildUI()
         if performInitialRefresh { refreshNow() }
@@ -232,19 +271,125 @@ import spacesterminalghostty
         guard let window else { return }
         let startedAt = Date()
         let wasVisible = isWindowPresented(window) && !didCloseWindow
+        let defersGhosttyClientAttach = backend == .ghosttyEmbedded && !usesCustomAttachClientAction
         didCloseWindow = false
-        attachLocalClientIfNeeded()
+        if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
+        let attachStartedAt = Date()
+        if !defersGhosttyClientAttach { attachLocalClientIfNeeded() }
+        logShowStage(startedAt: attachStartedAt, requestID: requestID, detail: "stage=attach_client deferred=\(defersGhosttyClientAttach ? 1 : 0)")
+        let preRefreshStartedAt = Date()
         refreshNow(allowGhosttyOwnerAttach: false)
+        logShowStage(startedAt: preRefreshStartedAt, requestID: requestID, detail: "stage=refresh_before_show")
         if !wasVisible {
             restorePersistedWindowFrame(window)
             constrainWindowToVisibleFrame(window)
         }
+        if shouldDeferInitialOwnerPresentation(wasVisible: wasVisible) {
+            startDeferredInitialOwnerPresentation(window: window, startedAt: startedAt, requestID: requestID, route: route)
+            return
+        }
+        let presentStartedAt = Date()
         presentWindow(window, forceFrontmost: !wasVisible)
+        logShowStage(startedAt: presentStartedAt, requestID: requestID, detail: "stage=present_window visible=\(wasVisible ? 1 : 0)")
+        let attachSurfaceStartedAt = Date()
         if backend == .ghosttyEmbedded { ensureGhosttyHostAttached(requestID: requestID, reason: "show") }
+        logShowStage(startedAt: attachSurfaceStartedAt, requestID: requestID, detail: "stage=attach_surface")
+        let postRefreshStartedAt = Date()
         refreshNow()
+        logShowStage(startedAt: postRefreshStartedAt, requestID: requestID, detail: "stage=refresh_after_show")
+        let startRefreshingStartedAt = Date()
         startRefreshing()
+        logShowStage(startedAt: startRefreshingStartedAt, requestID: requestID, detail: "stage=start_refresh")
+        let firstResponderStartedAt = Date()
         assignPreferredFirstResponder()
+        logShowStage(startedAt: firstResponderStartedAt, requestID: requestID, detail: "stage=assign_first_responder")
         logFocusMetric("terminal_window_show", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "show")")
+    }
+
+    private func shouldDeferInitialOwnerPresentation(wasVisible: Bool) -> Bool {
+        !Self.isRunningUnderXCTest && !wasVisible && launchConfiguration != nil && backend == .ghosttyEmbedded && preferredAttachmentMode == .owner
+            && !ownerRendererReadyForInitialPresentation()
+    }
+
+    private func ownerRendererReadyForInitialPresentation() -> Bool {
+        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner else { return true }
+        return visibleRenderer == .ghosttyOwner && ghosttyRendererHost?.hasRenderableSurface() == true
+    }
+
+    private func startDeferredInitialOwnerPresentation(window: NSWindow, startedAt: Date, requestID: String?, route: String?) {
+        deferredInitialPresentationTask?.cancel()
+        isDeferringInitialOwnerPresentation = true
+        updateRendererVisibility()
+        let attachSurfaceStartedAt = Date()
+        ensureGhosttyHostAttached(requestID: requestID, reason: "deferred_show_prepare", requestWindowFocus: false)
+        logShowStage(startedAt: attachSurfaceStartedAt, requestID: requestID, detail: "stage=attach_surface deferred=1")
+        let refreshStartedAt = Date()
+        refreshNow(allowGhosttyOwnerAttach: false)
+        logShowStage(startedAt: refreshStartedAt, requestID: requestID, detail: "stage=refresh_deferred")
+        if ownerRendererReadyForInitialPresentation() {
+            completeDeferredInitialOwnerPresentation(window: window, startedAt: startedAt, requestID: requestID, route: route)
+            return
+        }
+        let deadline = Date().addingTimeInterval(Self.deferredInitialOwnerPresentationTimeout)
+        deferredInitialPresentationTask = Task { @MainActor [weak self, weak window] in
+            while !Task.isCancelled {
+                guard let self, let window, !self.didCloseWindow else { return }
+                self.attachLocalClientIfNeeded()
+                self.ensureGhosttyHostAttached(requestID: requestID, reason: "deferred_show_wait", requestWindowFocus: false)
+                self.refreshNow(allowGhosttyOwnerAttach: false)
+                if self.ownerRendererReadyForInitialPresentation() {
+                    self.completeDeferredInitialOwnerPresentation(window: window, startedAt: startedAt, requestID: requestID, route: route)
+                    return
+                }
+                if Date() >= deadline {
+                    self.presentDeferredInitialOwnerPresentationError(window: window, startedAt: startedAt, requestID: requestID, route: route)
+                    return
+                }
+                do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+            }
+        }
+    }
+
+    private func completeDeferredInitialOwnerPresentation(window: NSWindow, startedAt: Date, requestID: String?, route: String?) {
+        deferredInitialPresentationTask?.cancel()
+        deferredInitialPresentationTask = nil
+        isDeferringInitialOwnerPresentation = false
+        let postRefreshStartedAt = Date()
+        refreshNow()
+        window.contentView?.layoutSubtreeIfNeeded()
+        terminalContainer.layoutSubtreeIfNeeded()
+        logShowStage(startedAt: postRefreshStartedAt, requestID: requestID, detail: "stage=refresh_before_present deferred=1")
+        let presentStartedAt = Date()
+        presentWindow(window, forceFrontmost: true)
+        logShowStage(startedAt: presentStartedAt, requestID: requestID, detail: "stage=present_window visible=0 deferred=1")
+        syncGhosttyOwnerFocus(reason: "deferred_show_present", requestWindowFocus: true)
+        let startRefreshingStartedAt = Date()
+        startRefreshing()
+        logShowStage(startedAt: startRefreshingStartedAt, requestID: requestID, detail: "stage=start_refresh deferred=1")
+        let firstResponderStartedAt = Date()
+        assignPreferredFirstResponder()
+        logShowStage(startedAt: firstResponderStartedAt, requestID: requestID, detail: "stage=assign_first_responder deferred=1")
+        logFocusMetric("terminal_window_show", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "show") deferred=1")
+    }
+
+    private func presentDeferredInitialOwnerPresentationError(window: NSWindow, startedAt: Date, requestID: String?, route: String?) {
+        deferredInitialPresentationTask?.cancel()
+        deferredInitialPresentationTask = nil
+        isDeferringInitialOwnerPresentation = false
+        let message =
+            "The live terminal renderer did not become ready within \(Int(Self.deferredInitialOwnerPresentationTimeout)) seconds.\n\nThe terminal session may still be running, but Spaces could not attach the native renderer. Close this window and reopen the terminal to retry."
+        shouldShowOwnerStateLabel = true
+        visibleRenderer = .textView
+        updateOutputPlainText(message)
+        updateInputStatus(message: "Live terminal renderer failed to become ready.", isError: true)
+        updateRendererVisibility()
+        let presentStartedAt = Date()
+        presentWindow(window, forceFrontmost: true)
+        logShowStage(startedAt: presentStartedAt, requestID: requestID, detail: "stage=present_window_error deferred=1")
+        assignPreferredFirstResponder()
+        logFocusMetric(
+            "terminal_window_show", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "show") deferred=1 error=renderer_not_ready"
+        )
     }
 
     public func focusWindow(requestID: String? = nil, route: String? = nil) {
@@ -260,6 +405,7 @@ import spacesterminalghostty
                 "terminal_window_focus_stage", startedAt: startedAt, requestID: requestID,
                 detail: "stage=pre_focus reused_surface=\(reusedSurface ? 1 : 0) route=\(route ?? "focus")")
             if !reusedSurface { ensureGhosttyHostAttached(requestID: requestID, reason: "focus_window") }
+            if reusedSurface { ghosttyRendererHost?.synchronizeSurfaceGeometry() }
             let syncStartedAt = Date()
             syncGhosttyOwnerFocus(reason: "window_focus_ipc", requestWindowFocus: true)
             logFocusMetric(
@@ -271,15 +417,36 @@ import spacesterminalghostty
         logFocusMetric("terminal_window_focus", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "focus")")
     }
 
+    public func requestOwnershipIfNeeded() {
+        guard backend == .ghosttyEmbedded else { return }
+        preferredAttachmentMode = .owner
+        if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
+        refreshNow(allowGhosttyOwnerAttach: false)
+        let hasDifferentActiveOwner = lastObservedOwnerClientID != nil && lastObservedOwnerClientID != client.id
+        if hasDifferentActiveOwner && isInteractiveRuntimeState(lastObservedRuntimeState) {
+            takeOverOwnership()
+            return
+        }
+        ensureGhosttyHostAttached(reason: "request_owner_mode")
+        refreshNow()
+    }
+
+    public func closeForSessionTermination() {
+        closesForSessionTermination = true
+        window?.close()
+    }
+
     public func windowWillClose(_ notification: Notification) {
+        let sessionIsTerminating = closesForSessionTermination
+        closesForSessionTermination = false
         didCloseWindow = true
-        hasHeadlessPresentation = false
+        hasTestWindowPresentation = false
         persistCurrentWindowFrame(immediately: true)
         if backend == .ghosttyEmbedded {
             syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false)
-            ghosttySessionHost?.parkSurfaceInHiddenHostWindow()
+            if !sessionIsTerminating { ghosttyRendererHost?.releaseRendererSurface() }
         }
-        detachLocalClientIfNeeded()
+        if sessionIsTerminating { isClientAttached = false } else { detachLocalClientIfNeeded(synchronously: detachClientSynchronouslyOnClose) }
         refreshTask?.cancel()
         refreshTask = nil
         onWindowClose?(sessionID, client.id)
@@ -322,15 +489,14 @@ import spacesterminalghostty
         case #selector(NSText.copy(_:)):
             switch visibleRenderer {
             case .ghosttyOwner: return preferredAttachmentMode == .owner
-            case .ghosttyViewerLoading: return false
-            case .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput: return true
-            case .outputFallback: return true
+            case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable: return true
+            case .textView: return true
             }
         case #selector(NSText.paste(_:)):
             switch visibleRenderer {
             case .ghosttyOwner: return preferredAttachmentMode == .owner && isInteractiveRuntimeState(lastObservedRuntimeState)
-            case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput: return false
-            case .outputFallback: return !inputRowStackView.isHidden && inputField.isEnabled
+            case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable: return false
+            case .textView: return !inputRowStackView.isHidden && inputField.isEnabled
             }
         case #selector(selectAll(_:)): return visibleRenderer != .ghosttyOwner
         default: return true
@@ -341,15 +507,15 @@ import spacesterminalghostty
         switch visibleRenderer {
         case .ghosttyOwner:
             guard preferredAttachmentMode == .owner else {
-                updateInputStatus(message: "Viewer windows cannot copy from the active terminal. Take over ownership first.", isError: true)
+                updateInputStatus(message: "Only the active owner can copy from the live terminal.", isError: true)
                 NSSound.beep()
                 return
             }
-            guard copySelectionAction?() ?? ghosttySessionHost?.copySelectionToPasteboard() ?? false else {
+            guard copySelectionAction?() ?? ghosttyRendererHost?.copySelectionToPasteboard() ?? false else {
                 NSSound.beep()
                 return
             }
-        case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput, .outputFallback: outputView.copy(sender)
+        case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable, .textView: outputView.copy(sender)
         }
     }
 
@@ -362,19 +528,19 @@ import spacesterminalghostty
                 return
             }
             guard preferredAttachmentMode == .owner else {
-                updateInputStatus(message: "Viewer windows cannot paste into the terminal. Take over ownership first.", isError: true)
+                updateInputStatus(message: "Only the active owner can paste into the terminal.", isError: true)
                 NSSound.beep()
                 return
             }
-            guard pasteClipboardAction?() ?? ghosttySessionHost?.pasteClipboardContents() ?? false else {
+            guard pasteClipboardAction?() ?? ghosttyRendererHost?.pasteClipboardContents() ?? false else {
                 NSSound.beep()
                 return
             }
-        case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput:
-            updateInputStatus(message: "Viewer windows cannot paste into the terminal. Take over ownership first.", isError: true)
+        case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable:
+            updateInputStatus(message: "Take over ownership before sending terminal input.", isError: true)
             NSSound.beep()
             return
-        case .outputFallback:
+        case .textView:
             guard !inputRowStackView.isHidden, inputField.isEnabled else {
                 NSSound.beep()
                 return
@@ -559,12 +725,23 @@ import spacesterminalghostty
         inputRowStackView.addArrangedSubview(inputField)
         inputRowStackView.addArrangedSubview(actionButtonStackView)
 
+        takeoverMessageLabel.font = .systemFont(ofSize: 13)
+        takeoverMessageLabel.textColor = .secondaryLabelColor
+        takeoverMessageLabel.alignment = .center
+        takeoverMessageLabel.lineBreakMode = .byWordWrapping
+        takeoverMessageLabel.maximumNumberOfLines = 0
+        takeoverMessageLabel.translatesAutoresizingMaskIntoConstraints = false
+        takeoverMessageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        takeoverMessageLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 360).isActive = true
+
+        Self.applyBrandPrimaryStyle(to: takeoverButton, title: "Take Over")
+
         takeoverRowStackView.translatesAutoresizingMaskIntoConstraints = false
-        takeoverRowStackView.orientation = .horizontal
-        takeoverRowStackView.alignment = .centerY
-        takeoverRowStackView.spacing = 8
+        takeoverRowStackView.orientation = .vertical
+        takeoverRowStackView.alignment = .centerX
+        takeoverRowStackView.spacing = 14
+        takeoverRowStackView.addArrangedSubview(takeoverMessageLabel)
         takeoverRowStackView.addArrangedSubview(takeoverButton)
-        takeoverButton.widthAnchor.constraint(equalToConstant: 92).isActive = true
 
         takeoverContainerView.translatesAutoresizingMaskIntoConstraints = false
         takeoverContainerView.addSubview(takeoverRowStackView)
@@ -607,6 +784,8 @@ import spacesterminalghostty
         bodyTrailingConstraint = bodyStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16)
         takeoverLeadingConstraint = takeoverContainerView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16)
         takeoverTrailingConstraint = takeoverContainerView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16)
+        takeoverBottomConstraint = takeoverContainerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16)
+        takeoverCenterYConstraint = takeoverContainerView.centerYAnchor.constraint(equalTo: contentView.centerYAnchor)
 
         NSLayoutConstraint.activate([
             headerStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
@@ -614,25 +793,25 @@ import spacesterminalghostty
             headerStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
 
             bodyLeadingConstraint!, bodyTrailingConstraint!, takeoverLeadingConstraint!, takeoverTrailingConstraint!,
-            takeoverContainerView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            takeoverContainerView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
+            takeoverContainerView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor), takeoverBottomConstraint!,
         ])
 
         updateRendererVisibility()
     }
 
-    private func ensureGhosttyHostAttached(requestID: String? = nil, reason: String) {
-        guard backend == .ghosttyEmbedded, let launchConfiguration else { return }
+    private func ensureGhosttyHostAttached(requestID: String? = nil, reason: String, requestWindowFocus: Bool = true) {
+        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, let launchConfiguration else { return }
         let startedAt = Date()
         do {
             window?.contentView?.layoutSubtreeIfNeeded()
             terminalContainer.layoutSubtreeIfNeeded()
-            let host = sessionHostProvider(launchConfiguration, paths)
-            ghosttySessionHost = host
-            try host.attach(client: client, mode: preferredAttachmentMode, into: preferredAttachmentMode == .owner ? terminalContainer : nil)
+            let host = resolvedGhosttySessionHost(for: launchConfiguration)
+            switchGhosttySessionHostIfNeeded(host)
+            try host.attach(client: client, mode: preferredAttachmentMode, into: terminalContainer)
+            if !usesCustomAttachClientAction { isClientAttached = true }
             lastObservedAttachmentMode = preferredAttachmentMode
             lastObservedOwnerClientID = host.activeOwnerClientID()
-            syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: preferredAttachmentMode == .owner)
+            syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: requestWindowFocus && preferredAttachmentMode == .owner)
             completeOwnershipTransitionIfNeeded(target: .owner, renderer: "ghostty_owner")
             updateRendererVisibility()
             logFocusMetric(
@@ -641,11 +820,16 @@ import spacesterminalghostty
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
 
+    private func releaseGhosttySurfaceIfNeeded() {
+        ghosttyRendererHost?.releaseRendererSurface()
+        terminalContainer.subviews.forEach { $0.removeFromSuperview() }
+    }
+
     private func hasAttachedGhosttyOwnerSurface() -> Bool {
-        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner, let host = ghosttySessionHost,
+        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner, let host = ghosttyRendererHost,
             host.hasRenderableSurface()
         else { return false }
-        if let ownerClientID = host.activeOwnerClientID() ?? lastObservedOwnerClientID { return ownerClientID == client.id }
+        if let ownerClientID = ghosttySessionInfoProvider?.activeOwnerClientID() ?? lastObservedOwnerClientID { return ownerClientID == client.id }
         return true
     }
 
@@ -654,6 +838,10 @@ import spacesterminalghostty
         TerminalPerformance.logMetric(
             metric, target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
             detail: "\(detail)\(requestDetail)")
+    }
+
+    private func logShowStage(startedAt: Date, requestID: String?, detail: String) {
+        logFocusMetric("terminal_window_show_stage", startedAt: startedAt, requestID: requestID, detail: detail)
     }
 
     private func beginPendingFocusObservation(startedAt: Date, requestID: String?, route: String) {
@@ -689,13 +877,13 @@ import spacesterminalghostty
     }
 
     private func isWindowPresented(_ window: NSWindow) -> Bool {
-        if Self.isRunningUnderXCTest { return hasHeadlessPresentation }
+        if Self.isRunningUnderXCTest { return hasTestWindowPresentation }
         return window.isVisible
     }
 
     private func presentWindow(_ window: NSWindow, forceFrontmost: Bool = false) {
         if Self.isRunningUnderXCTest {
-            hasHeadlessPresentation = true
+            hasTestWindowPresentation = true
             return
         }
         let appWasActive = NSApp.isActive
@@ -737,6 +925,7 @@ import spacesterminalghostty
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
             lastObservedRuntimeState = runtimeState
             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
+            if backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, allowGhosttyOwnerAttach { attachLocalClientIfNeeded() }
             let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
             let currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
             let isOwner = currentOwnerClient?.id == client.id || (currentOwnerClient == nil && preferredAttachmentMode == .owner)
@@ -750,7 +939,6 @@ import spacesterminalghostty
                 workingDirectory: currentWorkingDirectory, shell: currentLaunchConfiguration.shell, command: currentLaunchConfiguration.command)
             let stateText = runtimeStateText(runtimeState: runtimeState, ownerClient: currentOwnerClient, isOwner: isOwner)
             stateLabel.stringValue = stateText
-            if isInteractiveRuntimeState(runtimeState) == false { lastGhosttyViewerSnapshotText = nil }
 
             if backend == .ghosttyEmbedded {
                 let activeAttachment = attachmentSnapshot?.attachments.last(where: { $0.clientID == client.id && $0.detachedAt == nil })
@@ -762,18 +950,26 @@ import spacesterminalghostty
                         if activeAttachment.mode == .owner {
                             if allowGhosttyOwnerAttach { ensureGhosttyHostAttached(reason: "attachment_mode_changed") }
                         } else {
+                            releaseGhosttySurfaceIfNeeded()
+                            updateGhosttySessionHostReference(for: currentLaunchConfiguration)
                             syncGhosttyOwnerFocus(reason: "ownership_demoted", requestWindowFocus: false, focused: false)
                         }
                     }
+                } else if preferredAttachmentMode != .owner {
+                    releaseGhosttySurfaceIfNeeded()
                 }
                 if lastObservedOwnerClientID != currentOwnerClient?.id {
                     if isOwner {
                         beginOwnershipTransition(.owner, reason: "ownership_promoted")
                     } else if lastObservedOwnerClientID == client.id {
                         beginOwnershipTransition(.viewer, reason: "ownership_demoted")
+                        releaseGhosttySurfaceIfNeeded()
                     }
                     lastObservedOwnerClientID = currentOwnerClient?.id
-                    if isOwner { syncGhosttyOwnerFocus(reason: "ownership_promoted", requestWindowFocus: true) }
+                    if isOwner {
+                        if allowGhosttyOwnerAttach { ensureGhosttyHostAttached(reason: "attachment_mode_changed") }
+                        syncGhosttyOwnerFocus(reason: "ownership_promoted", requestWindowFocus: true)
+                    }
                 }
                 shouldShowOwnerStateLabel = shouldShowCompactOwnerStateLabel(runtimeState: runtimeState, isOwner: isOwner)
                 visibleRenderer = resolveVisibleRenderer(isOwner: isOwner)
@@ -782,117 +978,60 @@ import spacesterminalghostty
                 rendererLabel.stringValue = rendererSummary(isOwner: isOwner)
             } else {
                 shouldShowOwnerStateLabel = true
-                visibleRenderer = .outputFallback
+                visibleRenderer = .textView
                 updateRendererVisibility()
                 updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractiveRuntimeState(runtimeState))
                 rendererLabel.stringValue = rendererMode.statusSummary
             }
-            guard visibleRenderer != .ghosttyOwner else { return }
+            guard visibleRenderer != .ghosttyOwner else {
+                restoreGhosttyOwnerInputFocusIfReady()
+                completeOwnershipTransitionIfNeeded(target: .owner, renderer: "owner_surface")
+                return
+            }
             let viewportState = captureOutputViewportState()
-            var didUpdatePassivePresentation = false
             switch visibleRenderer {
-            case .ghosttyViewerLoading:
-                if let snapshot = ghosttySessionHost?.snapshot() {
-                    outputView.textStorage?.setAttributedString(
-                        GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
-                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
-                    outputView.sizeToFit()
-                    lastRenderedOutput = outputView.string
-                    lastGhosttyViewerSnapshotText = outputView.string
+            case .ghosttyTakeoverStatus:
+                let statusMessage = currentGhosttyStatusMessage(isOwner: isOwner, runtimeState: runtimeState, ownerClient: currentOwnerClient)
+                takeoverMessageLabel.stringValue = statusMessage
+                updateOutputPlainText(statusMessage)
+                restoreOutputViewportState(viewportState)
+                completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "takeover_status")
+            case .ghosttyEndedFinalRender:
+                if let snapshot = ghosttyRendererHost?.snapshot() {
+                    updateOutputSnapshot(snapshot)
                     restoreOutputViewportState(viewportState)
-                    didUpdatePassivePresentation = true
-                    completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
-                    completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_snapshot")
+                    completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "final_render")
                     return
                 }
-                if let snapshotText = ghosttySessionHost?.snapshotText() {
-                    if snapshotText != lastRenderedOutput {
-                        outputView.string = snapshotText
-                        if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
-                        outputView.sizeToFit()
-                        lastRenderedOutput = snapshotText
-                        didUpdatePassivePresentation = true
-                    }
-                    lastGhosttyViewerSnapshotText = snapshotText
+                if let snapshotText = ghosttyRendererHost?.snapshotText(), !snapshotText.isEmpty {
+                    updateOutputPlainText(snapshotText)
                     restoreOutputViewportState(viewportState)
-                    completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot_text", changedOutput: didUpdatePassivePresentation)
-                    completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_snapshot_text")
+                    completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "final_render_text")
                     return
                 }
-                let loadingMessage = "Waiting for live terminal surface…"
-                if loadingMessage != lastRenderedOutput {
-                    outputView.string = loadingMessage
-                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
-                    outputView.sizeToFit()
-                    lastRenderedOutput = loadingMessage
-                    didUpdatePassivePresentation = true
-                }
+                updateOutputPlainText("Final terminal render unavailable.")
                 restoreOutputViewportState(viewportState)
-                completePendingPassiveOutputMeasurement(renderer: "viewer_loading", changedOutput: didUpdatePassivePresentation)
-                completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_loading")
-            case .ghosttyViewerSnapshot:
-                if let snapshot = ghosttySessionHost?.snapshot() {
-                    outputView.textStorage?.setAttributedString(
-                        GhosttyTerminalSnapshotRenderer.render(snapshot, defaultBackgroundOverride: outputView.backgroundColor))
-                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
-                    outputView.sizeToFit()
-                    lastRenderedOutput = outputView.string
-                    lastGhosttyViewerSnapshotText = outputView.string
+                completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "final_render_unavailable")
+            case .unavailable:
+                updateOutputPlainText("Terminal render unavailable.")
+                restoreOutputViewportState(viewportState)
+                completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "unavailable")
+            case .textView:
+                if let snapshot = ghosttyRendererHost?.snapshot() {
+                    updateOutputSnapshot(snapshot)
                     restoreOutputViewportState(viewportState)
-                    didUpdatePassivePresentation = true
-                    completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot", changedOutput: true)
-                    completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_snapshot")
+                    completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "owner_snapshot_text_view")
                     return
                 }
-                if let snapshotText = ghosttySessionHost?.snapshotText() {
-                    if snapshotText != lastRenderedOutput {
-                        outputView.string = snapshotText
-                        if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
-                        outputView.sizeToFit()
-                        lastRenderedOutput = snapshotText
-                        didUpdatePassivePresentation = true
-                    }
-                    lastGhosttyViewerSnapshotText = snapshotText
+                if let snapshotText = ghosttyRendererHost?.snapshotText() {
+                    updateOutputPlainText(snapshotText)
                     restoreOutputViewportState(viewportState)
-                    completePendingPassiveOutputMeasurement(renderer: "viewer_snapshot_text", changedOutput: didUpdatePassivePresentation)
-                    completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_snapshot_text")
+                    completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "owner_snapshot_text")
                     return
                 }
-                let loadingMessage = "Waiting for live terminal surface…"
-                if loadingMessage != lastRenderedOutput {
-                    outputView.string = loadingMessage
-                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
-                    outputView.sizeToFit()
-                    lastRenderedOutput = loadingMessage
-                    didUpdatePassivePresentation = true
-                }
+                updateOutputPlainText("Terminal render unavailable.")
                 restoreOutputViewportState(viewportState)
-                completePendingPassiveOutputMeasurement(renderer: "viewer_loading", changedOutput: didUpdatePassivePresentation)
-                completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_loading")
-            case .ghosttyViewerExitedOutput:
-                let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 400)) ?? lastGhosttyViewerSnapshotText ?? ""
-                if output != lastRenderedOutput {
-                    outputView.string = output
-                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
-                    outputView.sizeToFit()
-                    lastRenderedOutput = output
-                    didUpdatePassivePresentation = true
-                }
-                restoreOutputViewportState(viewportState)
-                completePendingPassiveOutputMeasurement(renderer: "viewer_exited_output", changedOutput: didUpdatePassivePresentation)
-                completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "viewer_exited_output")
-            case .outputFallback:
-                let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 200)) ?? ""
-                if output != lastRenderedOutput {
-                    outputView.string = output
-                    if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
-                    outputView.sizeToFit()
-                    lastRenderedOutput = output
-                    didUpdatePassivePresentation = true
-                }
-                restoreOutputViewportState(viewportState)
-                completePendingPassiveOutputMeasurement(renderer: "output_tail", changedOutput: didUpdatePassivePresentation)
-                completeOwnershipTransitionIfNeeded(target: .viewer, renderer: "output_tail")
+                completeOwnershipTransitionIfNeeded(target: transitionTarget(isOwner: isOwner), renderer: "owner_render_unavailable")
             case .ghosttyOwner: break
             }
         } catch {
@@ -916,7 +1055,7 @@ import spacesterminalghostty
             return
         }
         guard preferredAttachmentMode == .owner else {
-            updateInputStatus(message: "Viewer windows cannot send input. Take over ownership first.", isError: true)
+            updateInputStatus(message: "Take over ownership before sending input.", isError: true)
             return
         }
         let text = inputField.stringValue.trimmingCharacters(in: .newlines)
@@ -940,7 +1079,7 @@ import spacesterminalghostty
             return
         }
         guard preferredAttachmentMode == .owner else {
-            updateInputStatus(message: "Viewer windows cannot send keys. Take over ownership first.", isError: true)
+            updateInputStatus(message: "Take over ownership before sending keys.", isError: true)
             return
         }
         do {
@@ -966,8 +1105,14 @@ import spacesterminalghostty
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
 
-    private func detachLocalClientIfNeeded() {
+    private func detachLocalClientIfNeeded(synchronously: Bool = true) {
         guard isClientAttached else { return }
+        guard synchronously else {
+            let clientID = client.id
+            isClientAttached = false
+            Task.detached(priority: .utility) { [detachClientAction] in try? detachClientAction(clientID) }
+            return
+        }
         do {
             try detachClientAction(client.id)
             isClientAttached = false
@@ -987,7 +1132,7 @@ import spacesterminalghostty
             forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main
         ) { [weak self] notification in
             let changedSessionID = notification.userInfo?["sessionID"] as? String
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
                 self.refreshNow()
             }
@@ -1013,11 +1158,10 @@ import spacesterminalghostty
         outputDidChangeObserver = NotificationCenter.default.addObserver(forName: .spacesTerminalOutputDidChange, object: nil, queue: .main) {
             [weak self] notification in
             let changedSessionID = notification.userInfo?["sessionID"] as? String
-            let byteCount = notification.userInfo?["byteCount"] as? Int ?? 0
             MainActor.assumeIsolated {
                 guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
-                self.recordPassiveOutputNotification(byteCount: byteCount)
-                self.schedulePassiveOutputRefresh()
+                guard self.visibleRenderer == .ghosttyEndedFinalRender || self.visibleRenderer == .textView else { return }
+                self.refreshNow()
             }
         }
     }
@@ -1035,46 +1179,14 @@ import spacesterminalghostty
         runtimeStateDidChangeObserver = nil
         outputDidChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
         outputDidChangeObserver = nil
-        pendingPassiveOutputRefreshTask?.cancel()
-        pendingPassiveOutputRefreshTask = nil
-    }
-
-    private func schedulePassiveOutputRefresh() {
-        guard backend == .ghosttyEmbedded else { return }
-        guard visibleRenderer != .ghosttyOwner else { return }
-        guard pendingPassiveOutputRefreshTask == nil else { return }
-        pendingPassiveOutputRefreshTask = Task { @MainActor [weak self] in
-            defer { self?.pendingPassiveOutputRefreshTask = nil }
-            do { try await Task.sleep(for: Self.passiveOutputRefreshCoalescingInterval) } catch { return }
-            self?.refreshNow()
-        }
-    }
-
-    private func recordPassiveOutputNotification(byteCount: Int) {
-        guard visibleRenderer != .ghosttyOwner else { return }
-        if pendingPassiveOutputStartedAt == nil { pendingPassiveOutputStartedAt = Date() }
-        pendingPassiveOutputByteCount += byteCount
-        pendingPassiveOutputNotificationCount += 1
-    }
-
-    private func completePendingPassiveOutputMeasurement(renderer: String, changedOutput: Bool) {
-        guard let startedAt = pendingPassiveOutputStartedAt else { return }
-        let byteCount = pendingPassiveOutputByteCount
-        let notificationCount = pendingPassiveOutputNotificationCount
-        pendingPassiveOutputStartedAt = nil
-        pendingPassiveOutputByteCount = 0
-        pendingPassiveOutputNotificationCount = 0
-        TerminalPerformance.logMetric(
-            "terminal_viewer_output_present", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-            success: true, detail: "renderer=\(renderer) bytes=\(byteCount) notifications=\(notificationCount) changed=\(changedOutput ? 1 : 0)")
     }
 
     private func syncGhosttyOwnerFocus(reason: String, requestWindowFocus: Bool, focused explicitFocused: Bool? = nil) {
         guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner else { return }
         let startedAt = Date()
         let focused = explicitFocused ?? (NSApp.isActive && window?.isMainWindow == true && window?.isKeyWindow == true)
-        if requestWindowFocus { if let ownerWindowFocusAction { ownerWindowFocusAction(window) } else { ghosttySessionHost?.focusWindow(window) } }
-        if let ownerSurfaceFocusAction { ownerSurfaceFocusAction(focused) } else { ghosttySessionHost?.setFocused(focused, for: client.id) }
+        if requestWindowFocus { if let ownerWindowFocusAction { ownerWindowFocusAction(window) } else { ghosttyRendererHost?.focusWindow(window) } }
+        if let ownerSurfaceFocusAction { ownerSurfaceFocusAction(focused) } else { ghosttyRendererHost?.setFocused(focused, for: client.id) }
         TerminalPerformance.logMetric(
             "terminal_owner_focus_sync", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
             detail: "reason=\(reason) focused=\(focused ? 1 : 0) request_window_focus=\(requestWindowFocus ? 1 : 0)")
@@ -1085,44 +1197,55 @@ import spacesterminalghostty
         case .ghosttyOwner:
             terminalContainer.isHidden = false
             outputScrollView.isHidden = true
-        case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput, .outputFallback:
+        case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable, .textView:
             outputScrollView.isHidden = false
             terminalContainer.isHidden = true
         }
         let isGhosttyOwner = visibleRenderer == .ghosttyOwner && preferredAttachmentMode == .owner
-        let isGhosttyViewer = backend == .ghosttyEmbedded && preferredAttachmentMode != .owner
+        let isFullBleedOwnerPreparation = isDeferringInitialOwnerPresentation && preferredAttachmentMode == .owner
+        if isFullBleedOwnerPreparation { outputView.string = "" }
         let shouldCollapseOwnerChrome = isGhosttyOwner && !shouldShowOwnerStateLabel
-        let shouldCollapseViewerChrome = isGhosttyViewer && inputStatusLabel.isHidden
-        titleLabel.isHidden = isGhosttyOwner || shouldCollapseViewerChrome
-        summaryLabel.isHidden = shouldCollapseOwnerChrome || shouldCollapseViewerChrome
-        rendererLabel.isHidden = isGhosttyOwner || shouldCollapseViewerChrome
-        stateLabel.isHidden = shouldCollapseOwnerChrome || shouldCollapseViewerChrome
-        outputScrollView.borderType = isGhosttyViewer ? .noBorder : .bezelBorder
-        bodyStackView.spacing = isGhosttyOwner ? 0 : 12
-        bodyLeadingConstraint?.constant = isGhosttyOwner ? 0 : 16
-        bodyTrailingConstraint?.constant = isGhosttyOwner ? 0 : -16
-        bodyTopToContentConstraint?.constant = isGhosttyOwner ? 0 : 12
-        bodyBottomToContentConstraint?.constant = isGhosttyOwner ? 0 : -16
-        outputView.textContainerInset = isGhosttyViewer ? .zero : NSSize(width: 8, height: 10)
-        outputView.textContainer?.lineFragmentPadding = isGhosttyViewer ? 0 : 5
+        titleLabel.isHidden = isGhosttyOwner
+        summaryLabel.isHidden = shouldCollapseOwnerChrome
+        rendererLabel.isHidden = isGhosttyOwner
+        stateLabel.isHidden = shouldCollapseOwnerChrome
+        let isFullBleed = isGhosttyOwner || isFullBleedOwnerPreparation
+        outputScrollView.borderType = isFullBleed || (backend == .ghosttyEmbedded && visibleRenderer != .textView) ? .noBorder : .bezelBorder
+        outputScrollView.drawsBackground = !isFullBleedOwnerPreparation
+        outputView.drawsBackground = !isFullBleedOwnerPreparation
+        bodyStackView.spacing = isFullBleed ? 0 : 12
+        bodyLeadingConstraint?.constant = isFullBleed ? 0 : 16
+        bodyTrailingConstraint?.constant = isFullBleed ? 0 : -16
+        bodyTopToContentConstraint?.constant = isFullBleed ? 0 : 12
+        bodyBottomToContentConstraint?.constant = isFullBleed ? 0 : -16
+        outputView.textContainerInset =
+            isFullBleedOwnerPreparation
+            ? .zero : backend == .ghosttyEmbedded && visibleRenderer != .textView ? NSSize(width: 14, height: 14) : NSSize(width: 8, height: 10)
+        outputView.textContainer?.lineFragmentPadding =
+            isFullBleedOwnerPreparation ? 0 : backend == .ghosttyEmbedded && visibleRenderer != .textView ? 0 : 5
         updateHeaderLayoutVisibility()
     }
 
     private func updateInputOwnershipUI(isOwner: Bool, isInteractive: Bool) {
-        let usesInlineControls = visibleRenderer == .outputFallback && isOwner
+        let usesInlineControls = visibleRenderer == .textView && isOwner
         inputRowStackView.isHidden = !usesInlineControls
-        takeoverContainerView.isHidden = !(backend == .ghosttyEmbedded && !isOwner && isInteractive)
+        let showsTakeoverShell = visibleRenderer == .ghosttyTakeoverStatus && backend == .ghosttyEmbedded
+        takeoverContainerView.isHidden = !(showsTakeoverShell && !isOwner)
         takeoverRowStackView.isHidden = takeoverContainerView.isHidden
+        isViewerTakeoverShellActive = !takeoverContainerView.isHidden
+        takeoverMessageLabel.isHidden = !isViewerTakeoverShellActive
+        takeoverBottomConstraint?.isActive = !isViewerTakeoverShellActive
+        takeoverCenterYConstraint?.isActive = isViewerTakeoverShellActive
         inputField.isEnabled = usesInlineControls && isInteractive
         sendButton.isEnabled = usesInlineControls && isInteractive
         interruptButton.isEnabled = usesInlineControls && isInteractive
         newlineButton.isEnabled = usesInlineControls && isInteractive
-        takeoverButton.isHidden = isOwner
+        takeoverButton.isHidden = isOwner || !isInteractive
         takeoverButton.isEnabled = !isOwner && isInteractive
         if !isInteractive {
             inputField.placeholderString = "Session is not running"
         } else {
-            inputField.placeholderString = isOwner ? "Send input to the session" : "Viewer window"
+            inputField.placeholderString = isOwner ? "Send input to the session" : "Take over to send input"
         }
         if !usesInlineControls && isOwner && (isInteractive || (!inputStatusIsError && inputStatusLabel.stringValue.isEmpty == false)) {
             inputStatusLabel.stringValue = ""
@@ -1133,27 +1256,73 @@ import spacesterminalghostty
     }
 
     private func updateHeaderLayoutVisibility() {
-        let hasVisibleHeaderContent = [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel].contains {
-            !$0.isHidden
+        // Session metadata remains available through debug accessors, but regular
+        // terminal windows do not show a detail header.
+        if isViewerTakeoverShellActive {
+            headerStackView.isHidden = true
+            bodyStackView.isHidden = true
+            outputScrollView.isHidden = true
+            bodyTopToHeaderConstraint?.isActive = false
+            bodyTopToContentConstraint?.isActive = true
+            bodyBottomToTakeoverConstraint?.isActive = false
+            bodyBottomToContentConstraint?.isActive = false
+            return
         }
-        headerStackView.isHidden = !hasVisibleHeaderContent
-        bodyTopToHeaderConstraint?.isActive = hasVisibleHeaderContent
-        bodyTopToContentConstraint?.isActive = !hasVisibleHeaderContent
+        bodyStackView.isHidden = false
+        headerStackView.isHidden = true
+        bodyTopToHeaderConstraint?.isActive = false
+        bodyTopToContentConstraint?.isActive = true
         bodyBottomToTakeoverConstraint?.isActive = !takeoverContainerView.isHidden
         bodyBottomToContentConstraint?.isActive = takeoverContainerView.isHidden
+    }
+
+    /// Applies the Spaces brand primary-button look (bright-teal fill, dark ink) to a button.
+    /// The brand `Theme` lives in `spacesui`, which depends on this module, so the teal
+    /// values are mirrored locally to avoid a dependency cycle. They match
+    /// `Theme.primaryButtonFill` / `Theme.primaryButtonText` and are appearance-independent.
+    private static func applyBrandPrimaryStyle(to button: NSButton, title: String) {
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.backgroundColor = CGColor(srgbRed: 61 / 255, green: 198 / 255, blue: 184 / 255, alpha: 1)
+        button.layer?.cornerRadius = 6
+        button.layer?.masksToBounds = true
+        let ink = NSColor(srgbRed: 15 / 255, green: 21 / 255, blue: 23 / 255, alpha: 1)
+        button.contentTintColor = ink
+        button.attributedTitle = NSAttributedString(
+            string: title, attributes: [.foregroundColor: ink, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.heightAnchor.constraint(equalToConstant: 30), button.widthAnchor.constraint(greaterThanOrEqualToConstant: 120),
+        ])
     }
 
     private func assignPreferredFirstResponder() {
         guard let window else { return }
         switch visibleRenderer {
-        case .ghosttyOwner: break
-        case .ghosttyViewerLoading, .ghosttyViewerSnapshot, .ghosttyViewerExitedOutput, .outputFallback:
-            if !inputRowStackView.isHidden, inputField.isEnabled {
+        case .ghosttyOwner: restoreGhosttyOwnerInputFocusIfReady()
+        case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable, .textView:
+            if !takeoverContainerView.isHidden, takeoverButton.isEnabled {
+                window.makeFirstResponder(takeoverButton)
+            } else if !inputRowStackView.isHidden, inputField.isEnabled {
                 window.makeFirstResponder(inputField)
             } else {
                 window.makeFirstResponder(outputView)
             }
         }
+    }
+
+    private func handleTerminalWindowKeyEvent(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown, backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner,
+            isInteractiveRuntimeState(lastObservedRuntimeState), window?.isKeyWindow == true
+        else { return false }
+        return ghosttyRendererHost?.handleKeyEvent(event, for: client.id) ?? false
+    }
+
+    private func restoreGhosttyOwnerInputFocusIfReady() {
+        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner,
+            isInteractiveRuntimeState(lastObservedRuntimeState), window?.isKeyWindow == true
+        else { return }
+        ghosttyRendererHost?.setFocused(true, for: client.id)
     }
 
     private func scrollOutputToBottom() {
@@ -1236,45 +1405,97 @@ import spacesterminalghostty
     }
 
     private func resolveVisibleRenderer(isOwner: Bool?) -> VisibleRenderer {
-        guard case .ghosttyEmbedded = rendererMode else { return .outputFallback }
-        if isOwner == true { return ghosttySessionHost?.hasRenderableSurface() == true ? .ghosttyOwner : .outputFallback }
-        if ghosttySessionHost?.hasRenderableSurface() == true { return .ghosttyViewerSnapshot }
-        if isInteractiveRuntimeState(lastObservedRuntimeState) { return .ghosttyViewerLoading }
-        return .ghosttyViewerExitedOutput
+        guard case .ghosttyEmbedded = rendererMode else { return .textView }
+        if isOwner == true {
+            if ghosttyRendererHost?.hasRenderableSurface() == true { return .ghosttyOwner }
+            if hasGhosttyVisibleRenderStateAvailable() { return .textView }
+            if isInteractiveRuntimeState(lastObservedRuntimeState) { return .ghosttyTakeoverStatus }
+            return hasGhosttyFinalRenderStateAvailable() ? .ghosttyEndedFinalRender : .unavailable
+        }
+        return .ghosttyTakeoverStatus
     }
 
     private func currentRefreshInterval() -> Duration {
         visibleRenderer == .ghosttyOwner && !shouldShowOwnerStateLabel ? Self.ownerGhosttyRefreshInterval : Self.fallbackRefreshInterval
     }
 
+    private func transitionTarget(isOwner: Bool?) -> OwnershipTransitionTarget { isOwner == true ? .owner : .viewer }
+
+    private func hasGhosttyFinalRenderStateAvailable() -> Bool {
+        if ghosttyRendererHost?.snapshot() != nil { return true }
+        guard let snapshotText = ghosttyRendererHost?.snapshotText() else { return false }
+        return !snapshotText.isEmpty
+    }
+
+    private func hasGhosttyVisibleRenderStateAvailable() -> Bool {
+        if let snapshot = ghosttyRendererHost?.snapshot(),
+            TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: snapshot, snapshotText: nil)
+        {
+            return true
+        }
+        guard let snapshotText = ghosttyRendererHost?.snapshotText() else { return false }
+        return TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: nil, snapshotText: snapshotText)
+    }
+
+    private func currentGhosttyStatusMessage(isOwner: Bool, runtimeState: TerminalSessionRuntimeState?, ownerClient: TerminalClient?) -> String {
+        if isInteractiveRuntimeState(runtimeState) {
+            if isOwner { return "" }
+            let ownerLabel = ownerClient.map(Self.displayLabel(for:)) ?? "another client"
+            if takeoverTask != nil || preferredAttachmentMode == .owner { return "Waiting for terminal ownership…\nCurrent owner: \(ownerLabel)" }
+            return "Live terminal rendering is limited to the active owner.\nCurrent owner: \(ownerLabel)"
+        }
+
+        guard let runtimeState else { return "Terminal session state unavailable." }
+        return "Terminal session \(runtimeState.state.rawValue)."
+    }
+
+    private func updateOutputSnapshot(_ snapshot: GhosttyTerminalSnapshot) {
+        outputView.string = GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot)
+        if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
+        outputView.sizeToFit()
+        lastRenderedOutput = outputView.string
+    }
+
+    private func updateOutputPlainText(_ text: String) {
+        guard text != lastRenderedOutput else { return }
+        outputView.string = text
+        if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
+        outputView.sizeToFit()
+        lastRenderedOutput = text
+    }
+
     private func rendererSummary(isOwner: Bool?) -> String {
         guard isOwner == true else {
             switch visibleRenderer {
-            case .ghosttyViewerLoading: return "Renderer: libghostty loading (viewer)"
-            case .ghosttyViewerSnapshot: return "Renderer: libghostty snapshot (viewer)"
-            case .ghosttyViewerExitedOutput: return "Renderer: final output (viewer)"
-            case .outputFallback: return "Renderer: viewer output"
-            case .ghosttyOwner: return "Renderer: libghostty (owner)"
+            case .ghosttyTakeoverStatus: return "Renderer: takeover status"
+            case .ghosttyEndedFinalRender: return "Renderer: final Ghostty render"
+            case .unavailable: return "Renderer: unavailable"
+            case .textView: return "Renderer: render-frame text"
+            case .ghosttyOwner: return "Renderer: ghostty-mirror"
             }
         }
         switch visibleRenderer {
-        case .ghosttyOwner: return "Renderer: libghostty (owner)"
-        case .ghosttyViewerLoading: return "Renderer: libghostty loading (viewer)"
-        case .ghosttyViewerSnapshot: return "Renderer: libghostty snapshot (viewer)"
-        case .ghosttyViewerExitedOutput: return "Renderer: final output (viewer)"
-        case .outputFallback: return "Renderer: output tail (owner fallback)"
+        case .ghosttyOwner: return "Renderer: ghostty-mirror"
+        case .ghosttyTakeoverStatus: return "Renderer: preparing owner surface"
+        case .ghosttyEndedFinalRender: return "Renderer: final Ghostty render"
+        case .unavailable: return "Renderer: unavailable"
+        case .textView:
+            if backend == .ghosttyEmbedded, ghosttyRendererHost?.snapshot() != nil || ghosttyRendererHost?.snapshotText() != nil {
+                return "Renderer: ghostty-mirror text debug"
+            }
+            return "Renderer: owner render unavailable"
         }
     }
 
     private func currentWindowTitle(fallback: String, isOwner: Bool) -> String {
         guard backend == .ghosttyEmbedded else { return fallback }
-        let baseTitle = ghosttySessionHost?.effectiveTitle ?? fallback
-        return isOwner ? baseTitle : "\(baseTitle) (viewer)"
+        let baseTitle = ghosttySessionInfoProvider?.effectiveTitle ?? lastObservedRuntimeState?.title ?? fallback
+        return baseTitle
     }
 
     private func currentSummaryWorkingDirectory(fallback: String) -> String {
         guard backend == .ghosttyEmbedded else { return fallback }
-        return ghosttySessionHost?.effectiveWorkingDirectory ?? fallback
+        return ghosttySessionInfoProvider?.effectiveWorkingDirectory ?? lastObservedRuntimeState?.workingDirectory ?? fallback
     }
 
     private func currentRepresentedURL(workingDirectory: String) -> URL? {
@@ -1310,8 +1531,31 @@ import spacesterminalghostty
 
     private func updateGhosttySessionHostReference(for launchConfiguration: TerminalSessionLaunchConfiguration) {
         guard launchConfiguration.backend == .ghosttyEmbedded else { return }
-        if ghosttySessionHost == nil { ghosttySessionHost = sessionHostProvider(launchConfiguration, paths) }
+        let host = resolvedGhosttySessionHost(for: launchConfiguration)
+        switchGhosttySessionHostIfNeeded(host)
     }
+
+    private func resolvedGhosttySessionHost(for launchConfiguration: TerminalSessionLaunchConfiguration) -> any TerminalGhosttySessionHosting {
+        if let clientGhosttySessionHost { return clientGhosttySessionHost }
+        let created = sessionHostProvider(launchConfiguration, paths)
+        clientGhosttySessionHost = created
+        return created
+    }
+
+    private func switchGhosttySessionHostIfNeeded(_ host: any TerminalGhosttySessionHosting) {
+        let hostObject = host as AnyObject
+        if let activeGhosttySessionHost, activeGhosttySessionHost as AnyObject === hostObject { return }
+        ghosttyRendererHost?.releaseRendererSurface()
+        terminalContainer.subviews.forEach { $0.removeFromSuperview() }
+        activeGhosttySessionHost = host
+        let resolvedHostComponents = Self.resolveGhosttyHostComponents(host)
+        ghosttyRendererHost = resolvedHostComponents.rendererHost
+        ghosttySessionInfoProvider = resolvedHostComponents.sessionInfoProvider
+    }
+
+    private static func resolveGhosttyHostComponents(_ host: any TerminalGhosttySessionHosting) -> (
+        sessionInfoProvider: any TerminalGhosttySessionInfoProviding, rendererHost: any TerminalGhosttyRendererHosting
+    ) { return (host, host) }
 
     private func activeOwnerClient(snapshot: TerminalSessionAttachmentSnapshot?) -> TerminalClient? {
         guard let snapshot else { return nil }
@@ -1347,7 +1591,35 @@ import spacesterminalghostty
         return "\(cleaned.prefix(72))…\(cleaned.suffix(48))"
     }
 
+    public func debugRefreshStateForTesting(skipOwnerAttach: Bool = false) {
+        if skipOwnerAttach { debugForceRefreshSkippingOwnerAttach() } else { debugForceRefresh() }
+    }
+
+    public func debugStateDump() -> TerminalSessionWindowDebugState {
+        let renderedOutput: String
+        if !terminalContainer.isHidden { ghosttyRendererHost?.prepareRenderStateExport() }
+        let surfaceSnapshot = ghosttyRendererHost?.snapshot() ?? ghosttyRendererHost?.sessionSnapshot()
+        if !terminalContainer.isHidden, let surfaceSnapshot,
+            TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: surfaceSnapshot, snapshotText: nil)
+        {
+            renderedOutput = GhosttyTerminalSnapshotGrid.fullPlainText(for: surfaceSnapshot)
+        } else if !terminalContainer.isHidden, let visibleText = ghosttyRendererHost?.debugVisibleSurfaceText(), !visibleText.isEmpty {
+            renderedOutput = visibleText
+        } else if !terminalContainer.isHidden, let sessionSnapshotText = ghosttyRendererHost?.sessionSnapshotText(), !sessionSnapshotText.isEmpty {
+            renderedOutput = sessionSnapshotText
+        } else {
+            renderedOutput = outputView.string
+        }
+        return .init(
+            renderedOutput: renderedOutput, showsTerminalSurface: !terminalContainer.isHidden, showsTextRenderer: !outputScrollView.isHidden,
+            rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue, state: stateLabel.stringValue,
+            windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
+            surfaceRows: surfaceSnapshot?.rows, windowIsKey: window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName)
+    }
+
     var debugRenderedOutput: String { outputView.string }
+    var debugShowsTerminalSurface: Bool { !terminalContainer.isHidden }
+    var debugShowsTextRenderer: Bool { !outputScrollView.isHidden }
     var debugRendererSummary: String { rendererLabel.stringValue }
     var debugSummary: String { summaryLabel.stringValue }
     var debugState: String { stateLabel.stringValue }
@@ -1360,9 +1632,10 @@ import spacesterminalghostty
     var debugDidCloseWindow: Bool { didCloseWindow }
     func debugForceRefresh() { refreshNow() }
     func debugForceRefreshSkippingOwnerAttach() { refreshNow(allowGhosttyOwnerAttach: false) }
+    func debugFlushPendingWindowFramePersistence() async { await pendingWindowFramePersistTask?.value }
     public var clientID: String { client.id }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
-    var debugShowsTakeoverButton: Bool { !takeoverRowStackView.isHidden }
+    var debugShowsTakeoverButton: Bool { !takeoverButton.isHidden }
     var debugInlineInputEnabled: Bool { inputField.isEnabled }
     var debugTakeoverEnabled: Bool { takeoverButton.isEnabled }
     var debugShowsRendererLabel: Bool { !rendererLabel.isHidden }
@@ -1370,6 +1643,8 @@ import spacesterminalghostty
     var debugShowsSummaryLabel: Bool { !summaryLabel.isHidden }
     var debugShowsStateLabel: Bool { !stateLabel.isHidden }
     var debugShowsHeader: Bool { !headerStackView.isHidden }
+    var debugShowsTakeoverMessage: Bool { !takeoverMessageLabel.isHidden }
+    var debugTakeoverMessage: String { takeoverMessageLabel.stringValue }
     var debugInputStatus: String { inputStatusLabel.stringValue }
     var debugShowsInputStatus: Bool { !inputStatusLabel.isHidden }
     func debugSubmitInput() { submitInput() }
@@ -1431,10 +1706,10 @@ import spacesterminalghostty
         }
     }
     @discardableResult func debugSendGhosttyScroll(horizontal: CGFloat = 0, vertical: CGFloat) -> Bool {
-        ghosttySessionHost?.debugSendScroll(horizontal: horizontal, vertical: vertical) ?? false
+        ghosttyRendererHost?.sendScroll(horizontal: horizontal, vertical: vertical) ?? false
     }
-    var debugGhosttyHasRenderableSurface: Bool { ghosttySessionHost?.hasRenderableSurface() ?? false }
-    var debugGhosttySurfaceRefreshRequestCount: Int { ghosttySessionHost?.debugSurfaceRefreshRequestCount ?? 0 }
+    var debugGhosttyHasRenderableSurface: Bool { ghosttyRendererHost?.hasRenderableSurface() ?? false }
+    var debugGhosttySurfaceRefreshRequestCount: Int { ghosttyRendererHost?.debugSurfaceRefreshRequestCount ?? 0 }
     var debugOutputDisablesSmartSubstitutions: Bool {
         !outputView.isAutomaticQuoteSubstitutionEnabled && !outputView.isAutomaticDashSubstitutionEnabled
             && !outputView.isAutomaticTextReplacementEnabled && !outputView.isAutomaticSpellingCorrectionEnabled

@@ -3,6 +3,7 @@ import Foundation
 public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
     public let sessionID: String
     public let backend: TerminalSessionBackendKind
+    public let lifetimePolicy: TerminalSessionLifetimePolicy
     public let title: String
     public let workingDirectory: String
     public let shell: String
@@ -10,11 +11,12 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
     public let createdAt: String
 
     public init(
-        sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, title: String, workingDirectory: String, shell: String,
-        command: String?, createdAt: String
+        sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent,
+        title: String, workingDirectory: String, shell: String, command: String?, createdAt: String
     ) {
         self.sessionID = sessionID
         self.backend = backend
+        self.lifetimePolicy = lifetimePolicy
         self.title = title
         self.workingDirectory = workingDirectory
         self.shell = shell
@@ -25,6 +27,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey {
         case sessionID
         case backend
+        case lifetimePolicy
         case title
         case workingDirectory
         case shell
@@ -36,6 +39,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sessionID = try container.decode(String.self, forKey: .sessionID)
         backend = try container.decodeIfPresent(TerminalSessionBackendKind.self, forKey: .backend) ?? .ghosttyEmbedded
+        lifetimePolicy = try container.decodeIfPresent(TerminalSessionLifetimePolicy.self, forKey: .lifetimePolicy) ?? .persistent
         title = try container.decode(String.self, forKey: .title)
         workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
         shell = try container.decode(String.self, forKey: .shell)
@@ -49,6 +53,8 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
     public let backend: TerminalSessionBackendKind
     public let servicePID: Int32
     public let childPID: Int32?
+    public let title: String?
+    public let workingDirectory: String?
     public let columns: Int?
     public let rows: Int?
     public let state: TerminalSessionState
@@ -57,12 +63,14 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
 
     public init(
         sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, servicePID: Int32, childPID: Int32?, state: TerminalSessionState,
-        updatedAt: String, exitedAt: String? = nil, columns: Int? = nil, rows: Int? = nil
+        updatedAt: String, exitedAt: String? = nil, title: String? = nil, workingDirectory: String? = nil, columns: Int? = nil, rows: Int? = nil
     ) {
         self.sessionID = sessionID
         self.backend = backend
         self.servicePID = servicePID
         self.childPID = childPID
+        self.title = title
+        self.workingDirectory = workingDirectory
         self.columns = columns
         self.rows = rows
         self.state = state
@@ -75,6 +83,8 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
         case backend
         case servicePID
         case childPID
+        case title
+        case workingDirectory
         case columns
         case rows
         case state
@@ -88,6 +98,8 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
         backend = try container.decodeIfPresent(TerminalSessionBackendKind.self, forKey: .backend) ?? .ghosttyEmbedded
         servicePID = try container.decode(Int32.self, forKey: .servicePID)
         childPID = try container.decodeIfPresent(Int32.self, forKey: .childPID)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        workingDirectory = try container.decodeIfPresent(String.self, forKey: .workingDirectory)
         columns = try container.decodeIfPresent(Int.self, forKey: .columns)
         rows = try container.decodeIfPresent(Int.self, forKey: .rows)
         state = try container.decode(TerminalSessionState.self, forKey: .state)

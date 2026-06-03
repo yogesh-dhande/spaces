@@ -46,8 +46,12 @@ enum GhosttyClipboardBridge {
     private static func completeClipboardRequest(userdata: UnsafeMutableRawPointer?, string: String, state: UnsafeMutableRawPointer?, confirmed: Bool)
     {
         guard let userdata else { return }
-        let view = Unmanaged<GhosttyEmbeddedTerminalView>.fromOpaque(userdata).takeUnretainedValue()
-        guard let surface = view.surface else { return }
-        string.withCString { pointer in ghostty_surface_complete_clipboard_request(surface, pointer, state, confirmed) }
+        let surfaceUserData = Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue()
+        let stateAddress = state.map { UInt(bitPattern: $0) }
+        Task { @MainActor in
+            guard let surface = surfaceUserData.surface() else { return }
+            let statePointer = stateAddress.flatMap(UnsafeMutableRawPointer.init(bitPattern:))
+            string.withCString { pointer in ghostty_surface_complete_clipboard_request(surface, pointer, statePointer, confirmed) }
+        }
     }
 }

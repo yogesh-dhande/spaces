@@ -58,7 +58,7 @@ public struct SpacesProfile: Sendable, Equatable {
         cachedProfileLock.unlock()
 
         let resolved = try resolve(
-            environment: environment, homeDirectoryURL: FileManager.default.homeDirectoryForCurrentUser,
+            environment: environment, homeDirectoryURL: currentHomeDirectoryURL(environment: environment),
             currentDirectoryPath: FileManager.default.currentDirectoryPath)
 
         cachedProfileLock.lock()
@@ -175,6 +175,15 @@ public struct SpacesProfile: Sendable, Equatable {
         return environment
     }
 
+    private static func currentHomeDirectoryURL(environment: [String: String]) -> URL {
+        if let home = trimmed(environment["HOME"]), !home.isEmpty { return URL(fileURLWithPath: home, isDirectory: true) }
+        #if os(macOS)
+            return FileManager.default.homeDirectoryForCurrentUser
+        #else
+            return URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        #endif
+    }
+
     private static func currentEnvironmentValue(for key: String) -> String? {
         guard let rawValue = getenv(key) else { return nil }
         return String(cString: rawValue)
@@ -183,9 +192,13 @@ public struct SpacesProfile: Sendable, Equatable {
     private static func resolveDevelopmentContext(
         currentDirectoryPath: String, executablePath: String?, fileManager: FileManager, gitProbe: SpacesGitProfileProbe
     ) throws -> SpacesDevelopmentContext? {
-        guard let executablePath = executablePath ?? currentExecutablePath(currentDirectoryPath: currentDirectoryPath) else { return nil }
-        guard let repoRoot = detectRepoRoot(executablePath: executablePath, fileManager: fileManager) else { return nil }
-        return try? gitProbe.resolveDevelopmentContext(repoRootPath: repoRoot)
+        #if os(macOS)
+            guard let executablePath = executablePath ?? currentExecutablePath(currentDirectoryPath: currentDirectoryPath) else { return nil }
+            guard let repoRoot = detectRepoRoot(executablePath: executablePath, fileManager: fileManager) else { return nil }
+            return try? gitProbe.resolveDevelopmentContext(repoRootPath: repoRoot)
+        #else
+            return nil
+        #endif
     }
 
     private static func detectRepoRoot(executablePath: String, fileManager: FileManager) -> String? {
@@ -230,30 +243,36 @@ public struct LiveSpacesGitProfileProbe: SpacesGitProfileProbe {
     public init() {}
 
     public func resolveDevelopmentContext(repoRootPath: String) throws -> SpacesDevelopmentContext? {
-        let worktreeRoot = try runGit(arguments: ["-C", repoRootPath, "rev-parse", "--show-toplevel"])
-        let branchName = try runGit(arguments: ["-C", repoRootPath, "rev-parse", "--abbrev-ref", "HEAD"])
-        let trimmedRoot = worktreeRoot.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedBranch = branchName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedRoot.isEmpty, !trimmedBranch.isEmpty else { return nil }
-        return SpacesDevelopmentContext(worktreeRoot: SpacesProfile.canonicalPath(trimmedRoot), branchName: trimmedBranch)
+        #if os(macOS)
+            let worktreeRoot = try runGit(arguments: ["-C", repoRootPath, "rev-parse", "--show-toplevel"])
+            let branchName = try runGit(arguments: ["-C", repoRootPath, "rev-parse", "--abbrev-ref", "HEAD"])
+            let trimmedRoot = worktreeRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedBranch = branchName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedRoot.isEmpty, !trimmedBranch.isEmpty else { return nil }
+            return SpacesDevelopmentContext(worktreeRoot: SpacesProfile.canonicalPath(trimmedRoot), branchName: trimmedBranch)
+        #else
+            return nil
+        #endif
     }
 
-    private func runGit(arguments: [String]) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git"] + arguments
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-        try process.run()
-        process.waitUntilExit()
-        if process.terminationStatus != 0 {
-            let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
-            let message = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
-            throw NSError(domain: "SpacesGitProfileProbe", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: message])
+    #if os(macOS)
+        private func runGit(arguments: [String]) throws -> String {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["git"] + arguments
+            let stdout = Pipe()
+            let stderr = Pipe()
+            process.standardOutput = stdout
+            process.standardError = stderr
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus != 0 {
+                let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+                let message = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+                throw NSError(domain: "SpacesGitProfileProbe", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: message])
+            }
+            let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+            return String(data: outputData, encoding: .utf8) ?? ""
         }
-        let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
-        return String(data: outputData, encoding: .utf8) ?? ""
-    }
+    #endif
 }

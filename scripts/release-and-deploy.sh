@@ -89,8 +89,9 @@ echo "🔐 Step 3/8: Code signing binaries..."
 BUILD_DIR="$MACOS_DIR/.build/apple/Products/Release"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
+TERMINAL_SERVICE="$BUILD_DIR/SpacesTerminalService"
 
-if [[ ! -f "$SPACES_APP" ]] || [[ ! -f "$SPACES_CLI" ]]; then
+if [[ ! -f "$SPACES_APP" ]] || [[ ! -f "$SPACES_CLI" ]] || [[ ! -f "$TERMINAL_SERVICE" ]]; then
   echo "Error: Release binaries not found in $BUILD_DIR" >&2
   exit 1
 fi
@@ -99,13 +100,13 @@ set -a          # auto-export all variables defined from now on
 source "$REPO_ROOT/.env"
 set +a          # stop auto-exporting
 
-"$SCRIPTS_DIR/codesign.sh" "$SPACES_APP" "$SPACES_CLI"
+"$SCRIPTS_DIR/codesign.sh" "$SPACES_APP" "$SPACES_CLI" "$TERMINAL_SERVICE"
 echo "✓ Code signing complete"
 echo ""
 
 # Step 4: Create DMG installer
 echo "💿 Step 4/8: Creating DMG installer..."
-"$SCRIPTS_DIR/create-dmg.sh" "$SPACES_APP" "$SPACES_CLI" "$VERSION"
+"$SCRIPTS_DIR/create-dmg.sh" "$SPACES_APP" "$SPACES_CLI" "$TERMINAL_SERVICE" "$VERSION"
 DMG_NAME="Spaces-${VERSION}.dmg"
 DMG_PATH="$REPO_ROOT/dist/releases/$VERSION/$DMG_NAME"
 
@@ -118,7 +119,7 @@ echo ""
 
 # Step 5: Create Sparkle archive
 echo "📦 Step 5/8: Creating Sparkle archive..."
-"$SCRIPTS_DIR/create-sparkle-archive.sh" "$SPACES_APP" "$SPACES_CLI" "$VERSION"
+"$SCRIPTS_DIR/create-sparkle-archive.sh" "$SPACES_APP" "$SPACES_CLI" "$TERMINAL_SERVICE" "$VERSION"
 ZIP_NAME="Spaces-${VERSION}.zip"
 ZIP_PATH="$REPO_ROOT/dist/releases/$VERSION/$ZIP_NAME"
 echo "✓ Sparkle archive created: $ZIP_NAME"

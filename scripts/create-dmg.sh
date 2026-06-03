@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ $# -ne 3 ]; then
-  echo "Usage: $0 <Spaces-app-path> <spaces-cli-path> <version>"
+if [ $# -ne 4 ]; then
+  echo "Usage: $0 <Spaces-app-path> <spaces-cli-path> <terminal-service-path> <version>"
   exit 1
 fi
 
 SPACES_APP="$1"
 SPACES_CLI="$2"
-VERSION="$3"
+TERMINAL_SERVICE="$3"
+VERSION="$4"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASES_DIR="$REPO_ROOT/dist/releases/$VERSION"
 DMG_NAME="Spaces-${VERSION}.dmg"
@@ -24,7 +25,7 @@ temp_dmg=""
 trap 'rm -rf "$staging"; [ -n "$temp_dmg" ] && rm -f "$temp_dmg"' EXIT
 
 app_bundle="$staging/Spaces.app"
-"$REPO_ROOT/scripts/create-app-bundle.sh" "$SPACES_APP" "$SPACES_CLI" "$app_bundle"
+"$REPO_ROOT/scripts/create-app-bundle.sh" "$SPACES_APP" "$SPACES_CLI" "$TERMINAL_SERVICE" "$app_bundle"
 
 # Create installer helper script used by the DMG wizard app.
 installer_script="$staging/.install-spaces.sh"
@@ -49,39 +50,73 @@ fi
 emit_result() {
   printf 'APP_PATH=%s\n' "$1"
   printf 'CLI_PATH=%s\n' "$2"
-  printf 'PATH_HINT=%s\n' "${3:-}"
+  printf 'SERVICE_PATH=%s\n' "$3"
+  printf 'PATH_HINT=%s\n' "${4:-}"
+}
+
+copy_ghostty_vt_dylibs() {
+  local copied=0
+  local source_dylib
+  for source_dylib in "$APP_PATH"/Contents/Frameworks/libghostty-vt*.dylib; do
+    [[ -e "$source_dylib" || -L "$source_dylib" ]] || continue
+    /bin/cp -P "$source_dylib" "$CLI_DIR/"
+    copied=1
+  done
+
+  if [[ "$copied" -eq 0 ]]; then
+    echo "Missing libghostty-vt dylibs in $APP_PATH/Contents/Frameworks" >&2
+    exit 1
+  fi
+
+  local installed_dylib
+  for installed_dylib in "$CLI_DIR"/libghostty-vt*.dylib; do
+    [[ -e "$installed_dylib" || -L "$installed_dylib" ]] || continue
+    /bin/chmod 755 "$installed_dylib" 2>/dev/null || true
+    /usr/bin/xattr -d com.apple.quarantine "$installed_dylib" 2>/dev/null || true
+  done
 }
 
 case "$MODE" in
   system)
     APP_PATH="/Applications/Spaces.app"
-    CLI_PATH="/usr/local/bin/spaces"
+    CLI_DIR="/usr/local/bin"
+    CLI_PATH="$CLI_DIR/spaces"
+    SERVICE_PATH="$CLI_DIR/SpacesTerminalService"
     /bin/mkdir -p /Applications /usr/local/bin
     /bin/rm -rf "$APP_PATH"
     /usr/bin/ditto "$SOURCE_APP" "$APP_PATH"
     /usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
     /bin/cp "$APP_PATH/Contents/Resources/spaces" "$CLI_PATH"
+    /bin/cp "$APP_PATH/Contents/Resources/SpacesTerminalService" "$SERVICE_PATH"
     /bin/chmod 755 "$CLI_PATH"
+    /bin/chmod 755 "$SERVICE_PATH"
+    copy_ghostty_vt_dylibs
     /usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" 2>/dev/null || true
-    emit_result "$APP_PATH" "$CLI_PATH"
+    /usr/bin/xattr -d com.apple.quarantine "$SERVICE_PATH" 2>/dev/null || true
+    emit_result "$APP_PATH" "$CLI_PATH" "$SERVICE_PATH"
     ;;
   user)
     APP_DIR="$HOME/Applications"
     CLI_DIR="$HOME/.local/bin"
     APP_PATH="$APP_DIR/Spaces.app"
     CLI_PATH="$CLI_DIR/spaces"
+    SERVICE_PATH="$CLI_DIR/SpacesTerminalService"
     PATH_HINT=""
     /bin/mkdir -p "$APP_DIR" "$CLI_DIR"
     /bin/rm -rf "$APP_PATH"
     /usr/bin/ditto "$SOURCE_APP" "$APP_PATH"
     /usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
     /bin/cp "$APP_PATH/Contents/Resources/spaces" "$CLI_PATH"
+    /bin/cp "$APP_PATH/Contents/Resources/SpacesTerminalService" "$SERVICE_PATH"
     /bin/chmod 755 "$CLI_PATH"
+    /bin/chmod 755 "$SERVICE_PATH"
+    copy_ghostty_vt_dylibs
     /usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" 2>/dev/null || true
+    /usr/bin/xattr -d com.apple.quarantine "$SERVICE_PATH" 2>/dev/null || true
     if [[ ":$PATH:" != *":$CLI_DIR:"* ]]; then
       PATH_HINT='export PATH="$PATH:$HOME/.local/bin"'
     fi
-    emit_result "$APP_PATH" "$CLI_PATH" "$PATH_HINT"
+    emit_result "$APP_PATH" "$CLI_PATH" "$SERVICE_PATH" "$PATH_HINT"
     ;;
   *)
     echo "Unsupported install mode: $MODE" >&2
@@ -97,6 +132,7 @@ cat > "$installer_source" << 'EOF'
 on parseInstallResult(shellOutput)
     set appPath to ""
     set cliPath to ""
+    set servicePath to ""
     set pathHint to ""
     repeat with outputLine in paragraphs of shellOutput
         set currentLine to contents of outputLine
@@ -104,13 +140,15 @@ on parseInstallResult(shellOutput)
             set appPath to text 10 thru -1 of currentLine
         else if currentLine starts with "CLI_PATH=" then
             set cliPath to text 10 thru -1 of currentLine
+        else if currentLine starts with "SERVICE_PATH=" then
+            set servicePath to text 14 thru -1 of currentLine
         else if currentLine starts with "PATH_HINT=" then
             if (length of currentLine) > 10 then
                 set pathHint to text 11 thru -1 of currentLine
             end if
         end if
     end repeat
-    return {appPath, cliPath, pathHint}
+    return {appPath, cliPath, servicePath, pathHint}
 end parseInstallResult
 
 on installerRootPOSIX()
@@ -123,7 +161,7 @@ on run
     set helperScript to quoted form of (dmgRoot & "/.install-spaces.sh")
 
     try
-        display dialog "Spaces installs the app and the required spaces CLI together. Continue to install both now?" buttons {"Cancel", "Install"} default button "Install" cancel button "Cancel" with icon note
+        display dialog "Spaces installs the app, the required spaces CLI, and the terminal service together. Continue to install them now?" buttons {"Cancel", "Install"} default button "Install" cancel button "Cancel" with icon note
     on error number -128
         return
     end try
@@ -149,8 +187,8 @@ on run
         end if
     end try
 
-    set {appPath, cliPath, pathHint} to parseInstallResult(installOutput)
-    set successText to "Spaces installed successfully.\n\nApp: " & appPath & "\nCLI: " & cliPath
+    set {appPath, cliPath, servicePath, pathHint} to parseInstallResult(installOutput)
+    set successText to "Spaces installed successfully.\n\nApp: " & appPath & "\nCLI: " & cliPath & "\nTerminal service: " & servicePath
     if pathHint is not "" then
         set successText to successText & "\n\nAdd this to your shell profile if the command is not found:\n" & pathHint
     end if

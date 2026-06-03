@@ -1,0 +1,896 @@
+import CoreGraphics
+import Foundation
+import ImageIO
+import XCTest
+
+final class SpacesMobileUITests: XCTestCase {
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+    }
+
+    func testTerminalTakeOverFromList() throws {
+        try runTerminalTakeOverScenario()
+    }
+
+    func testTerminalTakeOverAfterMacRetakeover() throws {
+        try runTerminalTakeOverScenario()
+    }
+
+    func testTerminalTakeOverAfterTwoMacRetakeovers() throws {
+        try runTerminalTakeOverScenario()
+    }
+
+    func testTerminalTakeOverRoundTripWithCommands() throws {
+        try runTerminalTakeOverScenario()
+    }
+
+    func testTerminalTakeOverAcrossTwoSessionsFromList() throws {
+        try runTerminalTakeOverScenario()
+    }
+
+    func testTerminalTakeOverReopenSameSessionFromList() throws {
+        try runTerminalTakeOverScenario()
+    }
+
+    func testAttachedAppConfigurationDoesNotRequireTransportKey() throws {
+        let configURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: false)
+        defer { try? FileManager.default.removeItem(at: configURL) }
+        let payload: [String: Any] = [
+            "sessionID": "session-1",
+            "host": "127.0.0.1",
+            "port": 47_847,
+            "authToken": "token",
+            "installationID": "installation",
+            "attachToExistingApp": true,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        try data.write(to: configURL)
+
+        let configuration = try UITestConfiguration.load(environment: ["SPACES_MOBILE_UI_TEST_CONFIG_PATH": configURL.path])
+
+        XCTAssertTrue(configuration.attachToExistingApp)
+        XCTAssertEqual(configuration.transportKey, "")
+    }
+
+    private func runTerminalTakeOverScenario() throws {
+        let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
+        let app = if configuration.attachToExistingApp {
+            XCUIApplication(bundleIdentifier: configuration.bundleID)
+        } else {
+            XCUIApplication()
+        }
+        if configuration.attachToExistingApp {
+            app.activate()
+            XCTAssertTrue(waitForRunningApp(app, timeout: 20), "Timed out waiting for attached app \(configuration.bundleID) to become active")
+        } else {
+            app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
+            app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
+            app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
+            app.launchEnvironment["SPACES_MOBILE_TEST_TRANSPORT_KEY"] = configuration.transportKey
+            app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
+            app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
+            if let renderDumpPath = configuration.renderDumpPath {
+                app.launchEnvironment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"] = renderDumpPath
+            }
+            if let eventLogPath = configuration.eventLogPath {
+                app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
+            }
+            app.launch()
+        }
+        XCUIDevice.shared.orientation = .portrait
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+
+        let sessionRow = app.buttons["terminal.row.\(configuration.sessionID)"]
+        XCTAssertTrue(sessionRow.waitForExistence(timeout: 20), "Timed out waiting for session row \(configuration.sessionID)")
+        if configuration.proceedTakeOverPath != nil {
+            waitForMarkerIfNeeded(configuration.proceedTakeOverPath, timeout: 60)
+        }
+        sessionRow.tap()
+
+        if !waitForOwnerState(in: app, configuration: configuration, timeout: 8),
+           let takeOverButton = waitForButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 8)
+        {
+            takeOverButton.tap()
+        }
+
+        guard waitForOwnerState(in: app, configuration: configuration, timeout: 45) else {
+            XCTFail("Timed out waiting for owner state")
+            return
+        }
+
+        captureScreenshot(app, name: "post-takeover-immediate", filePath: configuration.immediateScreenshotPath)
+        RunLoop.current.run(until: Date().addingTimeInterval(2))
+        captureScreenshot(app, name: "post-takeover-plus-2s", filePath: configuration.shortDelayScreenshotPath)
+        guard waitForVisibleTerminalContentIfNeeded(in: app, configuration: configuration, context: "after initial takeover", timeout: 4) else {
+            return
+        }
+        captureScreenshot(app, name: "post-takeover-plus-6s", filePath: configuration.longDelayScreenshotPath)
+        if let secondarySessionID = configuration.secondarySessionID {
+            try takeOverSessionsAcrossListCycles(
+                in: app,
+                configuration: configuration,
+                sessionIDs: [secondarySessionID, configuration.sessionID, secondarySessionID]
+            )
+            return
+        }
+        if configuration.scrollbackSwipeCount > 0 {
+            performScrollback(in: app, configuration: configuration)
+            guard waitForVisibleTerminalContentIfNeeded(in: app, configuration: configuration, context: "after scrollback", timeout: 4) else {
+                return
+            }
+            captureScreenshot(app, name: "post-scrollback", filePath: configuration.finalScreenshotPath)
+        }
+
+        if let firstCommandRequestPath = configuration.firstCommandRequestPath {
+            waitForMarkerIfNeeded(firstCommandRequestPath, timeout: 20)
+            focusTerminalSurface(in: app)
+            writeMarkerIfNeeded(configuration.firstCommandFocusedPath)
+            waitForMarkerIfNeeded(configuration.firstCommandCompletedPath, timeout: 20)
+            XCTAssertTrue(
+                waitForOwnerReadyState(in: app, configuration: configuration, timeout: 1),
+                "Owner-ready badge did not return promptly after first iOS command"
+            )
+            assertOwnerReadyStable(in: app, configuration: configuration, duration: 1, context: "after first iOS command")
+            guard waitForVisibleTerminalContentIfNeeded(in: app, configuration: configuration, context: "after first iOS command", timeout: 4) else {
+                return
+            }
+            captureScreenshot(app, name: "post-ios-command-immediate", filePath: configuration.postFirstCommandScreenshotPath)
+            writeMarkerIfNeeded(configuration.firstCommandObservedPath)
+            if let secondCommandRequestPath = configuration.secondCommandRequestPath {
+                waitForMarkerIfNeeded(secondCommandRequestPath, timeout: 20)
+                focusTerminalSurface(in: app)
+                writeMarkerIfNeeded(configuration.secondCommandFocusedPath)
+                waitForMarkerIfNeeded(configuration.secondCommandCompletedPath, timeout: 20)
+                XCTAssertTrue(
+                    waitForOwnerReadyState(in: app, configuration: configuration, timeout: 1),
+                    "Owner-ready badge did not return promptly after second iOS command"
+                )
+                assertOwnerReadyStable(in: app, configuration: configuration, duration: 1, context: "after second iOS command")
+                guard waitForVisibleTerminalContentIfNeeded(
+                    in: app,
+                    configuration: configuration,
+                    context: "after second iOS command",
+                    timeout: 4
+                ) else {
+                    return
+                }
+                captureScreenshot(app, name: "post-ios-second-command", filePath: configuration.postSecondCommandScreenshotPath)
+                writeMarkerIfNeeded(configuration.secondCommandObservedPath)
+            }
+        }
+
+        if let proceedFinishPath = configuration.proceedFinishPath {
+            waitForMarkerIfNeeded(proceedFinishPath, timeout: 30)
+            for attemptIndex in 0..<configuration.manualRetakeoverAttempts {
+                guard let takeOverButton = waitForButton(
+                    in: app,
+                    identifier: "terminal.takeover",
+                    fallbackLabel: "Take Over",
+                    timeout: 20
+                ) else {
+                    XCTFail("Timed out waiting for Take Over button after Mac retakeover")
+                    return
+                }
+                takeOverButton.tap()
+                guard waitForOwnerState(in: app, configuration: configuration, timeout: 45) else {
+                    XCTFail("Timed out waiting for owner state after mobile retakeover attempt \(attemptIndex + 1)")
+                    return
+                }
+                XCTAssertTrue(
+                    waitForOwnerReadyState(in: app, configuration: configuration, timeout: 5),
+                    "Owner-ready badge did not return promptly after mobile retakeover attempt \(attemptIndex + 1)"
+                )
+                assertOwnerReadyStable(
+                    in: app,
+                    configuration: configuration,
+                    duration: 1,
+                    context: "after mobile retakeover attempt \(attemptIndex + 1)"
+                )
+                guard waitForVisibleTerminalContentIfNeeded(
+                    in: app,
+                    configuration: configuration,
+                    context: "after mobile retakeover attempt \(attemptIndex + 1)",
+                    timeout: 4
+                ) else {
+                    return
+                }
+                writeMarkerIfNeeded(configuration.manualRetakeoverObservedPath(for: attemptIndex))
+                if attemptIndex + 1 < configuration.manualRetakeoverAttempts {
+                    waitForMarkerIfNeeded(configuration.manualRetakeoverContinuePath(for: attemptIndex), timeout: 30)
+                }
+            }
+            if let finalMacRetakeoverRequestPath = configuration.finalMacRetakeoverRequestPath {
+                waitForMarkerIfNeeded(finalMacRetakeoverRequestPath, timeout: 30)
+                guard waitForButton(
+                    in: app,
+                    identifier: "terminal.takeover",
+                    fallbackLabel: "Take Over",
+                    timeout: 20
+                ) != nil else {
+                    XCTFail("Timed out waiting for Take Over button after the final Mac retakeover")
+                    return
+                }
+                captureScreenshot(
+                    app,
+                    name: "post-final-mac-retakeover",
+                    filePath: configuration.postFinalMacRetakeoverScreenshotPath
+                )
+                writeMarkerIfNeeded(configuration.finalMacRetakeoverObservedPath)
+            }
+            captureScreenshot(app, name: "post-mac-retakeover", filePath: configuration.finalScreenshotPath)
+        }
+    }
+
+    private func waitForButton(in app: XCUIApplication, identifier: String, fallbackLabel: String, timeout: TimeInterval) -> XCUIElement? {
+        waitForElement(primary: app.buttons[identifier], fallback: app.buttons[fallbackLabel], timeout: timeout)
+    }
+
+    private func focusTerminalSurface(in app: XCUIApplication) {
+        let terminalSurface = app.otherElements["terminal.surface"]
+        if terminalSurface.waitForExistence(timeout: 2) {
+            terminalSurface.tap()
+        }
+    }
+
+    private func waitForVisibleTerminalContentIfNeeded(
+        in app: XCUIApplication,
+        configuration: UITestConfiguration,
+        context: String,
+        timeout: TimeInterval
+    ) -> Bool {
+        let requiredInkBands = configuration.minimumVisibleTerminalInkBands
+        let maximumTopBlankRatio = configuration.maximumTerminalTopBlankRatio
+        guard requiredInkBands > 0 || maximumTopBlankRatio > 0 else { return true }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastMetrics: TerminalSurfaceInkMetrics?
+        var lastScreenshot: XCUIScreenshot?
+        while Date() < deadline {
+            let surface = terminalSurfaceElement(in: app)
+            let screenshot = surface?.screenshot() ?? app.screenshot()
+            lastScreenshot = screenshot
+            if let metrics = Self.terminalSurfaceInkMetrics(from: screenshot.pngRepresentation, isFullAppScreenshot: surface == nil) {
+                lastMetrics = metrics
+                let hasEnoughInk = requiredInkBands <= 0 || metrics.inkBands >= requiredInkBands
+                let hasAcceptableTopBlank =
+                    maximumTopBlankRatio <= 0
+                    || metrics.firstInkRow.map { Double($0) / Double(max(metrics.height, 1)) <= maximumTopBlankRatio } == true
+                if hasEnoughInk, hasAcceptableTopBlank {
+                    return true
+                }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        }
+
+        if let lastScreenshot {
+            let attachment = XCTAttachment(screenshot: lastScreenshot)
+            attachment.name = "terminal-surface-visible-content-failure-\(context)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        XCTFail(
+            "Terminal surface did not visibly render enough content \(context). "
+                + "requiredInkBands=\(requiredInkBands) maximumTopBlankRatio=\(maximumTopBlankRatio) "
+                + "lastMetrics=\(String(describing: lastMetrics))"
+        )
+        return false
+    }
+
+    private func terminalSurfaceElement(in app: XCUIApplication) -> XCUIElement? {
+        let surface = app.otherElements["terminal.surface"]
+        guard surface.exists, surface.frame.width > 1, surface.frame.height > 1 else { return nil }
+        return surface
+    }
+
+    private static func terminalSurfaceInkMetrics(from pngData: Data, isFullAppScreenshot: Bool) -> TerminalSurfaceInkMetrics? {
+        guard let source = CGImageSourceCreateWithData(pngData as CFData, nil),
+            let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { return nil }
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0 else { return nil }
+
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        guard
+            let context = CGContext(
+                data: &pixels,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo
+            )
+        else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        let firstRow = isFullAppScreenshot ? Int(Double(height) * 0.14) : 0
+        let lastRow = isFullAppScreenshot ? max(firstRow, Int(Double(height) * 0.88)) : height
+        let rowInkThreshold = max(3, width / 120)
+        var brightPixels = 0
+        var inkRows = 0
+        var inkBands = 0
+        var firstInkRow: Int?
+        var previousRowHadInk = false
+        for y in firstRow..<lastRow {
+            var rowBrightPixels = 0
+            for x in 0..<width {
+                let offset = (y * width + x) * 4
+                let red = Int(pixels[offset])
+                let green = Int(pixels[offset + 1])
+                let blue = Int(pixels[offset + 2])
+                let alpha = Int(pixels[offset + 3])
+                let luminance = (299 * red + 587 * green + 114 * blue) / 1000
+                if alpha > 20, luminance > 70 {
+                    rowBrightPixels += 1
+                }
+            }
+            brightPixels += rowBrightPixels
+            let rowHasInk = rowBrightPixels > rowInkThreshold
+            if rowHasInk {
+                if firstInkRow == nil {
+                    firstInkRow = y - firstRow
+                }
+                inkRows += 1
+                if !previousRowHadInk {
+                    inkBands += 1
+                }
+            }
+            previousRowHadInk = rowHasInk
+        }
+        return TerminalSurfaceInkMetrics(
+            width: width,
+            height: lastRow - firstRow,
+            brightPixels: brightPixels,
+            inkRows: inkRows,
+            inkBands: inkBands,
+            firstInkRow: firstInkRow
+        )
+    }
+
+    private func takeOverSessionsAcrossListCycles(
+        in app: XCUIApplication,
+        configuration: UITestConfiguration,
+        sessionIDs: [String]
+    ) throws {
+        for (index, sessionID) in sessionIDs.enumerated() {
+            try returnToTerminalList(in: app)
+            try takeOverSessionFromList(
+                in: app,
+                sessionID: sessionID,
+                timeout: 20,
+                context: "list cycle \(index + 1)"
+            )
+        }
+        captureScreenshot(app, name: "post-second-session-takeover", filePath: configuration.finalScreenshotPath)
+    }
+
+    private func returnToTerminalList(in app: XCUIApplication) throws {
+        if isTerminalListVisible(in: app) {
+            return
+        }
+
+        if let backControl = waitForElement(
+            primary: app.buttons["terminal.back"],
+            fallback: app.descendants(matching: .any)["terminal.back"],
+            timeout: 4
+        ) {
+            backControl.tap()
+        } else {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.09, dy: 0.11)).tap()
+        }
+        XCTAssertTrue(waitForRunningApp(app, timeout: 5), "App stopped running after returning to the terminal list")
+        XCTAssertTrue(waitForTerminalList(in: app, timeout: 8), "Timed out returning to the terminal list")
+    }
+
+    private func waitForTerminalList(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if isTerminalListVisible(in: app) {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return false
+    }
+
+    private func isTerminalListVisible(in app: XCUIApplication) -> Bool {
+        let rowPredicate = NSPredicate(format: "identifier BEGINSWITH %@", "terminal.row.")
+        return app.buttons.matching(rowPredicate).firstMatch.exists
+    }
+
+    private func takeOverSessionFromList(
+        in app: XCUIApplication,
+        sessionID: String,
+        timeout: TimeInterval,
+        context: String
+    ) throws {
+        let sessionRow = app.buttons["terminal.row.\(sessionID)"]
+        XCTAssertTrue(sessionRow.waitForExistence(timeout: timeout), "Terminal row \(sessionID) did not reappear during \(context)")
+        sessionRow.tap()
+
+        let sessionDetail = app.descendants(matching: .any)["terminal.detail.\(sessionID)"]
+        XCTAssertTrue(sessionDetail.waitForExistence(timeout: 8), "Terminal detail \(sessionID) did not appear during \(context)")
+        if waitForOwnerState(in: app, timeout: 4) == nil,
+           let takeOverButton = waitForButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 8)
+        {
+            takeOverButton.tap()
+        }
+
+        guard waitForOwnerState(in: app, timeout: 45) != nil else {
+            XCTFail("Timed out waiting for owner state after taking over session \(sessionID) during \(context)")
+            return
+        }
+        XCTAssertTrue(waitForOwnerReadyState(in: app, timeout: 10), "Owner-ready badge did not return promptly after taking over session \(sessionID) during \(context)")
+        assertOwnerReadyStable(in: app, duration: 1, context: "after taking over session \(sessionID) during \(context)")
+    }
+
+    private func performScrollback(in app: XCUIApplication, configuration: UITestConfiguration) {
+        guard configuration.scrollbackSwipeCount > 0 else { return }
+        focusTerminalSurface(in: app)
+        let startCoordinate = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.36))
+        let endCoordinate = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.88))
+        for _ in 0..<configuration.scrollbackSwipeCount {
+            startCoordinate.press(forDuration: 0.05, thenDragTo: endCoordinate)
+            RunLoop.current.run(until: Date().addingTimeInterval(1.2))
+        }
+    }
+
+    private func waitForStaticText(
+        in app: XCUIApplication,
+        identifier: String,
+        fallbackLabel: String,
+        timeout: TimeInterval
+    ) -> XCUIElement? {
+        waitForElement(primary: app.staticTexts[identifier], fallback: app.staticTexts[fallbackLabel], timeout: timeout)
+    }
+
+    private func waitForElement(primary: XCUIElement, fallback: XCUIElement, timeout: TimeInterval) -> XCUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if primary.exists {
+                return primary
+            }
+            if fallback.exists {
+                return fallback
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return nil
+    }
+
+    private func waitForRunningApp(_ app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            switch app.state {
+            case .runningForeground:
+                return true
+            default:
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            }
+        }
+        return false
+    }
+
+    private func waitForOwnerState(in app: XCUIApplication, timeout: TimeInterval) -> XCUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let ownerBadge = app.otherElements["terminal.ownerBadge"]
+            if ownerBadge.exists {
+                return ownerBadge
+            }
+            let ownerPreparing = app.descendants(matching: .any)["terminal.ownerPreparing"]
+            if ownerPreparing.exists {
+                return ownerPreparing
+            }
+            let ownerText = app.staticTexts["Owner"]
+            if ownerText.exists {
+                return ownerText
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return nil
+    }
+
+    private func waitForOwnerState(
+        in app: XCUIApplication,
+        configuration: UITestConfiguration,
+        timeout: TimeInterval
+    ) -> Bool {
+        if configuration.renderDumpPath != nil {
+            return waitForRenderDump(configuration: configuration, timeout: timeout) { dump in
+                dump.sessionID == configuration.sessionID
+                    && dump.isOwner
+                    && (dump.showsTerminalSurface || dump.renderMode.hasPrefix("owner") || dump.renderMode == "ghostty-mirror")
+            } != nil
+        }
+        return waitForOwnerState(in: app, timeout: timeout) != nil
+    }
+
+    private func waitForOwnerReadyState(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if isShowingOwnerReadyState(in: app) && !isShowingPreparingInput(in: app) {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return false
+    }
+
+    private func waitForOwnerReadyState(
+        in app: XCUIApplication,
+        configuration: UITestConfiguration,
+        timeout: TimeInterval
+    ) -> Bool {
+        if configuration.renderDumpPath != nil {
+            return waitForRenderDump(configuration: configuration, timeout: timeout) { dump in
+                isOwnerReady(dump, configuration: configuration)
+            } != nil
+        }
+        return waitForOwnerReadyState(in: app, timeout: timeout)
+    }
+
+    private func assertOwnerReadyStable(in app: XCUIApplication, duration: TimeInterval, context: String) {
+        let deadline = Date().addingTimeInterval(duration)
+        while Date() < deadline {
+            XCTAssertTrue(isShowingOwnerReadyState(in: app), "Owner-ready badge disappeared \(context)")
+            XCTAssertFalse(isShowingPreparingInput(in: app), "Preparing input remained visible \(context)")
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+    }
+
+    private func assertOwnerReadyStable(
+        in app: XCUIApplication,
+        configuration: UITestConfiguration,
+        duration: TimeInterval,
+        context: String
+    ) {
+        if configuration.renderDumpPath == nil {
+            assertOwnerReadyStable(in: app, duration: duration, context: context)
+            return
+        }
+        let deadline = Date().addingTimeInterval(duration)
+        while Date() < deadline {
+            guard let dump = latestRenderDump(configuration: configuration) else {
+                XCTFail("Missing render dump \(context)")
+                return
+            }
+            XCTAssertTrue(isOwnerReady(dump, configuration: configuration), "Owner-ready render dump regressed \(context): \(dump)")
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+    }
+
+    private func isShowingOwnerReadyState(in app: XCUIApplication) -> Bool {
+        app.otherElements["terminal.ownerBadge"].exists || app.staticTexts["Owner"].exists
+    }
+
+    private func isShowingPreparingInput(in app: XCUIApplication) -> Bool {
+        if app.descendants(matching: .any)["terminal.ownerPreparing"].exists {
+            return true
+        }
+        return false
+    }
+
+    private func waitForRenderDump(
+        configuration: UITestConfiguration,
+        timeout: TimeInterval,
+        predicate: (UITestRenderDump) -> Bool
+    ) -> UITestRenderDump? {
+        guard configuration.renderDumpPath != nil else { return nil }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let dump = latestRenderDump(configuration: configuration),
+                predicate(dump)
+            {
+                return dump
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        if let dump = latestRenderDump(configuration: configuration),
+            predicate(dump)
+        {
+            return dump
+        }
+        return nil
+    }
+
+    private func latestRenderDump(configuration: UITestConfiguration) -> UITestRenderDump? {
+        guard let renderDumpPath = configuration.renderDumpPath else { return nil }
+        let url = URL(fileURLWithPath: renderDumpPath)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(UITestRenderDump.self, from: data)
+    }
+
+    private func isOwnerReady(_ dump: UITestRenderDump, configuration: UITestConfiguration) -> Bool {
+        dump.sessionID == configuration.sessionID
+            && dump.isOwner
+            && dump.showsTerminalSurface
+            && dump.isInputSurfaceReady
+            && !dump.isBusy
+            && !dump.isPreparingInput
+    }
+
+    private func captureScreenshot(_ app: XCUIApplication, name: String, filePath: String?) {
+        let screenshot = app.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        guard let filePath else { return }
+        let url = URL(fileURLWithPath: filePath)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try screenshot.pngRepresentation.write(to: url, options: [.atomic])
+        } catch {
+            XCTFail("Failed to write screenshot \(name) to \(filePath): \(error)")
+        }
+    }
+
+    private func waitForMarkerIfNeeded(_ path: String?, timeout: TimeInterval) {
+        guard let path else { return }
+        let url = URL(fileURLWithPath: path)
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if FileManager.default.fileExists(atPath: url.path) {
+                return
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        XCTFail("Timed out waiting for marker file at \(path)")
+    }
+
+    private func writeMarkerIfNeeded(_ path: String?) {
+        guard let path else { return }
+        let url = URL(fileURLWithPath: path)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try "ready\n".write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            XCTFail("Failed writing marker file at \(path): \(error)")
+        }
+    }
+
+}
+
+private struct UITestConfiguration: Decodable {
+    static let defaultConfigPath = "/tmp/spaces-mobile-ui-test-config.json"
+    static let defaultBundleID = "com.yogeshdhande.spacesmobile"
+
+    let sessionID: String
+    let secondarySessionID: String?
+    let host: String
+    let port: Int
+    let authToken: String
+    let transportKey: String
+    let installationID: String
+    let renderDumpPath: String?
+    let eventLogPath: String?
+    let immediateScreenshotPath: String?
+    let shortDelayScreenshotPath: String?
+    let longDelayScreenshotPath: String?
+    let proceedTakeOverPath: String?
+    let firstCommandRequestPath: String?
+    let firstCommandFocusedPath: String?
+    let firstCommandCompletedPath: String?
+    let firstCommandObservedPath: String?
+    let secondCommandRequestPath: String?
+    let secondCommandFocusedPath: String?
+    let secondCommandCompletedPath: String?
+    let secondCommandObservedPath: String?
+    let proceedFinishPath: String?
+    let firstCommandText: String
+    let secondCommandText: String?
+    let manualRetakeoverAttempts: Int
+    let manualRetakeoverObservedPrefix: String?
+    let manualRetakeoverContinuePrefix: String?
+    let postFirstCommandScreenshotPath: String?
+    let postSecondCommandScreenshotPath: String?
+    let finalMacRetakeoverRequestPath: String?
+    let finalMacRetakeoverObservedPath: String?
+    let postFinalMacRetakeoverScreenshotPath: String?
+    let finalScreenshotPath: String?
+    let scrollbackSwipeCount: Int
+    let minimumVisibleTerminalInkBands: Int
+    let maximumTerminalTopBlankRatio: Double
+    let attachToExistingApp: Bool
+    let bundleID: String
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID
+        case secondarySessionID
+        case host
+        case port
+        case authToken
+        case transportKey
+        case installationID
+        case renderDumpPath
+        case eventLogPath
+        case immediateScreenshotPath
+        case shortDelayScreenshotPath
+        case longDelayScreenshotPath
+        case proceedTakeOverPath
+        case firstCommandRequestPath
+        case firstCommandFocusedPath
+        case firstCommandCompletedPath
+        case firstCommandObservedPath
+        case secondCommandRequestPath
+        case secondCommandFocusedPath
+        case secondCommandCompletedPath
+        case secondCommandObservedPath
+        case proceedFinishPath
+        case firstCommandText
+        case secondCommandText
+        case manualRetakeoverAttempts
+        case manualRetakeoverObservedPrefix
+        case manualRetakeoverContinuePrefix
+        case postFirstCommandScreenshotPath
+        case postSecondCommandScreenshotPath
+        case finalMacRetakeoverRequestPath
+        case finalMacRetakeoverObservedPath
+        case postFinalMacRetakeoverScreenshotPath
+        case finalScreenshotPath
+        case scrollbackSwipeCount
+        case minimumVisibleTerminalInkBands
+        case maximumTerminalTopBlankRatio
+        case attachToExistingApp
+        case bundleID
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        attachToExistingApp = try container.decodeIfPresent(Bool.self, forKey: .attachToExistingApp) ?? false
+        sessionID = try container.decode(String.self, forKey: .sessionID)
+        secondarySessionID = try container.decodeIfPresent(String.self, forKey: .secondarySessionID)
+        host = try container.decode(String.self, forKey: .host)
+        port = try container.decode(Int.self, forKey: .port)
+        authToken = try container.decode(String.self, forKey: .authToken)
+        if attachToExistingApp {
+            transportKey = try container.decodeIfPresent(String.self, forKey: .transportKey) ?? ""
+        } else {
+            transportKey = try container.decode(String.self, forKey: .transportKey)
+        }
+        installationID = try container.decode(String.self, forKey: .installationID)
+        renderDumpPath = try container.decodeIfPresent(String.self, forKey: .renderDumpPath)
+        eventLogPath = try container.decodeIfPresent(String.self, forKey: .eventLogPath)
+        immediateScreenshotPath = try container.decodeIfPresent(String.self, forKey: .immediateScreenshotPath)
+        shortDelayScreenshotPath = try container.decodeIfPresent(String.self, forKey: .shortDelayScreenshotPath)
+        longDelayScreenshotPath = try container.decodeIfPresent(String.self, forKey: .longDelayScreenshotPath)
+        proceedTakeOverPath = try container.decodeIfPresent(String.self, forKey: .proceedTakeOverPath)
+        firstCommandRequestPath = try container.decodeIfPresent(String.self, forKey: .firstCommandRequestPath)
+        firstCommandFocusedPath = try container.decodeIfPresent(String.self, forKey: .firstCommandFocusedPath)
+        firstCommandCompletedPath = try container.decodeIfPresent(String.self, forKey: .firstCommandCompletedPath)
+        firstCommandObservedPath = try container.decodeIfPresent(String.self, forKey: .firstCommandObservedPath)
+        secondCommandRequestPath = try container.decodeIfPresent(String.self, forKey: .secondCommandRequestPath)
+        secondCommandFocusedPath = try container.decodeIfPresent(String.self, forKey: .secondCommandFocusedPath)
+        secondCommandCompletedPath = try container.decodeIfPresent(String.self, forKey: .secondCommandCompletedPath)
+        secondCommandObservedPath = try container.decodeIfPresent(String.self, forKey: .secondCommandObservedPath)
+        proceedFinishPath = try container.decodeIfPresent(String.self, forKey: .proceedFinishPath)
+        firstCommandText = try container.decodeIfPresent(String.self, forKey: .firstCommandText) ?? ""
+        secondCommandText = try container.decodeIfPresent(String.self, forKey: .secondCommandText)
+        manualRetakeoverAttempts = try container.decodeIfPresent(Int.self, forKey: .manualRetakeoverAttempts) ?? 0
+        manualRetakeoverObservedPrefix = try container.decodeIfPresent(String.self, forKey: .manualRetakeoverObservedPrefix)
+        manualRetakeoverContinuePrefix = try container.decodeIfPresent(String.self, forKey: .manualRetakeoverContinuePrefix)
+        postFirstCommandScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postFirstCommandScreenshotPath)
+        postSecondCommandScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postSecondCommandScreenshotPath)
+        finalMacRetakeoverRequestPath = try container.decodeIfPresent(String.self, forKey: .finalMacRetakeoverRequestPath)
+        finalMacRetakeoverObservedPath = try container.decodeIfPresent(String.self, forKey: .finalMacRetakeoverObservedPath)
+        postFinalMacRetakeoverScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postFinalMacRetakeoverScreenshotPath)
+        finalScreenshotPath = try container.decodeIfPresent(String.self, forKey: .finalScreenshotPath)
+        scrollbackSwipeCount = try container.decodeIfPresent(Int.self, forKey: .scrollbackSwipeCount) ?? 0
+        minimumVisibleTerminalInkBands = try container.decodeIfPresent(Int.self, forKey: .minimumVisibleTerminalInkBands) ?? 0
+        maximumTerminalTopBlankRatio = try container.decodeIfPresent(Double.self, forKey: .maximumTerminalTopBlankRatio) ?? 0
+        bundleID = try container.decodeIfPresent(String.self, forKey: .bundleID) ?? Self.defaultBundleID
+    }
+
+    func manualRetakeoverObservedPath(for attemptIndex: Int) -> String? {
+        guard let manualRetakeoverObservedPrefix else { return nil }
+        return "\(manualRetakeoverObservedPrefix)-\(attemptIndex + 1)"
+    }
+
+    func manualRetakeoverContinuePath(for attemptIndex: Int) -> String? {
+        guard let manualRetakeoverContinuePrefix else { return nil }
+        return "\(manualRetakeoverContinuePrefix)-\(attemptIndex + 1)"
+    }
+
+    static func load(environment: [String: String]) throws -> Self {
+        let configPath = environment["SPACES_MOBILE_UI_TEST_CONFIG_PATH"] ?? defaultConfigPath
+        let url = URL(fileURLWithPath: configPath)
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw UITestConfigurationError.missingConfigFile(configPath)
+        }
+        do {
+            return try JSONDecoder().decode(Self.self, from: data)
+        } catch {
+            throw UITestConfigurationError.invalidConfigFile(configPath, error.localizedDescription)
+        }
+    }
+}
+
+private struct UITestRenderDump: Decodable, CustomStringConvertible {
+    let sessionID: String
+    let renderMode: String
+    let isOwner: Bool
+    let showsTerminalSurface: Bool
+    let isBusy: Bool
+    let isPreparingInput: Bool
+    let isInputSurfaceReady: Bool
+    let visibleText: String
+    let renderedText: String
+    let renderStateKey: String
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID
+        case renderMode
+        case isOwner
+        case showsTerminalSurface
+        case isBusy
+        case isPreparingInput
+        case isInputSurfaceReady
+        case visibleText
+        case renderedText
+        case renderStateKey
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decode(String.self, forKey: .sessionID)
+        renderMode = try container.decode(String.self, forKey: .renderMode)
+        isOwner = try container.decode(Bool.self, forKey: .isOwner)
+        showsTerminalSurface = try container.decode(Bool.self, forKey: .showsTerminalSurface)
+        isBusy = try container.decode(Bool.self, forKey: .isBusy)
+        isPreparingInput = try container.decode(Bool.self, forKey: .isPreparingInput)
+        isInputSurfaceReady = try container.decode(Bool.self, forKey: .isInputSurfaceReady)
+        visibleText = try container.decode(String.self, forKey: .visibleText)
+        renderedText = try container.decode(String.self, forKey: .renderedText)
+        renderStateKey = try container.decode(String.self, forKey: .renderStateKey)
+    }
+
+    var description: String {
+        [
+            "sessionID=\(sessionID)",
+            "renderMode=\(renderMode)",
+            "isOwner=\(isOwner)",
+            "showsTerminalSurface=\(showsTerminalSurface)",
+            "isBusy=\(isBusy)",
+            "isPreparingInput=\(isPreparingInput)",
+            "isInputSurfaceReady=\(isInputSurfaceReady)",
+            "visibleText=\(visibleText)",
+            "renderedTextLength=\(renderedText.count)",
+            "renderStateKey=\(renderStateKey)",
+        ].joined(separator: " ")
+    }
+}
+
+private struct TerminalSurfaceInkMetrics: CustomStringConvertible {
+    let width: Int
+    let height: Int
+    let brightPixels: Int
+    let inkRows: Int
+    let inkBands: Int
+    let firstInkRow: Int?
+
+    var description: String {
+        "width=\(width) height=\(height) brightPixels=\(brightPixels) inkRows=\(inkRows) "
+            + "inkBands=\(inkBands) firstInkRow=\(String(describing: firstInkRow))"
+    }
+}
+
+private enum UITestConfigurationError: LocalizedError {
+    case missingConfigFile(String)
+    case invalidConfigFile(String, String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingConfigFile(let path):
+            return "Missing UI test config file at \(path)"
+        case .invalidConfigFile(let path, let message):
+            return "Invalid UI test config file at \(path): \(message)"
+        }
+    }
+}
