@@ -1632,6 +1632,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     var debugDidCloseWindow: Bool { didCloseWindow }
     func debugForceRefresh() { refreshNow() }
     func debugForceRefreshSkippingOwnerAttach() { refreshNow(allowGhosttyOwnerAttach: false) }
+    func debugFlushPendingWindowFramePersistence() async { await pendingWindowFramePersistTask?.value }
     public var clientID: String { client.id }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
     var debugShowsTakeoverButton: Bool { !takeoverButton.isHidden }

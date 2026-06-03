@@ -350,7 +350,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertTrue(writes.isEmpty)
 
-        try await Task.sleep(for: .milliseconds(250))
+        await controller.debugFlushPendingWindowFramePersistence()
 
         XCTAssertEqual(writes.count, 1)
     }
