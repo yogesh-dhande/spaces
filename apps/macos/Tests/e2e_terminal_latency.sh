@@ -23,7 +23,7 @@ SAMPLES="${SAMPLES:-12}"
 KEEP_ROOT="${KEEP_ROOT:-0}"
 APP_PID=""
 
-SCENARIOS=(mac-input-latency mac-scrollback-latency mac-command-output-catchup)
+SCENARIOS=(mac-input-latency mac-scrollback-latency mac-scrollback-partial-latency mac-command-output-catchup)
 SELECTED_SCENARIOS=()
 
 print_usage() {
@@ -40,6 +40,7 @@ Options:
 Scenarios:
   mac-input-latency
   mac-scrollback-latency
+  mac-scrollback-partial-latency
   mac-command-output-catchup
 EOF
 }
@@ -169,6 +170,7 @@ scenario_results: dict[str, dict] = {}
 budgets = {
     "mac-input-latency": {"gross_p95_ms": 500, "target_p95_ms": 75},
     "mac-scrollback-latency": {"gross_p95_ms": 500, "target_p95_ms": 75},
+    "mac-scrollback-partial-latency": {"gross_p95_ms": 500, "target_p95_ms": 75},
     "mac-command-output-catchup": {"gross_p95_ms": 2000, "target_p95_ms": 150},
 }
 
@@ -319,6 +321,16 @@ def first_mac_frame_apply(session_id: str, begin_ns: int, visible_ns: int) -> tu
     )
 
 
+def first_mac_frame_apply_after_submit(session_id: str, submit_ns: int) -> tuple[dict, int] | None:
+    return first_performance_event(
+        session_id,
+        "mac-mirror",
+        "render_frame_mirror_apply",
+        submit_ns,
+        timeout=1.0,
+    )
+
+
 def extract_session_id(output: str) -> str:
     match = re.findall(r"[0-9A-Fa-f-]{36}", output)
     if not match:
@@ -457,6 +469,10 @@ def summarize_phases(measurements: list[dict]) -> dict:
     return {
         "enqueue_to_rpc_begin": summarize_latencies(measurements, "enqueue_to_rpc_begin_ms"),
         "rpc_duration": summarize_latencies(measurements, "rpc_ms"),
+        "command_typing_duration": summarize_latencies(measurements, "command_typing_duration_ms"),
+        "command_submit_to_first_frame_apply": summarize_latencies(measurements, "command_submit_to_first_frame_apply_ms"),
+        "command_submit_to_frame_apply": summarize_latencies(measurements, "command_submit_to_frame_apply_ms"),
+        "command_submit_to_render_visible": summarize_latencies(measurements, "command_submit_to_render_visible_ms"),
         "owner_input_activity_to_state_change": summarize_latencies(measurements, "owner_input_activity_to_state_change_ms"),
         "state_change_to_frame_export": summarize_latencies(measurements, "state_change_to_frame_export_ms"),
         "frame_export_to_frame_apply": summarize_latencies(measurements, "frame_export_to_frame_apply_ms"),
@@ -632,8 +648,11 @@ def run_mac_input_latency() -> dict:
     }
 
 
-def run_mac_scrollback_latency() -> dict:
-    scenario = "mac-scrollback-latency"
+def run_mac_scrollback_latency(
+    scenario: str = "mac-scrollback-latency",
+    default_delta_y: int = 720,
+    delta_env_key: str = "MAC_SCROLL_DELTA_Y",
+) -> dict:
     title = f"{scenario}-{uuid.uuid4().hex[:8]}"
     command = (
         "/usr/bin/python3 -c 'import sys,time\n"
@@ -649,7 +668,7 @@ def run_mac_scrollback_latency() -> dict:
         "scroll-ready",
     )
     measurements = []
-    base_delta_y = int(os.environ.get("MAC_SCROLL_DELTA_Y", "720"))
+    base_delta_y = int(os.environ.get(delta_env_key, str(default_delta_y)))
     for index in range(sample_count):
         probe_id = f"mac-scroll-{index + 1:03d}-{uuid.uuid4().hex[:8]}"
         delta_y = base_delta_y if index % 2 == 0 else -base_delta_y
@@ -773,25 +792,11 @@ def run_mac_scrollback_latency() -> dict:
 
 def run_mac_command_output_catchup() -> dict:
     scenario = "mac-command-output-catchup"
-    title_prefix = f"{scenario}-{uuid.uuid4().hex[:8]}"
-    initial_render_modes = []
-    session_ids = []
-    measurements = []
-    for index in range(sample_count):
-        title = f"{title_prefix}-{index + 1:03d}"
-        session_id = start_terminal(title, None)
-        session_ids.append(session_id)
-        initial_state, _ = wait_for_state(session_id, lambda state: state.get("found") and renderer_is_ghostty(state), 20, "initial")
-        initial_render_modes.append(initial_state.get("rendererSummary"))
-        probe_id = f"mac-command-{index + 1:03d}-{uuid.uuid4().hex[:8]}"
-        marker_prefix = f"__mac_command_probe_{index + 1:03d}_"
-        marker_suffix = uuid.uuid4().hex[:10]
-        marker = f"{marker_prefix}{marker_suffix}__"
-        command_text = f"echo '{marker_prefix}'\"{marker_suffix}\"'__'"
-        enqueue_ns = now_ns()
-        event("mac_command_enqueue", scenario, probe_id, enqueue_ns)
-        rpc_begin_ns = now_ns()
-        event("mac_command_rpc_begin", scenario, probe_id, rpc_begin_ns, enqueue_to_rpc_begin_ms=ms_between(enqueue_ns, rpc_begin_ns))
+    title = f"{scenario}-{uuid.uuid4().hex[:8]}"
+    session_id = start_terminal(title, None)
+    initial_state, _ = wait_for_state(session_id, lambda state: state.get("found") and renderer_is_ghostty(state), 20, "initial")
+
+    def type_shell_command(command_text: str) -> tuple[int, int, int]:
         completed = run(
             [
                 spacese2e,
@@ -817,6 +822,27 @@ def run_mac_command_output_catchup() -> dict:
             key_up_ns = int(helper_payload["lastKeyUpUptimeNanoseconds"])
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
             raise RuntimeError(f"failed to parse spacese2e keyboard timing payload: {completed.stdout}") from error
+        return begin_ns, key_up_ns, rpc_end_ns
+
+    warmup_prefix = "__mac_command_warmup_"
+    warmup_suffix = uuid.uuid4().hex[:10]
+    warmup_marker = f"{warmup_prefix}{warmup_suffix}__"
+    warmup_command = f"echo '{warmup_prefix}'\"{warmup_suffix}\"'__'"
+    type_shell_command(warmup_command)
+    wait_for_state(session_id, lambda state, marker=warmup_marker: marker in compact_rendered_output(state), 8, "warmup")
+
+    measurements = []
+    for index in range(sample_count):
+        probe_id = f"mac-command-{index + 1:03d}-{uuid.uuid4().hex[:8]}"
+        marker_prefix = f"__mac_command_probe_{index + 1:03d}_"
+        marker_suffix = uuid.uuid4().hex[:10]
+        marker = f"{marker_prefix}{marker_suffix}__"
+        command_text = f"echo '{marker_prefix}'\"{marker_suffix}\"'__'"
+        enqueue_ns = now_ns()
+        event("mac_command_enqueue", scenario, probe_id, enqueue_ns)
+        rpc_begin_ns = now_ns()
+        event("mac_command_rpc_begin", scenario, probe_id, rpc_begin_ns, enqueue_to_rpc_begin_ms=ms_between(enqueue_ns, rpc_begin_ns))
+        begin_ns, key_up_ns, rpc_end_ns = type_shell_command(command_text)
         event("mac_command_begin", scenario, probe_id, begin_ns, marker=marker)
         event(
             "mac_command_rpc_end",
@@ -829,9 +855,16 @@ def run_mac_command_output_catchup() -> dict:
         )
         visible_state, visible_ns = wait_for_state(
             session_id, lambda state, marker=marker: marker in compact_rendered_output(state), 8, probe_id)
+        first_frame_apply = first_mac_frame_apply_after_submit(session_id, key_up_ns)
+        first_frame_apply_ns = first_frame_apply[1] if first_frame_apply else None
+        command_submit_to_first_frame_apply_ms = (
+            ms_between(key_up_ns, first_frame_apply_ns) if first_frame_apply_ns is not None else None
+        )
         frame_apply = first_mac_frame_apply(session_id, begin_ns, visible_ns)
         frame_apply_ns = frame_apply[1] if frame_apply else None
         event_to_frame_apply_ms = ms_between(begin_ns, frame_apply_ns) if frame_apply_ns is not None else None
+        command_submit_to_frame_apply_ms = ms_between(key_up_ns, frame_apply_ns) if frame_apply_ns is not None else None
+        command_submit_to_render_visible_ms = ms_between(key_up_ns, visible_ns)
         frame_apply_to_visible_ms = ms_between(frame_apply_ns, visible_ns) if frame_apply_ns is not None else None
         stage_split = mac_host_latency_split(session_id, begin_ns, frame_apply_ns, visible_ns)
         if frame_apply_ns is not None:
@@ -851,6 +884,7 @@ def run_mac_command_output_catchup() -> dict:
             probe_id,
             visible_ns,
             rpc_end_to_render_visible_ms=ms_between(rpc_end_ns, visible_ns),
+            command_submit_to_render_visible_ms=command_submit_to_render_visible_ms,
             event_to_visible_ms=ms_between(begin_ns, visible_ns),
         )
         measurements.append(
@@ -865,19 +899,23 @@ def run_mac_command_output_catchup() -> dict:
                 "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
                 "event_to_frame_apply_ms": event_to_frame_apply_ms,
+                "command_submit_to_first_frame_apply_ms": command_submit_to_first_frame_apply_ms,
+                "command_submit_to_frame_apply_ms": command_submit_to_frame_apply_ms,
                 "frame_apply_to_visible_ms": frame_apply_to_visible_ms,
+                "command_submit_to_render_visible_ms": command_submit_to_render_visible_ms,
                 "event_to_visible_ms": ms_between(begin_ns, visible_ns),
                 "visible_latency_ms": ms_between(begin_ns, visible_ns),
                 "rpc_ms": ms_between(rpc_begin_ns, rpc_end_ns),
                 "rpc_begin_to_key_event_ms": ms_between(rpc_begin_ns, begin_ns),
+                "command_typing_duration_ms": ms_between(begin_ns, key_up_ns),
                 "key_up_to_rpc_end_ms": ms_between(key_up_ns, rpc_end_ns),
                 "render_mode": "ghostty-mirror" if renderer_is_ghostty(visible_state) else visible_state.get("rendererSummary"),
             }
         )
     return {
-        "session_ids": session_ids,
-        "window_title": title_prefix,
-        "initial_render_mode": initial_render_modes[0] if initial_render_modes else None,
+        "session_ids": [session_id],
+        "window_title": title,
+        "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
         "summary": summarize_latencies(measurements),
         "phase_summaries": summarize_phases(measurements),
@@ -890,6 +928,12 @@ for scenario in scenarios:
         scenario_results[scenario] = run_mac_input_latency()
     elif scenario == "mac-scrollback-latency":
         scenario_results[scenario] = run_mac_scrollback_latency()
+    elif scenario == "mac-scrollback-partial-latency":
+        scenario_results[scenario] = run_mac_scrollback_latency(
+            scenario="mac-scrollback-partial-latency",
+            default_delta_y=20,
+            delta_env_key="MAC_SCROLL_PARTIAL_DELTA_Y",
+        )
     elif scenario == "mac-command-output-catchup":
         scenario_results[scenario] = run_mac_command_output_catchup()
     else:
@@ -927,6 +971,10 @@ for name, result in scenario_results.items():
             "  phases: "
             f"enqueue_to_rpc_begin p95={format_ms(phases['enqueue_to_rpc_begin']['p95_ms'])}, "
             f"rpc p95={format_ms(phases['rpc_duration']['p95_ms'])}, "
+            f"typing p95={format_ms(phases['command_typing_duration']['p95_ms'])}, "
+            f"submit_to_first_apply p95={format_ms(phases['command_submit_to_first_frame_apply']['p95_ms'])}, "
+            f"submit_to_apply p95={format_ms(phases['command_submit_to_frame_apply']['p95_ms'])}, "
+            f"submit_to_visible p95={format_ms(phases['command_submit_to_render_visible']['p95_ms'])}, "
             f"owner_input_to_state_change p95={format_ms(phases['owner_input_activity_to_state_change']['p95_ms'])}, "
             f"state_change_to_frame_export p95={format_ms(phases['state_change_to_frame_export']['p95_ms'])}, "
             f"frame_export_to_apply p95={format_ms(phases['frame_export_to_frame_apply']['p95_ms'])}, "

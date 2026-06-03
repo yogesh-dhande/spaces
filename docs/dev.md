@@ -159,13 +159,14 @@ For focused terminal latency probes:
 apps/macos/Tests/e2e_terminal_latency.sh --list
 apps/macos/Tests/e2e_terminal_latency.sh --scenario mac-input-latency
 apps/macos/Tests/e2e_terminal_latency.sh --scenario mac-scrollback-latency
+apps/macos/Tests/e2e_terminal_latency.sh --scenario mac-scrollback-partial-latency
 apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-input-latency --network-profile local
 apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-input-latency --network-profile ios-constrained
 apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-scrollback-latency --network-profile local
 apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-scrollback-latency --network-profile ios-constrained
 ```
 
-The latency scripts are fast performance iteration lanes rather than the canonical correctness gate. They write `terminal-latency-summary.json`, print p50, p95, max, per-sample timings, and render payload rates, fail input scenarios only on gross latency regressions or render-frame decode failures, and leave report-only targets visible in the terminal output. Input summaries include enqueue-to-RPC-begin, RPC duration, frame-apply or frame-publish timing, RPC-end-to-render-visible, and event-to-visible totals. Mac probes target the debug app by executable name; input totals are key-down-to-rendered-text, and scroll totals are wheel-event-to-rendered-text-change with alternating directions across samples. Mac summaries also split owner input activity to state change, state change to frame export, and frame export to mirror apply. Mobile summaries split host publish to relay read, relay read to network send begin, and network send begin to stream-visible. Scrollback summaries measure rendered text changes, no-op gesture counts, and render cadence as report-only metrics. The `ios-constrained` mobile profile shapes the standalone bridge with `80ms` RTT, `8Mbps` bandwidth, and `16KB` chunks unless `SPACES_MOBILE_BRIDGE_NETWORK_RTT_MS`, `SPACES_MOBILE_BRIDGE_NETWORK_BANDWIDTH_BPS`, or `SPACES_MOBILE_BRIDGE_NETWORK_CHUNK_BYTES` override those values.
+The latency scripts are fast performance iteration lanes rather than the canonical correctness gate. They write `terminal-latency-summary.json`, print p50, p95, max, per-sample timings, and render payload rates, fail input scenarios only on gross latency regressions or render-frame decode failures, and leave report-only targets visible in the terminal output. Input summaries include enqueue-to-RPC-begin, RPC duration, frame-apply or frame-publish timing, RPC-end-to-render-visible, and event-to-visible totals. Mac probes target the debug app by executable name; input totals are key-down-to-rendered-text, scroll totals are wheel-event-to-rendered-text-change with alternating directions across samples, and command-catchup totals use one warmed shell session across samples. `mac-scrollback-latency` uses large scroll deltas and `mac-scrollback-partial-latency` uses smaller within-screen deltas. Mac summaries also split owner input activity to state change, state change to frame export, and frame export to mirror apply. Mobile summaries split host publish to relay read, relay read to network send begin, and network send begin to stream-visible. Scrollback summaries measure rendered text changes, no-op gesture counts, and render cadence as report-only metrics. The `ios-constrained` mobile profile shapes the standalone bridge with `80ms` RTT, `8Mbps` bandwidth, and `16KB` chunks unless `SPACES_MOBILE_BRIDGE_NETWORK_RTT_MS`, `SPACES_MOBILE_BRIDGE_NETWORK_BANDWIDTH_BPS`, or `SPACES_MOBILE_BRIDGE_NETWORK_CHUNK_BYTES` override those values.
 
 For paired render-update profiling, run the same latency scenario twice with a fixed sample count, terminal size, fixture command, target, and network profile while changing only `SPACES_TERMINAL_RENDER_UPDATE_MODE`:
 
@@ -174,7 +175,7 @@ SPACES_TERMINAL_RENDER_UPDATE_MODE=full KEEP_ROOT=1 apps/macos/Tests/e2e_mobile_
 SPACES_TERMINAL_RENDER_UPDATE_MODE=delta KEEP_ROOT=1 apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-input-latency --network-profile local --samples 12
 ```
 
-Summarize each preserved `mobile-terminal-performance.jsonl` with the latency summary JSON from the same work root:
+Summarize each preserved `mobile-terminal-performance.jsonl` or `terminal-performance.jsonl` with the latency summary JSON from the same work root. Render-update summaries report total selected payload bytes plus split fields for network send bytes, local publish/receive payload bytes, materialized frame bytes, materialized render-update bytes, frame-kind byte totals, fallback reasons, and drop reasons:
 
 ```bash
 apps/macos/Tests/render_update_profile_summary.py \

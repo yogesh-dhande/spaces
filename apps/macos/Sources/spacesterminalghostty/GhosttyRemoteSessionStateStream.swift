@@ -7,13 +7,21 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
     fileprivate static let ioBufferSize = 256 * 1024
     private static let socketBufferSize: Int32 = 1024 * 1024
     private static let writeRetrySleepInterval: TimeInterval = 0.0005
+    private static let initialStateHandshakeDelay: DispatchTimeInterval = .milliseconds(10)
 
     private let socketPath: String
     private let queue: DispatchQueue
     private let initialStateProvider: @Sendable () -> GhosttyRemoteSessionStatePayload?
     private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
-    private var clientSources: [Int32: DispatchSourceRead] = [:]
+    private var clientStates: [Int32: ClientState] = [:]
+
+    private struct ClientState {
+        var source: DispatchSourceRead
+        var inputBuffer = Data()
+        var supportsRenderUpdateV2 = false
+        var sentInitialState = false
+    }
 
     init(socketPath: String, queue: DispatchQueue, initialStateProvider: @escaping @Sendable () -> GhosttyRemoteSessionStatePayload?) {
         self.socketPath = socketPath
@@ -61,7 +69,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
 
     func stop() {
         queue.async {
-            for fd in Array(self.clientSources.keys) { self.closeClient(fd) }
+            for fd in Array(self.clientStates.keys) { self.closeClient(fd) }
             self.acceptSource?.cancel()
             self.acceptSource = nil
         }
@@ -69,9 +77,13 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
 
     func broadcast(_ payload: GhosttyRemoteSessionStatePayload) {
         queue.async {
-            guard !self.clientSources.isEmpty else { return }
-            guard let data = try? GhosttyRemoteSessionStateCodec.encodeLine(payload) else { return }
-            for fd in Array(self.clientSources.keys) where !Self.writeAll(data: data, to: fd) { self.closeClient(fd) }
+            guard !self.clientStates.isEmpty else { return }
+            for fd in Array(self.clientStates.keys) {
+                guard let data = self.encodedPayload(payload, for: fd), Self.writeAll(data: data, to: fd) else {
+                    self.closeClient(fd)
+                    continue
+                }
+            }
         }
     }
 
@@ -91,17 +103,17 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
                 let source = DispatchSource.makeReadSource(fileDescriptor: clientFD, queue: queue)
                 source.setEventHandler { [weak self] in self?.drainClientInput(clientFD) }
                 source.setCancelHandler { close(clientFD) }
-                clientSources[clientFD] = source
+                clientStates[clientFD] = ClientState(source: source)
                 source.resume()
-                if let payload = initialStateProvider(), let data = try? GhosttyRemoteSessionStateCodec.encodeLine(payload) {
-                    if !Self.writeAll(data: data, to: clientFD) { closeClient(clientFD) }
-                }
+                queue.asyncAfter(deadline: .now() + Self.initialStateHandshakeDelay) { [weak self] in self?.sendInitialStateIfNeeded(to: clientFD) }
             } catch { close(clientFD) }
         }
     }
 
     private func drainClientInput(_ clientFD: Int32) {
+        guard var state = clientStates[clientFD] else { return }
         var buffer = [UInt8](repeating: 0, count: 1024)
+        var inputBuffer = state.inputBuffer
         while true {
             let count = read(clientFD, &buffer, buffer.count)
             if count == 0 {
@@ -109,16 +121,49 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
                 return
             }
             if count < 0 {
-                if errno == EWOULDBLOCK || errno == EAGAIN { return }
+                if errno == EWOULDBLOCK || errno == EAGAIN { break }
                 closeClient(clientFD)
                 return
             }
+            inputBuffer.append(buffer, count: count)
         }
+        var receivedClientHello = false
+        while let newlineIndex = inputBuffer.firstIndex(of: 0x0A) {
+            let line = Data(inputBuffer.prefix(upTo: newlineIndex))
+            inputBuffer.removeSubrange(...newlineIndex)
+            guard let hello = try? JSONDecoder().decode(GhosttyRemoteSessionStateStreamClientHello.self, from: line) else { continue }
+            if hello.renderUpdateProtocols?.contains(GhosttyRenderUpdate.binaryEncoding) == true {
+                state.supportsRenderUpdateV2 = true
+                receivedClientHello = true
+            }
+        }
+        state.inputBuffer = inputBuffer
+        clientStates[clientFD] = state
+        if receivedClientHello { sendInitialStateIfNeeded(to: clientFD) }
+    }
+
+    private func sendInitialStateIfNeeded(to clientFD: Int32) {
+        guard var state = clientStates[clientFD], !state.sentInitialState else { return }
+        state.sentInitialState = true
+        clientStates[clientFD] = state
+        guard let payload = initialStateProvider(), let data = encodedPayload(payload, for: clientFD) else { return }
+        if !Self.writeAll(data: data, to: clientFD) { closeClient(clientFD) }
+    }
+
+    private func encodedPayload(_ payload: GhosttyRemoteSessionStatePayload, for clientFD: Int32) -> Data? {
+        let transformedPayload: GhosttyRemoteSessionStatePayload
+        if clientStates[clientFD]?.supportsRenderUpdateV2 == true, payload.renderUpdate != nil {
+            transformedPayload = payload.replacingRenderState(
+                renderFrame: nil, renderUpdate: payload.renderUpdate, renderUpdateEncoding: payload.renderUpdateEncoding)
+        } else {
+            transformedPayload = payload
+        }
+        return try? GhosttyRemoteSessionStateCodec.encodeLine(transformedPayload)
     }
 
     private func closeClient(_ clientFD: Int32) {
-        guard let source = clientSources.removeValue(forKey: clientFD) else { return }
-        source.cancel()
+        guard let state = clientStates.removeValue(forKey: clientFD) else { return }
+        state.source.cancel()
     }
 
     private func handleAcceptSourceCancel() {
@@ -174,7 +219,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
         setsockopt(fileDescriptor, SOL_SOCKET, SO_RCVBUF, &bufferSize, socklen_t(MemoryLayout<Int32>.size))
     }
 
-    private static func writeAll(data: Data, to fileDescriptor: Int32) -> Bool {
+    fileprivate static func writeAll(data: Data, to fileDescriptor: Int32) -> Bool {
         do {
             try data.withUnsafeBytes { rawBuffer in
                 guard let baseAddress = rawBuffer.baseAddress else { return }
@@ -198,10 +243,13 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
     }
 }
 
+private struct GhosttyRemoteSessionStateStreamClientHello: Codable { let renderUpdateProtocols: [String]? }
+
 final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
     private let socketPath: String
     private let onEvent: @MainActor @Sendable (GhosttyRemoteSessionStatePayload) -> Void
     private let onDisconnect: @MainActor @Sendable () -> Void
+    private let supportsRenderUpdateV2: Bool
     private let queue: DispatchQueue
     private let eventLock = NSLock()
     private var socketFD: Int32 = -1
@@ -212,11 +260,12 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
 
     init(
         socketPath: String, onEvent: @escaping @MainActor @Sendable (GhosttyRemoteSessionStatePayload) -> Void,
-        onDisconnect: @escaping @MainActor @Sendable () -> Void = {}
+        onDisconnect: @escaping @MainActor @Sendable () -> Void = {}, supportsRenderUpdateV2: Bool = false
     ) {
         self.socketPath = socketPath
         self.onEvent = onEvent
         self.onDisconnect = onDisconnect
+        self.supportsRenderUpdateV2 = supportsRenderUpdateV2
         queue = DispatchQueue(label: "spaces.terminal.remote-session-state.\(UUID().uuidString)")
     }
 
@@ -238,6 +287,16 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         guard connectResult == 0 else {
             close(socketFD)
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        if supportsRenderUpdateV2 {
+            let hello = GhosttyRemoteSessionStateStreamClientHello(renderUpdateProtocols: [GhosttyRenderUpdate.binaryEncoding])
+            if var data = try? JSONEncoder().encode(hello) {
+                data.append(0x0A)
+                guard GhosttyRemoteSessionStateStreamServer.writeAll(data: data, to: socketFD) else {
+                    close(socketFD)
+                    throw POSIXError(.EIO)
+                }
+            }
         }
 
         try GhosttyRemoteSessionStateStreamServer.setNonBlocking(socketFD)

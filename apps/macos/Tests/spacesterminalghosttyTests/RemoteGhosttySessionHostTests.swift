@@ -125,6 +125,40 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(receivedPayloads[0].outputEndByteOffset, 42)
     }
 
+    @MainActor func testStateStreamClientCanRequestRenderUpdateOnlyPayloads() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha"))
+        let initialPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "stream-render-update-only", reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-03T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "live",
+            workingDirectory: "/tmp/live", renderFrame: try GhosttyRenderFrame.encode(frame), outputByteCount: nil,
+            renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)), renderUpdateEncoding: GhosttyRenderUpdate.binaryEncoding)
+        let server = GhosttyRemoteSessionStateStreamServer(
+            socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-state-stream-render-update-only")
+        ) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        var receivedPayloads: [GhosttyRemoteSessionStatePayload] = []
+        let client = GhosttyRemoteSessionStateStreamClient(
+            socketPath: paths.subscriptionSocketPath, onEvent: { payload in receivedPayloads.append(payload) }, supportsRenderUpdateV2: true)
+        try client.start()
+        defer { client.stop() }
+
+        waitForCondition("render-update-only stream payload") { receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        let payload = try XCTUnwrap(receivedPayloads.first { $0.reason == TerminalRemoteSessionStateReason.initial })
+        XCTAssertNil(payload.renderFrame)
+        XCTAssertNotNil(payload.renderUpdate)
+        XCTAssertEqual(payload.renderUpdateEncoding, GhosttyRenderUpdate.binaryEncoding)
+        let snapshot = try XCTUnwrap(payload.renderFrameSnapshot)
+        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: snapshot), "alpha")
+    }
+
     @MainActor func testRemoteHostPrefersRenderFrameSnapshotWhenAvailable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -175,7 +175,7 @@ import spacesterminalcore
         lastSubscriptionAttemptAt = now
         let client = GhosttyRemoteSessionStateStreamClient(
             socketPath: paths.subscriptionSocketPath, onEvent: { [weak self] payload in self?.applyRemoteState(payload) },
-            onDisconnect: { [weak self] in self?.handleStreamDisconnect() })
+            onDisconnect: { [weak self] in self?.handleStreamDisconnect() }, supportsRenderUpdateV2: true)
         do {
             try client.start()
             stateStreamClient = client
@@ -189,6 +189,7 @@ import spacesterminalcore
 
     private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
         let decodeStartedAt = Date()
+        let incomingPayloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(incomingPayload).count) ?? 0
         let resolvedRenderState = payloadByResolvingRenderUpdate(incomingPayload)
         let payload = resolvedRenderState.payload
         let decodedFrame = payload.decodedRenderFrame
@@ -205,27 +206,29 @@ import spacesterminalcore
         let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
         if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
         let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
-        let payloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(payload).count) ?? 0
         var renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
-            reason: payload.reason, frame: decodedFrame, frameByteCount: payload.renderFrame?.count, payloadByteCount: payloadBytes,
+            reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderFrame?.count, payloadByteCount: incomingPayloadBytes,
             decodeMS: decodeMS, outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
-            dropped: payload.renderFrame == nil ? nil : dropReason != nil, dropReason: resolvedRenderState.dropReason ?? dropReason,
+            dropped: incomingPayload.renderFrame == nil ? nil : dropReason != nil, dropReason: resolvedRenderState.dropReason ?? dropReason,
             renderMode: "ghostty-mirror", frameKind: decodedUpdate?.frameKindMetricValue ?? "full", baseRevision: decodedUpdate?.baseRevision,
             targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
             appliedRevision: frameForUpdate == nil ? nil : (payload.screenStateRevision ?? frameForUpdate?.sessionRevision), applyMS: applyMS,
             operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
             scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)
-        renderFrameAttributes["render_update"] = payload.renderUpdate == nil ? "0" : "1"
-        renderFrameAttributes["render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
+        renderFrameAttributes["materialized_frame_bytes"] = String(payload.renderFrame?.count ?? 0)
+        renderFrameAttributes["render_frame"] = incomingPayload.renderFrame == nil ? "0" : "1"
+        renderFrameAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
+        renderFrameAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
         SpacesMobileTerminalPerformanceLogger.emit(
             .init(
                 sessionID: payload.sessionID, source: "mac-mirror", name: "render_frame_payload_receive",
-                elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), count: payload.renderFrame?.count, attributes: renderFrameAttributes))
+                elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), count: incomingPayload.renderFrame?.count,
+                attributes: renderFrameAttributes))
         TerminalPerformance.logMetric(
             "terminal_remote_state_receive", target: "session=\(payload.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
             success: true,
             detail:
-                "reason=\(payload.reason) render_frame=\(payload.renderFrame == nil ? 0 : 1) bytes=\(payload.outputByteCount ?? 0) payload_bytes=\(payloadBytes) frame_bytes=\(payload.renderFrame?.count ?? 0)"
+                "reason=\(payload.reason) render_frame=\(incomingPayload.renderFrame == nil ? 0 : 1) bytes=\(payload.outputByteCount ?? 0) payload_bytes=\(incomingPayloadBytes) frame_bytes=\(incomingPayload.renderFrame?.count ?? 0)"
         )
         TerminalPerformance.logMetric(
             "terminal_render_frame_payload_receive", target: "session=\(payload.sessionID)",

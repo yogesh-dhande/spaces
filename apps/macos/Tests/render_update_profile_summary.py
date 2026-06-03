@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[3]
 
 
 def git_output(args: list[str], cwd: Path) -> str:
@@ -86,6 +86,39 @@ def event_bytes(record: dict[str, Any]) -> int:
             return value
     count = number(record.get("count"))
     return int(count or 0)
+
+
+def sum_event_bytes(records: list[dict[str, Any]]) -> int:
+    return sum(event_bytes(record) for record in records)
+
+
+def sum_int_attr(records: list[dict[str, Any]], key: str) -> int:
+    return sum(int_attr(record, key) or 0 for record in records)
+
+
+def first_nonzero(*values: int) -> int:
+    return next((value for value in values if value > 0), 0)
+
+
+def bytes_by_frame_kind(records: list[dict[str, Any]], key: str | None = None, fallback_to_event_bytes: bool = False) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for record in records:
+        kind = attr(record, "frame_kind") or "unknown"
+        value = int_attr(record, key) if key else None
+        if value is None:
+            value = event_bytes(record) if fallback_to_event_bytes else 0
+        totals[kind] = totals.get(kind, 0) + value
+    return totals
+
+
+def attr_counts(records: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        value = attr(record, key)
+        if value in (None, "", "none"):
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    return counts
 
 
 def percentile(values: list[float], percent: float) -> float | None:
@@ -150,10 +183,11 @@ def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_su
         record for record in events
         if record.get("source") == "mobile-bridge" and record.get("name") == "stream_network_send_begin"
     ]
-    payload_events = network_events or [
-        record for record in events
-        if record.get("name") in ("render_frame_payload_publish", "render_frame_payload_receive", "stream_relay_read")
-    ]
+    publish_events = [record for record in events if record.get("name") == "render_frame_payload_publish"]
+    receive_events = [record for record in events if record.get("name") == "render_frame_payload_receive"]
+    relay_events = [record for record in events if record.get("name") == "stream_relay_read"]
+    export_events = [record for record in events if record.get("name") == "render_frame_export_end"]
+    payload_events = network_events or relay_events or receive_events or publish_events
     frame_events = [
         record for record in events
         if record.get("name") in ("render_frame_export_end", "render_frame_payload_publish")
@@ -161,11 +195,30 @@ def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_su
     if not frame_events:
         frame_events = payload_events
 
-    total_bytes = sum(event_bytes(record) for record in payload_events)
+    total_bytes = sum_event_bytes(payload_events)
     render_frame_count = len(frame_events)
     full_frame_count = sum(1 for record in frame_events if (attr(record, "frame_kind") or "full") == "full")
     delta_frame_count = sum(1 for record in frame_events if attr(record, "frame_kind") == "delta")
     resync_frame_count = sum(1 for record in frame_events if attr(record, "frame_kind") == "resync_required")
+    local_publish_payload_bytes = sum_event_bytes(publish_events)
+    local_receive_payload_bytes = sum_event_bytes(receive_events)
+    stream_relay_read_bytes = sum_event_bytes(relay_events)
+    network_send_bytes = sum_event_bytes(network_events)
+    materialized_frame_bytes = first_nonzero(
+        sum_int_attr(export_events, "frame_bytes"),
+        sum_int_attr(publish_events, "frame_bytes"),
+        sum_int_attr(receive_events, "frame_bytes"),
+        sum_int_attr(payload_events, "frame_bytes"),
+    )
+    materialized_render_update_bytes = first_nonzero(
+        sum_int_attr(export_events, "render_update_bytes"),
+        sum_int_attr(receive_events, "render_update_bytes"),
+        sum_int_attr(publish_events, "render_update_bytes"),
+        sum_int_attr(payload_events, "render_update_bytes"),
+    )
+    payload_bytes_by_frame_kind = bytes_by_frame_kind(payload_events, "payload_bytes", fallback_to_event_bytes=True)
+    materialized_frame_bytes_by_frame_kind = bytes_by_frame_kind(frame_events, "frame_bytes")
+    materialized_render_update_bytes_by_frame_kind = bytes_by_frame_kind(frame_events, "render_update_bytes")
 
     encode_ms = [value for record in events for value in [number(attr(record, "frame_encode_ms") or attr(record, "render_update_encode_ms"))] if value is not None]
     decode_ms = [value for record in events for value in [number(attr(record, "decode_ms"))] if value is not None]
@@ -201,6 +254,17 @@ def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_su
             "average_bytes_per_frame": round(total_bytes / render_frame_count, 1) if render_frame_count else 0,
             "peak_1s_bytes_per_second": peak_bytes_per_second(payload_events, 1),
             "peak_10s_bytes_per_second": peak_bytes_per_second(payload_events, 10),
+            "network_send_bytes": network_send_bytes,
+            "local_publish_payload_bytes": local_publish_payload_bytes,
+            "local_receive_payload_bytes": local_receive_payload_bytes,
+            "stream_relay_read_bytes": stream_relay_read_bytes,
+            "materialized_frame_bytes": materialized_frame_bytes,
+            "materialized_render_update_bytes": materialized_render_update_bytes,
+            "payload_bytes_by_frame_kind": payload_bytes_by_frame_kind,
+            "materialized_frame_bytes_by_frame_kind": materialized_frame_bytes_by_frame_kind,
+            "materialized_render_update_bytes_by_frame_kind": materialized_render_update_bytes_by_frame_kind,
+            "full_frame_fallback_reason_counts": attr_counts(frame_events, "full_frame_fallback_reason"),
+            "drop_reason_counts": attr_counts(frame_events, "drop_reason"),
             "full_frame_count": full_frame_count,
             "delta_frame_count": delta_frame_count,
             "resync_frame_count": resync_frame_count,
@@ -255,6 +319,11 @@ def comparison(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, A
         "average_bytes_per_frame_reduction": reduction("average_bytes_per_frame"),
         "peak_1s_bytes_per_second_reduction": reduction("peak_1s_bytes_per_second"),
         "peak_10s_bytes_per_second_reduction": reduction("peak_10s_bytes_per_second"),
+        "network_send_bytes_reduction": reduction("network_send_bytes"),
+        "local_publish_payload_bytes_reduction": reduction("local_publish_payload_bytes"),
+        "local_receive_payload_bytes_reduction": reduction("local_receive_payload_bytes"),
+        "materialized_frame_bytes_reduction": reduction("materialized_frame_bytes"),
+        "materialized_render_update_bytes_reduction": reduction("materialized_render_update_bytes"),
         "latency_p95_delta_ms": latency_delta,
         "encode_decode_apply_ratio": ratio("total_encode_decode_apply_ms"),
         "compression_ratio": ratio("total_bytes"),
@@ -288,12 +357,21 @@ def print_table(summary: dict[str, Any], compare: dict[str, Any] | None, output_
         ("avg bytes/frame", metrics["average_bytes_per_frame"]),
         ("peak 1s B/s", metrics["peak_1s_bytes_per_second"]),
         ("peak 10s B/s", metrics["peak_10s_bytes_per_second"]),
+        ("network send bytes", metrics["network_send_bytes"]),
+        ("local publish payload bytes", metrics["local_publish_payload_bytes"]),
+        ("local receive payload bytes", metrics["local_receive_payload_bytes"]),
+        ("materialized frame bytes", metrics["materialized_frame_bytes"]),
+        ("materialized update bytes", metrics["materialized_render_update_bytes"]),
+        ("payload bytes by kind", metrics["payload_bytes_by_frame_kind"]),
+        ("update bytes by kind", metrics["materialized_render_update_bytes_by_frame_kind"]),
         ("frames full/delta/resync", f"{metrics['full_frame_count']}/{metrics['delta_frame_count']}/{metrics['resync_frame_count']}"),
         ("latency p50/p95/p99 ms", f"{fmt(metrics['output_to_visible_latency_ms']['p50'])}/{fmt(metrics['output_to_visible_latency_ms']['p95'])}/{fmt(metrics['output_to_visible_latency_ms']['p99'])}"),
         ("encode p50/p95 ms", f"{fmt(metrics['encode_ms']['p50'])}/{fmt(metrics['encode_ms']['p95'])}"),
         ("decode p50/p95 ms", f"{fmt(metrics['decode_ms']['p50'])}/{fmt(metrics['decode_ms']['p95'])}"),
         ("apply p50/p95 ms", f"{fmt(metrics['apply_ms']['p50'])}/{fmt(metrics['apply_ms']['p95'])}"),
         ("failures/drop/resync/refresh", f"{metrics['decode_failures'] + metrics['apply_failures']}/{metrics['dropped_frames']}/{metrics['resync_count']}/{metrics['explicit_refresh_count']}"),
+        ("fallback reasons", metrics["full_frame_fallback_reason_counts"]),
+        ("drop reasons", metrics["drop_reason_counts"]),
     ]
     width = max(len(label) for label, _ in rows)
     print(f"render update summary: {output_path}")
