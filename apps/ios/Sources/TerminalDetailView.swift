@@ -66,6 +66,7 @@ struct TerminalDetailView: View {
                             },
                             onScrollGestureApplied: {
                                 writeE2EEventIfNeeded(kind: "e2e_scroll_gesture_applied", detail: nil)
+                                model.flushPendingScroll()
                             },
                             onRenderedTextChanged: shouldCaptureRenderedText ? { text in
                                 renderedText = text
@@ -80,8 +81,8 @@ struct TerminalDetailView: View {
                             onSendKey: { key in
                                 sendTerminalKey(key)
                             },
-                            onSendScroll: { horizontal, vertical in
-                                sendTerminalScroll(horizontal: horizontal, vertical: vertical)
+                            onSendScroll: { horizontal, vertical, scrollMods in
+                                sendTerminalScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
                             }
                         )
                         .accessibilityIdentifier("terminal.surface")
@@ -131,9 +132,9 @@ struct TerminalDetailView: View {
         Task { await model.sendKey(key) }
     }
 
-    private func sendTerminalScroll(horizontal: Double, vertical: Double) {
+    private func sendTerminalScroll(horizontal: Double, vertical: Double, scrollMods: Int32) {
         writeE2EEventIfNeeded(kind: "send_scroll", detail: "\(horizontal),\(vertical)")
-        Task { await model.sendScroll(horizontal: horizontal, vertical: vertical) }
+        Task { await model.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods) }
     }
 
     private var topOverlay: some View {

@@ -125,13 +125,14 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
     public let resizeSerial: UInt64?
     public let scrollHorizontal: Double?
     public let scrollVertical: Double?
+    public let scrollMods: Int32?
     public let appendNewline: Bool
 
     public init(
         command: String, authToken: String? = nil, pairingCode: String? = nil, pairingNonce: String? = nil, clientApp: SpacesMobileClientApp? = nil,
         sessionID: String? = nil, clientID: String? = nil, client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil,
         text: String? = nil, key: String? = nil, columns: Int? = nil, rows: Int? = nil, ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil,
-        scrollHorizontal: Double? = nil, scrollVertical: Double? = nil, appendNewline: Bool = false
+        scrollHorizontal: Double? = nil, scrollVertical: Double? = nil, scrollMods: Int32? = nil, appendNewline: Bool = false
     ) {
         self.command = command
         self.authToken = authToken
@@ -150,6 +151,7 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         self.resizeSerial = resizeSerial
         self.scrollHorizontal = scrollHorizontal
         self.scrollVertical = scrollVertical
+        self.scrollMods = scrollMods
         self.appendNewline = appendNewline
     }
 
@@ -171,6 +173,7 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         case resizeSerial
         case scrollHorizontal
         case scrollVertical
+        case scrollMods
         case appendNewline
     }
 
@@ -193,6 +196,7 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         resizeSerial = try container.decodeIfPresent(UInt64.self, forKey: .resizeSerial)
         scrollHorizontal = try container.decodeIfPresent(Double.self, forKey: .scrollHorizontal)
         scrollVertical = try container.decodeIfPresent(Double.self, forKey: .scrollVertical)
+        scrollMods = try container.decodeIfPresent(Int32.self, forKey: .scrollMods)
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
     }
 
@@ -215,6 +219,7 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(resizeSerial, forKey: .resizeSerial)
         try container.encodeIfPresent(scrollHorizontal, forKey: .scrollHorizontal)
         try container.encodeIfPresent(scrollVertical, forKey: .scrollVertical)
+        try container.encodeIfPresent(scrollMods, forKey: .scrollMods)
         try container.encode(appendNewline, forKey: .appendNewline)
     }
 }

@@ -165,7 +165,7 @@ import Foundation
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executablePath)
-            process.arguments = ["-t", "-U", socketPath]
+            process.arguments = ["-nP", "-U"]
             let output = Pipe()
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
@@ -175,12 +175,22 @@ import Foundation
             } catch { return [] }
             let data = output.fileHandleForReading.readDataToEndOfFile()
             guard process.terminationStatus == 0 else { return [] }
-            return parseProcessIDs(String(decoding: data, as: UTF8.self))
+            return parseSocketOwnerProcessIDs(String(decoding: data, as: UTF8.self), socketPath: socketPath)
         }
 
         static func parseProcessIDs(_ output: String) -> Set<pid_t> {
             let processIDs: [pid_t] = output.split(whereSeparator: \.isWhitespace).compactMap { token in
                 guard let processID = Int32(token, radix: 10) else { return nil }
+                return processID
+            }
+            return Set(processIDs)
+        }
+
+        static func parseSocketOwnerProcessIDs(_ output: String, socketPath: String) -> Set<pid_t> {
+            let processIDs: [pid_t] = output.split(separator: "\n").compactMap { line in
+                guard line.contains(socketPath) else { return nil }
+                let columns = line.split(whereSeparator: \.isWhitespace)
+                guard columns.count > 1, let processID = Int32(columns[1], radix: 10) else { return nil }
                 return processID
             }
             return Set(processIDs)

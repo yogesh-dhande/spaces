@@ -16,6 +16,15 @@ import spacesterminalcore
     private var pendingViewportResizeTask: Task<Void, Never>?
     private var resizeSerial: UInt64 = 0
     private let inputQueue = TerminalInputSerialQueue()
+    private lazy var scrollCoalescer = TerminalScrollCoalescer(frameInterval: Self.scrollCoalescingInterval) { [weak self] batch, finish in
+        guard let self else {
+            finish()
+            return
+        }
+        self.enqueueRemoteScrollBatch(batch, onFinished: finish)
+    }
+
+    private static let scrollCoalescingInterval: Duration = .milliseconds(16)
 
     public init(launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) {
         self.launchConfiguration = launchConfiguration
@@ -25,9 +34,12 @@ import spacesterminalcore
     }
 
     deinit {
-        stateStreamClient?.stop()
-        pendingViewportResizeTask?.cancel()
-        inputQueue.cancelAll()
+        MainActor.assumeIsolated {
+            stateStreamClient?.stop()
+            pendingViewportResizeTask?.cancel()
+            scrollCoalescer.cancel()
+            inputQueue.cancelAll()
+        }
     }
 
     public func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
@@ -46,7 +58,9 @@ import spacesterminalcore
         terminalView.acceptsTerminalInput = mode == .owner
         terminalView.onSendText = { [weak self] text in self?.sendRemoteInput(text) }
         terminalView.onSendKey = { [weak self] key in self?.sendRemoteKey(key) }
-        terminalView.onSendScroll = { [weak self] horizontal, vertical in self?.sendRemoteScroll(horizontal: horizontal, vertical: vertical) }
+        terminalView.onSendScroll = { [weak self] horizontal, vertical, scrollMods in
+            self?.sendRemoteScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+        }
         terminalView.onViewportSizeChanged = { [weak self] columns, rows in self?.handleViewportSizeChange(columns: columns, rows: rows) }
 
         if let container, terminalView.superview !== container {
@@ -126,8 +140,8 @@ import spacesterminalcore
 
     public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
 
-    @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
-        terminalView.sendScroll(horizontal: horizontal, vertical: vertical)
+    @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
+        terminalView.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
     }
 
     public var debugSurfaceRefreshRequestCount: Int { 0 }
@@ -274,6 +288,7 @@ import spacesterminalcore
 
     private func sendRemoteInput(_ text: String) {
         guard let client = attachedClient else { return }
+        scrollCoalescer.flush()
         let socketPath = paths.controlSocketPath
         let clientID = client.id
         let ownerEpoch = latestState?.renderFrameOwnerEpoch
@@ -285,6 +300,7 @@ import spacesterminalcore
 
     private func sendRemoteKey(_ key: String) {
         guard let client = attachedClient else { return }
+        scrollCoalescer.flush()
         let socketPath = paths.controlSocketPath
         let clientID = client.id
         let ownerEpoch = latestState?.renderFrameOwnerEpoch
@@ -294,16 +310,25 @@ import spacesterminalcore
         }
     }
 
-    private func sendRemoteScroll(horizontal: CGFloat, vertical: CGFloat) {
-        guard let client = attachedClient, attachedMode == .owner else { return }
+    private func sendRemoteScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) {
+        guard attachedClient != nil, attachedMode == .owner else { return }
+        scrollCoalescer.append(horizontal: Double(horizontal), vertical: Double(vertical), scrollMods: scrollMods)
+    }
+
+    private func enqueueRemoteScrollBatch(_ batch: TerminalScrollCoalescer.Batch, onFinished: @escaping TerminalScrollCoalescer.FinishHandler) {
+        guard let client = attachedClient, attachedMode == .owner else {
+            onFinished()
+            return
+        }
         let socketPath = paths.controlSocketPath
         let clientID = client.id
         let ownerEpoch = latestState?.renderFrameOwnerEpoch
         inputQueue.enqueue(priority: .userInitiated) {
+            defer { Task { @MainActor in onFinished() } }
             _ = try TerminalControlClient.send(
                 request: TerminalControlRequest(
-                    command: "scroll", clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: Double(horizontal),
-                    scrollVertical: Double(vertical)), socketPath: socketPath)
+                    command: "scroll", clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: batch.horizontal, scrollVertical: batch.vertical,
+                    scrollMods: batch.scrollMods == 0 ? nil : batch.scrollMods), socketPath: socketPath)
         }
     }
 

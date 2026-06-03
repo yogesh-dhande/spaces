@@ -9,7 +9,7 @@ import spacesterminalcore
 @MainActor final class GhosttyMirrorTerminalView: NSView {
     typealias SendTextHandler = @MainActor (String) -> Void
     typealias SendKeyHandler = @MainActor (String) -> Void
-    typealias SendScrollHandler = @MainActor (CGFloat, CGFloat) -> Void
+    typealias SendScrollHandler = @MainActor (CGFloat, CGFloat, Int32) -> Void
     typealias ViewportSizeHandler = @MainActor (Int, Int) -> Void
 
     private struct SurfaceGeometry: Equatable {
@@ -101,9 +101,8 @@ import spacesterminalcore
     }
 
     override func scrollWheel(with event: NSEvent) {
-        let horizontal = event.hasPreciseScrollingDeltas ? event.scrollingDeltaX * 2 : event.scrollingDeltaX
-        let vertical = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY * 2 : event.scrollingDeltaY
-        onSendScroll?(horizontal, vertical)
+        let scrollMods = Self.makeScrollMods(hasPreciseDeltas: event.hasPreciseScrollingDeltas, phase: event.momentumPhase)
+        onSendScroll?(event.scrollingDeltaX, event.scrollingDeltaY, scrollMods)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -181,9 +180,23 @@ import spacesterminalcore
         return true
     }
 
-    @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
-        onSendScroll?(horizontal, vertical)
+    @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32 = 0) -> Bool {
+        onSendScroll?(horizontal, vertical, scrollMods)
         return true
+    }
+
+    static func makeScrollMods(hasPreciseDeltas: Bool, phase: NSEvent.Phase) -> Int32 {
+        var mods: Int32 = 0
+        if hasPreciseDeltas { mods |= 0b0000_0001 }
+        guard !phase.isEmpty else { return mods }
+        if phase.contains(.mayBegin) {
+            mods |= 6 << 1
+        } else if phase.contains(.ended) || phase.contains(.cancelled) {
+            mods |= (phase.contains(.cancelled) ? 5 : 4) << 1
+        } else {
+            mods |= 3 << 1
+        }
+        return mods
     }
 
     func focusWindow(_ window: NSWindow?) {

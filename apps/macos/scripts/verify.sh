@@ -1,8 +1,9 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 repo_root="$(cd "$root/../.." && pwd)"
+source "$repo_root/scripts/spaces-profile-helpers.sh"
 
 ios_test_destination() {
   if [ -n "${SPACES_IOS_TEST_DESTINATION:-}" ]; then
@@ -60,9 +61,28 @@ run_ios_tests() {
     test
 }
 
+stop_current_profile_runtime_for_tests() {
+  if [ "${SPACES_VERIFY_KEEP_PROFILE_RUNTIME:-0}" = "1" ]; then
+    echo "Keeping current Spaces profile runtime for verification (SPACES_VERIFY_KEEP_PROFILE_RUNTIME=1)"
+    return
+  fi
+
+  local cli="$root/.build/debug/spaces"
+  if [ ! -x "$cli" ]; then
+    return
+  fi
+
+  echo "Stopping current Spaces profile app and terminal service before SwiftPM coverage..."
+  (
+    spaces_profile_stop_running_app "$cli" "${SPACES_VERIFY_PROFILE_STOP_TIMEOUT:-20}"
+    spaces_profile_stop_terminal_service "$cli" "${SPACES_VERIFY_PROFILE_STOP_TIMEOUT:-20}"
+  )
+}
+
 cd "$root"
 
 "$root/scripts/lint.sh"
 "$root/scripts/swiftpm.sh" build
+stop_current_profile_runtime_for_tests
 "$root/scripts/coverage.sh"
 run_ios_tests

@@ -213,6 +213,7 @@ struct SpacesMobileBridgeClient: Sendable {
         horizontal: Double,
         vertical: Double,
         ownerEpoch: UInt64?,
+        scrollMods: Int32? = nil,
         timeout: Duration = .seconds(3),
         commandChannel: SpacesMobileBridgeCommandChannel? = nil
     ) async throws {
@@ -224,7 +225,8 @@ struct SpacesMobileBridgeClient: Sendable {
             clientID: clientID,
             ownerEpoch: ownerEpoch,
             scrollHorizontal: horizontal,
-            scrollVertical: vertical
+            scrollVertical: vertical,
+            scrollMods: scrollMods
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
@@ -336,6 +338,7 @@ actor SpacesMobileBridgeCommandChannel {
                 resizeSerial: request.resizeSerial,
                 scrollHorizontal: request.scrollHorizontal,
                 scrollVertical: request.scrollVertical,
+                scrollMods: request.scrollMods,
                 appendNewline: request.appendNewline
             )
         }

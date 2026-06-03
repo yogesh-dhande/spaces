@@ -85,8 +85,16 @@ private enum TerminalViewerRenderMode: String {
     private var ownerRenderEpochState: GhosttyRemoteTerminalOwnerEpoch?
     private var reportedOwnerReadyEpochID: String?
     private var reportedOwnerNonblankEpochID: String?
+    @ObservationIgnored private lazy var scrollCoalescer = TerminalScrollCoalescer(frameInterval: Self.scrollCoalescingInterval) { [weak self] batch, finish in
+        guard let self else {
+            finish()
+            return
+        }
+        self.enqueueCoalescedScrollBatch(batch, onFinished: finish)
+    }
 
     private static let inputBatchDelay: Duration = .milliseconds(35)
+    private static let scrollCoalescingInterval: Duration = .milliseconds(16)
     private static let inputRequestTimeout: Duration = .seconds(6)
     private static let ownerRecoveryGraceInterval: TimeInterval = 2
     private static let silentReconnectDelay: Duration = .milliseconds(150)
@@ -196,6 +204,7 @@ private enum TerminalViewerRenderMode: String {
         reconnectTask = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
+        scrollCoalescer.cancel()
         inputSendQueue.cancelAll()
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = nil
@@ -284,6 +293,7 @@ private enum TerminalViewerRenderMode: String {
         guard isOwner else { return }
         guard acceptsInput, hasConfirmedOwnerInputReadiness else { return }
         guard !text.isEmpty else { return }
+        flushPendingScroll()
         if appendNewline {
             flushBufferedInputText()
             enqueueInputSend(kind: "send_text", detail: "\(text)\\n") { [weak self, text] in
@@ -298,6 +308,7 @@ private enum TerminalViewerRenderMode: String {
     func sendKey(_ key: String) async {
         guard isOwner else { return }
         guard acceptsInput, hasConfirmedOwnerInputReadiness else { return }
+        flushPendingScroll()
         flushBufferedInputText()
         enqueueInputSend(kind: "send_key", detail: key) { [weak self, key] in
             guard let self else { return }
@@ -305,15 +316,15 @@ private enum TerminalViewerRenderMode: String {
         }
     }
 
-    func sendScroll(horizontal: Double, vertical: Double) async {
+    func sendScroll(horizontal: Double, vertical: Double, scrollMods: Int32 = 0) async {
         guard isOwner else { return }
         guard keepsTerminalInputSurfaceActive else { return }
         flushBufferedInputText()
-        let detail = "\(horizontal),\(vertical)"
-        enqueueInputSend(kind: "send_scroll", detail: detail) { [weak self, horizontal, vertical] in
-            guard let self else { return }
-            try await self.performSendScrollRequest(horizontal: horizontal, vertical: vertical)
-        }
+        scrollCoalescer.append(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+    }
+
+    func flushPendingScroll() {
+        scrollCoalescer.flush()
     }
 
     func recordRenderedText(_ text: String) {
@@ -394,7 +405,7 @@ private enum TerminalViewerRenderMode: String {
         }
     }
 
-    private func performSendScrollRequest(horizontal: Double, vertical: Double) async throws {
+    private func performSendScrollRequest(horizontal: Double, vertical: Double, scrollMods: Int32) async throws {
         let ownerEpoch = currentOwnerEpoch
         try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
             try await bridgeClient.scroll(
@@ -403,9 +414,22 @@ private enum TerminalViewerRenderMode: String {
                 horizontal: horizontal,
                 vertical: vertical,
                 ownerEpoch: ownerEpoch,
+                scrollMods: scrollMods == 0 ? nil : scrollMods,
                 timeout: Self.inputRequestTimeout,
                 commandChannel: commandChannel
             )
+        }
+    }
+
+    private func enqueueCoalescedScrollBatch(_ batch: TerminalScrollCoalescer.Batch, onFinished: @escaping TerminalScrollCoalescer.FinishHandler) {
+        let detail = "\(batch.horizontal),\(batch.vertical)"
+        enqueueInputSend(kind: "send_scroll", detail: detail) { [weak self, batch] in
+            guard let self else {
+                await MainActor.run { onFinished() }
+                return
+            }
+            defer { Task { @MainActor in onFinished() } }
+            try await self.performSendScrollRequest(horizontal: batch.horizontal, vertical: batch.vertical, scrollMods: batch.scrollMods)
         }
     }
 

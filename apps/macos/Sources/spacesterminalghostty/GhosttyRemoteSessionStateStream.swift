@@ -127,8 +127,14 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
         try? removeSocketIfPresent()
     }
 
-    private func removeSocketIfPresent() throws {
-        if FileManager.default.fileExists(atPath: socketPath) { try FileManager.default.removeItem(atPath: socketPath) }
+    private func removeSocketIfPresent() throws { try Self.removeSocketFile(at: socketPath) }
+
+    static func removeSocketFileIfPresent(at path: String) { try? removeSocketFile(at: path) }
+
+    private static func removeSocketFile(at path: String) throws {
+        let result = path.withCString { unlink($0) }
+        guard result != 0 else { return }
+        if errno != ENOENT { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
     fileprivate static func makeSocketAddress(path: String) throws -> sockaddr_un {

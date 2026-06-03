@@ -516,7 +516,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             command: command, text: request.text, key: request.key, clientID: clientID, client: request.client,
             attachmentMode: request.attachmentMode, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
             resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
-            appendNewline: request.appendNewline)
+            scrollMods: request.scrollMods, appendNewline: request.appendNewline)
         let response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath)
         TerminalPerformance.logMetric(
             "mobile_bridge_\(command)", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),

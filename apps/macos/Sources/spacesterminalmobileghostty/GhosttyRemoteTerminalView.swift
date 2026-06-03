@@ -18,12 +18,14 @@ import Foundation
     private func ghosttyRemoteTerminalTraceSeconds() -> String { String(format: "%.3f", Date().timeIntervalSince1970) }
 
     struct GhosttyRemoteTerminalScrollMapper {
+        private static let directPanSensitivity: CGFloat = 0.5
+        private static let momentumSensitivity: CGFloat = 0.35
         private static let minimumMomentumVelocity: CGFloat = 8
         private static let maximumMomentumVelocity: CGFloat = 6_000
-        private static let maximumMomentumFrameDelta: CGFloat = 240
+        private static let maximumMomentumFrameDelta: CGFloat = 120
 
         static func scrollDelta(forPanDelta panDelta: CGPoint, scaleFactor: Double) -> CGPoint {
-            let scale = CGFloat(scaleFactor)
+            let scale = CGFloat(scaleFactor) * directPanSensitivity
             return CGPoint(x: -panDelta.x * scale, y: panDelta.y * scale)
         }
 
@@ -35,10 +37,10 @@ import Foundation
 
         static func momentumFrameDelta(velocity: CGPoint, elapsed: TimeInterval, scaleFactor: Double) -> CGPoint {
             let elapsed = max(0, elapsed)
-            let pointDelta = CGPoint(
-                x: min(max(velocity.x * elapsed, -maximumMomentumFrameDelta), maximumMomentumFrameDelta),
-                y: min(max(velocity.y * elapsed, -maximumMomentumFrameDelta), maximumMomentumFrameDelta))
-            return scrollDelta(forPanDelta: pointDelta, scaleFactor: scaleFactor)
+            let scale = CGFloat(scaleFactor) * momentumSensitivity
+            return CGPoint(
+                x: min(max(-velocity.x * elapsed * scale, -maximumMomentumFrameDelta), maximumMomentumFrameDelta),
+                y: min(max(velocity.y * elapsed * scale, -maximumMomentumFrameDelta), maximumMomentumFrameDelta))
         }
 
         static func decayedMomentumVelocity(_ velocity: CGPoint, elapsed: TimeInterval, decelerationRate: CGFloat) -> CGPoint {
@@ -88,14 +90,14 @@ import Foundation
         public let onViewportSizeChanged: @MainActor (Int, Int) -> Void
         public let onSendText: @MainActor (String) -> Void
         public let onSendKey: @MainActor (String) -> Void
-        public let onSendScroll: @MainActor (Double, Double) -> Void
+        public let onSendScroll: @MainActor (Double, Double, Int32) -> Void
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
             isVisible: Bool, acceptsInput: Bool, isBusy: Bool, onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
             onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
             onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void, onSendText: @escaping @MainActor (String) -> Void,
-            onSendKey: @escaping @MainActor (String) -> Void, onSendScroll: @escaping @MainActor (Double, Double) -> Void = { _, _ in }
+            onSendKey: @escaping @MainActor (String) -> Void, onSendScroll: @escaping @MainActor (Double, Double, Int32) -> Void = { _, _, _ in }
         ) {
             self.ownerEpoch = ownerEpoch
             self.endedRender = endedRender
@@ -120,7 +122,7 @@ import Foundation
             hostView.onViewportSizeChanged = { columns, rows in _ = Task { @MainActor in onViewportSizeChanged(columns, rows) } }
             hostView.onSendText = { text in _ = Task { @MainActor in onSendText(text) } }
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
-            hostView.onSendScroll = { horizontal, vertical in _ = Task { @MainActor in onSendScroll(horizontal, vertical) } }
+            hostView.onSendScroll = { horizontal, vertical, scrollMods in _ = Task { @MainActor in onSendScroll(horizontal, vertical, scrollMods) } }
             hostView.onRenderedTextChanged = onRenderedTextChanged.map { callback in { text in _ = Task { @MainActor in callback(text) } } }
             hostView.setTerminalVisible(isVisible)
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
@@ -176,6 +178,7 @@ import Foundation
         private var lastRenderKey = ""
         private var lastSurfaceGeometry: SurfaceGeometry?
         private var snapshotScrollOffsetRows: Int?
+        private var snapshotScrollRemainderRows: CGFloat = 0
         private var lastReportedViewportSize: (columns: Int, rows: Int)?
         private var lastRenderedText = ""
         private var lastReportedInputReadiness = false
@@ -207,7 +210,7 @@ import Foundation
         public var onViewportSizeChanged: ((Int, Int) -> Void)?
         public var onSendText: ((String) -> Void)?
         public var onSendKey: ((String) -> Void)?
-        public var onSendScroll: ((Double, Double) -> Void)?
+        public var onSendScroll: ((Double, Double, Int32) -> Void)?
         public var onRenderedTextChanged: ((String) -> Void)? {
             didSet {
                 guard onRenderedTextChanged == nil else {
@@ -372,6 +375,7 @@ import Foundation
             let nextKey = ownerEpoch.map { "owner|\($0.id)" } ?? endedRender.map { "ended|\($0.id)" } ?? "status|\(fallbackText)"
             if nextKey != lastRenderKey {
                 snapshotScrollOffsetRows = nil
+                snapshotScrollRemainderRows = 0
                 lastRenderKey = nextKey
             }
             latestSnapshot = nextSnapshot
@@ -421,15 +425,20 @@ import Foundation
         @discardableResult public func debugSendScrollForTesting(
             horizontal: CGFloat, vertical: CGFloat, location: CGPoint? = nil, hasPreciseDeltas: Bool = false,
             momentumState: UIGestureRecognizer.State = .changed
-        ) -> Bool { sendScroll(horizontal: horizontal, vertical: vertical) }
+        ) -> Bool {
+            sendScroll(
+                horizontal: horizontal, vertical: vertical,
+                scrollMods: Self.makeScrollMods(hasPreciseDeltas: hasPreciseDeltas, momentumState: momentumState))
+        }
 
         public static func makeScrollMods(hasPreciseDeltas: Bool, momentumState: UIGestureRecognizer.State) -> Int32 {
             var mods: Int32 = 0
-            if hasPreciseDeltas { mods |= 0b0000_0111 }
+            if hasPreciseDeltas { mods |= 0b0000_0001 }
             switch momentumState {
-            case .possible: mods |= 0b0000_1100
-            case .ended, .cancelled, .failed: mods |= 0b0000_1000
-            default: mods |= 0b0000_0100
+            case .possible: mods |= 6 << 1
+            case .ended: mods |= 4 << 1
+            case .cancelled, .failed: mods |= 5 << 1
+            default: mods |= 3 << 1
             }
             return mods
         }
@@ -450,12 +459,19 @@ import Foundation
                 let delta = CGPoint(x: translation.x - lastScrollTranslation.x, y: translation.y - lastScrollTranslation.y)
                 lastScrollTranslation = translation
                 let scrollDelta = GhosttyRemoteTerminalScrollMapper.scrollDelta(forPanDelta: delta, scaleFactor: Double(window?.screen.scale ?? 1))
-                if sendScroll(horizontal: scrollDelta.x, vertical: scrollDelta.y) { didScrollDuringCurrentPan = true }
+                let scrollMods = Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed)
+                if sendScroll(horizontal: scrollDelta.x, vertical: scrollDelta.y, scrollMods: scrollMods) { didScrollDuringCurrentPan = true }
             case .ended:
+                if didScrollDuringCurrentPan {
+                    _ = sendScroll(horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .ended))
+                }
                 if didScrollDuringCurrentPan { onScrollGestureApplied?() }
                 let velocity = GhosttyRemoteTerminalScrollMapper.clampedMomentumVelocity(recognizer.velocity(in: self))
                 if GhosttyRemoteTerminalScrollMapper.shouldContinueMomentum(velocity: velocity) { startMomentum(velocity: velocity) }
             case .cancelled, .failed:
+                if didScrollDuringCurrentPan {
+                    _ = sendScroll(horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .cancelled))
+                }
                 if didScrollDuringCurrentPan { onScrollGestureApplied?() }
                 stopMomentum()
             default: break
@@ -468,7 +484,7 @@ import Foundation
             lastMomentumTimestamp = timestamp
             let delta = GhosttyRemoteTerminalScrollMapper.momentumFrameDelta(
                 velocity: momentumVelocity, elapsed: elapsed, scaleFactor: Double(window?.screen.scale ?? 1))
-            _ = sendScroll(horizontal: delta.x, vertical: delta.y)
+            _ = sendScroll(horizontal: delta.x, vertical: delta.y, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed))
             momentumVelocity = GhosttyRemoteTerminalScrollMapper.decayedMomentumVelocity(
                 momentumVelocity, elapsed: elapsed, decelerationRate: UIScrollView.DecelerationRate.normal.rawValue)
             if !GhosttyRemoteTerminalScrollMapper.shouldContinueMomentum(velocity: momentumVelocity) { stopMomentum() }
@@ -484,6 +500,9 @@ import Foundation
         }
 
         private func stopMomentum() {
+            if momentumDisplayLink != nil {
+                _ = sendScroll(horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .ended))
+            }
             momentumDisplayLink?.invalidate()
             momentumDisplayLink = nil
             momentumVelocity = .zero
@@ -760,9 +779,9 @@ import Foundation
             return (columns: columns, rows: min(rows, visibleRows))
         }
 
-        @discardableResult private func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+        @discardableResult private func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
             let locallyScrolled = scrollLocalSnapshot(vertical: vertical)
-            onSendScroll?(Double(horizontal), Double(vertical))
+            onSendScroll?(Double(horizontal), Double(vertical), scrollMods)
             return locallyScrolled || horizontal != 0 || vertical != 0
         }
 
@@ -773,10 +792,23 @@ import Foundation
             let base = GhosttyTerminalSnapshotViewport.window(
                 for: latestSnapshot, columns: size.columns, rows: size.rows, horizontalAlignment: .leading)
             let currentOffset = snapshotScrollOffsetRows ?? base.rowOffset
-            let lineDelta = max(Int((abs(vertical) / 12).rounded(.up)), 1)
-            let proposed = currentOffset + (vertical < 0 ? -lineDelta : lineDelta)
+            let rowDelta = vertical / cellMetrics().height
+            snapshotScrollRemainderRows += rowDelta
+            let wholeRows: Int
+            if snapshotScrollRemainderRows >= 1 {
+                wholeRows = Int(floor(snapshotScrollRemainderRows))
+            } else if snapshotScrollRemainderRows <= -1 {
+                wholeRows = Int(ceil(snapshotScrollRemainderRows))
+            } else {
+                return false
+            }
+            snapshotScrollRemainderRows -= CGFloat(wholeRows)
+            let proposed = currentOffset - wholeRows
             let next = min(max(proposed, 0), max(latestSnapshot.rows - size.rows, 0))
-            guard next != currentOffset else { return false }
+            guard next != currentOffset else {
+                snapshotScrollRemainderRows = 0
+                return false
+            }
             snapshotScrollOffsetRows = next
             renderLatestSnapshot()
             return true

@@ -180,6 +180,21 @@ import spacesterminalcore
             XCTAssertEqual(forwardedResize.clientID, "ios-client")
             XCTAssertEqual(forwardedResize.ownerEpoch, 11)
             XCTAssertEqual(forwardedResize.resizeSerial, 5)
+
+            let acceptedScrollResponse = try await Task.detached {
+                try Self.sendBridgeRequest(
+                    SpacesMobileBridgeRequest(
+                        command: "scroll", authToken: authToken, clientApp: clientApp, sessionID: sessionID, clientID: "ios-client", ownerEpoch: 12,
+                        scrollVertical: 24, scrollMods: 7), port: server.listeningPort, transportKey: transportKey)
+            }.value
+
+            XCTAssertTrue(acceptedScrollResponse.ok)
+            let forwardedScroll = try XCTUnwrap(recorder.requests().last)
+            XCTAssertEqual(forwardedScroll.command, "scroll")
+            XCTAssertEqual(forwardedScroll.clientID, "ios-client")
+            XCTAssertEqual(forwardedScroll.ownerEpoch, 12)
+            XCTAssertEqual(forwardedScroll.scrollVertical, 24)
+            XCTAssertEqual(forwardedScroll.scrollMods, 7)
         }
     }
 

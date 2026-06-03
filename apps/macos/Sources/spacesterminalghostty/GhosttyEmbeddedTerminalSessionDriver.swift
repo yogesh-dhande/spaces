@@ -43,6 +43,7 @@ private final class GhosttyHostManagedOutputPipe: @unchecked Sendable {
     private var lastDeliveredSessionStateRevision: UInt64 = 0
     private var sessionStateDeliveryScheduled = false
     private var debugRefreshRequestCountValue = 0
+    private var debugLastScrollModsValue: Int32 = 0
 
     var onActionEvent: (@MainActor (GhosttyActionEvent) -> Void)?
     var onSurfaceClosed: (@MainActor () -> Void)?
@@ -59,6 +60,7 @@ private final class GhosttyHostManagedOutputPipe: @unchecked Sendable {
     }
 
     var debugRefreshRequestCount: Int { debugRefreshRequestCountValue }
+    var debugLastScrollMods: Int32 { debugLastScrollModsValue }
 
     func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { outputHandler = handler }
 
@@ -249,9 +251,10 @@ private final class GhosttyHostManagedOutputPipe: @unchecked Sendable {
         return resolvedSize.columns == targetColumns && resolvedSize.rows == targetRows
     }
 
-    @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+    @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32 = 0) -> Bool {
         guard let surface else { return false }
-        ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), 0)
+        debugLastScrollModsValue = scrollMods
+        ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), scrollMods)
         requestSurfaceRefresh()
         return true
     }

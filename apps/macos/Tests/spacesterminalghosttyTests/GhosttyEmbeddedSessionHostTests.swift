@@ -168,7 +168,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try waitUntil(timeout: 2) { !receivedPayloads.isEmpty }
         receivedPayloads.removeAll()
 
-        let screenRevision: UInt64 = 9_000_000
+        let screenRevision: UInt64 = UInt64.max / 2
         host.applySessionStateChange(.init(flags: [.screen], revision: screenRevision, title: nil, workingDirectory: nil))
 
         try waitUntil(timeout: 2) {
@@ -887,10 +887,27 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let baselineRefreshCount = sessionDriver.debugRefreshRequestCount
 
         XCTAssertTrue(sessionDriver.sendScroll(horizontal: 0, vertical: -48))
+        XCTAssertEqual(sessionDriver.debugLastScrollMods, 0)
 
         XCTAssertGreaterThanOrEqual(
             sessionDriver.debugRefreshRequestCount, baselineRefreshCount + 1,
             "Scroll movement should schedule redraws so Ghostty can update the exported viewport.")
+    }
+
+    @MainActor func testHeadlessDriverForwardsPreciseScrollMods() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "host-managed-scroll-mods-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "scroll",
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-18T00:00:00Z"))
+        defer { sessionDriver.terminate() }
+
+        try sessionDriver.startIfNeeded()
+
+        XCTAssertTrue(sessionDriver.sendScroll(horizontal: 0, vertical: -48, scrollMods: 0b0000_0111))
+        XCTAssertEqual(sessionDriver.debugLastScrollMods, 0b0000_0111)
     }
 
     @MainActor func testControlAttachAndDetachRequestsUpdatePersistenceAndPostAttachmentChanges() throws {

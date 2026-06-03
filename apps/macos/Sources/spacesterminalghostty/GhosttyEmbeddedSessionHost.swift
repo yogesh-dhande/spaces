@@ -42,12 +42,18 @@ extension Notification.Name {
     func sessionSnapshotText() -> String?
     func copySelectionToPasteboard() -> Bool
     func pasteClipboardContents() -> Bool
-    @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool
+    @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool
     var debugSurfaceRefreshRequestCount: Int { get }
     func debugVisibleSurfaceText() -> String?
 }
 
 @MainActor public protocol TerminalGhosttySessionHosting: TerminalGhosttySessionInfoProviding, TerminalGhosttyRendererHosting {}
+
+extension TerminalGhosttyRendererHosting {
+    @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+        sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: 0)
+    }
+}
 
 @MainActor public final class GhosttyHeadlessRendererHost: TerminalGhosttyRendererHosting {
     private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
@@ -129,8 +135,8 @@ extension Notification.Name {
         return true
     }
 
-    @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
-        sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical)
+    @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
+        sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
     }
 
     public var debugSurfaceRefreshRequestCount: Int { sessionDriver.debugRefreshRequestCount }
@@ -365,7 +371,7 @@ extension Notification.Name {
         inputOutputResyncWorkItem = nil
         controlServer?.stop()
         controlServer = nil
-        try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
+        TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
         started = false
         rendererHostStorage.terminateSession()
         try? outputHandle?.synchronize()
@@ -382,7 +388,7 @@ extension Notification.Name {
         broadcastCurrentState(reason: "terminated")
         stateStreamServer?.stop()
         stateStreamServer = nil
-        try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
+        GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
     }
 
     private func handleSessionClosed() {
@@ -586,12 +592,13 @@ extension Notification.Name {
         if let rejection = ownerRequestRejection(for: request, commandName: "scroll", startedAt: startedAt) { return rejection }
         let horizontal = CGFloat(request.scrollHorizontal ?? 0)
         let vertical = CGFloat(request.scrollVertical ?? 0)
-        guard horizontal != 0 || vertical != 0 else { return TerminalControlResponse(ok: false, message: "Missing scroll delta.") }
+        let scrollMods = request.scrollMods ?? 0
+        guard horizontal != 0 || vertical != 0 || scrollMods != 0 else { return TerminalControlResponse(ok: false, message: "Missing scroll delta.") }
         if let ownerClient = activeOwnerClient() {
             logMobileTakeoverPerformance(
                 name: "owner_input_activity", attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": "1", "input_kind": "scroll"])
         }
-        let scrolled = rendererHostStorage.sendScroll(horizontal: horizontal, vertical: vertical)
+        let scrolled = rendererHostStorage.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
         if scrolled { broadcastCurrentState(reason: TerminalRemoteSessionStateReason.scroll) }
         TerminalPerformance.logMetric(
             "terminal_control_scroll", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
@@ -1226,8 +1233,8 @@ extension Notification.Name {
 
     public func pasteClipboardContents() -> Bool { core.rendererHost.pasteClipboardContents() }
 
-    @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
-        core.rendererHost.sendScroll(horizontal: horizontal, vertical: vertical)
+    @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
+        core.rendererHost.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
     }
 
     public var debugSurfaceRefreshRequestCount: Int { core.rendererHost.debugSurfaceRefreshRequestCount }

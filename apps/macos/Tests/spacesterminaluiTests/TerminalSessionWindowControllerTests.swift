@@ -58,7 +58,8 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             pastedClipboard = true
             return true
         }
-        @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+        @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
+            _ = scrollMods
             debugSurfaceRefreshRequestCount += 1
             return true
         }

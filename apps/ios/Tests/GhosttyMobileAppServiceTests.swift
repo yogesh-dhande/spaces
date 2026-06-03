@@ -60,7 +60,7 @@
                 scaleFactor: 2
             )
 
-            XCTAssertEqual(delta.y, 24)
+            XCTAssertEqual(delta.y, 12)
         }
 
         func testTouchScrollFingerUpMapsTowardLiveBottom() {
@@ -69,7 +69,7 @@
                 scaleFactor: 2
             )
 
-            XCTAssertEqual(delta.y, -24)
+            XCTAssertEqual(delta.y, -12)
         }
 
         func testTouchScrollUsesScaleFactorAsPointToPixelConversion() {
@@ -78,8 +78,8 @@
                 scaleFactor: 3
             )
 
-            XCTAssertEqual(delta.x, -12)
-            XCTAssertEqual(delta.y, 30)
+            XCTAssertEqual(delta.x, -6)
+            XCTAssertEqual(delta.y, 15)
         }
 
         func testHighVelocityMomentumProducesBoundedDeltas() {
@@ -89,8 +89,8 @@
                 scaleFactor: 3
             )
 
-            XCTAssertEqual(delta.x, -720)
-            XCTAssertEqual(delta.y, 720)
+            XCTAssertEqual(delta.x, -120)
+            XCTAssertEqual(delta.y, 120)
         }
 
         func testResolveResourcesPathUsesBundledGhosttyResources() throws {
@@ -1099,6 +1099,18 @@
                 Int32(0b0000_0111)
             )
             XCTAssertEqual(
+                Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .ended)),
+                Int32(0b0000_1001)
+            )
+            XCTAssertEqual(
+                Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .cancelled)),
+                Int32(0b0000_1011)
+            )
+            XCTAssertEqual(
+                Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .possible)),
+                Int32(0b0000_1101)
+            )
+            XCTAssertEqual(
                 Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: false, momentumState: .ended)),
                 Int32(0b0000_1000)
             )
@@ -1106,6 +1118,95 @@
                 Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: false, momentumState: .possible)),
                 Int32(0b0000_1100)
             )
+        }
+
+        func testRemoteTerminalHostViewForwardsPreciseScrollMods() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            var sentScrolls: [(horizontal: Double, vertical: Double, scrollMods: Int32)] = []
+            hostView.onSendScroll = { horizontal, vertical, scrollMods in
+                sentScrolls.append((horizontal, vertical, scrollMods))
+            }
+
+            XCTAssertTrue(
+                hostView.debugSendScrollForTesting(
+                    horizontal: 0,
+                    vertical: 8,
+                    hasPreciseDeltas: true,
+                    momentumState: .changed
+                )
+            )
+
+            XCTAssertEqual(sentScrolls.last?.horizontal, 0)
+            XCTAssertEqual(sentScrolls.last?.vertical, 8)
+            XCTAssertEqual(sentScrolls.last?.scrollMods, Int32(0b0000_0111))
+        }
+
+        func testRemoteTerminalHostViewTinyScrollDeltaDoesNotForceRowJump() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: scrollbackSnapshot(lineCount: 220),
+                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            let bottomSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let bottomText = GhosttyTerminalSnapshotLayout.plainText(for: bottomSnapshot)
+
+            XCTAssertTrue(hostView.debugSendScrollForTesting(horizontal: 0, vertical: 1))
+
+            let tinyScrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: tinyScrolledSnapshot), bottomText)
+
+            window.isHidden = true
+        }
+
+        func testRemoteTerminalHostViewTinyScrollDeltasAccumulate() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: scrollbackSnapshot(lineCount: 220),
+                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…"
+            )
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+            let bottomSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let bottomText = GhosttyTerminalSnapshotLayout.plainText(for: bottomSnapshot)
+
+            for _ in 0..<20 {
+                XCTAssertTrue(hostView.debugSendScrollForTesting(horizontal: 0, vertical: 1))
+            }
+
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+            let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
+            XCTAssertNotEqual(scrolledText, bottomText)
+            XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
+
+            window.isHidden = true
         }
 
         func testRemoteTerminalHostViewCanScrollBackThroughSnapshotScrollback() throws {
@@ -1142,7 +1243,7 @@
 
             let didScroll = hostView.debugSendScrollForTesting(
                 horizontal: 0,
-                vertical: -2400,
+                vertical: 10_000,
                 location: CGPoint(x: hostView.bounds.midX, y: hostView.bounds.midY)
             )
             XCTAssertTrue(didScroll)
@@ -1198,7 +1299,7 @@
 
             let didScroll = hostView.debugSendScrollForTesting(
                 horizontal: 0,
-                vertical: -2400,
+                vertical: 10_000,
                 location: CGPoint(x: hostView.bounds.midX, y: hostView.bounds.midY)
             )
             XCTAssertTrue(didScroll)
