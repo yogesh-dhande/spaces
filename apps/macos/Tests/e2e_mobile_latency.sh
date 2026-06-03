@@ -216,6 +216,7 @@ import math
 import os
 import re
 import select
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -234,6 +235,7 @@ sample_count = int(os.environ["SAMPLES"])
 summary_json = Path(os.environ["SUMMARY_JSON"])
 performance_log_path = Path(os.environ["PERFORMANCE_LOG_PATH"])
 work_root = Path(os.environ["WORK_ROOT"])
+profile_root = Path(os.environ["SPACES_DB_PATH"]).expanduser().resolve().parent
 spaces_cli = os.environ["SPACES_CLI"]
 base_env = os.environ.copy()
 
@@ -331,19 +333,23 @@ def extract_session_id(output: str) -> str:
     return match[-1].upper()
 
 
+def control_socket_path(profile_root: Path, session_id: str) -> Path:
+    hash_value = 5381
+    for byte in f"{profile_root}|{session_id}".encode("utf-8"):
+        hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
+    return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
+
+
 def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
-    sessions_root = Path(os.environ["SPACES_RUNTIME_DIR"]) / "terminal" / "sessions"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        for metadata_path in sessions_root.glob("*/metadata.json"):
-            try:
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if metadata.get("title") != title:
-                continue
-            session_id = metadata.get("sessionID") or metadata_path.parent.name
-            if (metadata_path.parent / "control.sock").exists() or (metadata_path.parent / "state.json").exists():
+        with sqlite3.connect(os.environ["SPACES_DB_PATH"]) as db:
+            rows = db.execute(
+                "SELECT session_id, root_directory FROM terminal_sessions WHERE title = ? ORDER BY created_at DESC",
+                (title,),
+            ).fetchall()
+        for session_id, root_directory in rows:
+            if control_socket_path(profile_root, session_id).exists():
                 return session_id.upper()
         time.sleep(0.1)
     raise TimeoutError(f"timed out recovering session id for title {title}")

@@ -174,7 +174,7 @@ struct TerminalShowCommand: ParsableCommand {
 
     func run() throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        guard FileManager.default.fileExists(atPath: paths.metadataPath) else {
+        guard (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) != nil else {
             throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' does not exist.")
         }
         DistributedNotificationCenter.default().postNotificationName(

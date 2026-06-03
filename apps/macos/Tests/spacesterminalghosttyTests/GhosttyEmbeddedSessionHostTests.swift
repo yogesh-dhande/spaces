@@ -7,6 +7,26 @@ import spacesterminalcore
 @testable import spacesterminalghostty
 
 final class GhosttyEmbeddedSessionHostTests: XCTestCase {
+    private var originalDatabasePath: String?
+    private var databaseRoot: URL?
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        databaseRoot = root
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+    }
+
+    override func tearDownWithError() throws {
+        if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+        if let databaseRoot { try? FileManager.default.removeItem(at: databaseRoot) }
+        databaseRoot = nil
+        originalDatabasePath = nil
+        try super.tearDownWithError()
+    }
+
     private final class TranscriptBuffer: @unchecked Sendable {
         private let lock = NSLock()
         private var data = Data()
@@ -695,6 +715,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-attached-dead-child-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
             workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z")
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -988,6 +1009,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-6", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh",
             createdAt: "2026-05-17T00:00:00Z")
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let client = TerminalClient(
             id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
         let attachmentNotifications = expectation(description: "attachment notifications")
@@ -1021,6 +1043,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-owner-return", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
             command: "zsh", createdAt: "2026-05-17T00:00:00Z")
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let localClient = TerminalClient(
             id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
         let remoteClient = TerminalClient(
@@ -1051,6 +1074,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-stale-owner-epoch", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
             command: "zsh", createdAt: "2026-05-31T00:00:00Z")
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let owner = TerminalClient(
             id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-31T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
@@ -1147,6 +1171,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-demoted-owner", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
             command: "zsh", createdAt: "2026-05-31T00:00:00Z")
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let previousOwner = TerminalClient(
             id: "iphone-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-31T00:00:00Z")
         let nextOwner = TerminalClient(
@@ -1175,6 +1200,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-stale-resize", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
             command: "zsh", createdAt: "2026-05-31T00:00:00Z")
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         host.core.debugSetLastKnownSurfaceSize(columns: 80, rows: 24)
         let owner = TerminalClient(
             id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-31T00:00:00Z")
@@ -1200,6 +1226,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-server-time", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
             command: "zsh", createdAt: "2026-05-17T00:00:00Z")
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let staleTimestampedClient = TerminalClient(
             id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2000-01-01T00:00:00Z")
 
@@ -1222,6 +1249,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-heartbeat", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
             command: "zsh", createdAt: "2026-05-17T00:00:00Z")
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let refreshedClient = TerminalClient(
             id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
         let staleClient = TerminalClient(
@@ -1250,6 +1278,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-7", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh",
             createdAt: "2026-05-17T00:00:00Z")
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let client = TerminalClient(
             id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
@@ -1280,6 +1309,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-owner-expiry", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
             command: "zsh", createdAt: "2026-05-17T00:00:00Z")
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let localClient = TerminalClient(
             id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
         let remoteClient = TerminalClient(

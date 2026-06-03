@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import spacesdatabase
 import systembridge
 
 public final class SQLiteStore {

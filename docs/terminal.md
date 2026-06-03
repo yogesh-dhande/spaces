@@ -13,26 +13,30 @@ This document describes the built-in terminal runtime in Spaces: what owns a ses
 ## Ownership Model
 - `SpacesTerminalService` owns built-in terminal sessions, including workspace terminals, built-in process windows, built-in coding-agent windows, mobile-visible sessions, and sessions created through `spaces terminal ...`.
 - The service is a per-user background executable started on demand by first-party clients and can outlive `SpacesApp`.
-- First-party clients attach through the same persisted session files, control socket, and render-frame stream.
+- First-party clients attach through SQLite-backed session metadata, the per-session control socket, and the render-frame stream.
 
 ## Session Boundary
-Each session lives under `~/.spaces/terminal/sessions/<session-id>/`.
+Each session keeps canonical metadata in SQLite and runtime-only files under `<profile-root>/runtime/terminal/sessions/<session-id>/`.
+
+SQLite stores:
+- launch configuration, backend, and lifetime policy
+- runtime state, service PID, child PID, title, working directory, and last known columns or rows
+- known client identities and remote lease timestamps
+- owner or viewer attachment history
+- saved terminal window frames
 
 The session directory keeps:
-- `metadata.json`: launch configuration, backend, and lifetime policy
-- `state.json`: runtime state, service PID, child PID, title, working directory, and last known columns or rows
 - `output.log`: append-only terminal output used for `spaces terminal tail` and diagnostics
-- `clients.json`: known client identities
-- `attachments.json`: owner or viewer attachment history
 - `control.sock`: local control-plane socket for attach, detach, send, key, takeover, and related requests
 - `subscription.sock`: service-published session state and Ghostty render-frame stream for daemon-owned client windows
+- `service.log`: service diagnostics for the session
 
 Each live session also participates in a service-level control path:
-- `~/.spaces/terminal/service.sock` is the service command socket used for session creation, listing, and termination.
+- `/tmp/spaces-terminal-sockets/service-<profile-hash>.sock` is the profile-scoped service command socket used for session creation, listing, and termination.
 
 ## Service Runtime
 - `GhosttyEmbeddedSessionHost` is the service-owned runtime for `ghostty-embedded`.
-- It owns one live libghostty-backed session, writes `output.log`, refreshes `state.json`, enforces owner-only input or resize, and expires stale remote leases.
+- It owns one live libghostty-backed session, writes `output.log`, refreshes SQLite runtime state, enforces owner-only input or resize, and expires stale remote leases from SQLite client rows.
 - It also preserves live metadata such as title, working directory, and child PID so attached clients can reopen a session without restarting the shell.
 - App-created ad hoc workspace terminals use persistent service-owned sessions so they survive app quit. The `.whileAttached` lifetime policy remains available for callers that intentionally want service reaping after the final live attachment detaches or expires.
 - If the service restarts and finds a session left in `starting` or `running` by a dead service PID, it marks that session failed and removes the stale `control.sock`.
@@ -55,14 +59,14 @@ Each live session also participates in a service-level control path:
 - `TerminalSessionWindowController` attaches a local owner or viewer client record to the daemon-owned session, keeps window reuse keyed by stable session ID, renders owner windows from the service render-frame stream, and uses a compact ownership/status shell for non-owner windows instead of rendering a passive terminal transcript.
 - The macOS daemon client path uses the service live Ghostty render-frame stream for owner bootstrap and output refreshes while a macOS window owns the session. V1 frames are encoded in the existing Codable state stream and carry Ghostty-exported grid, cursor, color, and style state for local mirror views. VT replay, snapshot-to-VT encoding, raw output bytes, and `output.log` are not terminal-rendering fallbacks.
 - Title and working-directory updates still follow live session metadata emitted by the service.
-- Owner or viewer attachment state is still authoritative in `attachments.json`.
+- Owner or viewer attachment state is authoritative in SQLite.
 - Only the active owner attachment may send input or drive PTY size.
 - Reopening a built-in window for an existing session reattaches to the same shell session instead of creating a new one.
 
 ## Tail and Metadata
 - `spaces terminal tail` reads `output.log`, not a live client window.
 - ANSI and full-screen output are replayed through `libghostty-vt`.
-- Tail rendering uses the persisted terminal size from `state.json` so wrapping and redraw-heavy transcripts stay aligned with the last visible geometry.
+- Tail rendering uses the persisted terminal size from SQLite so wrapping and redraw-heavy transcripts stay aligned with the last visible geometry.
 - The VT bridge feeds `spaces terminal tail` and diagnostics. Terminal UI rendering does not use VT replay, snapshot-to-VT encoding, or `output.log`.
 
 ## Mobile Bridge

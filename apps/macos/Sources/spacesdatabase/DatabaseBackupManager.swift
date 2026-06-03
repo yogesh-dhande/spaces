@@ -1,18 +1,18 @@
 import Foundation
 import SQLite3
 
-struct DatabaseBackupManager {
+public struct DatabaseBackupManager: Sendable {
     private let backupDirectory: URL
     private let retentionLimit: Int
     private let dateProvider: @Sendable () -> Date
 
-    init(databaseURL: URL, backupDirectory: URL? = nil, retentionLimit: Int = 10, dateProvider: @escaping @Sendable () -> Date = Date.init) {
+    public init(databaseURL: URL, backupDirectory: URL? = nil, retentionLimit: Int = 10, dateProvider: @escaping @Sendable () -> Date = Date.init) {
         self.backupDirectory = backupDirectory ?? databaseURL.deletingLastPathComponent().appendingPathComponent("backups", isDirectory: true)
         self.retentionLimit = retentionLimit
         self.dateProvider = dateProvider
     }
 
-    func createMigrationBackup(sourceHandle: OpaquePointer, fromVersion: Int, toVersion: Int) throws -> URL {
+    public func createMigrationBackup(sourceHandle: OpaquePointer, fromVersion: Int, toVersion: Int) throws -> URL {
         try FileManager.default.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
         let backupURL = backupDirectory.appendingPathComponent(backupFileName(fromVersion: fromVersion, toVersion: toVersion))
         try backupDatabase(sourceHandle: sourceHandle, destinationURL: backupURL)
@@ -20,7 +20,7 @@ struct DatabaseBackupManager {
         return backupURL
     }
 
-    func existingBackups() throws -> [URL] {
+    public func existingBackups() throws -> [URL] {
         let urls = try FileManager.default.contentsOfDirectory(
             at: backupDirectory, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])
         return urls.sorted { $0.lastPathComponent > $1.lastPathComponent }

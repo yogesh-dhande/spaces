@@ -149,10 +149,8 @@ import spacesterminalghostty
 
     private func summaryIfLive(for launchConfiguration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary? {
         let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
-        guard FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) else {
-            return nil
-        }
         guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return nil }
         guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }
         guard Self.isProcessAlive(pid: Int(runtimeState.servicePID)) else { return nil }
         return try summary(for: launchConfiguration, paths: paths)

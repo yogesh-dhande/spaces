@@ -2453,6 +2453,9 @@ final class OrchestratorTests: XCTestCase {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
             FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: "now"),
+                paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
@@ -2495,6 +2498,9 @@ final class OrchestratorTests: XCTestCase {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
             FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: "now"),
+                paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,

@@ -70,18 +70,29 @@ PY
 active_attachment_client_id() {
   local session_id="$1"
   local mode="$2"
-  local attachments_path
-  attachments_path="$RUNTIME_DIR/terminal/sessions/$session_id/attachments.json"
-  python3 - "$attachments_path" "$mode" <<'PY'
-import json, sys
-path = sys.argv[1]
-mode = sys.argv[2]
-with open(path, "r", encoding="utf-8") as handle:
-    attachments = json.load(handle)
-for attachment in attachments:
-    if attachment.get("mode") == mode and attachment.get("detachedAt") is None:
-        print(attachment["clientID"])
-        break
+  python3 - "$DB_PATH" "$RUNTIME_DIR/terminal/sessions/$session_id" "$mode" <<'PY'
+import os
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+root_directory = os.path.normpath(sys.argv[2])
+mode = sys.argv[3]
+with sqlite3.connect(db_path) as db:
+    row = db.execute(
+        """
+        SELECT client_id
+        FROM terminal_attachments
+        WHERE root_directory = ?
+          AND mode = ?
+          AND detached_at IS NULL
+        ORDER BY attached_at DESC
+        LIMIT 1
+        """,
+        (root_directory, mode),
+    ).fetchone()
+if row:
+    print(row[0])
 else:
     raise SystemExit(f"no active {mode} attachment found")
 PY

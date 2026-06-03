@@ -1,12 +1,99 @@
 import Foundation
 import SQLite3
 
-enum DatabaseSchema {
-    static let currentVersion = 1
+public enum DatabaseSchema {
+    public static let currentVersion = 2
 
-    static let migrationSteps: [DatabaseMigrationStep] = []
+    public static let migrationSteps: [DatabaseMigrationStep] = [
+        DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "terminal metadata tables", requiresBackup: false) { database in
+            try executeBatch(sql: terminalSchemaSQL, database: database)
+        }
+    ]
 
-    static let latestSchemaSQL = """
+    static let terminalSchemaSQL = """
+            CREATE TABLE IF NOT EXISTS terminal_sessions (
+              session_id TEXT PRIMARY KEY,
+              root_directory TEXT NOT NULL UNIQUE,
+              backend TEXT NOT NULL,
+              lifetime_policy TEXT NOT NULL,
+              title TEXT NOT NULL,
+              working_directory TEXT NOT NULL,
+              shell TEXT NOT NULL,
+              command TEXT,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS terminal_runtime_states (
+              session_id TEXT PRIMARY KEY,
+              root_directory TEXT NOT NULL UNIQUE,
+              backend TEXT NOT NULL,
+              service_pid INTEGER NOT NULL,
+              child_pid INTEGER,
+              title TEXT,
+              working_directory TEXT,
+              columns INTEGER,
+              rows INTEGER,
+              state TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              exited_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS terminal_clients (
+              root_directory TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              client_id TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              identity_label TEXT NOT NULL,
+              identity_host_name TEXT,
+              identity_device_name TEXT,
+              identity_network_address TEXT,
+              connected_at TEXT NOT NULL,
+              lease_refreshed_at TEXT NOT NULL,
+              disconnected_at TEXT,
+              PRIMARY KEY (root_directory, client_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS terminal_clients_session_idx
+            ON terminal_clients(session_id);
+
+            CREATE TABLE IF NOT EXISTS terminal_attachments (
+              id TEXT PRIMARY KEY,
+              root_directory TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              client_id TEXT NOT NULL,
+              mode TEXT NOT NULL,
+              attached_at TEXT NOT NULL,
+              detached_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS terminal_attachments_session_idx
+            ON terminal_attachments(session_id);
+
+            CREATE INDEX IF NOT EXISTS terminal_attachments_root_idx
+            ON terminal_attachments(root_directory);
+
+            CREATE UNIQUE INDEX IF NOT EXISTS terminal_attachments_active_owner_unique
+            ON terminal_attachments(root_directory)
+            WHERE detached_at IS NULL AND mode = 'owner';
+
+            CREATE UNIQUE INDEX IF NOT EXISTS terminal_attachments_active_client_unique
+            ON terminal_attachments(root_directory, client_id)
+            WHERE detached_at IS NULL;
+
+            CREATE TABLE IF NOT EXISTS terminal_window_frames (
+              root_directory TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              mode TEXT NOT NULL,
+              x REAL NOT NULL,
+              y REAL NOT NULL,
+              width REAL NOT NULL,
+              height REAL NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (root_directory, mode)
+            );
+        """
+
+    public static let latestSchemaSQL = """
             CREATE TABLE IF NOT EXISTS projects (
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
@@ -225,8 +312,17 @@ enum DatabaseSchema {
               FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
             );
 
+            \(terminalSchemaSQL)
+
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL
             );
         """
+
+    private static func executeBatch(sql: String, database: OpaquePointer) throws {
+        if sqlite3_exec(database, sql, nil, nil, nil) != SQLITE_OK {
+            let message = String(cString: sqlite3_errmsg(database))
+            throw NSError(domain: "spaces.database", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+    }
 }

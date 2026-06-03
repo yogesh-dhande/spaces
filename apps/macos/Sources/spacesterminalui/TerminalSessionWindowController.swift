@@ -130,6 +130,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var pendingWindowFramePersistTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
     private var isClientAttached = false
+    private var lastRequestedAttachmentMode: TerminalAttachmentMode?
     private var closesForSessionTermination = false
     private var didCloseWindow = false
     private var lastObservedAttachmentMode: TerminalAttachmentMode?
@@ -275,7 +276,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         didCloseWindow = false
         if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
         let attachStartedAt = Date()
-        if !defersGhosttyClientAttach { attachLocalClientIfNeeded() }
+        if !defersGhosttyClientAttach { attachLocalClientIfNeeded(mode: initialAttachmentModeForShow()) }
         logShowStage(startedAt: attachStartedAt, requestID: requestID, detail: "stage=attach_client deferred=\(defersGhosttyClientAttach ? 1 : 0)")
         let preRefreshStartedAt = Date()
         refreshNow(allowGhosttyOwnerAttach: false)
@@ -304,6 +305,14 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         assignPreferredFirstResponder()
         logShowStage(startedAt: firstResponderStartedAt, requestID: requestID, detail: "stage=assign_first_responder")
         logFocusMetric("terminal_window_show", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "show")")
+    }
+
+    private func initialAttachmentModeForShow() -> TerminalAttachmentMode {
+        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner else { return preferredAttachmentMode }
+        guard let ownerClient = activeOwnerClient(snapshot: try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) else {
+            return preferredAttachmentMode
+        }
+        return ownerClient.id == client.id ? .owner : .viewer
     }
 
     private func shouldDeferInitialOwnerPresentation(wasVisible: Bool) -> Bool {
@@ -421,8 +430,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         guard backend == .ghosttyEmbedded else { return }
         preferredAttachmentMode = .owner
         if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
-        refreshNow(allowGhosttyOwnerAttach: false)
-        let hasDifferentActiveOwner = lastObservedOwnerClientID != nil && lastObservedOwnerClientID != client.id
+        lastObservedRuntimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastObservedRuntimeState
+        let currentOwnerClient = activeOwnerClient(snapshot: try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths))
+        lastObservedOwnerClientID = currentOwnerClient?.id
+        let hasDifferentActiveOwner = currentOwnerClient != nil && currentOwnerClient?.id != client.id
         if hasDifferentActiveOwner && isInteractiveRuntimeState(lastObservedRuntimeState) {
             takeOverOwnership()
             return
@@ -446,7 +457,12 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false)
             if !sessionIsTerminating { ghosttyRendererHost?.releaseRendererSurface() }
         }
-        if sessionIsTerminating { isClientAttached = false } else { detachLocalClientIfNeeded(synchronously: detachClientSynchronouslyOnClose) }
+        if sessionIsTerminating {
+            isClientAttached = false
+            lastRequestedAttachmentMode = nil
+        } else {
+            detachLocalClientIfNeeded(synchronously: detachClientSynchronouslyOnClose)
+        }
         refreshTask?.cancel()
         refreshTask = nil
         onWindowClose?(sessionID, client.id)
@@ -925,9 +941,40 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
             lastObservedRuntimeState = runtimeState
             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
-            if backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, allowGhosttyOwnerAttach { attachLocalClientIfNeeded() }
-            let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
-            let currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
+            var attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+            var currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
+            if backend == .ghosttyEmbedded {
+                let activeAttachment = attachmentSnapshot?.attachments.last { $0.clientID == client.id && $0.detachedAt == nil }
+                if let activeAttachment {
+                    isClientAttached = true
+                    lastRequestedAttachmentMode = activeAttachment.mode
+                } else {
+                    let wasObservedAsAttachedOwner =
+                        isClientAttached || lastObservedAttachmentMode == .owner || lastObservedOwnerClientID == client.id
+                    isClientAttached = false
+                    lastRequestedAttachmentMode = nil
+                    lastObservedAttachmentMode = nil
+                    if wasObservedAsAttachedOwner, preferredAttachmentMode == .owner, let currentOwnerClient, currentOwnerClient.id != client.id {
+                        preferredAttachmentMode = .viewer
+                    }
+                }
+                let canAttachAsOwner = currentOwnerClient == nil || currentOwnerClient?.id == client.id
+                let attachmentModeToRequest: TerminalAttachmentMode?
+                if preferredAttachmentMode == .owner {
+                    if canAttachAsOwner {
+                        attachmentModeToRequest = allowGhosttyOwnerAttach && activeAttachment?.mode != .owner ? .owner : nil
+                    } else {
+                        attachmentModeToRequest = activeAttachment == nil ? .viewer : nil
+                    }
+                } else {
+                    attachmentModeToRequest = activeAttachment == nil ? preferredAttachmentMode : nil
+                }
+                if let attachmentModeToRequest {
+                    attachLocalClientIfNeeded(mode: attachmentModeToRequest)
+                    attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+                    currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
+                }
+            }
             let isOwner = currentOwnerClient?.id == client.id || (currentOwnerClient == nil && preferredAttachmentMode == .owner)
             let currentTitle = currentWindowTitle(fallback: currentLaunchConfiguration.title, isOwner: isOwner)
             let currentWorkingDirectory = currentSummaryWorkingDirectory(fallback: currentLaunchConfiguration.workingDirectory)
@@ -1097,11 +1144,13 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         updateHeaderLayoutVisibility()
     }
 
-    private func attachLocalClientIfNeeded() {
-        guard !isClientAttached else { return }
+    private func attachLocalClientIfNeeded(mode: TerminalAttachmentMode? = nil) {
+        let attachmentMode = mode ?? preferredAttachmentMode
+        guard !isClientAttached || lastRequestedAttachmentMode != attachmentMode else { return }
         do {
-            try attachClientAction(client, preferredAttachmentMode)
+            try attachClientAction(client, attachmentMode)
             isClientAttached = true
+            lastRequestedAttachmentMode = attachmentMode
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
 
@@ -1110,12 +1159,14 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         guard synchronously else {
             let clientID = client.id
             isClientAttached = false
+            lastRequestedAttachmentMode = nil
             Task.detached(priority: .utility) { [detachClientAction] in try? detachClientAction(clientID) }
             return
         }
         do {
             try detachClientAction(client.id)
             isClientAttached = false
+            lastRequestedAttachmentMode = nil
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
 

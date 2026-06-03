@@ -4,6 +4,26 @@ import XCTest
 @testable import spacesterminalcore
 
 final class TerminalOutputTailTests: XCTestCase {
+    private var originalDatabasePath: String?
+    private var databaseRoot: URL?
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        databaseRoot = root
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+    }
+
+    override func tearDownWithError() throws {
+        if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+        if let databaseRoot { try? FileManager.default.removeItem(at: databaseRoot) }
+        databaseRoot = nil
+        originalDatabasePath = nil
+        try super.tearDownWithError()
+    }
+
     func testTailReturnsLastLinesWithoutScanningWholeFileInCaller() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let text = (1...10).map { "line-\($0)" }.joined(separator: "\n") + "\n"

@@ -4634,10 +4634,8 @@ public final class WorkspaceOrchestrator {
 
     private func builtInSessionIsStillLive(sessionID: String) -> Bool {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
-        guard FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) else {
-            return false
-        }
         guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return false }
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return false }
         guard runtimeState.state == .starting || runtimeState.state == .running else { return false }
         return isProcessAlive(pid: Int(runtimeState.servicePID))
     }
@@ -5957,9 +5955,9 @@ public final class WorkspaceOrchestrator {
             let sessionID = process.terminalNativeID ?? process.terminalTrackingID
             guard let sessionID, !sessionID.isEmpty else { return false }
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
-            guard FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) else {
-                return false
-            }
+            guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return false }
+            guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return false }
+            guard runtimeState.state == .starting || runtimeState.state == .running else { return false }
             guard let pid = resolvedRuntimePID(for: process), isProcessAlive(pid: pid) else { return false }
             let (_, workspace) = try resolveWorkspace(id: workspaceID)
             let snapshot = bestEffortYabaiWindowSnapshot()

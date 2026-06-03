@@ -424,28 +424,31 @@ PY
 
 wait_for_session_owner() {
   local session_id="$1"
-  python3 - "$RUNTIME_DIR" "$session_id" <<'PY'
-import json
-import pathlib
+  python3 - "$DB_PATH" "$RUNTIME_DIR" "$session_id" <<'PY'
+import os
+import sqlite3
 import sys
 import time
 
-runtime_dir = pathlib.Path(sys.argv[1])
-session_id = sys.argv[2]
-attachments_path = runtime_dir / "terminal" / "sessions" / session_id / "attachments.json"
+db_path = sys.argv[1]
+root_directory = os.path.normpath(os.path.join(sys.argv[2], "terminal", "sessions", sys.argv[3]))
+session_id = sys.argv[3]
 deadline = time.time() + 30
 last_snapshot = ""
 while time.time() < deadline:
-    if attachments_path.exists():
-        try:
-            payload = json.loads(attachments_path.read_text())
-        except json.JSONDecodeError:
-            time.sleep(0.1)
-            continue
-        last_snapshot = json.dumps(payload, indent=2, sort_keys=True)
-        for attachment in payload:
-            if attachment.get("mode") == "owner" and attachment.get("detachedAt") is None and attachment.get("clientID"):
-                raise SystemExit(0)
+    with sqlite3.connect(db_path) as db:
+        rows = db.execute(
+            """
+            SELECT client_id, mode, COALESCE(detached_at, '')
+            FROM terminal_attachments
+            WHERE root_directory = ?
+            ORDER BY attached_at, id
+            """,
+            (root_directory,),
+        ).fetchall()
+    last_snapshot = repr(rows)
+    if any(mode == "owner" and not detached_at and client_id for client_id, mode, detached_at in rows):
+        raise SystemExit(0)
     time.sleep(0.1)
 raise SystemExit(f"Timed out waiting for active owner attachment for {session_id}.\n{last_snapshot}")
 PY
@@ -725,6 +728,7 @@ launch_codex_on_mac_owner() {
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -736,7 +740,6 @@ spacese2e = Path(sys.argv[3])
 command_text = sys.argv[4]
 scenario_dir = Path(sys.argv[5])
 runtime_root = demo_root / "runtime"
-attachments_path = runtime_root / "terminal" / "sessions" / session_id / "attachments.json"
 owner_dump_path = scenario_dir / "codex-mac-owner-dump.json"
 output_log_path = runtime_root / "terminal" / "sessions" / session_id / "output.log"
 
@@ -755,12 +758,22 @@ def socket_path(root: Path, session_id: str) -> Path:
     return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
 
 def current_owner_client_id() -> str:
-    payload = json.loads(attachments_path.read_text())
-    for attachment in payload:
-        if attachment.get("mode") == "owner" and attachment.get("detachedAt") is None:
-            client_id = attachment.get("clientID")
-            if client_id:
-                return client_id
+    root_directory = os.path.normpath(str(runtime_root / "terminal" / "sessions" / session_id))
+    with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
+        row = db.execute(
+            """
+            SELECT client_id
+            FROM terminal_attachments
+            WHERE root_directory = ?
+              AND mode = 'owner'
+              AND detached_at IS NULL
+            ORDER BY attached_at DESC
+            LIMIT 1
+            """,
+            (root_directory,),
+        ).fetchone()
+    if row:
+        return row[0]
     raise RuntimeError("No active owner attachment was found for the demo session.")
 
 def send_request(request: dict) -> dict:
@@ -1162,6 +1175,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -1182,7 +1196,6 @@ scenario_dir = Path(sys.argv[12])
 mobile_device_label = sys.argv[13]
 mobile_artifact_name = sys.argv[14]
 runtime_root = demo_root / "runtime"
-attachments_path = runtime_root / "terminal" / "sessions" / session_id / "attachments.json"
 output_log_path = runtime_root / "terminal" / "sessions" / session_id / "output.log"
 
 config = json.loads(ui_test_config.read_text())
@@ -1252,26 +1265,45 @@ def socket_path(root: Path, session_id: str) -> Path:
 
 def current_owner_client_id(excluded_client_ids: set[str] | None = None) -> str:
     excluded_client_ids = excluded_client_ids or set()
-    payload = json.loads(attachments_path.read_text())
-    for attachment in payload:
-        if attachment.get("mode") == "owner" and attachment.get("detachedAt") is None:
-            client_id = attachment.get("clientID")
-            if client_id and client_id not in excluded_client_ids:
-                return client_id
-    raise RuntimeError(f"No active owner attachment was found.\n{json.dumps(payload, indent=2)}")
+    root_directory = os.path.normpath(str(runtime_root / "terminal" / "sessions" / session_id))
+    with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
+        rows = db.execute(
+            """
+            SELECT client_id
+            FROM terminal_attachments
+            WHERE root_directory = ?
+              AND mode = 'owner'
+              AND detached_at IS NULL
+            ORDER BY attached_at DESC
+            """,
+            (root_directory,),
+        ).fetchall()
+    for (client_id,) in rows:
+        if client_id not in excluded_client_ids:
+            return client_id
+    raise RuntimeError(f"No active owner attachment was found. rows={rows!r}")
 
 def wait_for_active_owner(excluded_client_ids: set[str] | None = None, timeout: float = 20) -> str:
     deadline = time.time() + timeout
     last_snapshot = ""
+    root_directory = os.path.normpath(str(runtime_root / "terminal" / "sessions" / session_id))
     while time.time() < deadline:
-        if attachments_path.exists():
-            payload = json.loads(attachments_path.read_text())
-            last_snapshot = json.dumps(payload, indent=2, sort_keys=True)
-            for attachment in payload:
-                if attachment.get("mode") == "owner" and attachment.get("detachedAt") is None:
-                    client_id = attachment.get("clientID")
-                    if client_id and client_id not in (excluded_client_ids or set()):
-                        return client_id
+        with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
+            rows = db.execute(
+                """
+                SELECT client_id
+                FROM terminal_attachments
+                WHERE root_directory = ?
+                  AND mode = 'owner'
+                  AND detached_at IS NULL
+                ORDER BY attached_at DESC
+                """,
+                (root_directory,),
+            ).fetchall()
+        last_snapshot = repr(rows)
+        for (client_id,) in rows:
+            if client_id not in (excluded_client_ids or set()):
+                return client_id
         time.sleep(0.1)
     raise RuntimeError(f"Timed out waiting for active owner.\n{last_snapshot}")
 
@@ -1724,6 +1756,7 @@ import json
 import os
 import shlex
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -1736,7 +1769,6 @@ spacese2e = Path(sys.argv[4])
 line_count = int(sys.argv[5])
 scenario_dir = Path(sys.argv[6])
 runtime_root = demo_root / "runtime"
-attachments_path = runtime_root / "terminal" / "sessions" / session_id / "attachments.json"
 owner_dump_path = scenario_dir / "scrollback-owner-dump.json"
 
 env = os.environ | {
@@ -1757,12 +1789,22 @@ def socket_path(root: Path, session_id: str) -> Path:
     return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
 
 def current_owner_client_id() -> str:
-    payload = json.loads(attachments_path.read_text())
-    for attachment in payload:
-        if attachment.get("mode") == "owner" and attachment.get("detachedAt") is None:
-            client_id = attachment.get("clientID")
-            if client_id:
-                return client_id
+    root_directory = os.path.normpath(str(runtime_root / "terminal" / "sessions" / session_id))
+    with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
+        row = db.execute(
+            """
+            SELECT client_id
+            FROM terminal_attachments
+            WHERE root_directory = ?
+              AND mode = 'owner'
+              AND detached_at IS NULL
+            ORDER BY attached_at DESC
+            LIMIT 1
+            """,
+            (root_directory,),
+        ).fetchone()
+    if row:
+        return row[0]
     raise RuntimeError("No active owner attachment was found for the demo session.")
 
 def send_request(request: dict) -> dict:
@@ -2056,6 +2098,7 @@ run_ownership_guard_scenario() {
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -2074,7 +2117,6 @@ mobile_device_key = sys.argv[9]
 mobile_device_name = sys.argv[10]
 mobile_device_label = sys.argv[11]
 runtime_root = demo_root / "runtime"
-attachments_path = runtime_root / "terminal" / "sessions" / session_id / "attachments.json"
 output_log_path = runtime_root / "terminal" / "sessions" / session_id / "output.log"
 pairing = json.loads((demo_root / "pairing.json").read_text())[mobile_device_key]
 
@@ -2125,15 +2167,24 @@ def active_owner(excluded: set[str] | None = None, timeout: float = 20) -> str:
     excluded = excluded or set()
     deadline = time.time() + timeout
     last_snapshot = ""
+    root_directory = os.path.normpath(str(runtime_root / "terminal" / "sessions" / session_id))
     while time.time() < deadline:
-        if attachments_path.exists():
-            payload = json.loads(attachments_path.read_text())
-            last_snapshot = json.dumps(payload, indent=2, sort_keys=True)
-            for attachment in payload:
-                if attachment.get("mode") == "owner" and attachment.get("detachedAt") is None:
-                    client_id = attachment.get("clientID")
-                    if client_id and client_id not in excluded:
-                        return client_id
+        with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
+            rows = db.execute(
+                """
+                SELECT client_id
+                FROM terminal_attachments
+                WHERE root_directory = ?
+                  AND mode = 'owner'
+                  AND detached_at IS NULL
+                ORDER BY attached_at DESC
+                """,
+                (root_directory,),
+            ).fetchall()
+        last_snapshot = repr(rows)
+        for (client_id,) in rows:
+            if client_id not in excluded:
+                return client_id
         time.sleep(0.1)
     raise RuntimeError(f"Timed out waiting for active owner.\n{last_snapshot}")
 
