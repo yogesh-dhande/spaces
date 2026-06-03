@@ -196,7 +196,7 @@ apps/macos/Tests/render_update_profile_summary.py \
   --baseline-summary <full-summary-json>
 ```
 
-The summarizer copies the raw JSONL log and writes normalized JSON under `apps/macos/.artifacts/terminal-render-profiles/`, an ignored output directory. Each summary records git SHA, Ghostty submodule SHA, render mode, terminal size, sample and warmup counts, fixture command, network profile, target, timestamp, byte totals, average bytes per frame, peak 1s and 10s bandwidth, frame mix, output-to-visible latency percentiles, encode/decode/apply CPU-proxy totals, drop/resync/refresh counts, and comparison ratios when a baseline summary is supplied.
+The summarizer copies the raw JSONL log and writes normalized JSON under `apps/macos/.artifacts/terminal-render-profiles/`, an ignored output directory. Each summary records git SHA, Ghostty submodule SHA, render mode, terminal size, sample and warmup counts, fixture command, network profile, target, timestamp, byte totals, average bytes per frame, peak 1s and 10s bandwidth, frame mix, scrollRect delta byte totals, output-to-visible latency percentiles, encode/decode/apply CPU-proxy totals, drop/resync/refresh counts, and comparison ratios when a baseline summary is supplied.
 
 For direct CLI verification of Spaces terminal commands:
 

@@ -121,6 +121,20 @@ def attr_counts(records: list[dict[str, Any]], key: str) -> dict[str, int]:
     return counts
 
 
+def delta_events_with_scroll_rects(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        record for record in records
+        if attr(record, "frame_kind") == "delta" and (int_attr(record, "scroll_operation_count") or 0) > 0
+    ]
+
+
+def delta_events_without_scroll_rects(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        record for record in records
+        if attr(record, "frame_kind") == "delta" and (int_attr(record, "scroll_operation_count") or 0) == 0
+    ]
+
+
 def percentile(values: list[float], percent: float) -> float | None:
     if not values:
         return None
@@ -222,6 +236,10 @@ def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_su
     payload_bytes_by_frame_kind = bytes_by_frame_kind(payload_events, "payload_bytes", fallback_to_event_bytes=True)
     materialized_frame_bytes_by_frame_kind = bytes_by_frame_kind(frame_events, "frame_bytes")
     materialized_render_update_bytes_by_frame_kind = bytes_by_frame_kind(frame_events, "render_update_bytes")
+    scroll_rect_frame_events = delta_events_with_scroll_rects(frame_events)
+    scroll_rect_payload_events = delta_events_with_scroll_rects(payload_events)
+    cell_delta_frame_events = delta_events_without_scroll_rects(frame_events)
+    cell_delta_payload_events = delta_events_without_scroll_rects(payload_events)
 
     encode_ms = [value for record in events for value in [number(attr(record, "frame_encode_ms") or attr(record, "render_update_encode_ms"))] if value is not None]
     decode_ms = [value for record in events for value in [number(attr(record, "decode_ms"))] if value is not None]
@@ -272,6 +290,20 @@ def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_su
             "delta_frame_count": delta_frame_count,
             "resync_frame_count": resync_frame_count,
             "render_frame_count": render_frame_count,
+            "scroll_rect_delta_frame_count": len(scroll_rect_frame_events),
+            "scroll_rect_delta_payload_bytes": sum_event_bytes(scroll_rect_payload_events),
+            "scroll_rect_delta_render_update_bytes": first_nonzero(
+                sum_int_attr(scroll_rect_payload_events, "render_update_bytes"),
+                sum_int_attr(scroll_rect_frame_events, "render_update_bytes"),
+            ),
+            "scroll_rect_delta_changed_cell_count": sum_int_attr(scroll_rect_frame_events, "changed_cell_count"),
+            "cell_delta_frame_count": len(cell_delta_frame_events),
+            "cell_delta_payload_bytes": sum_event_bytes(cell_delta_payload_events),
+            "cell_delta_render_update_bytes": first_nonzero(
+                sum_int_attr(cell_delta_payload_events, "render_update_bytes"),
+                sum_int_attr(cell_delta_frame_events, "render_update_bytes"),
+            ),
+            "cell_delta_changed_cell_count": sum_int_attr(cell_delta_frame_events, "changed_cell_count"),
             "output_to_visible_latency_ms": stats(latency_ms),
             "encode_ms": stats(encode_ms),
             "decode_ms": stats(decode_ms),
@@ -368,6 +400,10 @@ def print_table(summary: dict[str, Any], compare: dict[str, Any] | None, output_
         ("payload bytes by kind", metrics["payload_bytes_by_frame_kind"]),
         ("update bytes by kind", metrics["materialized_render_update_bytes_by_frame_kind"]),
         ("frames full/delta/resync", f"{metrics['full_frame_count']}/{metrics['delta_frame_count']}/{metrics['resync_frame_count']}"),
+        ("scrollRect delta frames/bytes", f"{metrics['scroll_rect_delta_frame_count']}/{metrics['scroll_rect_delta_payload_bytes']}"),
+        ("scrollRect update bytes", metrics["scroll_rect_delta_render_update_bytes"]),
+        ("cell delta frames/bytes", f"{metrics['cell_delta_frame_count']}/{metrics['cell_delta_payload_bytes']}"),
+        ("cell delta update bytes", metrics["cell_delta_render_update_bytes"]),
         ("latency p50/p95/p99 ms", f"{fmt(metrics['output_to_visible_latency_ms']['p50'])}/{fmt(metrics['output_to_visible_latency_ms']['p95'])}/{fmt(metrics['output_to_visible_latency_ms']['p99'])}"),
         ("encode p50/p95 ms", f"{fmt(metrics['encode_ms']['p50'])}/{fmt(metrics['encode_ms']['p95'])}"),
         ("decode p50/p95 ms", f"{fmt(metrics['decode_ms']['p50'])}/{fmt(metrics['decode_ms']['p95'])}"),
