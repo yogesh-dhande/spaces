@@ -1,6 +1,5 @@
 import XCTest
 import spacesmobilecore
-import spacesterminalcore
 
 final class SpacesMobileBridgeProtocolTests: XCTestCase {
     func testRequestRoundTripsScrollModsThroughCodec() throws {
@@ -19,21 +18,4 @@ final class SpacesMobileBridgeProtocolTests: XCTestCase {
         XCTAssertNil(request.scrollMods)
     }
 
-    func testRequestRoundTripsRenderUpdateProtocolsThroughCodec() throws {
-        let request = SpacesMobileBridgeRequest(
-            command: "subscribe", authToken: "SECRET", sessionID: "session-1", clientID: "ios-client",
-            renderUpdateProtocols: [GhosttyRenderUpdate.binaryEncoding])
-
-        let decoded = try SpacesMobileBridgeCodec.decodeRequest(SpacesMobileBridgeCodec.encodeRequest(request))
-
-        XCTAssertEqual(decoded.renderUpdateProtocols, [GhosttyRenderUpdate.binaryEncoding])
-        XCTAssertEqual(decoded, request)
-    }
-
-    func testLegacyRequestDecodesWithoutRenderUpdateProtocols() throws {
-        let payload = #"{"command":"subscribe","sessionID":"session-1","clientID":"ios-client"}"#.data(using: .utf8)!
-        let request = try SpacesMobileBridgeCodec.decodeRequest(payload)
-
-        XCTAssertNil(request.renderUpdateProtocols)
-    }
 }

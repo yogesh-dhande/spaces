@@ -6,21 +6,6 @@ public enum GhosttyRenderUpdateKind: String, Codable, Sendable, Equatable {
     case resyncRequired
 }
 
-public enum GhosttyRenderUpdateMode: String, Sendable, Equatable {
-    public static let environmentKey = "SPACES_TERMINAL_RENDER_UPDATE_MODE"
-
-    case full
-    case delta
-    case auto
-
-    public static func resolved(environment: [String: String] = ProcessInfo.processInfo.environment) -> Self {
-        guard let rawValue = environment[environmentKey]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !rawValue.isEmpty else {
-            return .auto
-        }
-        return Self(rawValue: rawValue) ?? .auto
-    }
-}
-
 public struct GhosttyRenderScrollRectOperation: Codable, Sendable, Equatable {
     public let rowStart: Int
     public let rowCount: Int
@@ -260,10 +245,10 @@ public enum GhosttyRenderUpdateApplier {
 
 public enum GhosttyRenderUpdateFactory {
     public static func makeUpdate(
-        target frame: GhosttyRenderFrame, baseline: GhosttyRenderUpdateBaseline?, mode: GhosttyRenderUpdateMode = .auto,
-        nativeScrollRects: [GhosttyRenderScrollRectOperation] = []
+        target frame: GhosttyRenderFrame, baseline: GhosttyRenderUpdateBaseline?, forceFull: Bool = false,
+        forceFullReason: String = "initial_baseline", nativeScrollRects: [GhosttyRenderScrollRectOperation] = []
     ) -> GhosttyRenderUpdate {
-        guard mode != .full else { return .full(frame, fallbackReason: "mode_full") }
+        guard !forceFull else { return .full(frame, fallbackReason: forceFullReason) }
         guard let baseline else { return .full(frame, fallbackReason: "missing_baseline") }
         guard canDelta(from: baseline, to: frame) else { return .full(frame, fallbackReason: "baseline_mismatch") }
         guard validGrid(frame.snapshot), validGrid(baseline.snapshot) else { return .full(frame, fallbackReason: "invalid_grid") }
@@ -272,13 +257,7 @@ public enum GhosttyRenderUpdateFactory {
         }
 
         let delta = makeDelta(from: baseline, to: frame, scrollRects: scrollRects)
-        let update = GhosttyRenderUpdate.delta(delta)
-        guard mode == .auto else { return update }
-        guard let deltaBytes = try? GhosttyRenderUpdateBinaryCodec.encode(update),
-            let fullBytes = try? GhosttyRenderUpdateBinaryCodec.encode(.full(frame, fallbackReason: "delta_larger_than_full"))
-        else { return update }
-        guard deltaBytes.count < fullBytes.count else { return .full(frame, fallbackReason: "delta_larger_than_full") }
-        return update
+        return GhosttyRenderUpdate.delta(delta)
     }
 
     private static func canDelta(from baseline: GhosttyRenderUpdateBaseline, to frame: GhosttyRenderFrame) -> Bool {

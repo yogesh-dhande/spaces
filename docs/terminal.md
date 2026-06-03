@@ -53,7 +53,7 @@ Each live session also participates in a service-level control path:
 ## macOS Window Behavior
 - `SpacesApp` uses `RemoteGhosttySessionHost` for service-owned sessions and subscribes to the daemon-owned session state stream for owner handoff compatibility and metadata updates.
 - `TerminalSessionWindowController` attaches a local owner or viewer client record to the daemon-owned session, keeps window reuse keyed by stable session ID, renders owner windows from the service render-frame stream, and uses a compact ownership/status shell for non-owner windows instead of rendering a passive terminal transcript.
-- The macOS daemon client path uses the service live Ghostty render stream for owner bootstrap and output refreshes while a macOS window owns the session. V1 frames are encoded in the existing Codable state stream and carry Ghostty-exported grid, cursor, color, and style state for local mirror views. V2 render updates are compact binary payloads carried beside the same state stream; they encode full frames, cell-run deltas, and Ghostty-exported scroll-rectangle operations with base and target revisions. VT replay, snapshot-to-VT encoding, raw output bytes, and `output.log` are not terminal-rendering fallbacks.
+- The macOS daemon client path uses the service live Ghostty render stream for owner bootstrap and output refreshes while a macOS window owns the session. The state stream carries compact binary v2 render updates: full updates establish baselines and resync clients, while steady updates use cell-run deltas and Ghostty-exported scroll-rectangle operations with base and target revisions. VT replay, snapshot-to-VT encoding, raw output bytes, and `output.log` are not terminal-rendering fallbacks.
 - Title and working-directory updates still follow live session metadata emitted by the service.
 - Owner or viewer attachment state is still authoritative in `attachments.json`.
 - Only the active owner attachment may send input or drive PTY size.
@@ -102,7 +102,7 @@ Each live session also participates in a service-level control path:
 ## Ghostty Compatibility Boundary
 - The Ghostty fork exposes additive headless-session, render-frame, and mirror-renderer entrypoints for Spaces without changing default Ghostty app behavior. Spaces keeps the v2 render-update protocol behind its first-party service and bridge boundary; current clients materialize v2 updates back into Ghostty mirror snapshots until the prebuilt GhosttyKit contract exposes direct native render-update apply calls.
 - The service remains the only PTY and session-state owner. Client windows and mobile views import service frames into local mirror state and may only send input, resize, mouse, keyboard, or scroll events while their client ID and owner epoch match the active owner.
-- V1 render frames remain available for compatibility, diagnostics, and render-mode A/B profiling. `SPACES_TERMINAL_RENDER_UPDATE_MODE=full|delta|auto` controls v2 payload generation for the same build, and `auto` falls back to full updates when a baseline is missing, dimensions or owner epochs change, or a delta payload is larger than the full v2 update.
+- The first-party render stream uses v2 render updates only. Full v2 updates are retained for initial baselines and correctness resyncs; steady-state output, prompt redraws, and scrollback movement use deltas with native scroll-rectangle operations when Ghostty provides them.
 - Pixel streaming is not the primary architecture.
 
 ## Validation

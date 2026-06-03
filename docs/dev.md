@@ -168,35 +168,25 @@ apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-scrollback-latency --netwo
 
 The latency scripts are fast performance iteration lanes rather than the canonical correctness gate. They write `terminal-latency-summary.json`, print p50, p95, max, per-sample timings, and render payload rates, fail input scenarios only on gross latency regressions or render-frame decode failures, and leave report-only targets visible in the terminal output. Input summaries include enqueue-to-RPC-begin, RPC duration, frame-apply or frame-publish timing, RPC-end-to-render-visible, and event-to-visible totals. Mac probes target the debug app by executable name; input totals are key-down-to-rendered-text, scroll totals are wheel-event-to-rendered-text-change with alternating directions across samples, and command-catchup totals use command-submit-to-visible output from one warmed shell session across samples. `mac-scrollback-latency` uses large scroll deltas and `mac-scrollback-partial-latency` uses smaller within-screen deltas. Mac summaries also split owner input activity to state change, state change to frame export, and frame export to mirror apply. Mobile summaries split host publish to relay read, relay read to network send begin, and network send begin to stream-visible. Scrollback summaries measure rendered text changes, no-op gesture counts, and render cadence as report-only metrics. The `ios-constrained` mobile profile shapes the standalone bridge with `80ms` RTT, `8Mbps` bandwidth, and `16KB` chunks unless `SPACES_MOBILE_BRIDGE_NETWORK_RTT_MS`, `SPACES_MOBILE_BRIDGE_NETWORK_BANDWIDTH_BPS`, or `SPACES_MOBILE_BRIDGE_NETWORK_CHUNK_BYTES` override those values.
 
-For paired render-update profiling, run the same latency scenario twice with a fixed sample count, terminal size, fixture command, target, and network profile while changing only `SPACES_TERMINAL_RENDER_UPDATE_MODE`:
+For render-update profiling, run the latency scenario with a fixed sample count, terminal size, fixture command, target, and network profile. The scripts exercise the production v2 stream: full v2 updates for initial baselines and resyncs, plus delta updates with native scroll-rectangle operations for steady output and scrollback.
 
 ```bash
-SPACES_TERMINAL_RENDER_UPDATE_MODE=full KEEP_ROOT=1 apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-input-latency --network-profile local --samples 12
-SPACES_TERMINAL_RENDER_UPDATE_MODE=delta KEEP_ROOT=1 apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-input-latency --network-profile local --samples 12
+KEEP_ROOT=1 apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-input-latency --network-profile local --samples 12
 ```
 
-Summarize each preserved `mobile-terminal-performance.jsonl` or `terminal-performance.jsonl` with the latency summary JSON from the same work root. Render-update summaries report total selected payload bytes plus split fields for network send bytes, local publish/receive payload bytes, materialized frame bytes, materialized render-update bytes, frame-kind byte totals, fallback reasons, and drop reasons:
+Summarize each preserved `mobile-terminal-performance.jsonl` or `terminal-performance.jsonl` with the latency summary JSON from the same work root. Render-update summaries report total selected payload bytes plus split fields for network send bytes, local publish/receive payload bytes, materialized render-update bytes, frame-kind byte totals, fallback reasons, and drop reasons:
 
 ```bash
 apps/macos/Tests/render_update_profile_summary.py \
   --performance-log <work-root>/mobile-terminal-performance.jsonl \
   --summary-json <work-root>/terminal-latency-summary.json \
-  --render-mode full \
+  --render-mode production \
   --sample-count 12 \
   --network-profile local \
   --target ios-input-latency
-
-apps/macos/Tests/render_update_profile_summary.py \
-  --performance-log <work-root>/mobile-terminal-performance.jsonl \
-  --summary-json <work-root>/terminal-latency-summary.json \
-  --render-mode delta \
-  --sample-count 12 \
-  --network-profile local \
-  --target ios-input-latency \
-  --baseline-summary <full-summary-json>
 ```
 
-The summarizer copies the raw JSONL log and writes normalized JSON under `apps/macos/.artifacts/terminal-render-profiles/`, an ignored output directory. Each summary records git SHA, Ghostty submodule SHA, render mode, terminal size, sample and warmup counts, fixture command, network profile, target, timestamp, byte totals, average bytes per frame, peak 1s and 10s bandwidth, frame mix, scrollRect delta byte totals, output-to-visible latency percentiles, encode/decode/apply CPU-proxy totals, drop/resync/refresh counts, and comparison ratios when a baseline summary is supplied.
+The summarizer copies the raw JSONL log and writes normalized JSON under `apps/macos/.artifacts/terminal-render-profiles/`, an ignored output directory. Each summary records git SHA, Ghostty submodule SHA, render mode, terminal size, sample and warmup counts, fixture command, network profile, target, timestamp, byte totals, average bytes per update, peak 1s and 10s bandwidth, frame mix, scrollRect delta byte totals, output-to-visible latency percentiles, encode/decode/apply CPU-proxy totals, and drop/resync/refresh counts.
 
 For direct CLI verification of Spaces terminal commands:
 

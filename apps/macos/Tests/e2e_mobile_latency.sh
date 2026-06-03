@@ -240,10 +240,6 @@ base_env = os.environ.copy()
 events: list[dict] = []
 stream_records: list[dict] = []
 decode_failures = 0
-render_update_encoding = "spaces.terminal.render-update.v2.binary"
-render_update_mode = os.environ.get("SPACES_TERMINAL_RENDER_UPDATE_MODE", "full").strip().lower()
-request_render_updates = render_update_mode in {"delta", "auto"}
-render_update_protocols = [render_update_encoding] if request_render_updates else []
 render_update_baselines: dict[str, dict] = {}
 
 budgets = {
@@ -304,7 +300,7 @@ def last_performance_event(
     after_ns: int,
     before_ns: int | None = None,
     timeout: float = 1.0,
-    require_render_frame: bool = True,
+    require_render_payload: bool = True,
 ) -> tuple[dict, int] | None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -318,7 +314,7 @@ def last_performance_event(
             if before_ns is not None and emitted_ns > before_ns:
                 continue
             attributes = record.get("attributes") or {}
-            if require_render_frame:
+            if require_render_payload:
                 has_render_payload = attributes.get("render_frame") == "1" or attributes.get("render_update") == "1"
                 if not has_render_payload or attributes.get("drop_reason") not in (None, "none"):
                     continue
@@ -415,16 +411,6 @@ def connect_stream(payload: dict) -> subprocess.Popen:
         text=True,
         env=base_env,
     )
-
-
-def decode_frame(payload: dict) -> dict | None:
-    encoded = payload.get("renderFrame")
-    if not encoded:
-        return None
-    try:
-        return json.loads(base64.b64decode(encoded))
-    except Exception:
-        return None
 
 
 class RenderUpdateReader:
@@ -657,26 +643,8 @@ def apply_render_update_delta(delta: dict, snapshot: dict) -> dict:
     }
 
 
-def encoded_render_frame(session_revision: int | None, owner_epoch: int, snapshot: dict) -> str:
-    frame = {
-        "version": 1,
-        "sessionRevision": session_revision,
-        "ownerEpoch": owner_epoch,
-        "snapshot": snapshot,
-    }
-    return base64.b64encode(json.dumps(frame, separators=(",", ":")).encode("utf-8")).decode("ascii")
-
-
 def materialize_render_update(payload: dict) -> dict:
     session_id = payload.get("sessionID")
-    decoded_frame = decode_frame(payload)
-    if session_id and decoded_frame and decoded_frame.get("snapshot"):
-        render_update_baselines[session_id] = {
-            "sessionRevision": decoded_frame.get("sessionRevision"),
-            "ownerEpoch": decoded_frame.get("ownerEpoch") or 0,
-            "snapshot": decoded_frame["snapshot"],
-        }
-        return payload
     if not session_id or not payload.get("renderUpdate"):
         return payload
     try:
@@ -709,15 +677,14 @@ def materialize_render_update(payload: dict) -> dict:
         }
     render_update_baselines[session_id] = baseline
     materialized = dict(payload)
-    materialized["renderFrame"] = encoded_render_frame(baseline["sessionRevision"], baseline["ownerEpoch"], baseline["snapshot"])
+    materialized["_materializedRenderSnapshot"] = baseline["snapshot"]
+    materialized["_materializedSessionRevision"] = baseline["sessionRevision"]
+    materialized["_materializedOwnerEpoch"] = baseline["ownerEpoch"]
     return materialized
 
 
 def plain_text(payload: dict) -> str:
-    frame = decode_frame(payload)
-    if not frame:
-        return ""
-    snapshot = frame.get("snapshot") or {}
+    snapshot = payload.get("_materializedRenderSnapshot") or {}
     columns = int(snapshot.get("columns") or 0)
     rows = int(snapshot.get("rows") or 0)
     cells = snapshot.get("cells") or []
@@ -754,20 +721,18 @@ def wait_for_line(stream: subprocess.Popen, predicate, timeout: float = 10) -> t
             decode_failures += 1
             stream_records.append({"received_ns": received_ns, "bytes": line_bytes, "decode_failed": True})
             continue
-        raw_render_frame = bool(payload.get("renderFrame"))
         raw_render_update = bool(payload.get("renderUpdate"))
         payload = materialize_render_update(payload)
+        materialized_snapshot = bool(payload.get("_materializedRenderSnapshot"))
         stream_records.append(
             {
                 "received_ns": received_ns,
                 "bytes": line_bytes,
                 "decode_failed": False,
                 "reason": payload.get("reason"),
-                "render_frame": raw_render_frame,
-                "materialized_render_frame": bool(payload.get("renderFrame")),
-                "render_frame_bytes": len((payload.get("renderFrame") or "").encode("utf-8")),
                 "render_update": raw_render_update,
                 "render_update_bytes": len((payload.get("renderUpdate") or "").encode("utf-8")),
+                "materialized_snapshot": materialized_snapshot,
             }
         )
         if predicate(payload):
@@ -842,7 +807,6 @@ def attach_pair(session_id: str) -> tuple[str, str, subprocess.Popen]:
             "clientApp": client_app,
             "sessionID": session_id,
             "clientID": mobile_client_id,
-            "renderUpdateProtocols": render_update_protocols or None,
         }
     )
     wait_for_line(stream, lambda payload: payload.get("sessionID") == session_id, timeout=10)
@@ -880,7 +844,6 @@ def fetch_state(session_id: str) -> dict:
             "authToken": auth_token,
             "clientApp": client_app,
             "sessionID": session_id,
-            "renderUpdateProtocols": render_update_protocols or None,
         }
     )
     assert response["ok"], response
@@ -891,7 +854,7 @@ def poll_state_contains(session_id: str, needle: str, timeout: float = 10) -> tu
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         state = fetch_state(session_id)
-        if state.get("renderFrame") and needle in plain_text(state):
+        if needle in plain_text(state):
             return state, now_ns()
         time.sleep(0.1)
     raise TimeoutError(f"timed out waiting for terminal state containing {needle!r}")
@@ -902,7 +865,7 @@ def poll_state_text_change(session_id: str, before_text: str, timeout: float = 1
     while time.monotonic() < deadline:
         state = fetch_state(session_id)
         text = plain_text(state)
-        if state.get("renderFrame") and text and text != before_text:
+        if text and text != before_text:
             return state, now_ns()
         time.sleep(0.1)
     raise TimeoutError("timed out waiting for terminal state text change")
@@ -1225,8 +1188,8 @@ def payload_rate_summary(records: list[dict]) -> dict:
             "decode_failures": decode_failures,
             "stale_drops": 0,
             "render_mode": "ghostty-mirror",
-            "render_frame_count": 0,
             "render_update_count": 0,
+            "materialized_snapshot_count": 0,
             "render_cadence_ms": summarize_values([]),
         }
     first_ns = good_records[0]["received_ns"]
@@ -1247,11 +1210,11 @@ def payload_rate_summary(records: list[dict]) -> dict:
             peak_bytes = max(peak_bytes, running)
         return int(peak_bytes / window_seconds)
 
-    frame_records = [record for record in good_records if record.get("render_frame") or record.get("materialized_render_frame")]
+    snapshot_records = [record for record in good_records if record.get("materialized_snapshot")]
     update_records = [record for record in good_records if record.get("render_update")]
-    frame_intervals_ms = [
-        round((frame_records[index]["received_ns"] - frame_records[index - 1]["received_ns"]) / 1_000_000, 3)
-        for index in range(1, len(frame_records))
+    snapshot_intervals_ms = [
+        round((snapshot_records[index]["received_ns"] - snapshot_records[index - 1]["received_ns"]) / 1_000_000, 3)
+        for index in range(1, len(snapshot_records))
     ]
 
     return {
@@ -1261,11 +1224,10 @@ def payload_rate_summary(records: list[dict]) -> dict:
         "decode_failures": decode_failures,
         "stale_drops": 0,
         "render_mode": "ghostty-mirror",
-        "render_frame_count": sum(1 for record in good_records if record.get("render_frame")),
-        "materialized_render_frame_count": len(frame_records),
         "render_update_count": len(update_records),
+        "materialized_snapshot_count": len(snapshot_records),
         "render_update_bytes": sum(record.get("render_update_bytes") or 0 for record in good_records),
-        "render_cadence_ms": summarize_values(frame_intervals_ms),
+        "render_cadence_ms": summarize_values(snapshot_intervals_ms),
     }
 
 
@@ -1286,7 +1248,7 @@ for name, result in scenario_results.items():
     if result.get("budget_enforced", True) and p95 is not None and p95 > budget["gross_p95_ms"]:
         failures.append(f"{name} {network_profile} p95 {p95}ms exceeded gross budget {budget['gross_p95_ms']}ms")
 if payload_metrics["decode_failures"] != 0:
-    failures.append(f"render-frame stream had {payload_metrics['decode_failures']} decode failures")
+    failures.append(f"render-update stream had {payload_metrics['decode_failures']} decode failures")
 if payload_metrics["render_mode"] != "ghostty-mirror":
     failures.append(f"render mode was {payload_metrics['render_mode']}, expected ghostty-mirror")
 
@@ -1336,9 +1298,8 @@ print(
     f"peak1s={payload_metrics['peak_1s_bytes_per_second']} B/s "
     f"peak10s={payload_metrics['peak_10s_bytes_per_second']} B/s "
     f"decode_failures={payload_metrics['decode_failures']} "
-    f"render_frames={payload_metrics['render_frame_count']} "
-    f"materialized_frames={payload_metrics['materialized_render_frame_count']} "
-    f"render_updates={payload_metrics['render_update_count']}"
+    f"render_updates={payload_metrics['render_update_count']} "
+    f"materialized_snapshots={payload_metrics['materialized_snapshot_count']}"
 )
 if failures:
     for failure in failures:

@@ -19,7 +19,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         let target = makeSnapshot(lines: ["hullo"])
         let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
         let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
-        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline, mode: .delta)
+        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
 
         let decoded = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(update))
         let applied = try GhosttyRenderUpdateApplier.apply(decoded, to: baseline)
@@ -40,7 +40,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
             GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: 3, columnStart: 0, columnCount: 4, deltaRows: -1, deltaColumns: 0)
         ]
 
-        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline, mode: .delta, nativeScrollRects: nativeScrollRects)
+        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline, nativeScrollRects: nativeScrollRects)
         let delta = try XCTUnwrap(update.delta)
         let scroll = try XCTUnwrap(delta.scrollRects.first)
         let applied = try GhosttyRenderUpdateApplier.apply(update, to: baseline)
@@ -68,8 +68,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
             GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: rows, columnStart: 0, columnCount: columns, deltaRows: -1, deltaColumns: 0)
         ]
 
-        let scrollRectUpdate = GhosttyRenderUpdateFactory.makeUpdate(
-            target: frame, baseline: baseline, mode: .delta, nativeScrollRects: nativeScrollRects)
+        let scrollRectUpdate = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline, nativeScrollRects: nativeScrollRects)
         let scrollRectDelta = try XCTUnwrap(scrollRectUpdate.delta)
         let cellRunOnlyUpdate = GhosttyRenderUpdate.delta(
             GhosttyRenderDeltaFrame(
@@ -98,7 +97,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         let target = makeSnapshot(lines: ["abd"])
         let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
         let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
-        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline, mode: .delta)
+        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
         let staleBaseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 0, ownerEpoch: 1)
 
         XCTAssertThrowsError(try GhosttyRenderUpdateApplier.apply(update, to: staleBaseline)) { error in
@@ -106,13 +105,13 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         }
     }
 
-    func testAutoFallsBackToFullWhenBaselineIsUnsafe() {
+    func testFullUpdateIsUsedWhenBaselineIsUnsafe() {
         let previous = makeSnapshot(lines: ["abc"])
         let target = makeSnapshot(lines: ["abc", "def"])
         let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
         let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
 
-        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline, mode: .auto)
+        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
 
         XCTAssertEqual(update.kind, .full)
         XCTAssertEqual(update.fallbackReason, "baseline_mismatch")

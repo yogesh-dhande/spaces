@@ -13,14 +13,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--performance-log", required=True, help="JSONL file written by SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH.")
     parser.add_argument("--summary-json", help="Optional latency summary JSON from e2e_terminal_latency.sh or e2e_mobile_latency.sh.")
     parser.add_argument("--output-dir", default="apps/macos/.artifacts/terminal-render-profiles")
-    parser.add_argument("--render-mode", default="")
+    parser.add_argument("--render-mode", default="production")
     parser.add_argument("--terminal-size", default="")
     parser.add_argument("--sample-count", type=int, default=0)
     parser.add_argument("--warmup-count", type=int, default=0)
     parser.add_argument("--fixture-command", default="")
     parser.add_argument("--network-profile", default="local")
     parser.add_argument("--target", default="")
-    parser.add_argument("--baseline-summary", help="Optional earlier render-update summary JSON to compare against.")
     parser.add_argument("--timestamp", default=datetime.now(timezone.utc).isoformat())
     return parser.parse_args()
 
@@ -213,7 +212,7 @@ def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_su
         frame_events = payload_events
 
     total_bytes = sum_event_bytes(payload_events)
-    render_frame_count = len(frame_events)
+    render_update_event_count = len(frame_events)
     full_frame_count = sum(1 for record in frame_events if (attr(record, "frame_kind") or "full") == "full")
     delta_frame_count = sum(1 for record in frame_events if attr(record, "frame_kind") == "delta")
     resync_frame_count = sum(1 for record in frame_events if attr(record, "frame_kind") == "resync_required")
@@ -258,7 +257,7 @@ def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_su
             "timestamp": args.timestamp,
             "git_sha": git_output(["git", "rev-parse", "HEAD"], repo_root()),
             "ghostty_submodule_sha": git_output(["git", "-C", "apps/macos/vendor/ghostty", "rev-parse", "HEAD"], repo_root()),
-            "render_mode": args.render_mode or "auto",
+            "render_mode": args.render_mode,
             "terminal_size": args.terminal_size or "unknown",
             "sample_count": args.sample_count,
             "warmup_count": args.warmup_count,
@@ -272,7 +271,7 @@ def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_su
         },
         "metrics": {
             "total_bytes": total_bytes,
-            "average_bytes_per_frame": round(total_bytes / render_frame_count, 1) if render_frame_count else 0,
+            "average_bytes_per_update": round(total_bytes / render_update_event_count, 1) if render_update_event_count else 0,
             "peak_1s_bytes_per_second": peak_bytes_per_second(payload_events, 1),
             "peak_10s_bytes_per_second": peak_bytes_per_second(payload_events, 10),
             "network_send_bytes": network_send_bytes,
@@ -289,7 +288,7 @@ def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_su
             "full_frame_count": full_frame_count,
             "delta_frame_count": delta_frame_count,
             "resync_frame_count": resync_frame_count,
-            "render_frame_count": render_frame_count,
+            "render_update_event_count": render_update_event_count,
             "scroll_rect_delta_frame_count": len(scroll_rect_frame_events),
             "scroll_rect_delta_payload_bytes": sum_event_bytes(scroll_rect_payload_events),
             "scroll_rect_delta_render_update_bytes": first_nonzero(
@@ -328,48 +327,11 @@ def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_su
     }
 
 
-def comparison(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
-    current_metrics = current.get("metrics") or {}
-    baseline_metrics = baseline.get("metrics") or {}
-
-    def ratio(key: str) -> float | None:
-        base = number(baseline_metrics.get(key))
-        cur = number(current_metrics.get(key))
-        if base in (None, 0) or cur is None:
-            return None
-        return round(cur / base, 4)
-
-    def reduction(key: str) -> float | None:
-        value = ratio(key)
-        return None if value is None else round(1 - value, 4)
-
-    latency_base = ((baseline_metrics.get("output_to_visible_latency_ms") or {}).get("p95"))
-    latency_current = ((current_metrics.get("output_to_visible_latency_ms") or {}).get("p95"))
-    latency_delta = None
-    if latency_base is not None and latency_current is not None:
-        latency_delta = round(float(latency_current) - float(latency_base), 3)
-
-    return {
-        "total_bytes_reduction": reduction("total_bytes"),
-        "average_bytes_per_frame_reduction": reduction("average_bytes_per_frame"),
-        "peak_1s_bytes_per_second_reduction": reduction("peak_1s_bytes_per_second"),
-        "peak_10s_bytes_per_second_reduction": reduction("peak_10s_bytes_per_second"),
-        "network_send_bytes_reduction": reduction("network_send_bytes"),
-        "local_publish_payload_bytes_reduction": reduction("local_publish_payload_bytes"),
-        "local_receive_payload_bytes_reduction": reduction("local_receive_payload_bytes"),
-        "materialized_frame_bytes_reduction": reduction("materialized_frame_bytes"),
-        "materialized_render_update_bytes_reduction": reduction("materialized_render_update_bytes"),
-        "latency_p95_delta_ms": latency_delta,
-        "encode_decode_apply_ratio": ratio("total_encode_decode_apply_ms"),
-        "compression_ratio": ratio("total_bytes"),
-    }
-
-
 def write_outputs(args: argparse.Namespace, summary: dict[str, Any]) -> Path:
     output_dir = repo_root() / args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp_slug = args.timestamp.replace(":", "").replace("+", "Z").replace(".", "-")
-    mode = (args.render_mode or "auto").replace("/", "-")
+    mode = args.render_mode.replace("/", "-")
     target = (args.target or summary["parameters"]["target"]).replace("/", "-")
     output_path = output_dir / f"render-update-{target}-{mode}-{timestamp_slug}.json"
     log_copy = output_path.with_suffix(".jsonl")
@@ -385,11 +347,11 @@ def fmt(value: Any) -> str:
     return str(value)
 
 
-def print_table(summary: dict[str, Any], compare: dict[str, Any] | None, output_path: Path) -> None:
+def print_table(summary: dict[str, Any], output_path: Path) -> None:
     metrics = summary["metrics"]
     rows = [
         ("total bytes", metrics["total_bytes"]),
-        ("avg bytes/frame", metrics["average_bytes_per_frame"]),
+        ("avg bytes/update", metrics["average_bytes_per_update"]),
         ("peak 1s B/s", metrics["peak_1s_bytes_per_second"]),
         ("peak 10s B/s", metrics["peak_10s_bytes_per_second"]),
         ("network send bytes", metrics["network_send_bytes"]),
@@ -416,24 +378,14 @@ def print_table(summary: dict[str, Any], compare: dict[str, Any] | None, output_
     print(f"render update summary: {output_path}")
     for label, value in rows:
         print(f"  {label:<{width}}  {value}")
-    if compare:
-        print("comparison:")
-        for key, value in compare.items():
-            print(f"  {key:<34} {fmt(value)}")
-
 
 def main() -> None:
     args = parse_args()
     events = load_json_lines(Path(args.performance_log))
     latency_summary = load_json(Path(args.summary_json) if args.summary_json else None)
     summary = summarize(args, events, latency_summary)
-    compare = None
-    if args.baseline_summary:
-        baseline = load_json(Path(args.baseline_summary))
-        compare = comparison(summary, baseline)
-        summary["comparison"] = compare
     output_path = write_outputs(args, summary)
-    print_table(summary, compare, output_path)
+    print_table(summary, output_path)
 
 
 if __name__ == "__main__":
