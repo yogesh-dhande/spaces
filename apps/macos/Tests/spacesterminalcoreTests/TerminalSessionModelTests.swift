@@ -3,6 +3,26 @@ import XCTest
 @testable import spacesterminalcore
 
 final class TerminalSessionModelTests: XCTestCase {
+    private var originalDatabasePath: String?
+    private var databaseRoot: URL?
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        databaseRoot = root
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+    }
+
+    override func tearDownWithError() throws {
+        if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+        if let databaseRoot { try? FileManager.default.removeItem(at: databaseRoot) }
+        databaseRoot = nil
+        originalDatabasePath = nil
+        try super.tearDownWithError()
+    }
+
     func testTerminalSessionSupportsTmuxFreeOwnerModel() {
         let session = TerminalSession(
             workspaceID: "workspace-1", kind: .process, title: "api", workingDirectory: "/tmp/project", command: "npm run api", shell: nil,
@@ -88,6 +108,7 @@ final class TerminalSessionModelTests: XCTestCase {
 
         let sessionID = "session-attach"
         let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
+        try writeLaunchConfiguration(sessionID: sessionID, paths: sessionPaths)
         let client = TerminalClient(
             id: "client-1", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-08T00:00:00Z")
 
@@ -115,12 +136,14 @@ final class TerminalSessionModelTests: XCTestCase {
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
         defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
 
-        let sessionPaths = try TerminalSessionPaths.forSession(id: "session-stale-remote")
+        let sessionID = "session-stale-remote"
+        let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
+        try writeLaunchConfiguration(sessionID: sessionID, paths: sessionPaths)
         let remoteClient = TerminalClient(
             id: "remote-client", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-05-08T00:00:00Z")
 
         try TerminalSessionPersistence.attachClient(
-            sessionID: "session-stale-remote", client: remoteClient, mode: .viewer, paths: sessionPaths, attachedAt: "2026-05-08T00:00:00Z")
+            sessionID: sessionID, client: remoteClient, mode: .viewer, paths: sessionPaths, attachedAt: "2026-05-08T00:00:00Z")
 
         let now = ISO8601DateFormatter().date(from: "2026-05-08T00:01:01Z")!
         XCTAssertTrue(try TerminalSessionPersistence.liveAttachments(paths: sessionPaths, now: now).isEmpty)
@@ -134,27 +157,29 @@ final class TerminalSessionModelTests: XCTestCase {
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
         defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
 
-        let sessionPaths = try TerminalSessionPaths.forSession(id: "session-targeted-remote")
+        let sessionID = "session-targeted-remote"
+        let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
+        try writeLaunchConfiguration(sessionID: sessionID, paths: sessionPaths)
         let remoteClient = TerminalClient(
             id: "remote-client", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-05-08T00:00:00Z")
         let staleRemoteClient = TerminalClient(
             id: "stale-remote-client", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPad"), connectedAt: "2026-05-08T00:00:00Z")
 
         try TerminalSessionPersistence.attachClient(
-            sessionID: "session-targeted-remote", client: remoteClient, mode: .viewer, paths: sessionPaths, attachedAt: "2026-05-08T00:00:00Z")
+            sessionID: sessionID, client: remoteClient, mode: .viewer, paths: sessionPaths, attachedAt: "2026-05-08T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
-            sessionID: "session-targeted-remote", client: staleRemoteClient, mode: .viewer, paths: sessionPaths, attachedAt: "2026-05-08T00:00:00Z")
+            sessionID: sessionID, client: staleRemoteClient, mode: .viewer, paths: sessionPaths, attachedAt: "2026-05-08T00:00:00Z")
         try TerminalSessionPersistence.touchClient(id: remoteClient.id, paths: sessionPaths, touchedAt: "2026-05-08T00:00:45Z")
 
         let now = ISO8601DateFormatter().date(from: "2026-05-08T00:01:01Z")!
         XCTAssertEqual(try TerminalSessionPersistence.liveAttachments(paths: sessionPaths, now: now).map(\.clientID), [remoteClient.id])
         XCTAssertEqual(try TerminalSessionPersistence.staleRemoteClientIDs(paths: sessionPaths, now: now), [staleRemoteClient.id])
         let snapshot = try TerminalSessionPersistence.readAttachmentSnapshot(paths: sessionPaths)
-        XCTAssertEqual(snapshot.clients.first(where: { $0.id == remoteClient.id })?.connectedAt, "2026-05-08T00:00:45Z")
+        XCTAssertEqual(snapshot.clients.first(where: { $0.id == remoteClient.id })?.connectedAt, "2026-05-08T00:00:00Z")
         XCTAssertEqual(snapshot.clients.first(where: { $0.id == staleRemoteClient.id })?.connectedAt, "2026-05-08T00:00:00Z")
     }
 
-    func testTransferOwnershipDemotesOldOwnerToViewer() throws {
+    func testTransferOwnershipKeepsOldOwnerAttachedAsViewer() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
@@ -163,6 +188,7 @@ final class TerminalSessionModelTests: XCTestCase {
 
         let sessionID = "session-transfer"
         let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
+        try writeLaunchConfiguration(sessionID: sessionID, paths: sessionPaths)
         let owner = TerminalClient(
             id: "client-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "Owner"), connectedAt: "2026-05-08T00:00:00Z")
         let viewer = TerminalClient(
@@ -180,6 +206,34 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(active.count, 2)
         XCTAssertEqual(active.first(where: { $0.clientID == owner.id })?.mode, .viewer)
         XCTAssertEqual(active.first(where: { $0.clientID == viewer.id })?.mode, .owner)
+        XCTAssertEqual(active.filter { $0.mode == .owner }.count, 1)
+    }
+
+    func testConcurrentOwnerAttachmentsKeepExactlyOneActiveOwner() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
+
+        let sessionID = "session-concurrent-owner"
+        let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
+        try writeLaunchConfiguration(sessionID: sessionID, paths: sessionPaths)
+        let errors = LockedErrors()
+
+        DispatchQueue.concurrentPerform(iterations: 16) { index in
+            let timestamp = String(format: "2026-05-08T00:00:%02dZ", index)
+            let client = TerminalClient(
+                id: "client-\(index)", kind: .remoteViewer, identity: TerminalClientIdentity(label: "Client \(index)"), connectedAt: timestamp)
+            do {
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: .owner, paths: sessionPaths, attachedAt: timestamp)
+            } catch { errors.append(error) }
+        }
+
+        XCTAssertTrue(errors.values.isEmpty, "\(errors.values)")
+        let activeOwners = try TerminalSessionPersistence.activeAttachments(paths: sessionPaths).filter { $0.mode == .owner }
+        XCTAssertEqual(activeOwners.count, 1)
     }
 
     func testSessionSocketPathUsesShortSharedSocketsDirectory() throws {
@@ -202,6 +256,7 @@ final class TerminalSessionModelTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try writeLaunchConfiguration(sessionID: "session-window-frame", paths: paths)
         let ownerFrame = TerminalSessionWindowFrame(x: 100, y: 120, width: 980, height: 640)
         let viewerFrame = TerminalSessionWindowFrame(x: 160, y: 180, width: 720, height: 480)
 
@@ -210,5 +265,29 @@ final class TerminalSessionModelTests: XCTestCase {
 
         XCTAssertEqual(try TerminalSessionPersistence.readWindowFrame(mode: .owner, paths: paths), ownerFrame)
         XCTAssertEqual(try TerminalSessionPersistence.readWindowFrame(mode: .viewer, paths: paths), viewerFrame)
+    }
+
+    private func writeLaunchConfiguration(sessionID: String, paths: TerminalSessionPaths) throws {
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: sessionID, workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+                createdAt: "2026-05-08T00:00:00Z"), paths: paths)
+    }
+}
+
+private final class LockedErrors: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [any Error] = []
+
+    var values: [any Error] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ error: any Error) {
+        lock.lock()
+        storage.append(error)
+        lock.unlock()
     }
 }

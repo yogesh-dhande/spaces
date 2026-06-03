@@ -1,6 +1,7 @@
 import SQLite3
 import XCTest
 
+@testable import spacesdatabase
 @testable import workspacecore
 
 private final class SQLiteCommitThread: Thread {
@@ -42,8 +43,11 @@ final class StoreTests: XCTestCase {
         let runtimeTargetColumns = try readTableColumns(dbURL: dbURL, table: "runtime_targets")
         let browserTargetColumns = try readTableColumns(dbURL: dbURL, table: "browser_targets")
         let agentSessionColumns = try readTableColumns(dbURL: dbURL, table: "agent_sessions")
+        let terminalSessionColumns = try readTableColumns(dbURL: dbURL, table: "terminal_sessions")
+        let terminalClientColumns = try readTableColumns(dbURL: dbURL, table: "terminal_clients")
+        let terminalAttachmentColumns = try readTableColumns(dbURL: dbURL, table: "terminal_attachments")
         let workspaceForeignKeys = try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspaces')")
-        XCTAssertEqual(version, 1)
+        XCTAssertEqual(version, 2)
         XCTAssertTrue(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
@@ -70,6 +74,9 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(agentSessionColumns.contains("runtime_target_id"))
         XCTAssertTrue(agentSessionColumns.contains("session_key"))
         XCTAssertTrue(agentSessionColumns.contains("claimed_launcher_name"))
+        XCTAssertTrue(terminalSessionColumns.contains("root_directory"))
+        XCTAssertTrue(terminalClientColumns.contains("lease_refreshed_at"))
+        XCTAssertTrue(terminalAttachmentColumns.contains("detached_at"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_target_id"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_tracking_id"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_native_id"))
@@ -93,7 +100,37 @@ final class StoreTests: XCTestCase {
         _ = try SQLiteStore(path: dbURL.path)
         _ = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 1)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
+    }
+
+    func testVersionOneDatabaseMigratesTerminalTablesWithoutDroppingProjects() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("v1-terminal-migration.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
+                  is_git INTEGER NOT NULL,
+                  default_branch TEXT,
+                  is_collapsed INTEGER NOT NULL DEFAULT 0,
+                  setup_script TEXT,
+                  stop_script TEXT
+                );
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO projects(id, name, dir, is_git, is_collapsed) VALUES ('project-1', 'Project', '/tmp/project', 1, 0);
+                INSERT INTO migration_state(current_version) VALUES (1);
+                """)
+
+        _ = try SQLiteStore(path: dbURL.path)
+
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 2)
+        XCTAssertTrue(try tableExists(dbURL: dbURL, table: "terminal_sessions"))
+        XCTAssertTrue(try tableExists(dbURL: dbURL, table: "terminal_clients"))
+        XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "SELECT name FROM projects WHERE id = 'project-1'"), "Project")
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 

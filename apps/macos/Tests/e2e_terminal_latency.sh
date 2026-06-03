@@ -147,6 +147,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -327,18 +328,15 @@ def extract_session_id(output: str) -> str:
 
 
 def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
-    sessions_root = runtime_dir / "terminal" / "sessions"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        for metadata_path in sessions_root.glob("*/metadata.json"):
-            try:
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if metadata.get("title") != title:
-                continue
-            session_id = metadata.get("sessionID") or metadata_path.parent.name
-            if (metadata_path.parent / "control.sock").exists() or (metadata_path.parent / "state.json").exists():
+        with sqlite3.connect(os.environ["SPACES_DB_PATH"]) as db:
+            rows = db.execute(
+                "SELECT session_id, root_directory FROM terminal_sessions WHERE title = ? ORDER BY created_at DESC",
+                (title,),
+            ).fetchall()
+        for session_id, root_directory in rows:
+            if (Path(root_directory) / "control.sock").exists():
                 return session_id.upper()
         time.sleep(0.1)
     raise TimeoutError(f"timed out recovering session id for title {title}")

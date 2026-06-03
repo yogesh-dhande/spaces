@@ -2,12 +2,7 @@ import Foundation
 
 public struct TerminalSessionPaths: Sendable, Equatable {
     public let rootDirectory: String
-    public let metadataPath: String
-    public let statePath: String
     public let outputPath: String
-    public let windowStatePath: String
-    public let clientsPath: String
-    public let attachmentsPath: String
     public let controlSocketPath: String
     public let subscriptionSocketPath: String
     public let serviceLogPath: String
@@ -20,12 +15,7 @@ public struct TerminalSessionPaths: Sendable, Equatable {
 
     public init(rootDirectory: String, controlSocketPath: String?, subscriptionSocketPath: String?) {
         self.rootDirectory = rootDirectory
-        metadataPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("metadata.json").path
-        statePath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("state.json").path
         outputPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("output.log").path
-        windowStatePath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("window-state.json").path
-        clientsPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("clients.json").path
-        attachmentsPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("attachments.json").path
         self.controlSocketPath = controlSocketPath ?? URL(fileURLWithPath: rootDirectory).appendingPathComponent("control.sock").path
         self.subscriptionSocketPath = subscriptionSocketPath ?? URL(fileURLWithPath: rootDirectory).appendingPathComponent("subscription.sock").path
         serviceLogPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("service.log").path

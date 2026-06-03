@@ -492,28 +492,31 @@ load_discovered_session_ids() {
 
 wait_for_session_owner() {
   local owner_session_id="$1"
-  python3 - "$spaces_runtime_dir" "$owner_session_id" <<'PY'
-import json
-import pathlib
+  python3 - "$spaces_db_path" "$spaces_runtime_dir" "$owner_session_id" <<'PY'
+import os
+import sqlite3
 import sys
 import time
 
-runtime_dir = pathlib.Path(sys.argv[1])
-session_id = sys.argv[2]
-attachments_path = runtime_dir / "terminal" / "sessions" / session_id / "attachments.json"
+db_path = sys.argv[1]
+root_directory = os.path.normpath(os.path.join(sys.argv[2], "terminal", "sessions", sys.argv[3]))
+session_id = sys.argv[3]
 deadline = time.time() + 30
 last_snapshot = ""
 while time.time() < deadline:
-    try:
-        payload = json.loads(attachments_path.read_text())
-    except Exception as exc:
-        last_snapshot = repr(exc)
-        time.sleep(0.1)
-        continue
-    last_snapshot = json.dumps(payload, indent=2, sort_keys=True)
-    for attachment in payload:
-        if attachment.get("mode") == "owner" and attachment.get("detachedAt") is None:
-            raise SystemExit(0)
+    with sqlite3.connect(db_path) as db:
+        rows = db.execute(
+            """
+            SELECT client_id, mode, COALESCE(detached_at, '')
+            FROM terminal_attachments
+            WHERE root_directory = ?
+            ORDER BY attached_at, id
+            """,
+            (root_directory,),
+        ).fetchall()
+    last_snapshot = repr(rows)
+    if any(mode == "owner" and not detached_at for _, mode, detached_at in rows):
+        raise SystemExit(0)
     time.sleep(0.1)
 raise SystemExit(f"Timed out waiting for active owner attachment for {session_id}.\n{last_snapshot}")
 PY

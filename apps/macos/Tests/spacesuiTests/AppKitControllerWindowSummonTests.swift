@@ -6,7 +6,23 @@ import spacesterminalghostty
 @testable import spacesterminalui
 @testable import spacesui
 
-@Suite struct AppKitControllerWindowSummonTests {
+@Suite(.serialized) final class AppKitControllerWindowSummonTests {
+    private let originalDatabasePath: String?
+    private let databaseRoot: URL
+
+    init() throws {
+        originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        databaseRoot = root
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+    }
+
+    deinit {
+        if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+        try? FileManager.default.removeItem(at: databaseRoot)
+    }
+
     @MainActor @Test func terminalSessionHostUsesRemoteHostForServiceOwnedSession() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -331,6 +347,7 @@ import spacesterminalghostty
         defer { try? FileManager.default.removeItem(at: root) }
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try writeLaunchConfiguration(sessionID: "session-remote", paths: paths)
         let localClient = TerminalClient(
             id: "local-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-17T18:00:00Z")
@@ -354,6 +371,7 @@ import spacesterminalghostty
         defer { try? FileManager.default.removeItem(at: root) }
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try writeLaunchConfiguration(sessionID: "session-remote", paths: paths)
         let remoteClient = TerminalClient(
             id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", hostName: "phone", deviceName: "Remote Client"),
             connectedAt: "2026-05-17T18:00:01Z")
@@ -373,6 +391,7 @@ import spacesterminalghostty
         defer { try? FileManager.default.removeItem(at: root) }
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try writeLaunchConfiguration(sessionID: "session-remote", paths: paths)
         let remoteClient = TerminalClient(
             id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", hostName: "phone", deviceName: "Remote Client"),
             connectedAt: "2026-05-17T18:00:01Z")
@@ -394,5 +413,12 @@ import spacesterminalghostty
         #expect(AppKitController.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: false))
         #expect(!AppKitController.shouldTerminateAdHocBuiltInTerminalSession(paths: paths, isConfiguredProcessSession: true))
         #expect(!AppKitController.shouldTerminateAdHocBuiltInTerminalSession(paths: nil, isConfiguredProcessSession: false))
+    }
+
+    private func writeLaunchConfiguration(sessionID: String, paths: TerminalSessionPaths) throws {
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: sessionID, workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+                createdAt: "2026-05-17T18:00:00Z"), paths: paths)
     }
 }

@@ -6,6 +6,26 @@ import spacesterminalcore
 @testable import spacesterminalui
 
 final class TerminalSessionWindowControllerTests: XCTestCase {
+    private var originalDatabasePath: String?
+    private var databaseRoot: URL?
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        databaseRoot = root
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+    }
+
+    override func tearDownWithError() throws {
+        if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+        if let databaseRoot { try? FileManager.default.removeItem(at: databaseRoot) }
+        databaseRoot = nil
+        originalDatabasePath = nil
+        try super.tearDownWithError()
+    }
+
     @MainActor private final class FakeGhosttySessionHost: TerminalGhosttySessionHosting {
         var hasSurface = true
         var snapshotValue: GhosttyTerminalSnapshot?

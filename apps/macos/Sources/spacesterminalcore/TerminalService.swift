@@ -227,10 +227,8 @@ import Foundation
         private static func sessionSummaryIfLive(for launchConfiguration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary?
         {
             let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
-            guard FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) else {
-                return nil
-            }
             let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+            guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return nil }
             guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }
             guard isProcessAlive(pid: Int(runtimeState.servicePID)) else { return nil }
             return TerminalServiceSessionSummary(
@@ -285,10 +283,8 @@ import Foundation
         private static func listXCTestCompatibilitySessions() throws -> [TerminalServiceSessionSummary] {
             try TerminalSessionPersistence.listKnownSessions().compactMap { launchConfiguration in
                 let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
-                guard FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) else {
-                    return nil
-                }
                 guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
+                guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return nil }
                 guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }
                 guard isProcessAlive(pid: Int(runtimeState.servicePID)) else { return nil }
                 return TerminalServiceSessionSummary(

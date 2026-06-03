@@ -138,20 +138,52 @@ PY
 active_attachment_client_id() {
   local session_id="$1"
   local mode="$2"
-  local attachments_path
-  attachments_path="$RUNTIME_DIR/terminal/sessions/$session_id/attachments.json"
-  python3 - "$attachments_path" "$mode" <<'PY'
-import json, sys
-path = sys.argv[1]
-mode = sys.argv[2]
-with open(path, "r", encoding="utf-8") as handle:
-    attachments = json.load(handle)
-for attachment in attachments:
-    if attachment.get("mode") == mode and attachment.get("detachedAt") is None:
-        print(attachment["clientID"])
-        break
+  python3 - "$DB_PATH" "$RUNTIME_DIR/terminal/sessions/$session_id" "$mode" <<'PY'
+import os
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+root_directory = os.path.normpath(sys.argv[2])
+mode = sys.argv[3]
+with sqlite3.connect(db_path) as db:
+    row = db.execute(
+        """
+        SELECT client_id
+        FROM terminal_attachments
+        WHERE root_directory = ?
+          AND mode = ?
+          AND detached_at IS NULL
+        ORDER BY attached_at DESC
+        LIMIT 1
+        """,
+        (root_directory, mode),
+    ).fetchone()
+if row:
+    print(row[0])
 else:
     raise SystemExit(f"no active {mode} attachment found")
+PY
+}
+
+terminal_service_pid() {
+  local session_id="$1"
+  python3 - "$DB_PATH" "$RUNTIME_DIR/terminal/sessions/$session_id" <<'PY'
+import os
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+root_directory = os.path.normpath(sys.argv[2])
+with sqlite3.connect(db_path) as db:
+    row = db.execute(
+        "SELECT service_pid FROM terminal_runtime_states WHERE root_directory = ?",
+        (root_directory,),
+    ).fetchone()
+if row:
+    print(row[0])
+else:
+    raise SystemExit("missing terminal runtime state")
 PY
 }
 
@@ -219,13 +251,7 @@ no_attach_payload="python3 -c 'import time; print(\"__cli_noattach_ready__\", fl
 no_attach_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "$no_attach_payload" --title cli-e2e-no-attach)"
 no_attach_session_id="$(extract_session_id "$no_attach_output")"
 [[ -n "$no_attach_session_id" ]] || { echo "Failed to parse unattached session ID from: $no_attach_output" >&2; exit 1; }
-no_attach_state_path="$RUNTIME_DIR/terminal/sessions/$no_attach_session_id/state.json"
-no_attach_service_pid="$(python3 - "$no_attach_state_path" <<'PY'
-import json, sys
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    print(json.load(handle)["servicePID"])
-PY
-)"
+no_attach_service_pid="$(terminal_service_pid "$no_attach_session_id")"
 sleep 2
 no_attach_list="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal list)"
 printf '%s\n' "$no_attach_list" | grep -Fq "$no_attach_session_id" || {
@@ -242,13 +268,7 @@ command_payload="stty raw -echo; python3 -c 'import os,sys,select,time; data=byt
 command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "$command_payload" --title cli-e2e)"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse session ID from: $command_output" >&2; exit 1; }
-state_path="$RUNTIME_DIR/terminal/sessions/$session_id/state.json"
-SERVICE_PID="$(python3 - "$state_path" <<'PY'
-import json, sys
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    print(json.load(handle)["servicePID"])
-PY
-)"
+SERVICE_PID="$(terminal_service_pid "$session_id")"
 
 owner_client_id="$(wait_for_active_attachment_client_id "$session_id" owner)"
 

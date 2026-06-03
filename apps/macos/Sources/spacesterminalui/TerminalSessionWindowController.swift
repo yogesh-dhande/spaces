@@ -421,8 +421,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         guard backend == .ghosttyEmbedded else { return }
         preferredAttachmentMode = .owner
         if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
-        refreshNow(allowGhosttyOwnerAttach: false)
-        let hasDifferentActiveOwner = lastObservedOwnerClientID != nil && lastObservedOwnerClientID != client.id
+        lastObservedRuntimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastObservedRuntimeState
+        let currentOwnerClient = activeOwnerClient(snapshot: try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths))
+        lastObservedOwnerClientID = currentOwnerClient?.id
+        let hasDifferentActiveOwner = currentOwnerClient != nil && currentOwnerClient?.id != client.id
         if hasDifferentActiveOwner && isInteractiveRuntimeState(lastObservedRuntimeState) {
             takeOverOwnership()
             return
@@ -925,9 +927,26 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
             lastObservedRuntimeState = runtimeState
             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
-            if backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, allowGhosttyOwnerAttach { attachLocalClientIfNeeded() }
-            let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
-            let currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
+            var attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+            var currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
+            if backend == .ghosttyEmbedded {
+                let activeAttachment = attachmentSnapshot?.attachments.last { $0.clientID == client.id && $0.detachedAt == nil }
+                if activeAttachment == nil {
+                    let wasObservedAsAttachedOwner =
+                        isClientAttached || lastObservedAttachmentMode == .owner || lastObservedOwnerClientID == client.id
+                    isClientAttached = false
+                    lastObservedAttachmentMode = nil
+                    if wasObservedAsAttachedOwner, preferredAttachmentMode == .owner, let currentOwnerClient, currentOwnerClient.id != client.id {
+                        preferredAttachmentMode = .viewer
+                    }
+                }
+                let canAttachAsOwner = currentOwnerClient == nil || currentOwnerClient?.id == client.id
+                if preferredAttachmentMode == .owner, allowGhosttyOwnerAttach, canAttachAsOwner {
+                    attachLocalClientIfNeeded()
+                    attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+                    currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
+                }
+            }
             let isOwner = currentOwnerClient?.id == client.id || (currentOwnerClient == nil && preferredAttachmentMode == .owner)
             let currentTitle = currentWindowTitle(fallback: currentLaunchConfiguration.title, isOwner: isOwner)
             let currentWorkingDirectory = currentSummaryWorkingDirectory(fallback: currentLaunchConfiguration.workingDirectory)

@@ -13,6 +13,7 @@ let package = Package(
     ],
     products: [
         .library(name: "systembridge", targets: ["systembridge"]),
+        .library(name: "spacesdatabase", targets: ["spacesdatabase"]),
         .library(name: "spacesterminalcore", targets: ["spacesterminalcore"]),
         .library(name: "spacesterminalghostty", targets: ["spacesterminalghostty"]),
         .library(name: "spacesterminalmobileghostty", targets: ["spacesterminalmobileghostty"]),
@@ -42,8 +43,12 @@ let package = Package(
                 .unsafeFlags(["-I", ghosttyVTIncludeDirectory])
             ]
         ),
+        .target(
+            name: "spacesdatabase",
+            linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
         .target(name: "systembridge"),
-        .target(name: "spacesterminalcore", dependencies: ["ghosttyvtshim"]),
+        .target(name: "spacesterminalcore", dependencies: ["spacesdatabase", "ghosttyvtshim"]),
         .target(name: "spacesmobilecore", dependencies: ["spacesterminalcore"]),
         .target(
             name: "spacesmobilebridge",
@@ -65,7 +70,7 @@ let package = Package(
         ),
         .target(
             name: "workspacecore",
-            dependencies: ["systembridge", "spacesterminalcore"],
+            dependencies: ["spacesdatabase", "systembridge", "spacesterminalcore"],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(
@@ -127,7 +132,7 @@ let package = Package(
         .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore"]),
         .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
         .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
-        .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "systembridge", "spacesterminalcore"]),
+        .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore"]),
         .testTarget(name: "spacesuiTests", dependencies: ["spacesui"]),
         .testTarget(
             name: "spacescliTests",
