@@ -136,6 +136,8 @@ extension TerminalGhosttyRendererHosting {
 
     public func sessionSnapshot() -> GhosttyTerminalSnapshot? { sessionDriver.snapshot() }
 
+    func sessionRenderStateSnapshot() -> GhosttyTerminalSnapshotCapture.CapturedSnapshot? { sessionDriver.renderStateSnapshot() }
+
     public func sessionSnapshotText() -> String? { sessionDriver.snapshotText() }
 
     public func copySelectionToPasteboard() -> Bool { false }
@@ -1105,7 +1107,7 @@ extension TerminalGhosttyRendererHosting {
             let renderFrame = frame.flatMap { try? GhosttyRenderFrame.encode($0) }
             let renderFrameEncodeMS = TerminalPerformance.elapsedMS(since: renderFrameEncodeStartedAt)
             let renderUpdateEncodeStartedAt = Date()
-            let renderUpdateValue = frame.map { makeRenderUpdate(for: $0, reason: reason) }
+            let renderUpdateValue = frame.map { makeRenderUpdate(for: $0, reason: reason, nativeScrollRects: resolvedScreenState.scrollRects) }
             let renderUpdate = renderUpdateValue.flatMap { try? GhosttyRenderUpdateBinaryCodec.encode($0) }
             let renderUpdateEncodeMS = TerminalPerformance.elapsedMS(since: renderUpdateEncodeStartedAt)
             if renderFrame != nil, let lastScreenStateRevision { lastExportedScreenStateRevision = lastScreenStateRevision }
@@ -1146,9 +1148,12 @@ extension TerminalGhosttyRendererHosting {
             outputEndByteOffset: bootstrapOutputEndByteOffset)
     }
 
-    private func makeRenderUpdate(for frame: GhosttyRenderFrame, reason: String) -> GhosttyRenderUpdate {
+    private func makeRenderUpdate(for frame: GhosttyRenderFrame, reason: String, nativeScrollRects: [GhosttyRenderScrollRectOperation] = [])
+        -> GhosttyRenderUpdate
+    {
         let mode = reason == TerminalRemoteSessionStateReason.initial ? .full : GhosttyRenderUpdateMode.resolved()
-        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: lastRenderUpdateBaseline, mode: mode)
+        let update = GhosttyRenderUpdateFactory.makeUpdate(
+            target: frame, baseline: lastRenderUpdateBaseline, mode: mode, nativeScrollRects: nativeScrollRects)
         switch update.kind {
         case .full: if let fullFrame = update.fullFrame { lastRenderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: fullFrame) }
         case .delta:
@@ -1165,25 +1170,28 @@ extension TerminalGhosttyRendererHosting {
     }
 
     private func resolveRemoteScreenState(runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?) -> (
-        snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, source: String
+        snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], source: String
     ) {
         let liveSessionScreenState = captureLiveSessionScreenState()
         let sessionSnapshot = liveSessionScreenState.snapshot
         let sessionSnapshotText = liveSessionScreenState.snapshotText
         if Self.remoteScreenStateHasVisibleContent(snapshot: sessionSnapshot, snapshotText: sessionSnapshotText) {
-            return (snapshot: sessionSnapshot, snapshotText: sessionSnapshotText, source: "session")
+            return (snapshot: sessionSnapshot, snapshotText: sessionSnapshotText, scrollRects: liveSessionScreenState.scrollRects, source: "session")
         }
 
         let isLiveRuntime = runtimeState?.state == .running || runtimeState?.state == .starting
-        return (snapshot: nil, snapshotText: nil, source: isLiveRuntime ? "session_empty" : "session_unavailable")
+        return (snapshot: nil, snapshotText: nil, scrollRects: [], source: isLiveRuntime ? "session_empty" : "session_unavailable")
     }
 
-    private func captureLiveSessionScreenState() -> (snapshot: GhosttyTerminalSnapshot?, snapshotText: String?) {
+    private func captureLiveSessionScreenState() -> (
+        snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation]
+    ) {
         flushPendingIncomingOutputForStateExport()
         rendererHostStorage.prepareRenderStateExport()
-        let sessionSnapshot = rendererHostStorage.sessionSnapshot()
+        let capturedRenderState = rendererHostStorage.sessionRenderStateSnapshot()
+        let sessionSnapshot = capturedRenderState?.snapshot
         let sessionSnapshotText = sessionSnapshot == nil ? rendererHostStorage.sessionSnapshotText() : nil
-        return (snapshot: sessionSnapshot, snapshotText: sessionSnapshotText)
+        return (snapshot: sessionSnapshot, snapshotText: sessionSnapshotText, scrollRects: capturedRenderState?.scrollRects ?? [])
     }
 
     static func remoteStateShouldIncludeScreenState(reason: String, ownerKind: TerminalClientKind? = nil) -> Bool {

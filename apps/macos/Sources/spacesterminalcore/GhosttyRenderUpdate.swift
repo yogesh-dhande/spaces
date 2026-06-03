@@ -259,15 +259,19 @@ public enum GhosttyRenderUpdateApplier {
 }
 
 public enum GhosttyRenderUpdateFactory {
-    public static func makeUpdate(target frame: GhosttyRenderFrame, baseline: GhosttyRenderUpdateBaseline?, mode: GhosttyRenderUpdateMode = .auto)
-        -> GhosttyRenderUpdate
-    {
+    public static func makeUpdate(
+        target frame: GhosttyRenderFrame, baseline: GhosttyRenderUpdateBaseline?, mode: GhosttyRenderUpdateMode = .auto,
+        nativeScrollRects: [GhosttyRenderScrollRectOperation] = []
+    ) -> GhosttyRenderUpdate {
         guard mode != .full else { return .full(frame, fallbackReason: "mode_full") }
         guard let baseline else { return .full(frame, fallbackReason: "missing_baseline") }
         guard canDelta(from: baseline, to: frame) else { return .full(frame, fallbackReason: "baseline_mismatch") }
         guard validGrid(frame.snapshot), validGrid(baseline.snapshot) else { return .full(frame, fallbackReason: "invalid_grid") }
+        guard let scrollRects = validatedScrollRects(nativeScrollRects, columns: frame.columns, rows: frame.rows) else {
+            return .full(frame, fallbackReason: "invalid_scroll_rect")
+        }
 
-        let delta = makeDelta(from: baseline, to: frame)
+        let delta = makeDelta(from: baseline, to: frame, scrollRects: scrollRects)
         let update = GhosttyRenderUpdate.delta(delta)
         guard mode == .auto else { return update }
         guard let deltaBytes = try? GhosttyRenderUpdateBinaryCodec.encode(update),
@@ -286,10 +290,11 @@ public enum GhosttyRenderUpdateFactory {
         snapshot.columns > 0 && snapshot.rows > 0 && snapshot.cells.count >= snapshot.columns * snapshot.rows
     }
 
-    private static func makeDelta(from baseline: GhosttyRenderUpdateBaseline, to frame: GhosttyRenderFrame) -> GhosttyRenderDeltaFrame {
+    private static func makeDelta(
+        from baseline: GhosttyRenderUpdateBaseline, to frame: GhosttyRenderFrame, scrollRects: [GhosttyRenderScrollRectOperation]
+    ) -> GhosttyRenderDeltaFrame {
         let previous = normalized(baseline.snapshot)
         let target = normalized(frame.snapshot)
-        let scrollRects = detectedScrollRects(previous: previous, target: target)
         let scrolledCells = scrollRects.reduce(previous.cells) { cells, operation in
             var next = cells
             applyScrollRectForDiff(operation, to: &next, snapshot: target)
@@ -315,41 +320,6 @@ public enum GhosttyRenderUpdateFactory {
             defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: cells)
     }
 
-    private static func detectedScrollRects(previous: GhosttyTerminalSnapshot, target: GhosttyTerminalSnapshot) -> [GhosttyRenderScrollRectOperation]
-    {
-        guard previous.columns == target.columns, previous.rows == target.rows, previous.rows > 1 else { return [] }
-        let maxOffset = previous.rows - 1
-        for offset in 1...maxOffset
-        where rowsMatch(previous: previous, previousStart: offset, target: target, targetStart: 0, count: previous.rows - offset) {
-            return [
-                GhosttyRenderScrollRectOperation(
-                    rowStart: 0, rowCount: previous.rows, columnStart: 0, columnCount: previous.columns, deltaRows: -offset, deltaColumns: 0)
-            ]
-        }
-        for offset in 1...maxOffset
-        where rowsMatch(previous: previous, previousStart: 0, target: target, targetStart: offset, count: previous.rows - offset) {
-            return [
-                GhosttyRenderScrollRectOperation(
-                    rowStart: 0, rowCount: previous.rows, columnStart: 0, columnCount: previous.columns, deltaRows: offset, deltaColumns: 0)
-            ]
-        }
-        return []
-    }
-
-    private static func rowsMatch(
-        previous: GhosttyTerminalSnapshot, previousStart: Int, target: GhosttyTerminalSnapshot, targetStart: Int, count: Int
-    ) -> Bool {
-        guard count > 0 else { return false }
-        for rowOffset in 0..<count {
-            let previousStartIndex = (previousStart + rowOffset) * previous.columns
-            let targetStartIndex = (targetStart + rowOffset) * target.columns
-            let previousRow = previous.cells[previousStartIndex..<(previousStartIndex + previous.columns)]
-            let targetRow = target.cells[targetStartIndex..<(targetStartIndex + target.columns)]
-            if !previousRow.elementsEqual(targetRow) { return false }
-        }
-        return true
-    }
-
     private static func applyScrollRectForDiff(
         _ operation: GhosttyRenderScrollRectOperation, to cells: inout [GhosttyTerminalSnapshot.Cell], snapshot: GhosttyTerminalSnapshot
     ) {
@@ -372,6 +342,21 @@ public enum GhosttyRenderUpdateFactory {
                     original[index(row: sourceRow, column: sourceColumn, columns: snapshot.columns)]
             }
         }
+    }
+
+    private static func validatedScrollRects(_ scrollRects: [GhosttyRenderScrollRectOperation], columns: Int, rows: Int)
+        -> [GhosttyRenderScrollRectOperation]?
+    {
+        guard columns > 0, rows > 0 else { return nil }
+        for operation in scrollRects {
+            guard operation.rowStart >= 0, operation.rowCount > 0, operation.columnStart >= 0, operation.columnCount > 0 else { return nil }
+            guard operation.rowCount <= rows, operation.columnCount <= columns else { return nil }
+            guard operation.rowStart <= rows - operation.rowCount, operation.columnStart <= columns - operation.columnCount else { return nil }
+            guard operation.deltaRows != 0 || operation.deltaColumns != 0 else { return nil }
+            guard operation.deltaRows > -operation.rowCount, operation.deltaRows < operation.rowCount else { return nil }
+            guard operation.deltaColumns > -operation.columnCount, operation.deltaColumns < operation.columnCount else { return nil }
+        }
+        return scrollRects
     }
 
     private static func changedRuns(

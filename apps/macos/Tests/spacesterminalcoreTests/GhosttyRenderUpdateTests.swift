@@ -36,8 +36,11 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         let target = makeSnapshot(lines: ["two ", "tre ", "for "])
         let frame = GhosttyRenderFrame(sessionRevision: 12, ownerEpoch: 5, snapshot: target)
         let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 11, ownerEpoch: 5)
+        let nativeScrollRects = [
+            GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: 3, columnStart: 0, columnCount: 4, deltaRows: -1, deltaColumns: 0)
+        ]
 
-        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline, mode: .delta)
+        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline, mode: .delta, nativeScrollRects: nativeScrollRects)
         let delta = try XCTUnwrap(update.delta)
         let scroll = try XCTUnwrap(delta.scrollRects.first)
         let applied = try GhosttyRenderUpdateApplier.apply(update, to: baseline)
@@ -61,8 +64,12 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         let target = makeUniformRowSnapshot(columns: columns, rows: rows, firstScalar: 66)
         let frame = GhosttyRenderFrame(sessionRevision: 12, ownerEpoch: 5, snapshot: target)
         let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 11, ownerEpoch: 5)
+        let nativeScrollRects = [
+            GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: rows, columnStart: 0, columnCount: columns, deltaRows: -1, deltaColumns: 0)
+        ]
 
-        let scrollRectUpdate = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline, mode: .delta)
+        let scrollRectUpdate = GhosttyRenderUpdateFactory.makeUpdate(
+            target: frame, baseline: baseline, mode: .delta, nativeScrollRects: nativeScrollRects)
         let scrollRectDelta = try XCTUnwrap(scrollRectUpdate.delta)
         let cellRunOnlyUpdate = GhosttyRenderUpdate.delta(
             GhosttyRenderDeltaFrame(

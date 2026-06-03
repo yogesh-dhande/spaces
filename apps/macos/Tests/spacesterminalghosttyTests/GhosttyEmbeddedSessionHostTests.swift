@@ -848,6 +848,36 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(sessionDriver.foregroundPID()), childPID)
     }
 
+    @MainActor func testHeadlessDriverExportsNativeScrollRectAfterAppendedOutputScrolls() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "host-managed-scrollrect-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh",
+                command: "sleep 0.2; printf 'line1\\nline2\\nline3\\nline4\\nline5\\n'; sleep 1", createdAt: "2026-06-03T00:00:00Z"))
+        defer { sessionDriver.terminate() }
+        let transcript = TranscriptBuffer()
+        sessionDriver.setOutputHandler { data in transcript.append(data) }
+
+        try sessionDriver.startIfNeeded()
+        XCTAssertTrue(sessionDriver.resizeCellGrid(columns: 20, rows: 4))
+        _ = sessionDriver.renderStateSnapshot()
+
+        try waitUntil { transcript.string().contains("line5") }
+        let captured = try XCTUnwrap(sessionDriver.renderStateSnapshot())
+        let scrollRect = try XCTUnwrap(captured.scrollRects.first)
+
+        XCTAssertEqual(scrollRect.rowStart, 0)
+        XCTAssertEqual(scrollRect.rowCount, 4)
+        XCTAssertEqual(scrollRect.columnStart, 0)
+        XCTAssertEqual(scrollRect.columnCount, 20)
+        XCTAssertLessThan(scrollRect.deltaRows, 0)
+        XCTAssertGreaterThan(scrollRect.deltaRows, -4)
+        XCTAssertEqual(scrollRect.deltaColumns, 0)
+    }
+
     @MainActor func testHeadlessDriverExportsHostManagedSynchronizedOutput() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
