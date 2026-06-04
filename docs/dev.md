@@ -53,7 +53,7 @@ apps/macos/.build/debug/spaces update --notes "Ready for review"
 apps/macos/.build/debug/spaces restart
 ```
 
-Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only the running app instance for that same profile before it relaunches.
+Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only the running app instance and terminal service for that same profile before it relaunches.
 
 For manual worktree-local shell sessions, export the same derived profile before launching the app, CLI, or E2E helper:
 
@@ -264,10 +264,12 @@ apps/macos/Tests/e2e_mobile.sh --scenario codex-resume-reopen
 apps/macos/Tests/e2e_mobile.sh --scenario roundtrip
 apps/macos/Tests/e2e_mobile.sh --scenario scrollback
 apps/macos/Tests/e2e_mobile.sh --scenario two-session
+apps/macos/Tests/e2e_mobile.sh --scenario ctrl-c-final-frame
+apps/macos/Tests/e2e_mobile.sh --scenario ctrl-c-final-frame-codex-survivor
 apps/macos/Tests/e2e_mobile.sh --scenario ownership-guard
 ```
 
-`codex` starts real Codex in a fresh Mac-owned terminal session and verifies iPhone takeover against the already-running simulator app. Codex scenarios build a generated Codex home inside the demo root by copying the current user's config, linking signed-in auth files, and marking the demo project trusted so the test exercises the TUI instead of the directory-trust prompt. If Codex shows its startup update prompt, the harness selects `Skip` and continues waiting for the TUI. `codex-resume-reopen` runs `codex resume 019e380a-9def-7852-9834-74c67b2da894`, takes over on iPhone, returns to the terminal list, and repeatedly reopens the same session. `roundtrip` drives the Mac/iPhone/Mac/iPhone/Mac ownership path with rendered-content assertions at each handoff. `scrollback` fills the Mac-owned terminal with long output, transfers ownership to iPhone, scrolls away from bottom, runs an owner command while still scrolled up, and checks the owner epoch and prompt rendering. `two-session` takes over two fresh terminal sessions through list navigation. `ownership-guard` exercises the mobile bridge ownership rules without UI automation.
+`codex` starts real Codex in a fresh Mac-owned terminal session and verifies iPhone takeover against the already-running simulator app. Codex scenarios build a generated Codex home inside the demo root by copying the current user's config, linking signed-in auth files, and marking the demo project trusted so the test exercises the TUI instead of the directory-trust prompt. If Codex shows its startup update prompt, the harness selects `Skip` and continues waiting for the TUI. `codex-resume-reopen` runs `codex resume 019e380a-9def-7852-9834-74c67b2da894`, takes over on iPhone, returns to the terminal list, and repeatedly reopens the same session. `roundtrip` drives the Mac/iPhone/Mac/iPhone/Mac ownership path with rendered-content assertions at each handoff. `scrollback` fills the Mac-owned terminal with long output, transfers ownership to iPhone, scrolls away from bottom, runs an owner command while still scrolled up, and checks the owner epoch and prompt rendering. `two-session` takes over two fresh terminal sessions through list navigation. `ctrl-c-final-frame` creates `interrupt-target` and `survivor-peer` process-style sessions, sends `ctrl+c` to `interrupt-target` from the iOS owner path, checks the persisted final Ghostty frame on iOS and Mac, and verifies the `survivor-peer` session remains running. `ctrl-c-final-frame-codex-survivor` uses the same interrupt path with a real Codex TUI as the survivor session. `ownership-guard` exercises the mobile bridge ownership rules without UI automation.
 
 Useful overrides:
 - `SPACES_MOBILE_CODEX_COMMAND='codex resume <thread-id>'` replaces the default `codex` startup command for the `codex` scenario.
@@ -363,7 +365,7 @@ That profiler waits for the built-in session summon metric instead of sleeping a
 
 ## Pre-commit Hook
 
-Git commits can use the repo hook in `.githooks/pre-commit`, which auto-formats staged Swift files under `apps/macos/Sources` and `apps/macos/Tests` before running lint and coverage.
+Git commits can use the repo hook in `.githooks/pre-commit`, which runs the canonical local verification path.
 
 Enable the repo-managed hooks once per clone:
 
@@ -383,11 +385,9 @@ Expected output:
 .githooks
 ```
 
-The pre-commit hook does two things:
-- runs `scripts/lint.sh`, which formats staged macOS Swift source and test files and then runs any additional lint checks
-- runs `scripts/coverage.sh`
+The pre-commit hook runs `scripts/verify.sh`, which formats staged macOS Swift source and test files, lints, builds, runs coverage, and runs iOS unit tests.
 
-Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](../.github/workflows/pr-checks.yml), which runs the same Swift lint/build/coverage flow plus the static website build.
+Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](../.github/workflows/pr-checks.yml), which runs the same Swift verification flow plus the static website build.
 
 ## Manual E2E
 

@@ -11,6 +11,8 @@ public enum TerminalSessionState: String, Codable, Sendable, CaseIterable {
     case running
     case exited
     case failed
+
+    public var isInteractive: Bool { self == .starting || self == .running }
 }
 
 public struct TerminalSession: Codable, Sendable, Equatable, Identifiable {

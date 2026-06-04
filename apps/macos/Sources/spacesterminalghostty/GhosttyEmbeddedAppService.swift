@@ -42,11 +42,12 @@ import GhosttyKit
         var runtimeConfig = ghostty_runtime_config_s()
         runtimeConfig.userdata = Unmanaged.passUnretained(self).toOpaque()
         runtimeConfig.supports_selection_clipboard = true
-        runtimeConfig.wakeup_cb = { _ in DispatchQueue.main.async { GhosttyEmbeddedAppService.shared.tick() } }
+        runtimeConfig.wakeup_cb = { _ in Task { @MainActor in GhosttyEmbeddedAppService.shared.tick() } }
         runtimeConfig.action_cb = { _, target, action in
             guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
             guard let event = GhosttyActionEventParser.parse(action) else { return true }
-            GhosttyEmbeddedAppService.shared.handleAction(event, target: target)
+            let surfaceKey = UInt(bitPattern: target.target.surface)
+            Task { @MainActor in GhosttyEmbeddedAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
             return true
         }
         runtimeConfig.read_clipboard_cb = { userdata, _, state in GhosttyClipboardBridge.readClipboard(userdata: userdata, state: state) }
@@ -57,7 +58,7 @@ import GhosttyKit
         runtimeConfig.close_surface_cb = { userdata, _ in
             guard let userdata else { return }
             let surfaceUserData = Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue()
-            DispatchQueue.main.async { MainActor.assumeIsolated { surfaceUserData.handleClose() } }
+            Task { @MainActor in surfaceUserData.handleClose() }
         }
 
         guard let app = ghostty_app_new(&runtimeConfig, config) else {
@@ -84,9 +85,8 @@ import GhosttyKit
         surfaceActionHandlers.removeValue(forKey: surfaceKey(surface))
     }
 
-    private func handleAction(_ event: GhosttyActionEvent, target: ghostty_target_s) {
-        let key = surfaceKey(target.target.surface)
-        guard let handler = surfaceActionHandlers[key] else { return }
+    private func handleAction(_ event: GhosttyActionEvent, surfaceKey: UInt) {
+        guard let handler = surfaceActionHandlers[surfaceKey] else { return }
         Task { @MainActor in handler(event) }
     }
 

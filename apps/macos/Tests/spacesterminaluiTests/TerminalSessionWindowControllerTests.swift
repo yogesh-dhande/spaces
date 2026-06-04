@@ -400,7 +400,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: preparing owner surface")
     }
 
-    @MainActor func testGhosttyOwnerShowsSnapshotTextWhenSurfaceIsUnavailable() throws {
+    @MainActor func testGhosttyOwnerDoesNotRenderSnapshotTextWhenSurfaceIsUnavailable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -422,8 +422,8 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertFalse(controller.debugShowsTerminalSurface)
         XCTAssertTrue(controller.debugShowsTextRenderer)
-        XCTAssertEqual(normalizedRenderedOutput(controller.debugRenderedOutput), "owner snapshot")
-        XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror text debug")
+        XCTAssertEqual(normalizedRenderedOutput(controller.debugRenderedOutput), "")
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: preparing owner surface")
     }
 
     @MainActor func testControllerUpgradesFromFallbackBackendOnceGhosttyMetadataAppears() throws {
@@ -792,7 +792,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: iPad"))
     }
 
-    @MainActor func testGhosttyViewerHidesPassiveRenderAfterSessionExit() throws {
+    @MainActor func testGhosttyViewerShowsFinalRenderAfterSessionExit() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -806,7 +806,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             .init(
                 sessionID: "session-viewer-final-output", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
                 updatedAt: "2026-05-15T00:00:01Z"), paths: paths)
-        try "command failed\nexit 1\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+        try "output log tail should not render\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
         let owner = TerminalClient(
             id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
             connectedAt: "2026-05-15T00:00:00Z")
@@ -822,20 +822,25 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         let fakeHost = FakeGhosttySessionHost()
         fakeHost.hasSurface = false
-        fakeHost.snapshotTextValue = "command failed\nexit 1"
+        fakeHost.snapshotValue = ghosttySnapshot(text: "command failed")
+        fakeHost.debugVisibleSurfaceTextValue = "command failed"
         let controller = makeGhosttyController(
             sessionID: "session-viewer-final-output", paths: paths, preferredAttachmentMode: .viewer, host: fakeHost, attachClientAction: { _, _ in },
             detachClientAction: { _ in })
 
-        XCTAssertFalse(controller.debugShowsTerminalSurface)
+        XCTAssertTrue(controller.debugShowsTerminalSurface)
         XCTAssertFalse(controller.debugShowsTextRenderer)
         XCTAssertFalse(controller.debugShowsHeader)
         XCTAssertFalse(controller.debugShowsTakeoverButton)
-        XCTAssertTrue(controller.debugShowsTakeoverMessage)
-        XCTAssertTrue(controller.debugRenderedOutput.contains("Terminal session exited."))
-        XCTAssertFalse(normalizedRenderedOutput(controller.debugRenderedOutput).contains("command failed"))
-        XCTAssertFalse(normalizedRenderedOutput(controller.debugRenderedOutput).contains("exit 1"))
-        XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
+        XCTAssertFalse(controller.debugShowsTakeoverMessage)
+        XCTAssertTrue(normalizedRenderedOutput(controller.debugStateDump().renderedOutput).contains("command failed"))
+        XCTAssertFalse(normalizedRenderedOutput(controller.debugStateDump().renderedOutput).contains("output log tail should not render"))
+        XCTAssertEqual(normalizedRenderedOutput(controller.debugRenderedOutput), "command failed")
+        NSPasteboard.general.clearContents()
+        controller.selectAll(nil)
+        controller.copy(nil)
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "command failed")
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: final Ghostty render")
     }
 
     @MainActor func testGhosttyOwnerWindowHidesInlineControls() throws {
@@ -904,7 +909,8 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugShowsHeader)
         XCTAssertTrue(controller.debugShowsSummaryLabel)
         XCTAssertTrue(controller.debugShowsStateLabel)
-        XCTAssertEqual(controller.debugState, "state: exited    child: 22")
+        XCTAssertTrue(controller.debugState.contains("state: exited"))
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: final Ghostty render")
     }
 
     @MainActor func testGhosttyOwnerUsesSlowerNotificationFirstRefreshInterval() throws {
@@ -1014,10 +1020,11 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertFalse(controller.debugShowsTakeoverButton)
         XCTAssertFalse(controller.debugTakeoverEnabled)
-        XCTAssertFalse(controller.debugShowsTextRenderer)
+        XCTAssertTrue(controller.debugShowsTextRenderer)
         XCTAssertFalse(controller.debugShowsHeader)
-        XCTAssertTrue(controller.debugShowsTakeoverMessage)
-        XCTAssertTrue(controller.debugRenderedOutput.contains("Terminal session exited."))
+        XCTAssertFalse(controller.debugShowsTakeoverMessage)
+        XCTAssertTrue(controller.debugRenderedOutput.contains("Terminal render unavailable."))
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: unavailable")
     }
 
     @MainActor func testGhosttyOwnerStatusShellDisablesInlineInputWhenSessionIsNotRunning() throws {

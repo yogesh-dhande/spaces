@@ -4,6 +4,7 @@ import Network
 import XCTest
 import spacesmobilecore
 import spacesterminalcore
+import workspacecore
 
 @testable import spacesmobilebridge
 
@@ -240,6 +241,112 @@ import spacesterminalcore
         }
     }
 
+    func testControlCFromMobileTargetsOnlyRequestedSession() async throws {
+        try await withTemporaryProfile { _ in
+            let interruptSessionID = "session-interrupt-target-\(UUID().uuidString)"
+            let survivorSessionID = "session-survivor-peer-\(UUID().uuidString)"
+            let interruptPaths = try TerminalSessionPaths.forSession(id: interruptSessionID)
+            let survivorPaths = try TerminalSessionPaths.forSession(id: survivorSessionID)
+            try interruptPaths.ensureDirectories()
+            try survivorPaths.ensureDirectories()
+
+            let interruptRecorder = MobileBridgeTerminalControlRecorder()
+            let survivorRecorder = MobileBridgeTerminalControlRecorder()
+            let interruptControlServer = TerminalControlServer(
+                socketPath: interruptPaths.controlSocketPath, queue: DispatchQueue(label: "spaces.mobile.bridge.ctrl-c.interrupt-target")
+            ) { request in
+                interruptRecorder.record(request)
+                return TerminalControlResponse(ok: true, message: "Sent key.")
+            }
+            let survivorControlServer = TerminalControlServer(
+                socketPath: survivorPaths.controlSocketPath, queue: DispatchQueue(label: "spaces.mobile.bridge.ctrl-c.survivor-peer")
+            ) { request in
+                survivorRecorder.record(request)
+                return TerminalControlResponse(ok: true, message: "Sent key.")
+            }
+            try interruptControlServer.start()
+            try survivorControlServer.start()
+            defer {
+                interruptControlServer.stop()
+                survivorControlServer.stop()
+            }
+
+            let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+            let clientApp = SpacesMobileClientApp(
+                installationID: "INSTALLATION-CTRL-C", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
+                appVersion: "1.0")
+            let authToken = try SpacesMobilePairingStore().issueToken(for: clientApp)
+            let server = try SpacesMobileBridgeServer(host: SpacesMobileBridgeDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+
+            let response = try await Task.detached {
+                try Self.sendBridgeRequest(
+                    SpacesMobileBridgeRequest(
+                        command: "key", authToken: authToken, clientApp: clientApp, sessionID: interruptSessionID, clientID: "ios-owner",
+                        key: "ctrl+c", ownerEpoch: 3), port: server.listeningPort, transportKey: transportKey)
+            }.value
+
+            XCTAssertTrue(response.ok)
+            XCTAssertEqual(
+                interruptRecorder.requests(), [TerminalControlRequest(command: "key", key: "ctrl+c", clientID: "ios-owner", ownerEpoch: 3)])
+            XCTAssertTrue(survivorRecorder.requests().isEmpty)
+        }
+    }
+
+    func testOverviewFiltersConfiguredWorkspaceRowsWithDeadInteractiveServicePID() async throws {
+        try await withTemporaryProfile { root in
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let projectDir = root.appendingPathComponent("project", isDirectory: true)
+            let workspaceDir = projectDir.appendingPathComponent("workspace", isDirectory: true)
+            try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
+
+            let project = ProjectRecord(id: "project-dead-service", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            let workspace = WorkspaceRecord(
+                id: "workspace-dead-service", projectID: project.id, title: "Dev", dir: workspaceDir.path, dirname: nil, branch: "main",
+                isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            try store.upsert(project: project)
+            try store.upsert(workspace: workspace)
+
+            let sessionID = "session-dead-service-\(UUID().uuidString)"
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "dead-process", workingDirectory: workspaceDir.path, shell: "/bin/zsh",
+                    command: "sleep 300", createdAt: "2026-06-04T12:00:00Z"), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 999_999, childPID: nil, state: .running,
+                    updatedAt: "2026-06-04T12:00:01Z", title: "dead-process", workingDirectory: workspaceDir.path), paths: paths)
+            try store.upsert(
+                runningProcess: RunningProcessRecord(
+                    id: "process-dead-service", workspaceID: workspace.id, templateName: "dead-process", command: "sleep 300",
+                    terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil,
+                    status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-06-04T12:00:00Z", exitedAt: nil))
+
+            let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+            let clientApp = SpacesMobileClientApp(
+                installationID: "INSTALLATION-DEAD-SERVICE", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let authToken = try SpacesMobilePairingStore().issueToken(for: clientApp)
+            let server = try SpacesMobileBridgeServer(host: SpacesMobileBridgeDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+
+            let response = try await Task.detached {
+                try Self.sendBridgeRequest(
+                    SpacesMobileBridgeRequest(command: "overview", authToken: authToken, clientApp: clientApp), port: server.listeningPort,
+                    transportKey: transportKey)
+            }.value
+
+            XCTAssertTrue(response.ok)
+            let overview = try XCTUnwrap(response.overview)
+            XCTAssertFalse(overview.sessions.contains { $0.id == sessionID })
+            XCTAssertEqual(overview.workspaces.first(where: { $0.id == workspace.id })?.sessionCount, 0)
+        }
+    }
+
     func testStateRequestReturnsLiveStateInsteadOfOutputLog() async throws {
         try await withTemporaryProfile { _ in
             let sessionID = "session-live-state-\(UUID().uuidString)"
@@ -310,6 +417,133 @@ import spacesterminalcore
                 .value
             XCTAssertTrue(response.ok)
             XCTAssertTrue(waitForConnectionClosure(connection, timeout: 5))
+        }
+    }
+
+    func testSubscribeDeliversFinalPayloadBeforeClosingStream() async throws {
+        try await withTemporaryProfile { _ in
+            let sessionID = "session-final-stream-\(UUID().uuidString)"
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            let finalPayload = GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T12:46:31Z", sessionStateRevision: 2,
+                sessionStateFlags: 1, screenStateRevision: 2,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 200, state: .exited,
+                    updatedAt: "2026-06-04T12:46:31Z", exitedAt: "2026-06-04T12:46:31Z", title: "final-target", workingDirectory: "/tmp/work",
+                    columns: 5, rows: 1), attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-target",
+                workingDirectory: "/tmp/work",
+                renderFrame: try GhosttyRenderFrame.encode(.init(sessionRevision: 2, ownerEpoch: 1, snapshot: Self.ghosttySnapshot(text: "FINAL"))),
+                outputByteCount: nil)
+            let subscriptionServer = MobileBridgeTestSubscriptionServer(
+                socketPath: paths.subscriptionSocketPath, payload: finalPayload, closeAfterPayload: true)
+            try subscriptionServer.start()
+            defer { subscriptionServer.stop() }
+
+            let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+            let clientApp = SpacesMobileClientApp(
+                installationID: "INSTALLATION-FINAL-STREAM", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let authToken = try SpacesMobilePairingStore().issueToken(for: clientApp)
+            let server = try SpacesMobileBridgeServer(host: SpacesMobileBridgeDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+
+            let connection = try startSubscribeConnection(
+                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort, transportKey: transportKey)
+            defer { connection.cancel() }
+
+            let receivedPayload = try readStreamPayload(connection, timeout: 5)
+
+            XCTAssertEqual(receivedPayload.reason, TerminalRemoteSessionStateReason.terminated)
+            XCTAssertEqual(receivedPayload.renderFrameText, "FINAL")
+            XCTAssertTrue(waitForConnectionClosure(connection, timeout: 5))
+        }
+    }
+
+    func testSubscribeToEndedSessionWithoutLiveSocketDeliversPersistedFinalPayload() async throws {
+        try await withTemporaryProfile { _ in
+            let sessionID = "session-ended-subscribe-\(UUID().uuidString)"
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "final-target", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                    command: "sleep 300", createdAt: "2026-06-04T14:23:10Z"), paths: paths)
+            let runtimeState = TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 200, state: .exited, updatedAt: "2026-06-04T14:23:23Z",
+                exitedAt: "2026-06-04T14:23:23Z", title: "final-target", workingDirectory: "/tmp/work", columns: 5, rows: 1)
+            try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+            let finalPayload = GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:23:23Z", sessionStateRevision: 2,
+                sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                title: "final-target", workingDirectory: "/tmp/work",
+                renderFrame: try GhosttyRenderFrame.encode(.init(sessionRevision: 2, ownerEpoch: 1, snapshot: Self.ghosttySnapshot(text: "FINAL"))),
+                outputByteCount: nil)
+            try TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths)
+            try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
+
+            let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+            let clientApp = SpacesMobileClientApp(
+                installationID: "INSTALLATION-ENDED-SUBSCRIBE", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let authToken = try SpacesMobilePairingStore().issueToken(for: clientApp)
+            let server = try SpacesMobileBridgeServer(host: SpacesMobileBridgeDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+
+            let connection = try startSubscribeConnection(
+                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort, transportKey: transportKey)
+            defer { connection.cancel() }
+
+            let receivedPayload = try readStreamPayload(connection, timeout: 5)
+
+            XCTAssertEqual(receivedPayload.reason, TerminalRemoteSessionStateReason.terminated)
+            XCTAssertEqual(receivedPayload.renderFrameText, "FINAL")
+            XCTAssertTrue(waitForConnectionClosure(connection, timeout: 5))
+        }
+    }
+
+    func testStateRequestForEndedSessionWithoutLiveSocketReturnsPersistedFinalPayload() async throws {
+        try await withTemporaryProfile { _ in
+            let sessionID = "session-ended-state-\(UUID().uuidString)"
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "final-target", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                    command: "sleep 300", createdAt: "2026-06-04T14:23:10Z"), paths: paths)
+            let runtimeState = TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 200, state: .exited, updatedAt: "2026-06-04T14:23:23Z",
+                exitedAt: "2026-06-04T14:23:23Z", title: "final-target", workingDirectory: "/tmp/work", columns: 5, rows: 1)
+            try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+            let finalPayload = GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:23:23Z", sessionStateRevision: 2,
+                sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                title: "final-target", workingDirectory: "/tmp/work",
+                renderFrame: try GhosttyRenderFrame.encode(.init(sessionRevision: 2, ownerEpoch: 1, snapshot: Self.ghosttySnapshot(text: "FINAL"))),
+                outputByteCount: nil)
+            try TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths)
+            try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
+
+            let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+            let clientApp = SpacesMobileClientApp(
+                installationID: "INSTALLATION-ENDED-STATE", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let authToken = try SpacesMobilePairingStore().issueToken(for: clientApp)
+            let server = try SpacesMobileBridgeServer(host: SpacesMobileBridgeDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+
+            let response = try await Task.detached {
+                try Self.sendBridgeRequest(
+                    SpacesMobileBridgeRequest(command: "state", authToken: authToken, clientApp: clientApp, sessionID: sessionID),
+                    port: server.listeningPort, transportKey: transportKey)
+            }.value
+
+            XCTAssertTrue(response.ok)
+            XCTAssertEqual(response.sessionState?.reason, TerminalRemoteSessionStateReason.terminated)
+            XCTAssertEqual(response.sessionState?.renderFrameText, "FINAL")
         }
     }
 
@@ -527,6 +761,39 @@ import spacesterminalcore
 
         guard finished.wait(timeout: .now() + timeout) == .success else { return false }
         return resultBox.flag()
+    }
+
+    private func readStreamPayload(_ connection: NWConnection, timeout: TimeInterval) throws -> GhosttyRemoteSessionStatePayload {
+        let received = DispatchSemaphore(value: 0)
+        let resultBox = MobileBridgeSupervisorTestResultBox()
+
+        @Sendable func receiveNext(_ data: Data) {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
+                if let error {
+                    resultBox.setError(error)
+                    received.signal()
+                    return
+                }
+                var nextData = data
+                if let content, !content.isEmpty { nextData.append(content) }
+                if let newlineIndex = nextData.firstIndex(of: 0x0A) {
+                    resultBox.appendData(Data(nextData.prefix(upTo: newlineIndex)))
+                    received.signal()
+                    return
+                }
+                if isComplete {
+                    resultBox.appendData(nextData)
+                    received.signal()
+                    return
+                }
+                receiveNext(nextData)
+            }
+        }
+        receiveNext(Data())
+
+        guard received.wait(timeout: .now() + timeout) == .success else { throw POSIXError(.ETIMEDOUT) }
+        if let error = resultBox.error() { throw error }
+        return try GhosttyRemoteSessionStateCodec.decodeLine(resultBox.responseData())
     }
 
     nonisolated private static func sendBridgeRequest(_ request: SpacesMobileBridgeRequest, port: Int, transportKey: String) throws
@@ -804,15 +1071,17 @@ private final class BlockingAuthorizePairingStore: SpacesMobilePairingStoreProto
 private final class MobileBridgeTestSubscriptionServer: @unchecked Sendable {
     private let socketPath: String
     private let payload: GhosttyRemoteSessionStatePayload?
+    private let closeAfterPayload: Bool
     private let queue = DispatchQueue(label: "spaces.mobile.bridge.supervisor.subscription.test")
     private let accepted = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var listenSocketFD: Int32 = -1
     private var clientSocketFD: Int32 = -1
 
-    init(socketPath: String, payload: GhosttyRemoteSessionStatePayload? = nil) {
+    init(socketPath: String, payload: GhosttyRemoteSessionStatePayload? = nil, closeAfterPayload: Bool = false) {
         self.socketPath = socketPath
         self.payload = payload
+        self.closeAfterPayload = closeAfterPayload
     }
 
     func start() throws {
@@ -868,6 +1137,13 @@ private final class MobileBridgeTestSubscriptionServer: @unchecked Sendable {
         lock.unlock()
         accepted.signal()
         writePayloadIfNeeded(to: clientFD)
+        if closeAfterPayload {
+            shutdown(clientFD, SHUT_RDWR)
+            close(clientFD)
+            lock.lock()
+            if clientSocketFD == clientFD { clientSocketFD = -1 }
+            lock.unlock()
+        }
     }
 
     private func currentListenSocket() -> Int32 {

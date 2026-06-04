@@ -39,7 +39,7 @@ final class SpacesMobileOverviewBuilderTests: XCTestCase {
             sessionID: "session-2", title: "scratch", workingDirectory: "/tmp/scratch", attachmentSnapshot: .init())
 
         let overview = SpacesMobileOverviewBuilder.build(
-            workspaces: [.init(project: project, workspace: workspace)], sessions: [matchedSession, unmatchedSession])
+            workspaces: [.init(project: project, workspace: workspace)], workspaceRows: [], liveSessions: [matchedSession, unmatchedSession])
 
         XCTAssertEqual(overview.workspaces.count, 1)
         XCTAssertEqual(overview.workspaces.first?.sessionCount, 1)
@@ -48,17 +48,99 @@ final class SpacesMobileOverviewBuilderTests: XCTestCase {
         XCTAssertNil(overview.sessions.first(where: { $0.id == "session-2" })?.workspaceID)
     }
 
+    func testBuildIncludesEndedWorkspaceProcessRowsWithoutLiveControl() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, title: "Docs", dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let descriptor = SpacesMobileOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
+        let endedSession = makeSessionCatalogEntry(
+            sessionID: "session-ended", title: "docs-watch", workingDirectory: "/repo/apps/web", state: .exited, attachmentSnapshot: .init(),
+            isControlAvailable: true, isSubscriptionAvailable: true)
+
+        let overview = SpacesMobileOverviewBuilder.build(
+            workspaces: [descriptor],
+            workspaceRows: [
+                .init(
+                    entry: endedSession, workspace: descriptor, title: "docs-watch", rowKind: .process, rowSourceID: "process-1", hasFinalRender: true
+                )
+            ], liveSessions: [])
+
+        XCTAssertEqual(overview.workspaces.first?.sessionCount, 1)
+        let summary = overview.sessions.first
+        XCTAssertEqual(summary?.id, "session-ended")
+        XCTAssertEqual(summary?.rowKind, .process)
+        XCTAssertEqual(summary?.rowSourceID, "process-1")
+        XCTAssertEqual(summary?.hasFinalRender, true)
+        XCTAssertEqual(summary?.state, .exited)
+        XCTAssertEqual(summary?.isControlAvailable, false)
+        XCTAssertEqual(summary?.isSubscriptionAvailable, false)
+    }
+
+    func testBuildIncludesEndedWorkspaceAgentRowsWithoutLiveControl() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, title: "Docs", dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let descriptor = SpacesMobileOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
+        let endedSession = makeSessionCatalogEntry(
+            sessionID: "session-ended-agent", title: "review-agent", workingDirectory: "/repo/apps/web", state: .exited, attachmentSnapshot: .init(),
+            isControlAvailable: true, isSubscriptionAvailable: true)
+
+        let overview = SpacesMobileOverviewBuilder.build(
+            workspaces: [descriptor],
+            workspaceRows: [
+                .init(
+                    entry: endedSession, workspace: descriptor, title: "review-agent", rowKind: .agent, rowSourceID: "agent-1", hasFinalRender: true)
+            ], liveSessions: [])
+
+        XCTAssertEqual(overview.workspaces.first?.sessionCount, 1)
+        let summary = overview.sessions.first
+        XCTAssertEqual(summary?.id, "session-ended-agent")
+        XCTAssertEqual(summary?.rowKind, .agent)
+        XCTAssertEqual(summary?.rowSourceID, "agent-1")
+        XCTAssertEqual(summary?.hasFinalRender, true)
+        XCTAssertEqual(summary?.state, .exited)
+        XCTAssertEqual(summary?.isControlAvailable, false)
+        XCTAssertEqual(summary?.isSubscriptionAvailable, false)
+    }
+
+    func testBuildHidesAdHocLiveSessionWhenConfiguredWorkspaceRowOwnsSameSlot() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, title: "Docs", dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let descriptor = SpacesMobileOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
+        let currentAgentSession = makeSessionCatalogEntry(
+            sessionID: "agent-current", title: "review-agent", workingDirectory: "/repo/apps/web", attachmentSnapshot: .init())
+        let orphanedAgentSession = makeSessionCatalogEntry(
+            sessionID: "agent-orphan", title: "review-agent", workingDirectory: "/repo/apps/web", attachmentSnapshot: .init())
+
+        let overview = SpacesMobileOverviewBuilder.build(
+            workspaces: [descriptor],
+            workspaceRows: [
+                .init(
+                    entry: currentAgentSession, workspace: descriptor, title: "review-agent", rowKind: .agent, rowSourceID: "agent-1",
+                    hasFinalRender: false)
+            ], liveSessions: [currentAgentSession, orphanedAgentSession])
+
+        XCTAssertEqual(overview.sessions.map(\.id), ["agent-current"])
+        XCTAssertEqual(overview.workspaces.first?.sessionCount, 1)
+    }
+
     private func makeSessionCatalogEntry(
-        sessionID: String, title: String, workingDirectory: String, attachmentSnapshot: TerminalSessionAttachmentSnapshot
+        sessionID: String, title: String, workingDirectory: String, state: TerminalSessionState = .running,
+        attachmentSnapshot: TerminalSessionAttachmentSnapshot, isControlAvailable: Bool = true, isSubscriptionAvailable: Bool = true
     ) -> TerminalSessionCatalogEntry {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: title, workingDirectory: workingDirectory,
             shell: "/bin/zsh", command: nil, createdAt: "2026-05-18T08:00:00Z")
         let runtimeState = TerminalSessionRuntimeState(
-            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 123, childPID: 456, state: .running, updatedAt: "2026-05-18T08:00:05Z",
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 123, childPID: 456, state: state, updatedAt: "2026-05-18T08:00:05Z",
             title: title, workingDirectory: workingDirectory)
         return TerminalSessionCatalogEntry(
             launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
-            paths: TerminalSessionPaths(rootDirectory: "/tmp/\(sessionID)"), isControlAvailable: true, isSubscriptionAvailable: true)
+            paths: TerminalSessionPaths(rootDirectory: "/tmp/\(sessionID)"), isControlAvailable: isControlAvailable,
+            isSubscriptionAvailable: isSubscriptionAvailable)
     }
 }

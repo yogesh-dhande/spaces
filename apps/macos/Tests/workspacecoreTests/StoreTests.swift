@@ -46,8 +46,9 @@ final class StoreTests: XCTestCase {
         let terminalSessionColumns = try readTableColumns(dbURL: dbURL, table: "terminal_sessions")
         let terminalClientColumns = try readTableColumns(dbURL: dbURL, table: "terminal_clients")
         let terminalAttachmentColumns = try readTableColumns(dbURL: dbURL, table: "terminal_attachments")
+        let terminalRemoteStateColumns = try readTableColumns(dbURL: dbURL, table: "terminal_remote_session_states")
         let workspaceForeignKeys = try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspaces')")
-        XCTAssertEqual(version, 2)
+        XCTAssertEqual(version, 4)
         XCTAssertTrue(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
@@ -72,11 +73,15 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(runtimeTargetColumns.contains("tmux_window_id"))
         XCTAssertTrue(browserTargetColumns.contains("resolved_url"))
         XCTAssertTrue(agentSessionColumns.contains("runtime_target_id"))
+        XCTAssertTrue(agentSessionColumns.contains("terminal_session_id"))
         XCTAssertTrue(agentSessionColumns.contains("session_key"))
         XCTAssertTrue(agentSessionColumns.contains("claimed_launcher_name"))
+        let runningProcessColumns = try readTableColumns(dbURL: dbURL, table: "running_processes")
+        XCTAssertTrue(runningProcessColumns.contains("terminal_session_id"))
         XCTAssertTrue(terminalSessionColumns.contains("root_directory"))
         XCTAssertTrue(terminalClientColumns.contains("lease_refreshed_at"))
         XCTAssertTrue(terminalAttachmentColumns.contains("detached_at"))
+        XCTAssertTrue(terminalRemoteStateColumns.contains("payload_json"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_target_id"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_tracking_id"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_native_id"))
@@ -100,7 +105,7 @@ final class StoreTests: XCTestCase {
         _ = try SQLiteStore(path: dbURL.path)
         _ = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 2)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
@@ -127,9 +132,10 @@ final class StoreTests: XCTestCase {
 
         _ = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 2)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
         XCTAssertTrue(try tableExists(dbURL: dbURL, table: "terminal_sessions"))
         XCTAssertTrue(try tableExists(dbURL: dbURL, table: "terminal_clients"))
+        XCTAssertTrue(try tableExists(dbURL: dbURL, table: "terminal_remote_session_states"))
         XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "SELECT name FROM projects WHERE id = 'project-1'"), "Project")
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
@@ -531,6 +537,31 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
+    func testSpacesRunningProcessKeepsSessionIDAfterRuntimeTargetIsDeleted() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let sessionID = "spaces-process-session"
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-1", workspaceID: workspace.id, templateName: "docs-watch", command: "sleep 300",
+                terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil,
+                status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "2026-06-04T14:23:10Z", exitedAt: "2026-06-04T14:23:23Z"))
+
+        let loaded = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
+        let runtimeTargetID = try XCTUnwrap(loaded.runtimeTargetID)
+        try store.deleteWindow(id: runtimeTargetID)
+
+        let reloaded = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
+        XCTAssertNil(reloaded.runtimeTargetID)
+        XCTAssertEqual(reloaded.terminalApp, TerminalHost.spaces.appName)
+        XCTAssertEqual(reloaded.terminalTrackingID, sessionID)
+        XCTAssertEqual(reloaded.terminalNativeID, sessionID)
+    }
+
     // Tests agent-window yabai lookup resolves a workspace by arranging a stored agent window and asserting the lookup result.
     func testWorkspaceIDForAgentWindowResolvesByYabaiWindowID() throws {
         let store = try makeTemporaryStore()
@@ -861,6 +892,31 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(found?.id, id)
         XCTAssertEqual(found?.terminalTrackingID, sessionID)
         XCTAssertNil(try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: "nonexistent"))
+    }
+
+    func testSpacesAgentKeepsSessionIDAfterRuntimeTargetIsDeleted() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let sessionID = "spaces-agent-session"
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "review-agent", terminalTrackingID: sessionID,
+                terminalNativeID: sessionID, codexThreadID: nil, windowID: nil, yabaiWindowID: nil, status: .done, createdAt: "2026-06-04T14:23:10Z",
+                updatedAt: "2026-06-04T14:25:06Z"))
+
+        let loaded = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
+        let runtimeTargetID = try XCTUnwrap(loaded.runtimeTargetID)
+        try store.deleteWindow(id: runtimeTargetID)
+
+        let reloaded = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertNil(reloaded.runtimeTargetID)
+        XCTAssertEqual(reloaded.terminalTrackingID, sessionID)
+        XCTAssertEqual(reloaded.terminalNativeID, sessionID)
+        XCTAssertEqual(try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID)?.id, "agent-1")
     }
 
     // Tests agentWindowsByProvider returns only records from the requested workspace/provider by arranging representative inputs and asserting the expected result.

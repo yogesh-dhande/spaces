@@ -1,8 +1,5 @@
 #!/bin/sh
 set -e
 
-echo "Running lint..."
-scripts/lint.sh
-
-echo "Running coverage tests..."
-scripts/coverage.sh
+echo "Running verification..."
+scripts/verify.sh

@@ -3,6 +3,10 @@ import systembridge
 
 @testable import workspacecore
 
+private final class AgentHookTerminalCloseCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
+
+private final class AgentHookTerminalTerminateCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
+
 final class AgentHookTests: XCTestCase {
     override func invokeTest() {
         do { try withMockCommands(["yabai": Self.yabaiMockScript]) { super.invokeTest() } } catch {
@@ -255,6 +259,38 @@ final class AgentHookTests: XCTestCase {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
+    func testHandleAgentExitKeepsClosedConfiguredSpacesAgentRow() throws {
+        let store = try makeTemporaryStore()
+        let closeCapture = AgentHookTerminalCloseCapture()
+        let terminateCapture = AgentHookTerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowCloser: { closeCapture.sessionIDs.append($0) },
+            builtInTerminalSessionTerminator: { terminateCapture.sessionIDs.append($0) })
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.setWorkspaceAgentLaunchers(
+            workspaceID: workspace.id, launchers: [AgentLauncher(name: "Configured Agent", command: "configured-agent")])
+
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Configured Agent", terminalTrackingID: "configured-session",
+            terminalNativeID: "configured-session", codexThreadID: "thread-1", yabaiWindowID: 202, status: .idle,
+            claimedLauncherName: "Configured Agent")
+
+        let result = try orchestrator.handleAgentExit(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "configured-session", codexThreadID: "thread-1",
+            terminalNativeID: "configured-session", yabaiWindowID: 202, label: "Configured Agent")
+
+        let record = try XCTUnwrap(result)
+        XCTAssertEqual(record.status, .done)
+        XCTAssertEqual(record.terminalTrackingID, "configured-session")
+        XCTAssertEqual(record.claimedLauncherName, "Configured Agent")
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.terminalTrackingID, "configured-session")
+        XCTAssertEqual(try store.windows(workspaceID: workspace.id).first?.terminalTrackingID, "configured-session")
+        XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
+        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
+    }
+
     func testRefreshWorkspaceWindowsDeletesClosedGhosttyAdHocAgentRow() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
@@ -268,6 +304,29 @@ final class AgentHookTests: XCTestCase {
 
         XCTAssertTrue(didMutate)
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+    }
+
+    func testRefreshWorkspaceWindowsKeepsClosedConfiguredSpacesAgentRow() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.setWorkspaceAgentLaunchers(
+            workspaceID: workspace.id, launchers: [AgentLauncher(name: "Configured Agent", command: "configured-agent")])
+
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Configured Agent", terminalTrackingID: "configured-session",
+            terminalNativeID: "configured-session", codexThreadID: "thread-1", yabaiWindowID: 202, status: .idle,
+            claimedLauncherName: "Configured Agent")
+
+        let didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
+
+        let record = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertTrue(didMutate)
+        XCTAssertEqual(record.label, "Configured Agent")
+        XCTAssertEqual(record.terminalTrackingID, "configured-session")
+        XCTAssertEqual(record.claimedLauncherName, "Configured Agent")
+        XCTAssertNil(record.runtimeTargetID)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 

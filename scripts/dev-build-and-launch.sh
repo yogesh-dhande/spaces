@@ -25,6 +25,33 @@ print_failure_diagnostics() {
   /usr/bin/log show --style compact --last 2m --predicate 'process == "SpacesApp" OR process == "Spaces"' | tail -n 120 || true
 }
 
+launch_app_detached() {
+  python3 - "$APP" "$LOG_FILE" "$SPACES_DB_PATH" "$SPACES_RUNTIME_DIR" <<'PY'
+import os
+import subprocess
+import sys
+
+app_path, log_path, db_path, runtime_dir = sys.argv[1:]
+log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+try:
+    env = os.environ.copy()
+    env["SPACES_DB_PATH"] = db_path
+    env["SPACES_RUNTIME_DIR"] = runtime_dir
+    process = subprocess.Popen(
+        [app_path],
+        stdin=subprocess.DEVNULL,
+        stdout=log_fd,
+        stderr=log_fd,
+        env=env,
+        close_fds=True,
+        start_new_session=True,
+    )
+finally:
+    os.close(log_fd)
+print(process.pid)
+PY
+}
+
 "$repo_root/scripts/swiftpm.sh" build
 
 spaces_profile_eval_shell_env "$CLI"
@@ -35,12 +62,11 @@ if [[ -n "${SPACES_DEV_DB_PATH:-}" ]]; then
   fi
 fi
 spaces_profile_stop_running_app "$CLI"
+spaces_profile_stop_terminal_service "$CLI"
 
-# Relaunch in background and keep logs so launch failures are visible.
-rm -f "$LOG_FILE"
+# Relaunch detached and keep logs so launch failures are visible.
 mkdir -p "$(dirname "$SPACES_DB_PATH")"
-nohup env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" "$APP" >"$LOG_FILE" 2>&1 </dev/null &
-app_pid=$!
+app_pid="$(launch_app_detached)"
 
 # Bring app to front when possible.
 for _ in $(seq 1 12); do

@@ -627,6 +627,49 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertNotNil(receivedPayloads[inputOutputIndex].renderFrameSnapshot)
     }
 
+    @MainActor func testStateExportFlushesBufferedOutputWithoutNestedOutputBroadcast() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-state-export-flush-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+            workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-06-04T00:00:00Z")
+        let core = GhosttyEmbeddedSessionCore(launchConfiguration: launchConfiguration, paths: paths, requestSurfaceRefreshAction: {})
+        let host = GhosttyEmbeddedSessionHost(core: core)
+        defer { host.debugStopStateStreamServerForTesting() }
+
+        let localOwner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-04T00:00:00Z")
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: launchConfiguration.sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-06-04T00:00:00Z", title: "shell", workingDirectory: "/tmp/original", columns: 80, rows: 24), paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: localOwner, mode: .owner, paths: paths, attachedAt: "2026-06-04T00:00:00Z")
+        try host.debugStartStateStreamServerForTesting()
+
+        var receivedPayloads: [GhosttyRemoteSessionStatePayload] = []
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        try waitUntil(timeout: 2) { receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        receivedPayloads.removeAll()
+
+        let output = Data("queued output\n".utf8)
+        host.debugBufferIncomingOutputForStateExport(output)
+        host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.stateChange)
+
+        try waitUntil(timeout: 2) { receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.stateChange } }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+
+        XCTAssertFalse(receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.output && $0.outputByteCount == output.count })
+        XCTAssertTrue(try String(contentsOfFile: paths.outputPath).hasSuffix("queued output\n"))
+    }
+
     @MainActor func testIncomingOutputUsesRendererRefreshSchedulerByDefault() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -779,6 +822,37 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(runtimeState.state, .exited)
         XCTAssertNotNil(runtimeState.exitedAt)
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.controlSocketPath))
+    }
+
+    @MainActor func testSessionClosePersistsFinalRenderBeforeRendererTeardown() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-final-render-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "final-render",
+            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "printf final-frame",
+            createdAt: "2026-06-04T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        defer { host.terminate() }
+        let owner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-06-04T00:00:00Z")
+
+        try host.attach(client: owner, mode: .owner, into: nil)
+
+        try waitUntil(timeout: 5) {
+            (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.reason == TerminalRemoteSessionStateReason.terminated
+        }
+        let finalPayload = try TerminalSessionPersistence.readRemoteSessionState(paths: paths)
+        let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+        XCTAssertEqual(runtimeState.state, .exited)
+        XCTAssertEqual(finalPayload.reason, TerminalRemoteSessionStateReason.terminated)
+        XCTAssertTrue(finalPayload.renderFrameText?.contains("final-frame") == true)
     }
 
     @MainActor func testHeadlessDriverKeepsHostManagedSessionRunningWithoutWindowSurface() throws {

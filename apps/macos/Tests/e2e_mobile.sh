@@ -30,7 +30,7 @@ E2E_GHOSTTY_XDG_CONFIG_HOME="${SPACES_MOBILE_GHOSTTY_XDG_CONFIG_HOME:-$USER_XDG_
 FIXTURE_LINE_COUNT=520
 SCROLLBACK_SWIPE_COUNT=2
 
-SCENARIOS=(codex codex-resume-reopen roundtrip scrollback two-session ownership-guard)
+SCENARIOS=(codex codex-resume-reopen roundtrip scrollback two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard)
 SELECTED_SCENARIOS=()
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
 DEMO_PORT="${SPACES_MOBILE_DEMO_PORT:-}"
@@ -79,6 +79,8 @@ Scenarios:
   roundtrip
   scrollback
   two-session
+  ctrl-c-final-frame
+  ctrl-c-final-frame-codex-survivor
   ownership-guard
 EOF
 }
@@ -455,13 +457,19 @@ PY
 }
 
 new_terminal_session() {
+  local title="${1:-e2e-$CURRENT_SCENARIO}"
+  local command_text="${2:-}"
   local create_log="$SCENARIO_DIR/start-terminal-session.log"
   local show_log="$SCENARIO_DIR/show-terminal.log"
   local session_id
   : >"$create_log"
   for attempt in 1 2 3 4 5; do
     local attempt_log="$SCENARIO_DIR/start-terminal-session-attempt-$attempt.log"
-    if demo_env "$SPACES_E2E_BIN" start-terminal-session --cwd "$PROJECT_DIR" --title "e2e-$CURRENT_SCENARIO" >"$attempt_log" 2>&1; then
+    local create_args=(start-terminal-session --cwd "$PROJECT_DIR" --title "$title")
+    if [[ -n "$command_text" ]]; then
+      create_args+=(--command "$command_text")
+    fi
+    if demo_env "$SPACES_E2E_BIN" "${create_args[@]}" >"$attempt_log" 2>&1; then
       {
         printf -- '--- create attempt %s ---\n' "$attempt"
         cat "$attempt_log"
@@ -632,10 +640,14 @@ payload = {
     "manualRetakeoverContinuePrefix": None,
     "postFirstCommandScreenshotPath": None,
     "postSecondCommandScreenshotPath": None,
+    "interruptedRenderDumpPath": None,
+    "postInterruptScreenshotPath": None,
     "finalMacRetakeoverRequestPath": None,
     "finalMacRetakeoverObservedPath": None,
     "postFinalMacRetakeoverScreenshotPath": None,
     "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final.png"),
+    "expectedInterruptedText": "",
+    "expectedSecondaryText": "",
     "scrollbackSwipeCount": 0,
     "minimumVisibleTerminalInkBands": 0,
     "maximumTerminalTopBlankRatio": 0,
@@ -696,6 +708,18 @@ elif scenario == "two-session":
         "longDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-takeover-plus-6s.png"),
         "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-second-takeover.png"),
         "firstCommandText": "pwd",
+    })
+elif scenario in ("ctrl-c-final-frame", "ctrl-c-final-frame-codex-survivor"):
+    expected_secondary_text = "" if scenario == "ctrl-c-final-frame-codex-survivor" else "__spaces_survivor_peer_ready__"
+    payload.update({
+        "secondarySessionID": secondary_session_id,
+        "interruptedRenderDumpPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-interrupted-render.json"),
+        "postInterruptScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-interrupted-final-frame.png"),
+        "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-secondary-live-after-interrupt.png"),
+        "expectedInterruptedText": "__spaces_ctrl_c_target_ready__",
+        "expectedSecondaryText": expected_secondary_text,
+        "minimumVisibleTerminalInkBands": 1,
+        "maximumTerminalTopBlankRatio": 0.45,
     })
 
 encoded = json.dumps(payload, indent=2, sort_keys=True)
@@ -1070,7 +1094,35 @@ PY
 }
 
 codex_demo_command_prefix() {
-  printf 'CODEX_HOME=%q codex' "$E2E_CODEX_HOME"
+  local codex_command
+  codex_command="$(resolve_codex_command_for_e2e)"
+  printf 'CODEX_HOME=%q %s' "$E2E_CODEX_HOME" "$codex_command"
+}
+
+resolve_codex_command_for_e2e() {
+  if [[ -n "${SPACES_MOBILE_CODEX_BIN:-}" ]]; then
+    [[ -x "$SPACES_MOBILE_CODEX_BIN" ]] || fail "SPACES_MOBILE_CODEX_BIN is not executable: $SPACES_MOBILE_CODEX_BIN"
+    printf '%q' "$SPACES_MOBILE_CODEX_BIN"
+    return
+  fi
+
+  local path_codex
+  path_codex="$(command -v codex || true)"
+  if [[ -n "$path_codex" ]]; then
+    printf '%q' "$path_codex"
+    return
+  fi
+
+  local candidate
+  while IFS= read -r candidate; do
+    [[ -x "$candidate" ]] || continue
+    printf '%q' "$candidate"
+    return
+  done < <(
+    find "$USER_HOME/.local/share/fnm/node-versions" -path '*/installation/bin/codex' \( -type f -o -type l \) -print 2>/dev/null | sort -Vr
+  )
+
+  fail "Unable to find a Codex executable. Set SPACES_MOBILE_CODEX_BIN to the codex CLI path."
 }
 
 require_codex_auth_for_e2e() {
@@ -2089,6 +2141,270 @@ run_two_session_scenario() {
   printf 'Mobile scenario passed: two-session\n'
 }
 
+assert_ctrl_c_final_frame_scenario() {
+  local session_id="$1"
+  local secondary_session_id="$2"
+  local expected_service_pid="$3"
+  python3 - "$DEMO_ROOT" "$SCENARIO_DIR" "$UI_TEST_CONFIG" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$session_id" "$secondary_session_id" "$expected_service_pid" "$BRIDGE_HOST" "$BRIDGE_PORT" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$MOBILE_DEVICE_LABEL" <<'PY'
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+demo_root = Path(sys.argv[1])
+scenario_dir = Path(sys.argv[2])
+ui_test_config = Path(sys.argv[3])
+spaces_cli = Path(sys.argv[4])
+spacese2e = Path(sys.argv[5])
+session_id = sys.argv[6]
+secondary_session_id = sys.argv[7]
+expected_service_pid = int(sys.argv[8])
+bridge_host = sys.argv[9]
+bridge_port = int(sys.argv[10])
+bundle_id = sys.argv[11]
+mobile_device_key = sys.argv[12]
+mobile_device_name = sys.argv[13]
+mobile_device_label = sys.argv[14]
+runtime_root = demo_root / "runtime"
+config = json.loads(ui_test_config.read_text())
+expected_interrupted_text = config["expectedInterruptedText"]
+expected_secondary_text = config["expectedSecondaryText"]
+interrupted_dump_path = Path(config["interruptedRenderDumpPath"])
+event_log_path = Path(config["eventLogPath"])
+pairing = json.loads((demo_root / "pairing.json").read_text())[mobile_device_key]
+
+env = os.environ | {
+    "HOME": str(demo_root / "home"),
+    "SPACES_DB_PATH": str(demo_root / "spaces.db"),
+    "SPACES_RUNTIME_DIR": str(runtime_root),
+}
+client_app = {
+    "installationID": pairing["installationID"],
+    "bundleID": bundle_id,
+    "platform": "ios",
+    "deviceName": mobile_device_name,
+    "appVersion": "1.0",
+}
+
+def combined_terminal_text(payload: dict) -> str:
+    return "\n".join(str(payload.get(key) or "") for key in ("renderedText", "snapshotText", "visibleText", "renderedOutput"))
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+def process_is_alive(pid: int) -> bool:
+    return subprocess.run(["/bin/kill", "-0", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+def send_mobile_request(request: dict) -> dict:
+    completed = subprocess.run(
+        [
+            str(spaces_cli),
+            "mobile",
+            "request",
+            "--host",
+            bridge_host,
+            "--port",
+            str(bridge_port),
+            "--transport-key",
+            pairing["transportKey"],
+            "--request-json",
+            json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+require(interrupted_dump_path.exists(), f"Missing interrupted {mobile_device_label} render dump at {interrupted_dump_path}")
+interrupted_dump = json.loads(interrupted_dump_path.read_text())
+interrupted_text = combined_terminal_text(interrupted_dump)
+require(interrupted_dump.get("sessionID") == session_id, f"Interrupted dump used the wrong session:\n{json.dumps(interrupted_dump, indent=2)}")
+require(interrupted_dump.get("renderMode") == "ended", f"Interrupted dump did not enter ended mode:\n{json.dumps(interrupted_dump, indent=2)}")
+require(interrupted_dump.get("showsTerminalSurface") is True, f"Interrupted dump did not mount the terminal surface:\n{json.dumps(interrupted_dump, indent=2)}")
+require(not interrupted_dump.get("isOwner"), f"Interrupted dump still claimed ownership:\n{json.dumps(interrupted_dump, indent=2)}")
+require(not interrupted_dump.get("errorMessage"), f"Interrupted dump reported an error:\n{json.dumps(interrupted_dump, indent=2)}")
+require(expected_interrupted_text in interrupted_text, f"Interrupted final frame missed {expected_interrupted_text!r}:\n{interrupted_text}")
+require("final render was available" not in interrupted_text, f"Interrupted render used the ended fallback message:\n{interrupted_text}")
+require("Final terminal render unavailable" not in interrupted_text, f"Interrupted render used the Mac fallback message:\n{interrupted_text}")
+
+event_lines = []
+if event_log_path.exists():
+    event_lines = [json.loads(line) for line in event_log_path.read_text().splitlines() if line.strip()]
+require(
+    any(event.get("kind") == "e2e_command_request_consumed" and "key=ctrl+c" in (event.get("detail") or "") for event in event_lines),
+    f"The {mobile_device_label} event log did not record the ctrl+c request.",
+)
+require(
+    any(event.get("kind") == "send_key_begin" and event.get("detail") == "ctrl+c" for event in event_lines),
+    f"The {mobile_device_label} event log did not begin a ctrl+c key send.",
+)
+
+with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
+    primary_state = db.execute(
+        "SELECT state, service_pid, child_pid FROM terminal_runtime_states WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    secondary_state = db.execute(
+        "SELECT state, service_pid, child_pid FROM terminal_runtime_states WHERE session_id = ?",
+        (secondary_session_id,),
+    ).fetchone()
+    persisted_final = db.execute(
+        "SELECT reason, payload_json FROM terminal_remote_session_states WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+require(process_is_alive(expected_service_pid), f"Terminal service pid {expected_service_pid} exited after ctrl+c.")
+require(primary_state and primary_state[0] == "exited", f"Primary session did not exit after ctrl+c: {primary_state!r}")
+require(
+    primary_state[1] == expected_service_pid,
+    f"Primary session was closed by a different terminal service pid. expected={expected_service_pid} row={primary_state!r}",
+)
+require(secondary_state and secondary_state[0] == "running", f"Secondary session did not remain running: {secondary_state!r}")
+require(
+    secondary_state[1] == expected_service_pid,
+    f"Secondary session moved to a different terminal service pid. expected={expected_service_pid} row={secondary_state!r}",
+)
+require(
+    secondary_state[2] and process_is_alive(int(secondary_state[2])),
+    f"Secondary child process is not alive after ctrl+c: {secondary_state!r}",
+)
+require(persisted_final is not None, "Primary session did not persist a final remote state payload.")
+require(persisted_final[0] == "terminated", f"Persisted final payload reason was not terminated: {persisted_final[0]!r}")
+persisted_final_payload = json.loads(persisted_final[1])
+require(bool(persisted_final_payload.get("renderFrame")), "Persisted final payload did not include an encoded render frame.")
+
+overview_response = send_mobile_request({"command": "overview"})
+require(overview_response.get("ok"), f"Bridge overview failed after ctrl+c: {overview_response}")
+overview_sessions = overview_response.get("overview", {}).get("sessions", [])
+require(
+    any(session.get("id") == secondary_session_id for session in overview_sessions),
+    f"Bridge overview did not include the surviving session after ctrl+c: {json.dumps(overview_response, indent=2)}",
+)
+
+def wait_for_terminal_window_dump(session: str, output_path: Path, predicate, timeout: float) -> dict:
+    deadline = time.time() + timeout
+    last_payload = None
+    while time.time() < deadline:
+        if output_path.exists():
+            output_path.unlink()
+        subprocess.run(
+            [
+                str(spacese2e),
+                "dump-terminal-session-window-state",
+                "--session-id",
+                session,
+                "--output-path",
+                str(output_path),
+                "--any-mode",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        file_deadline = time.time() + 1
+        while time.time() < file_deadline:
+            if output_path.exists():
+                try:
+                    payload = json.loads(output_path.read_text())
+                except json.JSONDecodeError:
+                    time.sleep(0.05)
+                    continue
+                last_payload = payload
+                if predicate(payload):
+                    return payload
+                break
+            time.sleep(0.05)
+        time.sleep(0.2)
+    raise RuntimeError(
+        f"Timed out waiting for terminal window dump for {session} at {output_path}.\n"
+        f"Last payload: {json.dumps(last_payload or {}, indent=2)}"
+    )
+
+primary_window = wait_for_terminal_window_dump(
+    session_id,
+    scenario_dir / "ctrl-c-primary-window.json",
+    lambda payload: (
+        payload.get("found") is True
+        and payload.get("showsTerminalSurface") is True
+        and payload.get("rendererSummary") == "Renderer: final Ghostty render"
+        and expected_interrupted_text in combined_terminal_text(payload)
+    ),
+    timeout=30,
+)
+primary_window_text = combined_terminal_text(primary_window)
+require("final render was available" not in primary_window_text, f"Mac primary window used the ended fallback:\n{primary_window_text}")
+require("Final terminal render unavailable" not in primary_window_text, f"Mac primary window used the unavailable fallback:\n{primary_window_text}")
+
+secondary_output_path = runtime_root / "terminal" / "sessions" / secondary_session_id / "output.log"
+secondary_output = secondary_output_path.read_text(errors="replace") if secondary_output_path.exists() else ""
+if expected_secondary_text:
+    require(expected_secondary_text in secondary_output, f"Secondary output log missed {expected_secondary_text!r}:\n{secondary_output[-4000:]}")
+wait_for_terminal_window_dump(
+    secondary_session_id,
+    scenario_dir / "ctrl-c-secondary-window.json",
+    lambda payload: (
+        payload.get("found") is True
+        and payload.get("didCloseWindow") is not True
+        and payload.get("rendererSummary") != "Renderer: final Ghostty render"
+    ),
+    timeout=20,
+)
+
+(scenario_dir / "ctrl-c-final-frame-result.json").write_text(json.dumps({
+    "sessionID": session_id,
+    "secondarySessionID": secondary_session_id,
+    "terminalServicePID": expected_service_pid,
+    "primaryState": primary_state[0],
+    "secondaryState": secondary_state[0],
+    "secondaryChildPID": secondary_state[2],
+    "primaryRendererSummary": primary_window.get("rendererSummary"),
+}, indent=2, sort_keys=True))
+PY
+}
+
+run_ctrl_c_final_frame_scenario() {
+  local scenario="${1:-ctrl-c-final-frame}"
+  begin_scenario "$scenario"
+  local session_id
+  local secondary_session_id
+  local interrupt_command="python3 -c 'for i in range(80): print(f\"__spaces_ctrl_c_fill_{i:03d}__\"); print(\"__spaces_ctrl_c_target_ready__\")'; sleep 300"
+  session_id="$(new_terminal_session "interrupt-target" "$interrupt_command")"
+  track_current_scenario_session "$session_id"
+  if [[ "$scenario" == "ctrl-c-final-frame-codex-survivor" ]]; then
+    require_codex_auth_for_e2e
+    local trusted_project_dir
+    trusted_project_dir="$(cd "$PROJECT_DIR" && pwd -P)"
+    prepare_codex_home_for_e2e "$trusted_project_dir"
+    secondary_session_id="$(new_terminal_session "survivor-codex")"
+  else
+    local survivor_command="printf '__spaces_survivor_peer_ready__\\n'; sleep 300"
+    secondary_session_id="$(new_terminal_session "survivor-peer" "$survivor_command")"
+  fi
+  track_current_scenario_session "$secondary_session_id"
+  if [[ "$scenario" == "ctrl-c-final-frame-codex-survivor" ]]; then
+    local codex_command_prefix
+    codex_command_prefix="$(codex_demo_command_prefix)"
+    launch_codex_on_mac_owner "$secondary_session_id" "${SPACES_MOBILE_CODEX_COMMAND:-$codex_command_prefix}" >>"$SCENARIO_LOG" 2>&1 \
+      || fail "Failed to launch Codex survivor in $secondary_session_id."
+  fi
+  local expected_service_pid
+  expected_service_pid="$(
+    sqlite3 "$DB_PATH" "SELECT service_pid FROM terminal_runtime_states WHERE session_id = '$secondary_session_id' LIMIT 1;"
+  )"
+  [[ -n "$expected_service_pid" ]] || fail "Unable to resolve terminal service pid before Ctrl+C scenario."
+  write_ui_test_config "$scenario" "$session_id" "$secondary_session_id"
+  run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testTerminalInterruptShowsFinalFrameAndKeepsSecondSessionLive"
+  assert_ctrl_c_final_frame_scenario "$session_id" "$secondary_session_id" "$expected_service_pid" >>"$SCENARIO_LOG" 2>&1 || fail "Ctrl+C final-frame assertions failed."
+  printf 'Mobile scenario passed: %s\n' "$scenario"
+}
+
 run_ownership_guard_scenario() {
   begin_scenario "ownership-guard"
   local session_id
@@ -2287,6 +2603,12 @@ run_selected_scenarios() {
         ;;
       two-session)
         run_two_session_scenario
+        ;;
+      ctrl-c-final-frame)
+        run_ctrl_c_final_frame_scenario
+        ;;
+      ctrl-c-final-frame-codex-survivor)
+        run_ctrl_c_final_frame_scenario "$scenario"
         ;;
       ownership-guard)
         run_ownership_guard_scenario

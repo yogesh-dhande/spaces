@@ -38,17 +38,20 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             private let chunks: [Data]
             private let connection: NWConnection
             private let queue: DispatchQueue
+            private let isComplete: Bool
             private let interChunkDelayMicroseconds: @Sendable (Int) -> Int
             private let onSendBegin: @Sendable () -> Void
             private let completion: @Sendable (Error?) -> Void
 
             init(
-                chunks: [Data], connection: NWConnection, queue: DispatchQueue, interChunkDelayMicroseconds: @escaping @Sendable (Int) -> Int,
-                onSendBegin: @escaping @Sendable () -> Void, completion: @escaping @Sendable (Error?) -> Void
+                chunks: [Data], connection: NWConnection, queue: DispatchQueue, isComplete: Bool,
+                interChunkDelayMicroseconds: @escaping @Sendable (Int) -> Int, onSendBegin: @escaping @Sendable () -> Void,
+                completion: @escaping @Sendable (Error?) -> Void
             ) {
                 self.chunks = chunks
                 self.connection = connection
                 self.queue = queue
+                self.isComplete = isComplete
                 self.interChunkDelayMicroseconds = interChunkDelayMicroseconds
                 self.onSendBegin = onSendBegin
                 self.completion = completion
@@ -62,7 +65,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                 let chunk = chunks[index]
                 if index == 0 { onSendBegin() }
                 connection.send(
-                    content: chunk, contentContext: .defaultMessage, isComplete: false,
+                    content: chunk, contentContext: .defaultMessage, isComplete: isComplete && index == chunks.count - 1,
                     completion: .contentProcessed { [self] error in
                         if let error {
                             self.completion(error)
@@ -89,11 +92,11 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
 
         func send(
             content data: Data, to connection: NWConnection, on queue: DispatchQueue, onSendBegin: @escaping @Sendable () -> Void = {},
-            completion: @escaping @Sendable (Error?) -> Void
+            isComplete: Bool = false, completion: @escaping @Sendable (Error?) -> Void
         ) {
             guard isEnabled, !data.isEmpty else {
                 onSendBegin()
-                connection.send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed(completion))
+                connection.send(content: data, contentContext: .defaultMessage, isComplete: isComplete, completion: .contentProcessed(completion))
                 return
             }
 
@@ -101,7 +104,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             let initialDelay = DispatchTimeInterval.milliseconds(max(rttMS / 2, 0))
             let bandwidthBPS = bandwidthBPS
             let chain = SendChain(
-                chunks: chunks, connection: connection, queue: queue,
+                chunks: chunks, connection: connection, queue: queue, isComplete: isComplete,
                 interChunkDelayMicroseconds: { byteCount in Self.interChunkDelayMicroseconds(forByteCount: byteCount, bandwidthBPS: bandwidthBPS) },
                 onSendBegin: onSendBegin, completion: completion)
             queue.asyncAfter(deadline: .now() + initialDelay) { chain.send(index: 0) }
@@ -192,13 +195,10 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                     self.receiveNext()
                 case .failed(let error):
                     self.server.trace("request_connection_failed peer=\(self.peerID) error=\(error)")
-                    self.server.closeStreamRelay(connection: self.connection)
-                    self.server.closeRequestConnection(connection: self.connection)
-                    self.connection.cancel()
+                    self.server.closeRequestConnectionAfterNetworkUpdate(connection: self.connection, cancelNetworkConnection: true)
                 case .cancelled:
                     self.server.trace("request_connection_cancelled peer=\(self.peerID)")
-                    self.server.closeStreamRelay(connection: self.connection)
-                    self.server.closeRequestConnection(connection: self.connection)
+                    self.server.closeRequestConnectionAfterNetworkUpdate(connection: self.connection, cancelNetworkConnection: false)
                 default: break
                 }
             }
@@ -315,6 +315,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private var listener: NWListener?
     private var requestConnections: [ObjectIdentifier: RequestConnection] = [:]
     private var streamRelays: [ObjectIdentifier: StreamRelay] = [:]
+    private var streamRelaysClosingAfterFinalSend: Set<ObjectIdentifier> = []
     private var running = false
     private var acceptingRequests = false
 
@@ -503,12 +504,18 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private func handleTerminalControlRequest(_ request: SpacesMobileBridgeRequest, command: String) throws -> SpacesMobileBridgeResponse {
         guard let sessionID = request.sessionID else { return SpacesMobileBridgeResponse(ok: false, message: "Missing session ID.") }
         let clientID = Self.normalizedClientID(from: request)
+        trace(
+            "terminal_control_request source_session=\(request.sessionID ?? "-") target_session=\(sessionID) client=\(clientID ?? request.client?.id ?? "-") command=\(command)"
+        )
         if Self.ownerGatedTerminalCommands.contains(command), clientID == nil {
             return SpacesMobileBridgeResponse(ok: false, message: "Missing mobile client ID.")
         }
 
         let startedAt = Date()
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
+            return SpacesMobileBridgeResponse(ok: false, message: "Terminal session '\(sessionID)' is not running.")
+        }
         guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
             return SpacesMobileBridgeResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.")
         }
@@ -539,7 +546,119 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             }
         }
         let sessions = try TerminalSessionCatalog.listLiveSessions()
-        return SpacesMobileOverviewBuilder.build(workspaces: workspaces, sessions: sessions)
+        let workspaceRows = try loadWorkspaceTerminalRows(store: store, workspaces: workspaces)
+        return SpacesMobileOverviewBuilder.build(workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions)
+    }
+
+    private func loadWorkspaceTerminalRows(store: SQLiteStore, workspaces: [SpacesMobileOverviewBuilder.WorkspaceDescriptor]) throws
+        -> [SpacesMobileOverviewBuilder.WorkspaceTerminalRow]
+    {
+        var rows: [SpacesMobileOverviewBuilder.WorkspaceTerminalRow] = []
+        var representedSessionIDs = Set<String>()
+        for descriptor in workspaces {
+            let processesBySlot = Dictionary(grouping: try store.runningProcesses(workspaceID: descriptor.workspace.id), by: { processSlotKey($0) })
+            for process in processesBySlot.values.compactMap(preferredProcessRecord).sorted(by: {
+                $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending
+            }) {
+                guard process.terminalApp == TerminalHost.spaces.appName,
+                    let sessionID = normalizedTerminalSessionID(process.terminalNativeID ?? process.terminalTrackingID)
+                else { continue }
+                guard representedSessionIDs.insert(sessionID).inserted else { continue }
+                guard let entry = terminalCatalogEntry(sessionID: sessionID) else { continue }
+                rows.append(
+                    SpacesMobileOverviewBuilder.WorkspaceTerminalRow(
+                        entry: entry, workspace: descriptor, title: process.templateName, rowKind: .process, rowSourceID: process.id,
+                        hasFinalRender: terminalFinalRenderAvailable(sessionID: sessionID)))
+            }
+
+            let agentsBySlot = Dictionary(grouping: try store.agentWindows(workspaceID: descriptor.workspace.id), by: { agentSlotKey($0) })
+            for agent in agentsBySlot.values.compactMap(preferredAgentRecord).sorted(by: {
+                ($0.label ?? "").localizedStandardCompare($1.label ?? "") == .orderedAscending
+            }) {
+                guard agent.provider == .spaces, let sessionID = normalizedTerminalSessionID(agent.terminalNativeID ?? agent.terminalTrackingID)
+                else { continue }
+                guard representedSessionIDs.insert(sessionID).inserted else { continue }
+                guard let entry = terminalCatalogEntry(sessionID: sessionID) else { continue }
+                rows.append(
+                    SpacesMobileOverviewBuilder.WorkspaceTerminalRow(
+                        entry: entry, workspace: descriptor, title: agent.label ?? entry.effectiveTitle, rowKind: .agent, rowSourceID: agent.id,
+                        hasFinalRender: terminalFinalRenderAvailable(sessionID: sessionID)))
+            }
+        }
+        return rows
+    }
+
+    private func preferredProcessRecord(_ records: [RunningProcessRecord]) -> RunningProcessRecord? {
+        records.max { lhs, rhs in
+            let lhsRank = processRecordRank(lhs)
+            let rhsRank = processRecordRank(rhs)
+            if lhsRank != rhsRank { return lhsRank < rhsRank }
+            return (lhs.startedAt ?? lhs.exitedAt ?? "") < (rhs.startedAt ?? rhs.exitedAt ?? "")
+        }
+    }
+
+    private func processRecordRank(_ record: RunningProcessRecord) -> Int {
+        switch record.status {
+        case .running: return 3
+        case .idle: return 2
+        case .exited: return 1
+        }
+    }
+
+    private func preferredAgentRecord(_ records: [AgentWindowRecord]) -> AgentWindowRecord? {
+        records.max { lhs, rhs in
+            let lhsRank = agentRecordRank(lhs)
+            let rhsRank = agentRecordRank(rhs)
+            if lhsRank != rhsRank { return lhsRank < rhsRank }
+            return lhs.updatedAt < rhs.updatedAt
+        }
+    }
+
+    private func agentRecordRank(_ record: AgentWindowRecord) -> Int {
+        if record.provider == .spaces, let sessionID = normalizedTerminalSessionID(record.terminalNativeID ?? record.terminalTrackingID),
+            let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+            (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.state.isInteractive == true
+        {
+            return 4
+        }
+        switch record.status {
+        case .spinning: return 3
+        case .waiting: return 2
+        case .idle: return 1
+        case .done: return 0
+        }
+    }
+
+    private func processSlotKey(_ record: RunningProcessRecord) -> String { "process:\(normalizedSlotName(record.templateName))" }
+
+    private func agentSlotKey(_ record: AgentWindowRecord) -> String {
+        let slotName = record.claimedLauncherName ?? record.label ?? record.id
+        return "agent:\(normalizedSlotName(slotName))"
+    }
+
+    private func normalizedSlotName(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+
+    private func terminalCatalogEntry(sessionID: String, fileManager: FileManager = .default) -> TerminalSessionCatalogEntry? {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+            let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
+            let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        else { return nil }
+        guard !runtimeState.state.isInteractive || TerminalSessionCatalog.isInteractiveServiceAlive(for: runtimeState) else { return nil }
+        let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? .init()
+        return TerminalSessionCatalogEntry(
+            launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, paths: paths,
+            isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
+            isSubscriptionAvailable: fileManager.fileExists(atPath: paths.subscriptionSocketPath))
+    }
+
+    private func terminalFinalRenderAvailable(sessionID: String) -> Bool {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
+        return (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderFrame != nil
+    }
+
+    private func normalizedTerminalSessionID(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
     }
 
     private func handleStateRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
@@ -562,6 +681,19 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             return
         }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
+            let payload =
+                (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))
+                ?? (try? endedStatePayload(sessionID: sessionID, paths: paths, runtimeState: runtimeState))
+            if let payload {
+                sendStreamPayloadAndComplete(payload, sessionID: sessionID, to: connection)
+            } else {
+                sendResponse(SpacesMobileBridgeResponse(ok: false, message: "Terminal session '\(sessionID)' has no final state."), to: connection) {
+                    _ in connection.cancel()
+                }
+            }
+            return
+        }
         guard FileManager.default.fileExists(atPath: paths.subscriptionSocketPath) else {
             sendResponse(SpacesMobileBridgeResponse(ok: false, message: "Terminal session '\(sessionID)' has no live state stream."), to: connection)
             { _ in connection.cancel() }
@@ -604,6 +736,29 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             "mobile_bridge_subscribe", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
     }
 
+    private func sendStreamPayloadAndComplete(_ payload: GhosttyRemoteSessionStatePayload, sessionID: String, to connection: NWConnection) {
+        do {
+            let data = try GhosttyRemoteSessionStateCodec.encodeLine(payload)
+            let attributes = streamRelayAttributes(for: data)
+            logBridgePerformance(sessionID: sessionID, name: "stream_relay_read", count: data.count, attributes: attributes)
+            networkShaper.send(
+                content: data, to: connection, on: queue,
+                onSendBegin: { [weak self, sessionID, attributes, count = data.count] in
+                    self?.logBridgePerformance(sessionID: sessionID, name: "stream_network_send_begin", count: count, attributes: attributes)
+                }, isComplete: true
+            ) { [weak self, weak connection] error in
+                if let error {
+                    self?.trace("stream_final_payload_send_error session=\(sessionID) error=\(error)")
+                    connection?.cancel()
+                } else {
+                    connection?.cancel()
+                }
+            }
+        } catch {
+            sendResponse(SpacesMobileBridgeResponse(ok: false, message: String(describing: error)), to: connection) { _ in connection.cancel() }
+        }
+    }
+
     private func relayStateData(from relaySocketFD: Int32, to connection: NWConnection) {
         var buffer = [UInt8](repeating: 0, count: Self.streamRelayReadBufferSize)
         var relayedData = Data()
@@ -612,11 +767,12 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             let count = read(relaySocketFD, &buffer, buffer.count)
             if count == 0 {
                 if !relayedData.isEmpty {
-                    enqueueRelayedStateData(relayedData, firstReadUptimeNanoseconds: firstReadUptimeNanoseconds, to: connection)
-                }
-                queue.async { [weak self, weak connection] in
-                    guard let self, let connection else { return }
-                    self.closeStreamRelay(connection: connection)
+                    enqueueRelayedStateData(relayedData, firstReadUptimeNanoseconds: firstReadUptimeNanoseconds, to: connection, closeAfterSend: true)
+                } else {
+                    queue.async { [weak self, weak connection] in
+                        guard let self, let connection else { return }
+                        self.closeStreamRelayUnlessFinalSendPending(connection: connection)
+                    }
                 }
                 return
             }
@@ -629,7 +785,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                 }
                 queue.async { [weak self, weak connection] in
                     guard let self, let connection else { return }
-                    self.closeStreamRelay(connection: connection)
+                    self.closeStreamRelayUnlessFinalSendPending(connection: connection)
                 }
                 return
             }
@@ -638,20 +794,32 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         }
     }
 
-    private func enqueueRelayedStateData(_ data: Data, firstReadUptimeNanoseconds: UInt64?, to connection: NWConnection) {
-        queue.async { [weak self, weak connection, data, firstReadUptimeNanoseconds] in
+    private func enqueueRelayedStateData(_ data: Data, firstReadUptimeNanoseconds: UInt64?, to connection: NWConnection, closeAfterSend: Bool = false)
+    {
+        queue.async { [weak self, weak connection, data, firstReadUptimeNanoseconds, closeAfterSend] in
             guard let self, let connection else { return }
-            self.sendRelayedStateData(data, firstReadUptimeNanoseconds: firstReadUptimeNanoseconds, to: connection)
+            if closeAfterSend, !self.prepareStreamRelayForFinalSend(connection: connection) { return }
+            self.sendRelayedStateData(data, firstReadUptimeNanoseconds: firstReadUptimeNanoseconds, to: connection, closeAfterSend: closeAfterSend)
         }
     }
 
-    private func sendRelayedStateData(_ data: Data, firstReadUptimeNanoseconds: UInt64?, to connection: NWConnection) {
+    private func prepareStreamRelayForFinalSend(connection: NWConnection) -> Bool {
+        let key = ObjectIdentifier(connection)
+        guard let relay = streamRelays[key] else { return false }
+        guard streamRelaysClosingAfterFinalSend.insert(key).inserted else { return true }
+        relay.heartbeatTimer?.cancel()
+        relay.relaySource.cancel()
+        shutdown(relay.relaySocketFD, SHUT_RDWR)
+        return true
+    }
+
+    private func sendRelayedStateData(_ data: Data, firstReadUptimeNanoseconds: UInt64?, to connection: NWConnection, closeAfterSend: Bool = false) {
         guard let relay = streamRelays[ObjectIdentifier(connection)] else { return }
         let attributes = streamRelayAttributes(for: data)
         logBridgePerformance(
             sessionID: relay.sessionID, name: "stream_relay_read",
             emittedUptimeNanoseconds: firstReadUptimeNanoseconds ?? DispatchTime.now().uptimeNanoseconds, count: data.count, attributes: attributes)
-        relay.sendSequencer.enqueue { [weak self, weak connection, sessionID = relay.sessionID, attributes, data] finish in
+        relay.sendSequencer.enqueue { [weak self, weak connection, sessionID = relay.sessionID, attributes, data, closeAfterSend] finish in
             guard let self, let connection else {
                 finish(nil)
                 return
@@ -660,12 +828,14 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                 content: data, to: connection, on: self.queue,
                 onSendBegin: { [weak self, sessionID, attributes, count = data.count] in
                     self?.logBridgePerformance(sessionID: sessionID, name: "stream_network_send_begin", count: count, attributes: attributes)
-                }
+                }, isComplete: closeAfterSend
             ) { [weak self, weak connection] error in
                 self?.queue.async { [weak self, weak connection] in
                     if let error {
                         self?.trace("stream_relay_send_error error=\(error)")
                         if let self, let connection { self.closeStreamRelay(connection: connection) }
+                    } else if closeAfterSend, let self, let connection {
+                        self.closeStreamRelay(connection: connection)
                     }
                     finish(error)
                 }
@@ -690,18 +860,37 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         return attributes
     }
 
-    private func closeStreamRelay(connection: NWConnection) {
-        guard let relay = streamRelays.removeValue(forKey: ObjectIdentifier(connection)) else { return }
+    private func closeStreamRelay(connection: NWConnection, cancelNetworkConnection: Bool = true) {
+        let key = ObjectIdentifier(connection)
+        guard let relay = streamRelays.removeValue(forKey: key) else {
+            streamRelaysClosingAfterFinalSend.remove(key)
+            return
+        }
+        let relayReadSideAlreadyClosed = streamRelaysClosingAfterFinalSend.remove(key) != nil
         trace("stream_relay_close peer=\(String(describing: connection.endpoint))")
-        relay.heartbeatTimer?.cancel()
-        relay.relaySource.cancel()
-        shutdown(relay.relaySocketFD, SHUT_RDWR)
-        connection.cancel()
+        if !relayReadSideAlreadyClosed {
+            relay.heartbeatTimer?.cancel()
+            relay.relaySource.cancel()
+            shutdown(relay.relaySocketFD, SHUT_RDWR)
+        }
+        if cancelNetworkConnection { connection.cancel() }
+    }
+
+    private func closeStreamRelayUnlessFinalSendPending(connection: NWConnection) {
+        guard !streamRelaysClosingAfterFinalSend.contains(ObjectIdentifier(connection)) else { return }
+        closeStreamRelay(connection: connection)
     }
 
     private func closeRequestConnection(connection: NWConnection) {
         requestConnections.removeValue(forKey: ObjectIdentifier(connection))
         trace("request_connection_closed active=\(requestConnections.count)")
+    }
+
+    private func closeRequestConnectionAfterNetworkUpdate(connection: NWConnection, cancelNetworkConnection: Bool) {
+        performOnQueue {
+            self.closeStreamRelay(connection: connection, cancelNetworkConnection: cancelNetworkConnection)
+            self.closeRequestConnection(connection: connection)
+        }
     }
 
     private func closeStreamRelaysOnQueue(forInstallationID installationID: String) {
@@ -726,6 +915,10 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private func syncOnQueue<T>(_ work: () throws -> T) throws -> T {
         if DispatchQueue.getSpecific(key: queueKey) != nil { return try work() }
         return try queue.sync(execute: work)
+    }
+
+    private func performOnQueue(_ work: @escaping @Sendable () -> Void) {
+        if DispatchQueue.getSpecific(key: queueKey) != nil { work() } else { queue.async(execute: work) }
     }
 
     private func connectUnixSocket(path: String) throws -> Int32 {
@@ -760,6 +953,10 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
 
     private func loadCurrentState(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
+            if let finalState = try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) { return finalState }
+            return try endedStatePayload(sessionID: sessionID, paths: paths, runtimeState: runtimeState)
+        }
         guard FileManager.default.fileExists(atPath: paths.subscriptionSocketPath) else {
             throw NSError(
                 domain: "SpacesMobileBridgeServer", code: 404,
@@ -794,6 +991,20 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                 userInfo: [NSLocalizedDescriptionKey: "Terminal session '\(sessionID)' did not return a state payload."])
         }
         return try GhosttyRemoteSessionStateCodec.decodeLine(data)
+    }
+
+    private func endedStatePayload(sessionID: String, paths: TerminalSessionPaths, runtimeState: TerminalSessionRuntimeState) throws
+        -> GhosttyRemoteSessionStatePayload
+    {
+        let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
+        let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot()
+        let emittedAt = runtimeState.exitedAt ?? runtimeState.updatedAt
+        return GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: emittedAt, sessionStateRevision: nil,
+            sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
+            title: runtimeState.title ?? launchConfiguration?.title ?? sessionID,
+            workingDirectory: runtimeState.workingDirectory ?? launchConfiguration?.workingDirectory ?? paths.rootDirectory, renderFrame: nil,
+            outputByteCount: nil)
     }
 
     private func sendResponse(_ response: SpacesMobileBridgeResponse, to connection: NWConnection, completion: @escaping @Sendable (Error?) -> Void) {

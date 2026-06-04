@@ -308,15 +308,21 @@ private final class GhosttyHostManagedOutputPipe: @unchecked Sendable {
     private func handleSurfaceClosed() {
         guard !didHandleSurfaceClose else { return }
         didHandleSurfaceClose = true
-        terminate()
-        onSurfaceClosed?()
+        guard let onSurfaceClosed else {
+            terminate()
+            return
+        }
+        onSurfaceClosed()
     }
 
     private func handleHostPTYClosed() {
         guard !didHandleSurfaceClose else { return }
         didHandleSurfaceClose = true
-        terminate()
-        onSurfaceClosed?()
+        guard let onSurfaceClosed else {
+            terminate()
+            return
+        }
+        onSurfaceClosed()
     }
 
     private func scheduleSessionStateDelivery() {

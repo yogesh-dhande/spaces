@@ -63,7 +63,7 @@ flowchart LR
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
 - SQLite stores projects, workspaces, runtime state, terminal metadata, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` records the canonical schema version. The active schema is version `2`.
+- `migration_state.current_version` records the canonical schema version. The active schema is version `4`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
 
 ### Profile Resolution
@@ -244,6 +244,7 @@ Runtime state persists separately from project and workspace templates:
 - running processes
 - runtime targets
 - terminal target details
+- final terminal render-state payloads
 - browser target details
 - agent sessions
 
@@ -257,6 +258,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - `agent_session_events` records signal-driven lifecycle updates and launcher-driven agent transitions. Each event keeps the resolved runtime-target link plus a compact message containing the provider, label, tracking token, native terminal ID, provider session key, yabai window ID, and the full set of environment key names seen by `spaces signal` for that event.
 - `running_processes` is the canonical process-status record. Each row links to a `runtime_target` and stores only process runtime state such as command, PID, status, log path, and timestamps.
 - Runtime targets are seeded as soon as a process or agent terminal is known, even before a separate window-reconciliation pass fills in a live yabai `window_id`. That keeps process and agent rows linked to a single canonical target instead of caching terminal identity on the base row.
+- Configured process and coding-agent rows group by their reserved workspace slot and use the linked runtime target's `tracking_id` as the current Spaces terminal session identity for Mac focus, restart, and mobile overview. Replacement launch paths terminate and close the prior Spaces-backed session before deleting or rebinding the runtime row, which prevents orphaned configured sessions from reappearing as ad-hoc mobile rows. Exit and missing-window prune paths preserve configured coding-agent rows and their `terminal_session_id`; ad-hoc agent rows remain tied to their tracked terminal target and are removed when that target disappears.
 
 ### Data Modeling Guidelines
 - Base tables should stay generic. If a field only makes sense for one provider or feature family, it should live on an adapter-specific runtime path rather than on a cross-cutting base record.
@@ -268,6 +270,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Add abstractions only when current behavior needs them. Extensibility matters, but speculative tables or fields should not be added before a real workflow requires them.
 - Prefer event history for debugging destructive transitions over piling more `last_*` and `*_reason` fields onto canonical state rows. When a target or session is rebound, detached, or pruned, the system should leave an inspectable event trail.
 - Distinguish the durable Spaces session identity used for replay, focus, and runtime correlation from transient window IDs that yabai may refresh over time.
+- Persist final render-state payloads by terminal session ID. Those rows are independent of live control sockets so ended sessions can be reopened by stable identity without replaying `output.log`.
 
 ### Referential Integrity
 - SQLite foreign keys stay enabled for persisted parent-child relationships.
@@ -286,9 +289,10 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 ### Workspace Launch
 1. Validate that the workspace is launchable.
 2. Build the workspace environment, including named port variables and workspace paths.
-3. Start tracked processes inside dedicated built-in terminal sessions, wait for the session boundary to become available, and then record the terminal row plus runtime state.
-4. Leave configured browser sessions unopened until the user focuses them.
-5. Capture new terminal windows through yabai and persist the mapping.
+3. Close and terminate any prior Spaces-backed configured process sessions that occupy the same workspace slots.
+4. Start tracked processes inside dedicated built-in terminal sessions, wait for the session boundary to become available, and then record the terminal row plus runtime state.
+5. Leave configured browser sessions unopened until the user focuses them.
+6. Capture new terminal windows through yabai and persist the mapping.
 
 ### Workspace Stop or Archive
 1. Stop tracked processes.
@@ -312,6 +316,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Workspace processes also receive stable environment variables such as project and workspace directories.
 - Setup scripts, stop scripts, and process commands all execute against the workspace-specific environment.
 - Built-in `Spaces` terminal sessions own their process lifetime directly through the session backend, so launch, stop, recovery, and reopen do not depend on tmux.
+- Configured process restart closes the old native Spaces terminal window and terminates the old service session before the replacement session is recorded as current. The process row remains the configured slot; the terminal session identity changes only through that explicit replacement path.
 - Immediate process-start failures should be surfaced from the recent built-in session output itself so launch errors report the real command failure instead of a follow-on recovery error.
 - Core external dependencies that the GUI invokes directly, such as `yabai` and `git`, are resolved through a shared executable-locator path instead of relying on the Finder app environment to provide a complete `PATH`.
 - App-level settings such as shell-mode process shell are persisted in the shared store but are configured through the app rather than through `spaces`.
@@ -345,6 +350,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Window cycling is tolerant of stale tracked yabai IDs and keeps advancing until it finds the next live target.
 - Built-in terminal and agent targets do not use the same hide path as external targets. Cycling or focusing into a Spaces-owned terminal keeps the main window available and dismisses only the command palette if it is open, while external browser or editor focus still uses the hide-after-success flow.
 - Built-in process and agent focus prefer the live native window when a tracked yabai window ID exists and only reopen the session when no live native window can be focused.
+- Ended built-in process and agent focus uses the persisted Spaces terminal session identity when one exists. Focus opens or raises that ended session for final-frame viewing; it does not use focus recovery to create a replacement session.
 - Reconciliation is required because window state can drift outside the app.
 
 ### Terminal Integration Contract
@@ -355,9 +361,9 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - `spaces signal` only resolves direct built-in terminal environments.
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata, but `init` also reconciles them against tracked terminal windows so ad-hoc agent terminals become focusable tracked rows.
 - Configured agent-launcher names are treated as reserved focus labels. The launcher-owned agent instance may keep that exact label, while unrelated ad-hoc agents that report the same label are suffixed during registration so GUI rows and CLI focus targets stay unambiguous.
-- Workspace launch now opens configured coding agents through the same direct-terminal path as manual agent launch. That creates the tracked agent rows eagerly, while later `spaces signal` calls still supply the actual lifecycle status.
+- Workspace launch opens configured coding agents through the same direct-terminal path as manual agent launch. That creates the tracked agent rows eagerly, while later `spaces signal` calls still supply the actual lifecycle status.
 - Alerts and numbered window shortcuts keep configured and ad-hoc agent rows in one `Coding Agents` section. Configured rows occupy their stable slots first, then unmatched ad-hoc agent rows append after them so shortcut ordering remains deterministic.
-- Configured-agent relaunch is conservative: if a reserved row still points at a live tracked terminal, Spaces keeps that row and treats launch as a no-op. Only clearly stale rows are evicted and replaced.
+- Configured-agent relaunch is conservative: if a reserved row still points at a live tracked terminal, Spaces keeps that row and treats launch as a no-op. Ended reserved rows keep their terminal identity for focus and final-frame viewing; explicit launcher replacement closes and terminates that stale Spaces-backed session before rebinding the reserved row.
 - Agent reconciliation prefers the built-in terminal session identity first.
 - Alerts attention state is derived from runtime records rather than inferred from UI state.
 - `waiting` and `done` agent events both contribute alerts and dock attention until the user dismisses that specific attention event; the workspace row still renders the underlying agent status independently.
