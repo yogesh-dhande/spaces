@@ -170,17 +170,233 @@ def connect_stream(payload: dict) -> subprocess.Popen:
     )
 
 
-def plain_text(payload: dict) -> str:
-    encoded_frame = payload.get("renderFrame")
-    if not encoded_frame:
-        return ""
+render_update_baselines: dict[str, dict] = {}
 
+
+class RenderUpdateReader:
+    nil_revision = (1 << 64) - 1
+
+    def __init__(self, data: bytes):
+        self.data = data
+        self.offset = 0
+
+    def read(self, count: int) -> bytes:
+        if count < 0 or self.offset + count > len(self.data):
+            raise ValueError("truncated render update")
+        value = self.data[self.offset : self.offset + count]
+        self.offset += count
+        return value
+
+    def u8(self) -> int:
+        return self.read(1)[0]
+
+    def u16(self) -> int:
+        return int.from_bytes(self.read(2), "little", signed=False)
+
+    def u32(self) -> int:
+        return int.from_bytes(self.read(4), "little", signed=False)
+
+    def u64(self) -> int:
+        return int.from_bytes(self.read(8), "little", signed=False)
+
+    def i32(self) -> int:
+        return int.from_bytes(self.read(4), "little", signed=True)
+
+    def revision(self) -> int | None:
+        value = self.u64()
+        return None if value == self.nil_revision else value
+
+    def string(self) -> str:
+        return self.read(self.u16()).decode("utf-8")
+
+
+def read_render_update_cell(reader: RenderUpdateReader) -> dict:
+    return {
+        "codepoint": reader.u32(),
+        "foregroundRGB": reader.u32(),
+        "backgroundRGB": reader.u32(),
+        "flags": reader.u16(),
+    }
+
+
+def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: int) -> dict:
+    cursor_column = reader.u16()
+    cursor_row = reader.u16()
+    cursor_visible = reader.u8() != 0
+    default_foreground_rgb = reader.u32()
+    default_background_rgb = reader.u32()
+    cell_count = reader.u32()
+    return {
+        "columns": columns,
+        "rows": rows,
+        "cursorColumn": cursor_column,
+        "cursorRow": cursor_row,
+        "cursorVisible": cursor_visible,
+        "defaultForegroundRGB": default_foreground_rgb,
+        "defaultBackgroundRGB": default_background_rgb,
+        "cells": [read_render_update_cell(reader) for _ in range(cell_count)],
+    }
+
+
+def read_render_update_delta(
+    reader: RenderUpdateReader, base_revision: int | None, target_revision: int | None, owner_epoch: int, columns: int, rows: int
+) -> dict:
+    delta = {
+        "baseRevision": base_revision,
+        "targetRevision": target_revision,
+        "ownerEpoch": owner_epoch,
+        "columns": columns,
+        "rows": rows,
+        "cursorColumn": reader.u16(),
+        "cursorRow": reader.u16(),
+        "cursorVisible": reader.u8() != 0,
+        "defaultForegroundRGB": reader.u32(),
+        "defaultBackgroundRGB": reader.u32(),
+        "changedCellCount": reader.u32(),
+        "scrollRects": [],
+        "replaceCellRuns": [],
+    }
+    for _ in range(reader.u32()):
+        delta["scrollRects"].append(
+            {
+                "rowStart": reader.u16(),
+                "rowCount": reader.u16(),
+                "columnStart": reader.u16(),
+                "columnCount": reader.u16(),
+                "deltaRows": reader.i32(),
+                "deltaColumns": reader.i32(),
+            }
+        )
+    for _ in range(reader.u32()):
+        row = reader.u16()
+        column = reader.u16()
+        cell_count = reader.u16()
+        delta["replaceCellRuns"].append(
+            {"row": row, "column": column, "cells": [read_render_update_cell(reader) for _ in range(cell_count)]}
+        )
+    return delta
+
+
+def decode_render_update(payload: dict) -> dict | None:
+    encoded = payload.get("renderUpdate")
+    if not encoded:
+        return None
+    reader = RenderUpdateReader(base64.b64decode(encoded))
+    if reader.read(4) != b"GRTU":
+        raise ValueError("invalid render update magic")
+    version = reader.u8()
+    if version != 2:
+        raise ValueError(f"unsupported render update version {version}")
+    kind_byte = reader.u8()
+    _ = reader.u16()
+    session_revision = reader.revision()
+    base_revision = reader.revision()
+    target_revision = reader.revision()
+    owner_epoch = reader.u64()
+    columns = reader.u16()
+    rows = reader.u16()
+    _ = reader.string()
+    if kind_byte == 1:
+        return {
+            "kind": "full",
+            "sessionRevision": session_revision,
+            "ownerEpoch": owner_epoch,
+            "snapshot": read_render_update_snapshot(reader, columns, rows),
+        }
+    if kind_byte == 2:
+        return {
+            "kind": "delta",
+            "delta": read_render_update_delta(reader, base_revision, target_revision, owner_epoch, columns, rows),
+        }
+    return None
+
+
+def apply_render_update_delta(delta: dict, snapshot: dict) -> dict:
+    columns = int(snapshot.get("columns") or 0)
+    rows = int(snapshot.get("rows") or 0)
+    if columns != delta["columns"] or rows != delta["rows"]:
+        raise ValueError("render update dimension mismatch")
+    cells = list(snapshot.get("cells") or [])[: columns * rows]
+    if len(cells) < columns * rows:
+        raise ValueError("render update baseline grid is incomplete")
+    blank = {
+        "codepoint": 0,
+        "foregroundRGB": delta["defaultForegroundRGB"],
+        "backgroundRGB": delta["defaultBackgroundRGB"],
+        "flags": 0,
+    }
+    for operation in delta["scrollRects"]:
+        row_start = operation["rowStart"]
+        row_count = operation["rowCount"]
+        column_start = operation["columnStart"]
+        column_count = operation["columnCount"]
+        original = list(cells)
+        for row in range(row_start, row_start + row_count):
+            for column in range(column_start, column_start + column_count):
+                cells[row * columns + column] = blank
+        for source_row in range(row_start, row_start + row_count):
+            for source_column in range(column_start, column_start + column_count):
+                destination_row = source_row + operation["deltaRows"]
+                destination_column = source_column + operation["deltaColumns"]
+                if (
+                    destination_row < row_start
+                    or destination_row >= row_start + row_count
+                    or destination_column < column_start
+                    or destination_column >= column_start + column_count
+                ):
+                    continue
+                cells[destination_row * columns + destination_column] = original[source_row * columns + source_column]
+    for run in delta["replaceCellRuns"]:
+        start = run["row"] * columns + run["column"]
+        cells[start : start + len(run["cells"])] = run["cells"]
+    return {
+        "columns": columns,
+        "rows": rows,
+        "cursorColumn": delta["cursorColumn"],
+        "cursorRow": delta["cursorRow"],
+        "cursorVisible": delta["cursorVisible"],
+        "defaultForegroundRGB": delta["defaultForegroundRGB"],
+        "defaultBackgroundRGB": delta["defaultBackgroundRGB"],
+        "cells": cells,
+    }
+
+
+def materialize_render_update(payload: dict) -> dict:
+    session_id = payload.get("sessionID")
+    if not session_id or not payload.get("renderUpdate"):
+        return payload
     try:
-        frame = json.loads(base64.b64decode(encoded_frame))
-    except (ValueError, json.JSONDecodeError):
-        return ""
+        update = decode_render_update(payload)
+    except Exception:
+        return payload
+    if not update:
+        return payload
+    if update["kind"] == "full":
+        baseline = {
+            "sessionRevision": update["sessionRevision"],
+            "ownerEpoch": update["ownerEpoch"],
+            "snapshot": update["snapshot"],
+        }
+    else:
+        baseline = render_update_baselines.get(session_id)
+        if not baseline:
+            return payload
+        delta = update["delta"]
+        if baseline.get("sessionRevision") != delta["baseRevision"] or baseline.get("ownerEpoch") != delta["ownerEpoch"]:
+            return payload
+        baseline = {
+            "sessionRevision": delta["targetRevision"],
+            "ownerEpoch": delta["ownerEpoch"],
+            "snapshot": apply_render_update_delta(delta, baseline["snapshot"]),
+        }
+    render_update_baselines[session_id] = baseline
+    materialized = dict(payload)
+    materialized["_materializedRenderSnapshot"] = baseline["snapshot"]
+    return materialized
 
-    snapshot = frame.get("snapshot") or {}
+
+def plain_text(payload: dict) -> str:
+    snapshot = payload.get("_materializedRenderSnapshot") or {}
     columns = int(snapshot.get("columns") or 0)
     rows = int(snapshot.get("rows") or 0)
     cells = snapshot.get("cells") or []
@@ -211,7 +427,7 @@ def wait_for_line(stream: subprocess.Popen, predicate, timeout: float = 10) -> t
         line = stream.stdout.readline()
         if not line:
             break
-        payload = json.loads(line)
+        payload = materialize_render_update(json.loads(line))
         if predicate(payload):
             return payload, (time.perf_counter() - started) * 1000, len(line.encode("utf-8"))
     raise RuntimeError("Timed out waiting for streamed terminal state.")

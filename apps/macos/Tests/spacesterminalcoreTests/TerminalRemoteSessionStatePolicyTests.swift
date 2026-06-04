@@ -43,15 +43,15 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
         let payloadWithoutSnapshot = GhosttyRemoteSessionStatePayload(
             sessionID: "session", reason: TerminalRemoteSessionStateReason.attachmentState, emittedAt: "2026-05-27T00:00:00Z",
             sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState,
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "shell", workingDirectory: "/tmp", renderFrame: nil, outputByteCount: nil)
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "shell", workingDirectory: "/tmp", outputByteCount: nil)
         XCTAssertFalse(TerminalRemoteSessionStatePolicy.hasUsableOwnerBootstrapState(payloadWithoutSnapshot))
 
         let snapshot = snapshot(columns: 40, rows: 34)
         let payloadWithSnapshot = GhosttyRemoteSessionStatePayload(
             sessionID: "session", reason: TerminalRemoteSessionStateReason.resize, emittedAt: "2026-05-27T00:00:01Z", sessionStateRevision: 1,
             sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "shell", workingDirectory: "/tmp",
-            renderFrame: try GhosttyRenderFrame.encode(.init(sessionRevision: 1, ownerEpoch: 2, snapshot: snapshot)), outputByteCount: nil)
+            title: "shell", workingDirectory: "/tmp", outputByteCount: nil,
+            renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(.init(sessionRevision: 1, ownerEpoch: 2, snapshot: snapshot))))
         XCTAssertTrue(TerminalRemoteSessionStatePolicy.hasUsableOwnerBootstrapState(payloadWithSnapshot, viewportColumns: 40, viewportRows: 34))
         XCTAssertFalse(TerminalRemoteSessionStatePolicy.hasUsableOwnerBootstrapState(payloadWithSnapshot, viewportColumns: 122, viewportRows: 34))
     }

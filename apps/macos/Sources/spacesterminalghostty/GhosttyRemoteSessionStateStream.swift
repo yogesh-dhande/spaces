@@ -174,7 +174,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
         setsockopt(fileDescriptor, SOL_SOCKET, SO_RCVBUF, &bufferSize, socklen_t(MemoryLayout<Int32>.size))
     }
 
-    private static func writeAll(data: Data, to fileDescriptor: Int32) -> Bool {
+    fileprivate static func writeAll(data: Data, to fileDescriptor: Int32) -> Bool {
         do {
             try data.withUnsafeBytes { rawBuffer in
                 guard let baseAddress = rawBuffer.baseAddress else { return }

@@ -659,7 +659,9 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             self.networkShaper.send(
                 content: data, to: connection, on: self.queue,
                 onSendBegin: { [weak self, sessionID, attributes, count = data.count] in
-                    self?.logBridgePerformance(sessionID: sessionID, name: "stream_network_send_begin", count: count, attributes: attributes)
+                    var sendAttributes = attributes
+                    sendAttributes["network_send_bytes"] = String(count)
+                    self?.logBridgePerformance(sessionID: sessionID, name: "stream_network_send_begin", count: count, attributes: sendAttributes)
                 }
             ) { [weak self, weak connection] error in
                 self?.queue.async { [weak self, weak connection] in
@@ -680,12 +682,20 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         guard let firstLine = data.split(separator: 0x0A, maxSplits: 1, omittingEmptySubsequences: true).first,
             let payload = try? GhosttyRemoteSessionStateCodec.decodeLine(Data(firstLine))
         else {
-            attributes["render_frame"] = "unknown"
+            attributes["render_update"] = "unknown"
             return attributes
         }
         attributes["reason"] = payload.reason
-        attributes["render_frame"] = payload.renderFrame == nil ? "0" : "1"
-        attributes["frame_bytes"] = String(payload.renderFrame?.count ?? 0)
+        attributes["render_update"] = payload.renderUpdate == nil ? "0" : "1"
+        attributes["render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
+        if let update = payload.decodedRenderUpdate {
+            attributes["frame_kind"] = update.frameKindMetricValue
+            attributes["operation_count"] = String(update.operationCount)
+            attributes["changed_cell_count"] = String(update.changedCellCount)
+            attributes["scroll_operation_count"] = String(update.scrollOperationCount)
+            attributes["base_revision"] = update.baseRevision.map(String.init) ?? "nil"
+            attributes["full_frame_fallback_reason"] = update.fallbackReason ?? "none"
+        }
         attributes["target_revision"] = payload.screenStateRevision.map(String.init) ?? "nil"
         return attributes
     }

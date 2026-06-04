@@ -271,7 +271,7 @@ import spacesterminalcore
                     port: server.listeningPort, transportKey: transportKey)
             }.value
 
-            XCTAssertEqual(response.sessionState?.renderFrameText, "LIVE-STATE")
+            XCTAssertEqual(response.sessionState?.renderText, "LIVE-STATE")
             XCTAssertNil(response.sessionState?.outputByteCount)
             XCTAssertNil(response.sessionState?.outputEndByteOffset)
         }
@@ -599,11 +599,12 @@ import spacesterminalcore
 
     nonisolated private static func liveTerminalStatePayload(sessionID: String, snapshotText: String) -> GhosttyRemoteSessionStatePayload {
         let snapshot = ghosttySnapshot(text: snapshotText)
+        let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot)
         return GhosttyRemoteSessionStatePayload(
             sessionID: sessionID, reason: "live_state", emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()), sessionStateRevision: 1,
             sessionStateFlags: nil, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live",
-            workingDirectory: "/tmp/work", renderFrame: try? GhosttyRenderFrame.encode(.init(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot)),
-            outputByteCount: nil, outputEndByteOffset: nil)
+            workingDirectory: "/tmp/work", outputByteCount: nil, outputEndByteOffset: nil,
+            renderUpdate: try? GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
     }
 
     nonisolated private static func ghosttySnapshot(text: String) -> GhosttyTerminalSnapshot {
