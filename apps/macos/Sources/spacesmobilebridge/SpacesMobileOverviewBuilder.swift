@@ -22,17 +22,11 @@ struct SpacesMobileOverviewBuilder {
         -> SpacesMobileOverviewPayload
     {
         let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
-        let representedWorkspaceTitleSlots = Set(workspaceRows.map { "\($0.workspace.workspace.id)|\(normalizedSlotName($0.title))" })
         let matchedWorkspaceByLiveSessionID = Dictionary(
             uniqueKeysWithValues: liveSessions.map { session in
                 (session.sessionID, matchedWorkspace(for: session.effectiveWorkingDirectory, workspaces: workspaces))
             })
-        let adHocLiveSessions = liveSessions.filter { session in
-            guard !representedSessionIDs.contains(session.sessionID) else { return false }
-            guard let matchedWorkspace = matchedWorkspaceByLiveSessionID[session.sessionID] ?? nil else { return true }
-            let workspaceID = matchedWorkspace.workspace.id
-            return !representedWorkspaceTitleSlots.contains("\(workspaceID)|\(normalizedSlotName(session.effectiveTitle))")
-        }
+        let adHocLiveSessions = liveSessions.filter { session in !representedSessionIDs.contains(session.sessionID) }
         let matchedWorkspaceBySessionID = Dictionary(
             uniqueKeysWithValues: adHocLiveSessions.map { session in (session.sessionID, matchedWorkspaceByLiveSessionID[session.sessionID] ?? nil) })
 
@@ -106,6 +100,4 @@ struct SpacesMobileOverviewBuilder {
     }
 
     private static func normalizedPath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
-
-    private static func normalizedSlotName(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
 }

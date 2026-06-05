@@ -105,7 +105,7 @@ final class SpacesMobileOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(summary?.isSubscriptionAvailable, false)
     }
 
-    func testBuildHidesAdHocLiveSessionWhenConfiguredWorkspaceRowOwnsSameSlot() {
+    func testBuildKeepsTitleMatchedAdHocLiveSessionWhenSessionIDIsDistinct() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
             id: "workspace-1", projectID: project.id, title: "Docs", dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
@@ -124,8 +124,10 @@ final class SpacesMobileOverviewBuilderTests: XCTestCase {
                     hasFinalRender: false)
             ], liveSessions: [currentAgentSession, orphanedAgentSession])
 
-        XCTAssertEqual(overview.sessions.map(\.id), ["agent-current"])
-        XCTAssertEqual(overview.workspaces.first?.sessionCount, 1)
+        XCTAssertEqual(overview.sessions.map(\.id), ["agent-current", "agent-orphan"])
+        XCTAssertEqual(overview.sessions.first(where: { $0.id == "agent-orphan" })?.rowKind, .liveSession)
+        XCTAssertEqual(overview.sessions.first(where: { $0.id == "agent-orphan" })?.workspaceID, workspace.id)
+        XCTAssertEqual(overview.workspaces.first?.sessionCount, 2)
     }
 
     private func makeSessionCatalogEntry(

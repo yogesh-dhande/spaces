@@ -246,6 +246,7 @@ extension TerminalGhosttyRendererHosting {
     private var stateStreamServer: GhosttyRemoteSessionStateStreamServer?
     private var outputHandle: FileHandle?
     private var started = false
+    private var didTerminateCurrentRun = false
     private var currentTitle: String?
     private var currentWorkingDirectory: String?
     private var lastKnownChildPID: Int32?
@@ -304,12 +305,14 @@ extension TerminalGhosttyRendererHosting {
             try ensureOutputHandle()
             rendererHostStorage.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
             rendererHostStorage.setInputActivityHandler { [weak self] byteCount in self?.handleOwnerInputActivity(byteCount: byteCount) }
+            didTerminateCurrentRun = false
+            started = true
             try rendererHostStorage.startSessionIfNeeded()
+            guard started, !didTerminateCurrentRun else { return }
             try startControlServer()
             try startStateStreamServer()
             startRuntimeStateTimer()
             refreshRuntimeState(force: true)
-            started = true
             sessionStartedAt = startedAt
             didLogFirstOutput = false
             broadcastCurrentState(reason: "initial")
@@ -320,6 +323,7 @@ extension TerminalGhosttyRendererHosting {
             TerminalPerformance.logMetric(
                 "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            started = false
             throw error
         }
     }
@@ -382,6 +386,8 @@ extension TerminalGhosttyRendererHosting {
     }
 
     public var rendererHost: any TerminalGhosttyRendererHosting { rendererHostStorage }
+    var isStarted: Bool { started }
+
     public func terminate() {
         let now = ISO8601DateFormatter().string(from: Date())
         let childPID = observedChildPID()
@@ -392,17 +398,18 @@ extension TerminalGhosttyRendererHosting {
         controlServer?.stop()
         controlServer = nil
         TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
+        didTerminateCurrentRun = true
         started = false
         let exitedState = TerminalSessionRuntimeState(
             sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: childPID, state: .exited,
             updatedAt: now, exitedAt: now, title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, columns: lastKnownSurfaceSize?.columns,
             rows: lastKnownSurfaceSize?.rows)
-        try? TerminalSessionPersistence.writeRuntimeState(exitedState, paths: paths)
-        lastPersistedRuntimeState = exitedState
+        persistExitedRuntimeState(exitedState)
         try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: now)
         let finalPayload = currentRemoteSessionState(reason: TerminalRemoteSessionStateReason.terminated, outputByteCount: nil)
         if let finalPayload {
             try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths)
+            persistExitedRuntimeState(exitedState)
             broadcastRemoteStatePayload(finalPayload, startedAt: Date(), ownerClient: nil, outputByteCount: nil)
         }
         NotificationCenter.default.post(
@@ -416,6 +423,11 @@ extension TerminalGhosttyRendererHosting {
         stateStreamServer?.stop()
         stateStreamServer = nil
         GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
+    }
+
+    private func persistExitedRuntimeState(_ state: TerminalSessionRuntimeState) {
+        try? TerminalSessionPersistence.writeRuntimeState(state, paths: paths)
+        lastPersistedRuntimeState = state
     }
 
     private func handleSessionClosed() {
@@ -738,6 +750,7 @@ extension TerminalGhosttyRendererHosting {
     }
 
     private func refreshRuntimeState(force: Bool) {
+        guard !didTerminateCurrentRun else { return }
         guard started || !currentRuntimeStateIsExited() else { return }
         let now = Date()
         let foregroundPID = rendererHostStorage.foregroundPID()
@@ -1348,6 +1361,7 @@ private final class GhosttyMainActorSyncBox<T>: @unchecked Sendable { var value:
         let startedAt = Date()
         do {
             try core.startIfNeeded()
+            guard core.isStarted else { return }
             try core.rendererHost.attach(client: client, mode: mode, into: container)
             try core.attachClient(client, mode: mode)
             if mode == .owner, let container {
