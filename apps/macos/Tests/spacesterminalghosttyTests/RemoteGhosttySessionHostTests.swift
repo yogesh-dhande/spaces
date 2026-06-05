@@ -31,6 +31,12 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor private final class FocusableView: NSView { override var acceptsFirstResponder: Bool { true } }
     @MainActor private final class KeyTestWindow: NSWindow { override var isKeyWindow: Bool { true } }
 
+    @MainActor private func searchField(in view: NSView) -> NSSearchField? {
+        if let searchField = view as? NSSearchField, searchField.accessibilityIdentifier() == "terminal-search-field" { return searchField }
+        for subview in view.subviews { if let searchField = searchField(in: subview) { return searchField } }
+        return nil
+    }
+
     @MainActor func testRemoteMirrorForwardsModifiedBackspaceSpecs() throws {
         XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_Delete))), "backspace")
         XCTAssertEqual(
@@ -123,6 +129,23 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         XCTAssertEqual(mirrorView.debugSearchState.query, "selected-token")
         XCTAssertEqual(mirrorView.debugRecordedBindingActions, ["search:selected-token"])
+    }
+
+    @MainActor func testRemoteMirrorSearchFieldEditSubmitsQueryOnce() throws {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-search-single-edit", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-05T00:00:00Z")
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        mirrorView.debugBindingActionHandler = { _ in true }
+        mirrorView.applyActionEvent(.startSearch(nil))
+        let field = try XCTUnwrap(searchField(in: mirrorView))
+
+        field.stringValue = "needle"
+        field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
+        field.sendAction(field.action, to: field.target)
+
+        XCTAssertEqual(mirrorView.debugSearchState.query, "needle")
+        XCTAssertEqual(mirrorView.debugRecordedBindingActions, ["search:needle"])
     }
 
     @MainActor func testRemoteMirrorReleaseSurfaceResetsSearchOverlay() {

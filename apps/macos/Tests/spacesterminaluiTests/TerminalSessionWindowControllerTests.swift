@@ -1312,7 +1312,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(host.debugSearchState.isVisible, false)
     }
 
-    @MainActor func testGhosttyViewerAndExitedSessionsDisableEditAndFindActions() throws {
+    @MainActor func testGhosttyViewerDisablesActionsAndExitedOwnerKeepsReadOnlyShortcuts() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1353,10 +1353,19 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         let exitedHost = FakeGhosttySessionHost()
         exitedHost.snapshotValue = ghosttySnapshot(text: "owner")
         let exited = makeGhosttyController(sessionID: "session-exited-disabled", paths: exitedPaths, host: exitedHost)
+        exited.show()
 
+        XCTAssertTrue(exited.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.copy(_:)))))
+        XCTAssertTrue(exited.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
         XCTAssertFalse(exited.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
         XCTAssertFalse(exited.validateUserInterfaceItem(ValidatedItem(action: #selector(TerminalSessionWindowController.find(_:)))))
         XCTAssertFalse(exited.validateUserInterfaceItem(ValidatedItem(action: #selector(TerminalSessionWindowController.findNext(_:)))))
+
+        XCTAssertTrue(exited.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_C, characters: "c", window: exited.window)) == true)
+        XCTAssertTrue(exited.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_A, characters: "a", window: exited.window)) == true)
+        XCTAssertFalse(exited.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_V, characters: "v", window: exited.window)) == true)
+        XCTAssertFalse(exited.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_F, characters: "f", window: exited.window)) == true)
+        XCTAssertEqual(exitedHost.recordedBindingActions, ["copy_to_clipboard", "select_all"])
     }
 
     @MainActor func testGhosttyOwnerPasteIsDisabledWhenSessionIsNotRunning() throws {

@@ -534,7 +534,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         switch item.action {
         case #selector(NSText.copy(_:)):
             switch visibleRenderer {
-            case .ghosttyOwner: return canPerformLiveTerminalEditAction
+            case .ghosttyOwner: return canPerformLiveTerminalReadOnlyAction
             case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable: return true
             case .textView: return backend == .ghosttyEmbedded ? isInteractiveRuntimeState(lastObservedRuntimeState) : true
             }
@@ -544,7 +544,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable: return false
             case .textView: return !inputRowStackView.isHidden && inputField.isEnabled
             }
-        case #selector(selectAll(_:)): return visibleRenderer == .ghosttyOwner ? canPerformLiveTerminalEditAction : true
+        case #selector(selectAll(_:)): return visibleRenderer == .ghosttyOwner ? canPerformLiveTerminalReadOnlyAction : true
         case #selector(find(_:)), #selector(findNext(_:)), #selector(findPrevious(_:)), #selector(useSelectionForFind(_:)), #selector(hideFind(_:)):
             switch visibleRenderer {
             case .ghosttyOwner: return canPerformLiveTerminalEditAction
@@ -612,7 +612,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     public override func selectAll(_ sender: Any?) {
         if visibleRenderer == .ghosttyOwner {
-            guard performLiveTerminalBindingAction("select_all") else { return }
+            guard performLiveTerminalReadOnlyBindingAction("select_all") else { return }
             return
         }
         window?.makeFirstResponder(outputView)
@@ -1471,27 +1471,33 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         guard flags == [.command] || flags == [.command, .shift] else { return false }
         let keyCode = Int(event.keyCode)
         if isFieldEditorFirstResponder, flags == [.command], keyCode == kVK_ANSI_C || keyCode == kVK_ANSI_V || keyCode == kVK_ANSI_A { return false }
-        guard canPerformLiveTerminalEditAction else { return false }
         switch (keyCode, flags) {
         case (kVK_ANSI_C, [.command]):
+            guard canPerformLiveTerminalReadOnlyAction else { return false }
             copy(nil)
             return true
         case (kVK_ANSI_V, [.command]):
+            guard canPerformLiveTerminalEditAction else { return false }
             paste(nil)
             return true
         case (kVK_ANSI_A, [.command]):
+            guard canPerformLiveTerminalReadOnlyAction else { return false }
             selectAll(nil)
             return true
         case (kVK_ANSI_F, [.command]):
+            guard canPerformLiveTerminalEditAction else { return false }
             find(nil)
             return true
         case (kVK_ANSI_E, [.command]):
+            guard canPerformLiveTerminalEditAction else { return false }
             useSelectionForFind(nil)
             return true
         case (kVK_ANSI_G, [.command]):
+            guard canPerformLiveTerminalEditAction else { return false }
             findNext(nil)
             return true
         case (kVK_ANSI_G, [.command, .shift]):
+            guard canPerformLiveTerminalEditAction else { return false }
             findPrevious(nil)
             return true
         default: return false
@@ -1693,9 +1699,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         return runtimeState.state != .running
     }
 
-    private var canPerformLiveTerminalEditAction: Bool {
+    private var canPerformLiveTerminalEditAction: Bool { canPerformLiveTerminalReadOnlyAction && isInteractiveRuntimeState(lastObservedRuntimeState) }
+
+    private var canPerformLiveTerminalReadOnlyAction: Bool {
         backend == .ghosttyEmbedded && preferredAttachmentMode == .owner && visibleRenderer == .ghosttyOwner
-            && isInteractiveRuntimeState(lastObservedRuntimeState)
     }
 
     @discardableResult private func performLiveTerminalBindingAction(_ action: String) -> Bool {
@@ -1705,6 +1712,19 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             } else if !isInteractiveRuntimeState(lastObservedRuntimeState) {
                 updateInputStatus(message: "Session is not running.", isError: true)
             }
+            NSSound.beep()
+            return false
+        }
+        guard ghosttyRendererHost?.performBindingAction(action) == true else {
+            NSSound.beep()
+            return false
+        }
+        return true
+    }
+
+    @discardableResult private func performLiveTerminalReadOnlyBindingAction(_ action: String) -> Bool {
+        guard canPerformLiveTerminalReadOnlyAction else {
+            if preferredAttachmentMode != .owner { updateInputStatus(message: "Only the active owner can edit the live terminal.", isError: true) }
             NSSound.beep()
             return false
         }

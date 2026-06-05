@@ -615,8 +615,6 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
 
     @objc private func searchFieldAction() { updateSearchQuery() }
 
-    func controlTextDidChange(_ notification: Notification) { updateSearchQuery() }
-
     private func updateSearchQuery() {
         guard !searchOverlay.isHidden else { return }
         submitSearchQuery(searchField.stringValue)
