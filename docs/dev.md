@@ -78,7 +78,7 @@ That installs `GhosttyKit.xcframework`, Ghostty resources, `libghostty-vt` heade
 - `apps/macos/.local/ghosttyvt/lib`
 
 The Ghostty fork is tracked as the submodule at `apps/macos/vendor/ghostty`. The parent repo's submodule pointer is the single source of truth for the Ghostty commit used by both `GhosttyKit.xcframework` and `libghostty-vt`.
-By default, `setup_ghostty.sh` reuses local artifacts only when `apps/macos/.local/ghostty-artifacts/manifest.json` matches the submodule SHA. Otherwise it downloads the Spaces-owned GitHub release named `ghostty-artifacts-<full-ghostty-sha>`.
+By default, `setup_ghostty.sh` reuses local artifacts only when `apps/macos/.local/ghostty-artifacts/manifest.json` matches the submodule SHA, setup script version, Zig version, and Xcode build version. Otherwise it downloads the Spaces-owned GitHub release named `ghostty-artifacts-<full-ghostty-sha>` and validates the same manifest fields before install. When a release artifact was built with a different Xcode build, setup exits before installing it; build locally with `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty` or publish artifacts from the matching Xcode.
 The setup flow finishes by running `apps/macos/scripts/verify_ghosttykit.sh`, which checks that the artifact declares and exports the embedded terminal APIs that Spaces uses for raw I/O, host rebinding, session state callbacks, renderer attachment, headless session creation, render-frame export, and mirror renderer surfaces. Passive-viewer attachment exports are not part of the required contract.
 
 When a Spaces branch depends on Ghostty fork work, edit and commit the fork change inside the submodule, push it to the fork's `spaces` branch, and update the parent repo's submodule pointer:
@@ -89,7 +89,7 @@ git -C apps/macos/vendor/ghostty push origin HEAD:spaces
 git add apps/macos/vendor/ghostty
 ```
 
-PR checks run `apps/macos/scripts/ensure_ghostty_artifacts.sh`, so existing `ghostty-artifacts-<sha>` releases are downloaded and validated before Swift verification starts. Same-repo PRs, manual PR-check runs, and pushes to `main` first run a non-cancelable trusted artifact publisher that builds from the pinned submodule and publishes a reusable release when the release is missing or incomplete; verification waits for that publisher and then downloads the artifact. Fork PRs build missing artifacts locally without publishing, and the main-push publisher creates the reusable release after merge. Trusted publish runs repair incomplete artifact releases by rebuilding and uploading the full asset set. After the release is present, refresh local artifacts and run the normal verification pass:
+PR checks run `apps/macos/scripts/ensure_ghostty_artifacts.sh`, so existing `ghostty-artifacts-<sha>` releases are downloaded and validated before Swift verification starts. Same-repo PRs, manual PR-check runs, and pushes to `main` first run a non-cancelable trusted artifact publisher that builds from the pinned submodule and publishes a reusable release when the release is missing or incomplete for that build environment; verification waits for that publisher and then downloads the artifact. Fork PRs build missing artifacts locally without publishing, and the main-push publisher creates the reusable release after merge. Trusted publish runs repair incomplete artifact releases by rebuilding and uploading the full asset set. After the release is present, refresh local artifacts and run the normal verification pass:
 
 ```bash
 git -C apps/macos/vendor/ghostty rev-parse HEAD
