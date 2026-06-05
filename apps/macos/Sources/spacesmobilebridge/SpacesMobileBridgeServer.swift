@@ -483,6 +483,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         case "workspaceCreateOptions": return try handleWorkspaceCreateOptionsRequest(request)
         case "createWorkspace": return try handleCreateWorkspaceRequest(request)
         case "openWorkspaceTerminal": return try handleOpenWorkspaceTerminalRequest(request)
+        case "stopWorkspaceTerminal": return try handleStopWorkspaceTerminalRequest(request)
         case "runWorkspaceProcess": return try handleRunWorkspaceProcessRequest(request)
         case "stopWorkspaceProcess": return try handleStopWorkspaceProcessRequest(request)
         case "restartWorkspaceProcess": return try handleRestartWorkspaceProcessRequest(request)
@@ -732,6 +733,20 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let sessionID = try mobileOrchestrator(store: store).openWorkspaceTerminal(workspaceID: workspaceID)
         return try refreshedMutationResponse(message: "Opened workspace terminal.", workspaceID: workspaceID, sessionID: sessionID)
+    }
+
+    private func handleStopWorkspaceTerminalRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let workspaceID = normalizedString(request.workspaceID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing workspace ID.")
+        }
+        guard let sessionID = normalizedString(request.sessionID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing terminal session ID.")
+        }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard try mobileOrchestrator(store: store).stopAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID) else {
+            return try refreshedMutationResponse(message: "Workspace terminal was already stopped.", workspaceID: workspaceID)
+        }
+        return try refreshedMutationResponse(message: "Stopped workspace terminal.", workspaceID: workspaceID)
     }
 
     private func handleRunWorkspaceProcessRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {

@@ -81,6 +81,8 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(agentSessionColumns.contains("claimed_launcher_id"))
         XCTAssertTrue(agentSessionColumns.contains("claimed_launcher_name"))
         XCTAssertTrue(terminalSessionColumns.contains("root_directory"))
+        XCTAssertTrue(terminalSessionColumns.contains("workspace_id"))
+        XCTAssertTrue(terminalSessionColumns.contains("kind"))
         XCTAssertTrue(terminalClientColumns.contains("lease_refreshed_at"))
         XCTAssertTrue(terminalAttachmentColumns.contains("detached_at"))
         XCTAssertTrue(terminalRemoteStateColumns.contains("payload_json"))
@@ -225,6 +227,81 @@ final class StoreTests: XCTestCase {
             try readSingleText(dbURL: dbURL, sql: "SELECT id FROM project_agent_launchers WHERE project_id = 'project-1' AND name = 'Codex'")
                 .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
+    }
+
+    func testVersionFiveDatabaseMigratesTerminalSessionOwnershipMetadata() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("v5-terminal-ownership-migration.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE terminal_sessions (
+                  session_id TEXT PRIMARY KEY,
+                  root_directory TEXT NOT NULL UNIQUE,
+                  backend TEXT NOT NULL,
+                  lifetime_policy TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  working_directory TEXT NOT NULL,
+                  shell TEXT NOT NULL,
+                  command TEXT,
+                  created_at TEXT NOT NULL
+                );
+                CREATE TABLE running_processes (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  terminal_session_id TEXT,
+                  started_at TEXT,
+                  exited_at TEXT,
+                  last_output_at TEXT
+                );
+                CREATE TABLE agent_sessions (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  terminal_session_id TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE runtime_targets (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  type TEXT NOT NULL,
+                  app TEXT NOT NULL,
+                  tracking_id TEXT,
+                  order_index INTEGER NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO terminal_sessions(session_id, root_directory, backend, lifetime_policy, title, working_directory, shell, created_at)
+                VALUES
+                  ('process-session', '/tmp/process-session', 'ghosttyEmbedded', 'persistent', 'process', '/tmp/process', '/bin/zsh', '2026-01-01T00:00:00Z'),
+                  ('agent-session', '/tmp/agent-session', 'ghosttyEmbedded', 'persistent', 'agent', '/tmp/agent', '/bin/zsh', '2026-01-01T00:00:00Z'),
+                  ('runtime-session', '/tmp/runtime-session', 'ghosttyEmbedded', 'persistent', 'runtime', '/tmp/runtime', '/bin/zsh', '2026-01-01T00:00:00Z'),
+                  ('unowned-session', '/tmp/unowned-session', 'ghosttyEmbedded', 'persistent', 'unowned', '/tmp/unowned', '/bin/zsh', '2026-01-01T00:00:00Z');
+                INSERT INTO running_processes(id, workspace_id, terminal_session_id, started_at)
+                VALUES ('process-1', 'workspace-process', 'process-session', '2026-01-01T00:00:02Z');
+                INSERT INTO agent_sessions(id, workspace_id, provider, terminal_session_id, created_at, updated_at)
+                VALUES ('agent-1', 'workspace-agent', 'spaces', 'agent-session', '2026-01-01T00:00:01Z', '2026-01-01T00:00:03Z');
+                INSERT INTO runtime_targets(id, workspace_id, type, app, tracking_id, order_index, updated_at)
+                VALUES
+                  ('target-process', 'workspace-wrong-process', 'terminal', 'Spaces', 'process-session', 0, '2026-01-01T00:00:04Z'),
+                  ('target-agent', 'workspace-wrong-agent', 'terminal', 'Spaces', 'agent-session', 1, '2026-01-01T00:00:04Z'),
+                  ('target-runtime', 'workspace-runtime', 'terminal', 'Spaces', 'runtime-session', 2, '2026-01-01T00:00:04Z');
+                INSERT INTO migration_state(current_version) VALUES (5);
+                """)
+
+        _ = try SQLiteStore(path: dbURL.path)
+
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+        let terminalSessionColumns = try readTableColumns(dbURL: dbURL, table: "terminal_sessions")
+        XCTAssertTrue(terminalSessionColumns.contains("workspace_id"))
+        XCTAssertTrue(terminalSessionColumns.contains("kind"))
+        XCTAssertEqual(
+            try readRows(dbURL: dbURL, sql: "SELECT session_id, COALESCE(workspace_id, ''), kind FROM terminal_sessions ORDER BY session_id"),
+            [
+                ["agent-session", "workspace-agent", "agent"], ["process-session", "workspace-process", "process"],
+                ["runtime-session", "workspace-runtime", "shell"], ["unowned-session", "", "shell"],
+            ])
     }
 
     func testCurrentSchemaRejectsBlankPortNamesAtDatabaseLevel() throws {

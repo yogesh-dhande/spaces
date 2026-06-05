@@ -23,6 +23,61 @@ final class SpacesMobileOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(matched?.workspace.id, nestedWorkspace.id)
     }
 
+    func testMetadataWorkspaceMatchBeatsNestedWorkingDirectoryPrefix() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let rootWorkspace = WorkspaceRecord(
+            id: "workspace-root", projectID: project.id, title: "Root", dir: "/repo", dirname: nil, branch: "main", isDefault: true,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let nestedWorkspace = WorkspaceRecord(
+            id: "workspace-nested", projectID: project.id, title: "Nested", dir: "/repo/apps/web", dirname: nil, branch: "feature", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let session = makeSessionCatalogEntry(
+            sessionID: "session-metadata", title: "shell", workingDirectory: "/repo/apps/web/src", workspaceID: rootWorkspace.id,
+            attachmentSnapshot: .init())
+
+        let overview = SpacesMobileOverviewBuilder.build(
+            workspaces: [.init(project: project, workspace: rootWorkspace), .init(project: project, workspace: nestedWorkspace)], sessions: [session])
+
+        XCTAssertEqual(overview.sessions.first?.workspaceID, rootWorkspace.id)
+        XCTAssertEqual(overview.workspaces.first(where: { $0.id == rootWorkspace.id })?.sessionCount, 1)
+        XCTAssertEqual(overview.workspaces.first(where: { $0.id == nestedWorkspace.id })?.sessionCount, 0)
+    }
+
+    func testMetadataWorkspaceMissingFromOverviewLeavesSessionUnassigned() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let session = makeSessionCatalogEntry(
+            sessionID: "session-missing-workspace", title: "shell", workingDirectory: workspace.dir, workspaceID: "workspace-archived",
+            attachmentSnapshot: .init())
+
+        let overview = SpacesMobileOverviewBuilder.build(workspaces: [.init(project: project, workspace: workspace)], sessions: [session])
+
+        XCTAssertNil(overview.sessions.first?.workspaceID)
+        XCTAssertEqual(overview.workspaces.first?.sessionCount, 0)
+        XCTAssertTrue(overview.workspaces.first?.terminalRows.isEmpty ?? false)
+    }
+
+    func testNilMetadataUsesLongestWorkingDirectoryPrefixFallback() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let rootWorkspace = WorkspaceRecord(
+            id: "workspace-root", projectID: project.id, title: "Root", dir: "/repo", dirname: nil, branch: "main", isDefault: true,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let nestedWorkspace = WorkspaceRecord(
+            id: "workspace-nested", projectID: project.id, title: "Nested", dir: "/repo/apps/web", dirname: nil, branch: "feature", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let session = makeSessionCatalogEntry(
+            sessionID: "session-legacy", title: "shell", workingDirectory: "/repo/apps/web/src", attachmentSnapshot: .init())
+
+        let overview = SpacesMobileOverviewBuilder.build(
+            workspaces: [.init(project: project, workspace: rootWorkspace), .init(project: project, workspace: nestedWorkspace)], sessions: [session])
+
+        XCTAssertEqual(overview.sessions.first?.workspaceID, nestedWorkspace.id)
+        XCTAssertEqual(overview.workspaces.first(where: { $0.id == rootWorkspace.id })?.sessionCount, 0)
+        XCTAssertEqual(overview.workspaces.first(where: { $0.id == nestedWorkspace.id })?.sessionCount, 1)
+    }
+
     func testBuildsWorkspaceCountsAndLeavesUnmatchedSessionsUngrouped() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
@@ -209,8 +264,27 @@ final class SpacesMobileOverviewBuilderTests: XCTestCase {
         let rows = overview.workspaces.first?.terminalRows ?? []
         XCTAssertEqual(rows.map(\.sessionID), ["session-shell"])
         XCTAssertEqual(rows.first?.runState, .running)
+        XCTAssertEqual(rows.first?.canStop, true)
         XCTAssertEqual(overview.workspaces.first?.processRows.first?.id, "process-runtime:process-api")
         XCTAssertEqual(overview.workspaces.first?.processRows.first?.canRun, false)
+    }
+
+    func testTrackedWorkspaceTerminalRequiresLiveSessionIDBeforeStopIsAvailable() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let terminalWindow = WindowRecord(
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", windowID: nil, terminalTrackingID: nil,
+            terminalNativeID: nil, role: "terminal", orderIndex: 0, lastSeenAt: "now")
+
+        let overview = SpacesMobileOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace, windows: [terminalWindow])], sessions: [])
+
+        let row = overview.workspaces.first?.terminalRows.first
+        XCTAssertEqual(row?.runState, .running)
+        XCTAssertNil(row?.sessionID)
+        XCTAssertEqual(row?.canStop, false)
     }
 
     func testBuildIncludesEndedWorkspaceProcessRowsWithoutLiveControl() {
@@ -296,12 +370,13 @@ final class SpacesMobileOverviewBuilderTests: XCTestCase {
     }
 
     private func makeSessionCatalogEntry(
-        sessionID: String, title: String, workingDirectory: String, state: TerminalSessionState = .running,
-        attachmentSnapshot: TerminalSessionAttachmentSnapshot, isControlAvailable: Bool = true, isSubscriptionAvailable: Bool = true
+        sessionID: String, title: String, workingDirectory: String, state: TerminalSessionState = .running, workspaceID: String? = nil,
+        kind: TerminalSessionKind = .shell, attachmentSnapshot: TerminalSessionAttachmentSnapshot, isControlAvailable: Bool = true,
+        isSubscriptionAvailable: Bool = true
     ) -> TerminalSessionCatalogEntry {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: title, workingDirectory: workingDirectory,
-            shell: "/bin/zsh", command: nil, createdAt: "2026-05-18T08:00:00Z")
+            shell: "/bin/zsh", command: nil, createdAt: "2026-05-18T08:00:00Z", workspaceID: workspaceID, kind: kind)
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 123, childPID: 456, state: state, updatedAt: "2026-05-18T08:00:05Z",
             title: title, workingDirectory: workingDirectory)

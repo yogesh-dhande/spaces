@@ -144,6 +144,17 @@ public final class WorkspaceOrchestrator {
         let outputPath: String
     }
 
+    private struct BuiltInTerminalSessionOwnership {
+        let process: RunningProcessRecord?
+        let agent: AgentWindowRecord?
+        let terminalWindowWorkspaceID: String?
+        let launchWorkspaceID: String?
+        let launchKind: TerminalSessionKind?
+
+        var processWorkspaceID: String? { process?.workspaceID }
+        var agentWorkspaceID: String? { agent?.workspaceID }
+    }
+
     public struct WorkspaceTerminalLaunchReservation: Sendable {
         public let sessionID: String
         let workspaceID: String
@@ -282,8 +293,10 @@ public final class WorkspaceOrchestrator {
             builtInTerminalWindowCloser ?? { sessionID in
                 guard let object = try? IPCNotification.currentObject() else { return }
                 DistributedNotificationCenter.default().postNotificationName(
-                    IPCNotification.closeTerminalSessionWindow, object: object, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID],
-                    options: [.deliverImmediately])
+                    IPCNotification.closeTerminalSessionWindow, object: object,
+                    userInfo: [
+                        IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalSessionIsTerminatingUserInfoKey: "true",
+                    ], options: [.deliverImmediately])
             }
         self.builtInTerminalSessionTerminator =
             builtInTerminalSessionTerminator ?? Self.builtInTerminalSessionTerminatorOverrideStore.get() ?? { sessionID in
@@ -1037,9 +1050,12 @@ public final class WorkspaceOrchestrator {
             }
             if window.role == "terminal", isManagedTerminalApp(window.app) {
                 if let windowID = window.windowID, closedManagedTerminalWindowIDs.contains(windowID) { continue }
-                if terminalHost(for: window.app) == .spaces, let sessionID = window.terminalNativeID ?? window.terminalTrackingID,
-                    closedBuiltInTerminalSessionIDs.contains(sessionID)
-                {
+                if terminalHost(for: window.app) == .spaces {
+                    guard let sessionID = normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID) else { continue }
+                    if !closedBuiltInTerminalSessionIDs.contains(sessionID) {
+                        terminateBuiltInTerminalSession(sessionID)
+                        closedBuiltInTerminalSessionIDs.insert(sessionID)
+                    }
                     continue
                 }
                 _ = try? closeTrackedItermTerminalWindow(window)
@@ -1434,7 +1450,7 @@ public final class WorkspaceOrchestrator {
         let command = try spacesTerminalCommand(template: template, env: env, processShell: try store.appConfig().processShell)
         let session = try launchSpacesTerminalSession(
             title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner, backend: .ghosttyEmbedded,
-            readinessPolicy: .sessionReady)
+            readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
             fputs(
                 "spaces: restart_process launched workspace=\(workspaceID) name=\(process.templateName) previous_session=\(previousSessionID ?? "-") new_session=\(session.sessionID)\n",
@@ -1562,7 +1578,7 @@ public final class WorkspaceOrchestrator {
         let createdAt = nowISO8601()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: generatedTitle, workingDirectory: workspace.dir,
-            shell: terminalShellPathOverride() ?? "/bin/zsh", command: command, createdAt: createdAt)
+            shell: terminalShellPathOverride() ?? "/bin/zsh", command: command, createdAt: createdAt, workspaceID: workspace.id, kind: .shell)
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
@@ -1591,7 +1607,8 @@ public final class WorkspaceOrchestrator {
             let session = try launchSpacesTerminalSession(
                 title: reservation.launchConfiguration.title, workingDirectory: reservation.launchConfiguration.workingDirectory,
                 command: reservation.launchConfiguration.command, showMode: .owner, backend: reservation.launchConfiguration.backend,
-                readinessPolicy: .stableChildPID, sessionID: reservation.sessionID, lifetimePolicy: reservation.launchConfiguration.lifetimePolicy)
+                readinessPolicy: .stableChildPID, sessionID: reservation.sessionID, lifetimePolicy: reservation.launchConfiguration.lifetimePolicy,
+                workspaceID: reservation.launchConfiguration.workspaceID, kind: reservation.launchConfiguration.kind)
             guard try reservedWorkspaceTerminalWindowExists(reservation) else {
                 builtInTerminalSessionTerminator(reservation.sessionID)
                 return session.sessionID
@@ -1781,16 +1798,69 @@ public final class WorkspaceOrchestrator {
     }
 
     public func workspaceIDForTerminalSession(_ sessionID: String) throws -> String? { try store.workspaceIDForTerminalSession(sessionID) }
-    @discardableResult public func removeAdHocBuiltInTerminalSession(sessionID: String) throws -> Bool {
-        guard let workspaceID = try store.workspaceIDForTerminalSession(sessionID) else { return false }
-        let runningProcessOwnsSession = try store.runningProcesses(workspaceID: workspaceID).contains {
-            ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
+
+    @discardableResult public func stopBuiltInTerminalSessionClosedByUser(sessionID: String) throws -> Bool {
+        guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
+        let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
+        if let process = ownership.process {
+            try stopWorkspaceProcess(workspaceID: process.workspaceID, processID: process.id)
+            return true
         }
-        guard !runningProcessOwnsSession else { return false }
+        if let agent = ownership.agent {
+            try stopCodingAgent(workspaceID: agent.workspaceID, agentID: agent.id)
+            return true
+        }
+        guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { return false }
+        return try stopAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID)
+    }
+
+    @discardableResult public func stopAdHocBuiltInTerminalSession(sessionID: String) throws -> Bool {
+        guard let sessionID = normalizedTerminalSessionID(sessionID), let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID)
+        else { return false }
+        return try stopAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID)
+    }
+
+    @discardableResult public func stopAdHocBuiltInTerminalSession(workspaceID: String, sessionID: String) throws -> Bool {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            try stopAdHocBuiltInTerminalSessionUnlocked(workspaceID: workspaceID, sessionID: sessionID)
+        }
+    }
+
+    @discardableResult public func removeAdHocBuiltInTerminalSession(sessionID: String) throws -> Bool {
+        guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
+        let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
+        guard ownership.process == nil, ownership.agent == nil else { return false }
+        let workspaceID: String?
+        if let terminalWindowWorkspaceID = ownership.terminalWindowWorkspaceID {
+            workspaceID = terminalWindowWorkspaceID
+        } else {
+            workspaceID = ownership.launchWorkspaceID
+        }
+        guard let workspaceID else { return false }
         let matchingWindowIDs = try store.windows(workspaceID: workspaceID).filter {
             $0.role == "terminal" && terminalHost(for: $0.app) == .spaces && ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
         }.map(\.id)
         guard !matchingWindowIDs.isEmpty else { return false }
+        for windowID in matchingWindowIDs { try store.deleteWindow(id: windowID) }
+        try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
+        return true
+    }
+
+    private func stopAdHocBuiltInTerminalSessionUnlocked(workspaceID: String, sessionID: String) throws -> Bool {
+        guard let sessionID = normalizedTerminalSessionID(sessionID), let workspace = try store.workspace(id: workspaceID) else { return false }
+        let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
+        guard ownership.process == nil, ownership.agent == nil else { return false }
+        if let terminalWindowWorkspaceID = ownership.terminalWindowWorkspaceID {
+            guard terminalWindowWorkspaceID == workspaceID else { return false }
+        } else if let launchWorkspaceID = ownership.launchWorkspaceID {
+            guard launchWorkspaceID == workspaceID else { return false }
+        } else {
+            guard terminalSession(sessionID: sessionID, belongsTo: workspace) else { return false }
+        }
+        let matchingWindowIDs = try store.windows(workspaceID: workspaceID).filter {
+            $0.role == "terminal" && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
+        }.map(\.id)
+        terminateBuiltInTerminalSession(sessionID)
         for windowID in matchingWindowIDs { try store.deleteWindow(id: windowID) }
         try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
         return true
@@ -2972,12 +3042,13 @@ public final class WorkspaceOrchestrator {
     private func launchSpacesTerminalSession(
         title: String, workingDirectory: String, command: String?, showMode: TerminalAttachmentMode,
         backend: TerminalSessionBackendKind = .ghosttyEmbedded, readinessPolicy: BuiltInTerminalReadinessPolicy = .stableChildPID,
-        sessionID: String? = nil, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent
+        sessionID: String? = nil, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent, workspaceID: String? = nil,
+        kind: TerminalSessionKind = .shell
     ) throws -> SpacesTerminalSessionHandle {
         let sessionID = sessionID ?? UUID().uuidString
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: backend, lifetimePolicy: lifetimePolicy, title: title, workingDirectory: workingDirectory,
-            shell: terminalShellPathOverride() ?? "/bin/zsh", command: command, createdAt: nowISO8601())
+            shell: terminalShellPathOverride() ?? "/bin/zsh", command: command, createdAt: nowISO8601(), workspaceID: workspaceID, kind: kind)
 
         let snapshot = bestEffortYabaiWindowSnapshot()
         builtInTerminalWindowOpener(sessionID, showMode)
@@ -4800,7 +4871,7 @@ public final class WorkspaceOrchestrator {
                 let sessionCommand = try spacesTerminalCommand(template: template, env: env, processShell: processShell)
                 let session = try launchSpacesTerminalSession(
                     title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-                    readinessPolicy: .sessionReady)
+                    readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
                 let now = nowISO8601()
                 let running = RunningProcessRecord(
                     id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
@@ -5816,9 +5887,86 @@ public final class WorkspaceOrchestrator {
 
     private func builtInTerminalSessionID(for process: RunningProcessRecord) -> String? {
         guard terminalHost(for: process.terminalApp) == .spaces else { return nil }
-        let sessionID = process.terminalNativeID ?? process.terminalTrackingID
-        guard let trimmed = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return normalizedTerminalSessionID(process.terminalNativeID ?? process.terminalTrackingID)
+    }
+
+    private func builtInTerminalSessionID(for agent: AgentWindowRecord) -> String? {
+        guard agent.provider == .spaces else { return nil }
+        return normalizedTerminalSessionID(agent.terminalNativeID ?? agent.terminalTrackingID)
+    }
+
+    private func terminalSessionID(for window: WindowRecord) -> String? {
+        normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID)
+    }
+
+    private func normalizedTerminalSessionID(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
         return trimmed
+    }
+
+    private func workspaceForBuiltInTerminalSession(sessionID: String, ownership existingOwnership: BuiltInTerminalSessionOwnership? = nil) throws
+        -> WorkspaceRecord?
+    {
+        let ownership = try existingOwnership ?? builtInTerminalSessionOwnership(sessionID: sessionID)
+        if let workspaceID = ownership.processWorkspaceID ?? ownership.agentWorkspaceID ?? ownership.terminalWindowWorkspaceID
+            ?? ownership.launchWorkspaceID
+        {
+            return try store.workspace(id: workspaceID)
+        }
+        guard let workingDirectory = terminalSessionWorkingDirectory(sessionID: sessionID) else { return nil }
+        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id, includeArchived: false) }
+        return workspaces.filter { isPath(workingDirectory, inside: $0.dir, allowEqual: true) }.max {
+            normalizePath($0.dir).count < normalizePath($1.dir).count
+        }
+    }
+
+    private func terminalSession(sessionID: String, belongsTo workspace: WorkspaceRecord) -> Bool {
+        guard let workingDirectory = terminalSessionWorkingDirectory(sessionID: sessionID) else { return false }
+        return isPath(workingDirectory, inside: workspace.dir, allowEqual: true)
+    }
+
+    private func terminalSessionWorkingDirectory(sessionID: String) -> String? {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+            let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
+            launchConfiguration.backend == .ghosttyEmbedded
+        else { return nil }
+        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        return runtimeState?.workingDirectory ?? launchConfiguration.workingDirectory
+    }
+
+    private func builtInTerminalSessionOwnership(sessionID: String) throws -> BuiltInTerminalSessionOwnership {
+        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id, includeArchived: true) }
+        var owningProcess: RunningProcessRecord?
+        var owningAgent: AgentWindowRecord?
+        var terminalWindowWorkspaceID: String?
+        for workspace in workspaces {
+            if owningProcess == nil {
+                owningProcess = try store.runningProcesses(workspaceID: workspace.id).first { builtInTerminalSessionID(for: $0) == sessionID }
+            }
+            if owningAgent == nil {
+                owningAgent = try store.agentWindows(workspaceID: workspace.id).first { builtInTerminalSessionID(for: $0) == sessionID }
+            }
+            if terminalWindowWorkspaceID == nil,
+                try store.windows(workspaceID: workspace.id).contains(where: {
+                    $0.role == "terminal" && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
+                })
+            {
+                terminalWindowWorkspaceID = workspace.id
+            }
+            if owningProcess != nil, owningAgent != nil, terminalWindowWorkspaceID != nil { break }
+        }
+        let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID)
+        return BuiltInTerminalSessionOwnership(
+            process: owningProcess, agent: owningAgent, terminalWindowWorkspaceID: terminalWindowWorkspaceID,
+            launchWorkspaceID: launchConfiguration?.workspaceID, launchKind: launchConfiguration?.kind)
+    }
+
+    private func terminalSessionLaunchConfiguration(sessionID: String) -> TerminalSessionLaunchConfiguration? {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+            let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
+            launchConfiguration.backend == .ghosttyEmbedded
+        else { return nil }
+        return launchConfiguration
     }
 
     private func terminateBuiltInTerminalSession(for process: RunningProcessRecord) {
@@ -5950,7 +6098,7 @@ public final class WorkspaceOrchestrator {
                     name: launcher.name, command: applyEnvVars(launcher.command, env: env), shellPath: terminalShellPathOverride()), env: launchEnv)
             let session = try launchSpacesTerminalSession(
                 title: launcher.name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-                readinessPolicy: .sessionReady, sessionID: agentSessionID)
+                readinessPolicy: .sessionReady, sessionID: agentSessionID, workspaceID: workspace.id, kind: .agent)
             terminalHandle = ManagedTerminalHandle(
                 fallbackWindowID: session.windowID, providerIdentity: .session(session.sessionID), hookAttributionID: session.sessionID,
                 containerIdentity: nil)
@@ -6175,7 +6323,7 @@ public final class WorkspaceOrchestrator {
             let sessionCommand = try spacesTerminalCommand(template: template, env: env, processShell: try store.appConfig().processShell)
             let session = try launchSpacesTerminalSession(
                 title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-                readinessPolicy: .sessionReady)
+                readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
             let now = nowISO8601()
             let record = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,

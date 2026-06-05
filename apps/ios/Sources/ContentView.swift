@@ -23,13 +23,18 @@ struct ContentView: View {
                         TerminalDetailView(
                             session: selectedSession,
                             settings: model.settings,
+                            appModel: model,
                             onAuthenticationRequired: { message in
                                 pendingAuthenticationMessage = message
                                 self.selectedSession = nil
+                            },
+                            onSessionChanged: { session in
+                                self.selectedSession = session
                             }
                         ) {
                             self.selectedSession = nil
                         }
+                        .id(selectedSession.id)
                     } else if let pendingTerminalLaunch {
                         TerminalLaunchPendingView(launch: pendingTerminalLaunch, model: model) { session in
                             if let session {
@@ -352,7 +357,7 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .disabled(model.isMutating || (row.sessionID == nil && !row.canRun))
             Spacer(minLength: 0)
-            if row.runState != .running {
+            if showsStateChip(for: row) {
                 MetaChip(text: row.runState.mobileLabel)
             }
             runtimeActionButtons(for: row)
@@ -363,6 +368,16 @@ struct ContentView: View {
     }
 
     @ViewBuilder private func runtimeActionButtons(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        if showsRunActionButton(for: row) {
+            Button {
+                pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .run)
+            } label: {
+                Image(systemName: "play.fill")
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.isMutating)
+            .accessibilityLabel("Run")
+        }
         if row.canStop {
             Button {
                 Task { await model.stop(row: row) }
@@ -394,6 +409,12 @@ struct ContentView: View {
         }
     }
 
+    private func showsRunActionButton(for row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
+        guard row.sessionID != nil, row.canRun else { return false }
+        guard case .process = row.source else { return false }
+        return row.runState == .exited
+    }
+
     private func activateRuntimeRow(_ row: SpacesMobileWorkspaceRuntimeRow) {
         if let session = model.terminalSession(for: row) {
             selectedSession = session
@@ -409,11 +430,18 @@ struct ContentView: View {
         case .notStarted: .idle
         }
     }
+
+    private func showsStateChip(for row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
+        guard row.runState != .running else { return false }
+        if case .terminal = row.source { return true }
+        return false
+    }
 }
 
 private struct PendingTerminalLaunch: Identifiable, Sendable {
     enum Action: Sendable {
         case primary
+        case run
         case restart
         case workspaceTerminal
     }
@@ -451,6 +479,7 @@ private extension PendingTerminalLaunch.Action {
     var idComponent: String {
         switch self {
         case .primary: "primary"
+        case .run: "run"
         case .restart: "restart"
         case .workspaceTerminal: "workspace-terminal"
         }
@@ -459,6 +488,7 @@ private extension PendingTerminalLaunch.Action {
     var progressLabel: String {
         switch self {
         case .primary: "Starting terminal..."
+        case .run: "Starting terminal..."
         case .restart: "Restarting terminal..."
         case .workspaceTerminal: "Opening terminal..."
         }
@@ -466,7 +496,7 @@ private extension PendingTerminalLaunch.Action {
 }
 
 private struct TerminalLaunchPendingView: View {
-    private static let chromeControlHeight: CGFloat = 48
+    private static let chromeControlHeight: CGFloat = 36
     private static let surfaceBackground = Color(red: 15 / 255, green: 21 / 255, blue: 23 / 255)
 
     let launch: PendingTerminalLaunch
@@ -479,9 +509,9 @@ private struct TerminalLaunchPendingView: View {
     var body: some View {
         VStack(spacing: 0) {
             topOverlay
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
-                .padding(.bottom, 10)
+                .padding(.horizontal, 8)
+                .padding(.top, 4)
+                .padding(.bottom, 4)
 
             VStack(spacing: 18) {
                 Spacer(minLength: 0)
@@ -518,13 +548,13 @@ private struct TerminalLaunchPendingView: View {
     }
 
     private var topOverlay: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Button(action: onBack) {
                 Image(systemName: "chevron.left")
-                    .font(.headline.weight(.semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .frame(height: Self.chromeControlHeight)
-                    .padding(.horizontal, 18)
+                    .padding(.horizontal, 12)
                     .background(
                         Capsule()
                             .fill(.black.opacity(0.28))
@@ -537,7 +567,7 @@ private struct TerminalLaunchPendingView: View {
             Spacer(minLength: 0)
 
             Text(launch.title)
-                .font(.headline.weight(.semibold))
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .accessibilityIdentifier("terminal.launch.title")
@@ -553,6 +583,9 @@ private struct TerminalLaunchPendingView: View {
         case .primary:
             guard let row = launch.row else { return nil }
             return await model.performPrimaryAction(for: row)
+        case .run:
+            guard let row = launch.row else { return nil }
+            return await model.run(row: row)
         case .restart:
             guard let row = launch.row else { return nil }
             return await model.restart(row: row)

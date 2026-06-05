@@ -3,7 +3,7 @@ import spacesterminalmobileghostty
 import spacesmobilecore
 
 struct TerminalDetailView: View {
-    private static let chromeControlHeight: CGFloat = 48
+    private static let chromeControlHeight: CGFloat = 36
     /// The terminal surface is always dark regardless of the app's light/dark
     /// appearance, so this uses the fixed brand dark background value
     /// (`Theme.bg` dark = 15,21,23) rather than a dynamic token.
@@ -11,7 +11,9 @@ struct TerminalDetailView: View {
 
     let session: SpacesMobileTerminalSessionSummary
     let settings: SpacesMobileConnectionSettings
+    let appModel: SpacesMobileAppModel
     let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
+    let onSessionChanged: (SpacesMobileTerminalSessionSummary) -> Void
     let onBack: () -> Void
 
     @State private var hasMountedTerminalSurface = false
@@ -28,12 +30,16 @@ struct TerminalDetailView: View {
     init(
         session: SpacesMobileTerminalSessionSummary,
         settings: SpacesMobileConnectionSettings,
+        appModel: SpacesMobileAppModel,
         onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
+        onSessionChanged: @escaping (SpacesMobileTerminalSessionSummary) -> Void,
         onBack: @escaping () -> Void
     ) {
         self.session = session
         self.settings = settings
+        self.appModel = appModel
         self.onAuthenticationRequired = onAuthenticationRequired
+        self.onSessionChanged = onSessionChanged
         self.onBack = onBack
         _model = State(
             initialValue: TerminalViewerModel(
@@ -47,9 +53,9 @@ struct TerminalDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             topOverlay
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
-                .padding(.bottom, 10)
+                .padding(.horizontal, 8)
+                .padding(.top, 4)
+                .padding(.bottom, 4)
 
             Group {
                 if hasMountedTerminalSurface || model.showsTerminalSurface {
@@ -109,6 +115,7 @@ struct TerminalDetailView: View {
         .background(Self.surfaceBackground.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .task { model.start() }
+        .task(id: session.id) { await refreshRuntimeRowsWhileVisible() }
         .task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }
         .task(id: e2eCommandRequestPath) { await consumeE2ECommandRequestsIfNeeded() }
         .onChange(of: model.showsTerminalSurface) { showsTerminalSurface in
@@ -139,45 +146,117 @@ struct TerminalDetailView: View {
     }
 
     private var topOverlay: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             chromeButton(accessibilityIdentifier: "terminal.back", accessibilityLabel: "Back") {
                 beginBackNavigation()
             } label: {
                 Image(systemName: isBackNavigationInProgress ? "arrow.triangle.2.circlepath" : "chevron.left")
-                    .font(.headline.weight(.semibold))
+                    .font(.subheadline.weight(.semibold))
             }
             .disabled(isBackNavigationInProgress)
 
             Spacer(minLength: 0)
 
-            Text(model.title)
-                .font(.headline.weight(.semibold))
+            Text(runtimeRow?.title ?? model.title)
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .accessibilityIdentifier("terminal.title")
 
             Spacer(minLength: 0)
 
-            // The Take Over action lives in the centered status view (mirroring the
-            // macOS viewer window), so the top chrome only carries owner state.
-            Group {
-                if model.isOwner {
-                    if model.isPreparingInput {
-                        chromeActivityBadge(accessibilityLabel: "Preparing input")
-                            .accessibilityIdentifier("terminal.ownerPreparing")
-                    } else {
-                        // Ownership is obvious from the absence of the Take Over
-                        // button, so no visible tag is shown. An invisible marker
-                        // preserves the ownership signal for UI tests.
-                        ownerStateMarker
-                    }
-                } else {
-                    Color.clear.frame(width: 1, height: 1)
-                }
-            }
+            trailingChrome
             .frame(minWidth: Self.chromeControlHeight, alignment: .trailing)
         }
         .frame(height: Self.chromeControlHeight)
+    }
+
+    private var runtimeRow: SpacesMobileWorkspaceRuntimeRow? { appModel.runtimeRow(forSessionID: session.id) }
+
+    @ViewBuilder private var trailingChrome: some View {
+        if let row = runtimeRow, row.hasTerminalDetailActions {
+            HStack(spacing: 6) {
+                ownerChromeStateMarker
+                Menu {
+                    if row.canRun {
+                        Button {
+                            Task { await runRuntime(row) }
+                        } label: {
+                            Label("Run", systemImage: "play.fill")
+                        }
+                        .disabled(appModel.isMutating)
+                    }
+                    if row.canRestartFromTerminalDetail {
+                        Button {
+                            Task { await restartRuntime(row) }
+                        } label: {
+                            Label("Restart", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(appModel.isMutating)
+                    }
+                    if row.canStopFromTerminalDetail {
+                        Button(role: .destructive) {
+                            Task { await appModel.stop(row: row) }
+                        } label: {
+                            Label("Stop", systemImage: "stop.fill")
+                        }
+                        .disabled(appModel.isMutating)
+                    }
+                } label: {
+                    Image(systemName: appModel.isMutating ? "arrow.triangle.2.circlepath" : "ellipsis")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: Self.chromeControlHeight, height: Self.chromeControlHeight)
+                        .background(
+                            Capsule()
+                                .fill(.black.opacity(0.28))
+                                .overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1))
+                        )
+                }
+                .disabled(appModel.isMutating)
+                .accessibilityLabel("Terminal actions")
+                .accessibilityIdentifier("terminal.runtimeActions")
+            }
+        } else if model.isOwner {
+            ownerChromeStateMarker
+        } else {
+            Color.clear.frame(width: 1, height: 1)
+        }
+    }
+
+    @ViewBuilder private var ownerChromeStateMarker: some View {
+        if model.isOwner {
+            if model.isPreparingInput {
+                chromeActivityBadge(accessibilityLabel: "Preparing input")
+                    .accessibilityIdentifier("terminal.ownerPreparing")
+            } else {
+                // Ownership is obvious from the absence of the Take Over button,
+                // so no visible tag is shown. An invisible marker preserves the
+                // ownership signal for UI tests.
+                ownerStateMarker
+            }
+        }
+    }
+
+    private func runRuntime(_ row: SpacesMobileWorkspaceRuntimeRow) async {
+        if let session = await appModel.run(row: row) {
+            onSessionChanged(session)
+        }
+    }
+
+    private func restartRuntime(_ row: SpacesMobileWorkspaceRuntimeRow) async {
+        if let session = await appModel.restart(row: row) {
+            onSessionChanged(session)
+        }
+    }
+
+    private func refreshRuntimeRowsWhileVisible() async {
+        await appModel.refresh()
+        while !Task.isCancelled {
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            guard !Task.isCancelled else { return }
+            await appModel.refresh()
+        }
     }
 
     private func beginBackNavigation() {
@@ -199,7 +278,7 @@ struct TerminalDetailView: View {
                 .foregroundStyle(Theme.primaryButtonText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-                .padding(.horizontal, 18)
+                .padding(.horizontal, 14)
                 .frame(height: Self.chromeControlHeight)
                 .background(Capsule().fill(Theme.primaryButtonFill))
         }

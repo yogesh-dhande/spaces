@@ -125,10 +125,11 @@ public struct SpacesMobileWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
     public let sessionID: String?
     public let runState: SpacesMobileRunState
     public let canOpenTerminal: Bool
+    public let canStop: Bool
 
     public init(
         id: String, workspaceID: String, title: String, workingDirectory: String, sessionID: String?, runState: SpacesMobileRunState,
-        canOpenTerminal: Bool
+        canOpenTerminal: Bool, canStop: Bool = false
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -137,6 +138,30 @@ public struct SpacesMobileWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
         self.sessionID = sessionID
         self.runState = runState
         self.canOpenTerminal = canOpenTerminal
+        self.canStop = canStop
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case workspaceID
+        case title
+        case workingDirectory
+        case sessionID
+        case runState
+        case canOpenTerminal
+        case canStop
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
+        title = try container.decode(String.self, forKey: .title)
+        workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
+        sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
+        runState = try container.decode(SpacesMobileRunState.self, forKey: .runState)
+        canOpenTerminal = try container.decode(Bool.self, forKey: .canOpenTerminal)
+        canStop = try container.decodeIfPresent(Bool.self, forKey: .canStop) ?? false
     }
 }
 

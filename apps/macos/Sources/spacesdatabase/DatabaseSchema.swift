@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public enum DatabaseSchema {
-    public static let currentVersion = 5
+    public static let currentVersion = 6
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "terminal metadata tables", requiresBackup: false) { database in
@@ -39,6 +39,20 @@ public enum DatabaseSchema {
             }
             if try tableExists("agent_sessions", database: database), try tableExists("workspace_agent_launchers", database: database) {
                 try executeBatch(sql: agentSessionLauncherIdentityBackfillSQL, database: database)
+            }
+        },
+        DatabaseMigrationStep(fromVersion: 5, toVersion: 6, description: "durable terminal session ownership metadata", requiresBackup: false) {
+            database in
+            try addColumnIfNeeded(table: "terminal_sessions", column: "workspace_id", definition: "TEXT", database: database)
+            try addColumnIfNeeded(table: "terminal_sessions", column: "kind", definition: "TEXT NOT NULL DEFAULT 'shell'", database: database)
+            if try tableExists("terminal_sessions", database: database), try tableExists("running_processes", database: database) {
+                try executeBatch(sql: terminalSessionProcessOwnershipBackfillSQL, database: database)
+            }
+            if try tableExists("terminal_sessions", database: database), try tableExists("agent_sessions", database: database) {
+                try executeBatch(sql: terminalSessionAgentOwnershipBackfillSQL, database: database)
+            }
+            if try tableExists("terminal_sessions", database: database), try tableExists("runtime_targets", database: database) {
+                try executeBatch(sql: terminalSessionRuntimeTargetOwnershipBackfillSQL, database: database)
             }
         },
     ]
@@ -85,6 +99,8 @@ public enum DatabaseSchema {
               root_directory TEXT NOT NULL UNIQUE,
               backend TEXT NOT NULL,
               lifetime_policy TEXT NOT NULL,
+              workspace_id TEXT,
+              kind TEXT NOT NULL DEFAULT 'shell',
               title TEXT NOT NULL,
               working_directory TEXT NOT NULL,
               shell TEXT NOT NULL,
@@ -200,6 +216,71 @@ public enum DatabaseSchema {
             WHERE (claimed_launcher_id IS NULL OR length(trim(claimed_launcher_id)) = 0)
               AND claimed_launcher_name IS NOT NULL
               AND length(trim(claimed_launcher_name)) > 0;
+        """
+
+    static let terminalSessionProcessOwnershipBackfillSQL = """
+            UPDATE terminal_sessions
+            SET workspace_id = (
+                  SELECT running_processes.workspace_id
+                  FROM running_processes
+                  WHERE running_processes.terminal_session_id = terminal_sessions.session_id
+                    AND length(trim(running_processes.workspace_id)) > 0
+                  ORDER BY COALESCE(running_processes.started_at, running_processes.exited_at, running_processes.last_output_at, '') DESC,
+                           running_processes.id
+                  LIMIT 1
+                ),
+                kind = 'process'
+            WHERE EXISTS (
+              SELECT 1
+              FROM running_processes
+              WHERE running_processes.terminal_session_id = terminal_sessions.session_id
+                AND length(trim(running_processes.workspace_id)) > 0
+            );
+        """
+
+    static let terminalSessionAgentOwnershipBackfillSQL = """
+            UPDATE terminal_sessions
+            SET workspace_id = (
+                  SELECT agent_sessions.workspace_id
+                  FROM agent_sessions
+                  WHERE agent_sessions.terminal_session_id = terminal_sessions.session_id
+                    AND agent_sessions.provider = 'spaces'
+                    AND length(trim(agent_sessions.workspace_id)) > 0
+                  ORDER BY agent_sessions.updated_at DESC, agent_sessions.created_at DESC, agent_sessions.id
+                  LIMIT 1
+                ),
+                kind = 'agent'
+            WHERE (workspace_id IS NULL OR length(trim(workspace_id)) = 0)
+              AND EXISTS (
+                SELECT 1
+                FROM agent_sessions
+                WHERE agent_sessions.terminal_session_id = terminal_sessions.session_id
+                  AND agent_sessions.provider = 'spaces'
+                  AND length(trim(agent_sessions.workspace_id)) > 0
+              );
+        """
+
+    static let terminalSessionRuntimeTargetOwnershipBackfillSQL = """
+            UPDATE terminal_sessions
+            SET workspace_id = (
+                  SELECT runtime_targets.workspace_id
+                  FROM runtime_targets
+                  WHERE runtime_targets.tracking_id = terminal_sessions.session_id
+                    AND runtime_targets.type = 'terminal'
+                    AND runtime_targets.app = 'Spaces'
+                    AND length(trim(runtime_targets.workspace_id)) > 0
+                  ORDER BY runtime_targets.updated_at DESC, runtime_targets.order_index
+                  LIMIT 1
+                )
+            WHERE (workspace_id IS NULL OR length(trim(workspace_id)) = 0)
+              AND EXISTS (
+                SELECT 1
+                FROM runtime_targets
+                WHERE runtime_targets.tracking_id = terminal_sessions.session_id
+                  AND runtime_targets.type = 'terminal'
+                  AND runtime_targets.app = 'Spaces'
+                  AND length(trim(runtime_targets.workspace_id)) > 0
+              );
         """
 
     public static let latestSchemaSQL = """

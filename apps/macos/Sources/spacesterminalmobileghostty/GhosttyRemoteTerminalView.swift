@@ -182,7 +182,7 @@ import Foundation
 
         private static let defaultFontSize: CGFloat = 11
         private static let contentInsets = GhosttyRemoteTerminalViewport.contentInsets
-        private static let accessoryToolbarHeight: CGFloat = 58
+        private static let accessoryToolbarHeight: CGFloat = 46
 
         nonisolated(unsafe) static var sessionFreeHandlerForTesting: @Sendable (UnsafeRawPointer?) -> Void = { _ in }
         nonisolated(unsafe) static var nativeMirrorEnabledForTesting = true
@@ -1016,11 +1016,11 @@ import Foundation
                 let fontSize: CGFloat
 
                 static let regular = Metrics(
-                    horizontalInset: 12, verticalInset: 10, spacing: 8, textButtonWidth: 64, iconButtonWidth: 56, buttonHeight: 38, cornerRadius: 8,
-                    fontSize: 17)
+                    horizontalInset: 10, verticalInset: 6, spacing: 6, textButtonWidth: 58, iconButtonWidth: 48, buttonHeight: 34, cornerRadius: 7,
+                    fontSize: 15)
                 static let phone = Metrics(
-                    horizontalInset: 8, verticalInset: 10, spacing: 6, textButtonWidth: 50, iconButtonWidth: 46, buttonHeight: 36, cornerRadius: 7,
-                    fontSize: 16)
+                    horizontalInset: 6, verticalInset: 6, spacing: 5, textButtonWidth: 44, iconButtonWidth: 40, buttonHeight: 34, cornerRadius: 6,
+                    fontSize: 14)
             }
 
             var pendingModifiers: Set<AccessoryModifier> = [] { didSet { updateModifierButtonAppearances() } }

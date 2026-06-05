@@ -62,8 +62,11 @@ flowchart LR
 - Mutation responses carry `ok`, a user-facing message, a refreshed overview, and action-specific identifiers such as `workspaceID` or `sessionID`. The refreshed overview keeps iOS state synchronized after create, run, stop, restart, or terminal-open actions without requiring the client to infer affected rows.
 - Workspace creation requests use the same project and git semantics as the macOS GUI. The bridge supplies per-project creation options and accepts title, branch mode, branch name, target branch, optional directory name, and existing-branch reuse intent.
 - Mobile workspace-terminal creation reserves and finishes a service-owned terminal session at the workspace root while using a no-op native window opener. This keeps the Mac window layer out of mobile-only terminal creation.
+- Mobile workspace-terminal stop requests pass workspace ID and session ID into workspacecore's ad hoc built-in terminal stop path. The path rejects process- and agent-owned sessions, terminates the matching service session, removes tracked terminal rows, and can resolve live sessions by working directory when a tracked window row is already gone.
 - Mobile process mutations call configured-process recovery for missing runtimes and running-process stop or restart for live runtimes.
-- Mobile coding-agent mutations call the workspace agent lifecycle methods. Stop removes runtime state and terminates the backing Spaces terminal session while preserving configured launchers. Restart resolves the claimed or configured launcher name before stopping, then launches that configured row again.
+- Mobile coding-agent mutations call the workspace agent lifecycle methods. Stop removes runtime state and terminates the backing Spaces terminal session while preserving configured launchers. Restart resolves the claimed or configured launcher ID first, falls back to launcher names only for records without an ID claim, and launches that configured row again.
+- Native built-in terminal windows receive a workspace runtime-control provider from `spacesui`. The native window title owns the runtime name and the terminal UI owns the compact right-aligned action strip; `AppKitController` resolves the session back to a process, coding-agent, or ad hoc terminal row, preferring stable process template and coding-agent launcher IDs over user-editable names.
+- User window close and terminal-toolbar stop use the same orchestrator lifecycle paths. Programmatic closes produced by stop or restart carry a termination marker through IPC so AppKit window cleanup does not recursively treat them as another user stop request.
 
 ## Persistence
 
@@ -72,7 +75,7 @@ flowchart LR
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
 - SQLite stores projects, workspaces, runtime state, terminal metadata, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` records the canonical schema version. The active schema is version `4`.
+- `migration_state.current_version` records the canonical schema version. The active schema is version `6`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
 
 ### Profile Resolution

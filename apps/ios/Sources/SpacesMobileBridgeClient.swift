@@ -131,6 +131,19 @@ struct SpacesMobileBridgeClient: Sendable {
         )
     }
 
+    func stopWorkspaceTerminal(
+        workspaceID: String,
+        sessionID: String,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileBridgeResponse {
+        try await mutation(
+            .init(
+                command: "stopWorkspaceTerminal", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID,
+                workspaceID: workspaceID),
+            commandChannel: commandChannel
+        )
+    }
+
     func runWorkspaceProcess(
         workspaceID: String,
         processKey: String,

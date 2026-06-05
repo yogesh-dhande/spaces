@@ -44,9 +44,7 @@ struct SpacesMobileOverviewBuilder {
     ) -> SpacesMobileOverviewPayload {
         let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
         let matchedWorkspaceByLiveSessionID = Dictionary(
-            uniqueKeysWithValues: liveSessions.map { session in
-                (session.sessionID, matchedWorkspace(for: session.effectiveWorkingDirectory, workspaces: workspaces))
-            })
+            uniqueKeysWithValues: liveSessions.map { session in (session.sessionID, matchedWorkspace(for: session, workspaces: workspaces)) })
         let adHocLiveSessions = liveSessions.filter { session in !representedSessionIDs.contains(session.sessionID) }
         let matchedWorkspaceBySessionID = Dictionary(
             uniqueKeysWithValues: adHocLiveSessions.map { session in (session.sessionID, matchedWorkspaceByLiveSessionID[session.sessionID] ?? nil) })
@@ -110,6 +108,11 @@ struct SpacesMobileOverviewBuilder {
             let workspaceDirectory = normalizedPath(descriptor.workspace.dir)
             return normalizedWorkingDirectory == workspaceDirectory || normalizedWorkingDirectory.hasPrefix(workspaceDirectory + "/")
         }.max { lhs, rhs in normalizedPath(lhs.workspace.dir).count < normalizedPath(rhs.workspace.dir).count }
+    }
+
+    static func matchedWorkspace(for session: TerminalSessionCatalogEntry, workspaces: [WorkspaceDescriptor]) -> WorkspaceDescriptor? {
+        if let workspaceID = session.workspaceID { return workspaces.first { $0.workspace.id == workspaceID } }
+        return matchedWorkspace(for: session.effectiveWorkingDirectory, workspaces: workspaces)
     }
 
     private static func summary(
@@ -289,20 +292,26 @@ struct SpacesMobileOverviewBuilder {
                 SpacesMobileWorkspaceTerminalRow(
                     id: "terminal-window:\(window.id)", workspaceID: descriptor.workspace.id,
                     title: window.name ?? session?.effectiveTitle ?? "Workspace Terminal", workingDirectory: descriptor.workspace.dir,
-                    sessionID: session?.sessionID, runState: runState, canOpenTerminal: session != nil))
+                    sessionID: session?.sessionID, runState: runState, canOpenTerminal: session != nil,
+                    canStop: runState == .running && session?.sessionID != nil))
         }
 
         for (sessionID, session) in sessionsByID where !includedSessionIDs.contains(sessionID) {
-            guard let matched = matchedWorkspace(for: session.effectiveWorkingDirectory, workspaces: [descriptor]),
-                matched.workspace.id == descriptor.workspace.id
-            else { continue }
+            if let workspaceID = session.workspaceID {
+                guard workspaceID == descriptor.workspace.id else { continue }
+            } else {
+                guard let matched = matchedWorkspace(for: session.effectiveWorkingDirectory, workspaces: [descriptor]),
+                    matched.workspace.id == descriptor.workspace.id
+                else { continue }
+            }
             let sessionKey = "terminal:\(sessionID)"
             guard !claimedTerminalKeys.contains(sessionKey) else { continue }
+            let runState = runState(for: session)
             rows.append(
                 SpacesMobileWorkspaceTerminalRow(
                     id: "terminal-session:\(sessionID)", workspaceID: descriptor.workspace.id, title: session.effectiveTitle,
-                    workingDirectory: session.effectiveWorkingDirectory, sessionID: sessionID, runState: runState(for: session), canOpenTerminal: true
-                ))
+                    workingDirectory: session.effectiveWorkingDirectory, sessionID: sessionID, runState: runState, canOpenTerminal: true,
+                    canStop: runState == .running))
         }
 
         return rows.sorted { lhs, rhs in lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending }

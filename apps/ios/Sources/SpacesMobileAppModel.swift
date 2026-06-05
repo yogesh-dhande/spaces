@@ -302,7 +302,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         switch source {
         case .process(let row): row.canStop
         case .codingAgent(let row): row.canStop
-        case .terminal: false
+        case .terminal(let row): row.canStop
         }
     }
 
@@ -313,6 +313,30 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .terminal: false
         }
     }
+
+    var canStopFromTerminalDetail: Bool {
+        switch source {
+        case .process(let row):
+            row.processID != nil && row.sessionID != nil
+        case .codingAgent(let row):
+            row.agentID != nil && row.sessionID != nil
+        case .terminal(let row):
+            row.canStop
+        }
+    }
+
+    var canRestartFromTerminalDetail: Bool {
+        switch source {
+        case .process(let row):
+            row.processID != nil && row.templateID != nil && row.sessionID != nil
+        case .codingAgent(let row):
+            row.agentID != nil && (row.isConfigured || row.launcherID != nil) && row.sessionID != nil
+        case .terminal:
+            false
+        }
+    }
+
+    var hasTerminalDetailActions: Bool { canRun || canStopFromTerminalDetail || canRestartFromTerminalDetail }
 }
 
 struct SpacesMobileWorkspaceGroup: Identifiable {
@@ -538,25 +562,30 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    func performPrimaryAction(for row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesMobileTerminalSessionSummary? {
-        if let session = terminalSession(for: row) { return session }
+    func run(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesMobileTerminalSessionSummary? {
+        let timeoutRecovery = SpacesMobileMutationTimeoutRecovery.requireFreshOverview(previousSessionID: row.sessionID)
         switch row.source {
         case .process(let process):
             guard process.canRun else { return nil }
-            return await performMutationReturningSession(fallbackRowID: row.id) {
+            return await performMutationReturningSession(fallbackRowID: row.id, timeoutRecovery: timeoutRecovery) {
                 try await bridgeClient.runWorkspaceProcess(
                     workspaceID: process.workspaceID, processKey: process.name, processTemplateID: process.templateID ?? process.id,
                     commandChannel: commandChannel)
             }
         case .codingAgent(let agent):
             guard agent.canRun else { return nil }
-            return await performMutationReturningSession(fallbackRowID: row.id) {
+            return await performMutationReturningSession(fallbackRowID: row.id, timeoutRecovery: timeoutRecovery) {
                 try await bridgeClient.runCodingAgent(
                     workspaceID: agent.workspaceID, agentName: agent.name, agentLauncherID: agent.launcherID, commandChannel: commandChannel)
             }
         case .terminal:
             return nil
         }
+    }
+
+    func performPrimaryAction(for row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesMobileTerminalSessionSummary? {
+        if let session = terminalSession(for: row) { return session }
+        return await run(row: row)
     }
 
     func stop(row: SpacesMobileWorkspaceRuntimeRow) async {
@@ -574,8 +603,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 guard let agentID = agent.agentID else { return }
                 response = try await bridgeClient.stopCodingAgent(
                     workspaceID: agent.workspaceID, agentID: agentID, agentName: agent.name, commandChannel: commandChannel)
-            case .terminal:
-                return
+            case .terminal(let terminal):
+                guard let sessionID = terminal.sessionID else { return }
+                response = try await bridgeClient.stopWorkspaceTerminal(
+                    workspaceID: terminal.workspaceID, sessionID: sessionID, commandChannel: commandChannel)
             }
             applyMutationResponse(response)
         } catch {
@@ -641,6 +672,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     func terminalSession(for row: SpacesMobileWorkspaceRuntimeRow) -> SpacesMobileTerminalSessionSummary? {
         row.sessionID.flatMap { sessionID in overview?.sessions.first(where: { $0.id == sessionID }) }
+    }
+
+    func runtimeRow(forSessionID sessionID: String) -> SpacesMobileWorkspaceRuntimeRow? {
+        overview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first { $0.sessionID == sessionID }
     }
 
     func refreshedSession(forRowID rowID: String) -> SpacesMobileTerminalSessionSummary? {

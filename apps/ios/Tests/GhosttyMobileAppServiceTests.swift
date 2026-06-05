@@ -344,9 +344,9 @@
             hostView.setAcceptsTerminalInput(true)
 
             let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
-            XCTAssertEqual(accessoryView.intrinsicContentSize.height, 58)
-            XCTAssertEqual(accessoryView.frame.height, 58)
-            XCTAssertEqual(accessoryView.sizeThatFits(CGSize(width: 320, height: 0)).height, 58)
+            XCTAssertEqual(accessoryView.intrinsicContentSize.height, 46)
+            XCTAssertEqual(accessoryView.frame.height, 46)
+            XCTAssertEqual(accessoryView.sizeThatFits(CGSize(width: 320, height: 0)).height, 46)
             XCTAssertTrue(accessoryView.autoresizingMask.contains(.flexibleHeight))
 
             let scrollView = try XCTUnwrap(descendants(of: accessoryView, matching: UIScrollView.self).first)
@@ -361,32 +361,32 @@
             let phoneFrames = hostView.accessoryToolbarLayoutFramesForTesting(width: 320, userInterfaceIdiom: .phone)
             XCTAssertGreaterThan(phoneFrames.scrollView.width, 0)
             XCTAssertGreaterThan(phoneFrames.scrollContentSize.width, phoneFrames.scrollView.width)
-            XCTAssertGreaterThanOrEqual(phoneFrames.joystickButton.minX, phoneFrames.scrollView.maxX + 5.5)
-            XCTAssertGreaterThanOrEqual(phoneFrames.keyboardButton.minX, phoneFrames.joystickButton.maxX + 5.5)
-            XCTAssertLessThanOrEqual(phoneFrames.keyboardButton.maxX, 312.5)
-            XCTAssertEqual(phoneFrames.joystickButton.width, 46, accuracy: 0.5)
-            XCTAssertEqual(phoneFrames.keyboardButton.width, 46, accuracy: 0.5)
+            XCTAssertGreaterThanOrEqual(phoneFrames.joystickButton.minX, phoneFrames.scrollView.maxX + 4.5)
+            XCTAssertGreaterThanOrEqual(phoneFrames.keyboardButton.minX, phoneFrames.joystickButton.maxX + 4.5)
+            XCTAssertLessThanOrEqual(phoneFrames.keyboardButton.maxX, 314.5)
+            XCTAssertEqual(phoneFrames.joystickButton.width, 40, accuracy: 0.5)
+            XCTAssertEqual(phoneFrames.keyboardButton.width, 40, accuracy: 0.5)
             let phoneWidths = hostView.accessoryToolbarButtonWidthsForTesting(width: 320, userInterfaceIdiom: .phone)
             for width in phoneWidths.scrollable {
-                XCTAssertEqual(width, 50, accuracy: 0.5)
+                XCTAssertEqual(width, 44, accuracy: 0.5)
             }
             for width in phoneWidths.pinned {
-                XCTAssertEqual(width, 46, accuracy: 0.5)
+                XCTAssertEqual(width, 40, accuracy: 0.5)
             }
 
             let padFrames = hostView.accessoryToolbarLayoutFramesForTesting(width: 320, userInterfaceIdiom: .pad)
             XCTAssertGreaterThan(padFrames.scrollContentSize.width, padFrames.scrollView.width)
-            XCTAssertGreaterThanOrEqual(padFrames.joystickButton.minX, padFrames.scrollView.maxX + 7.5)
-            XCTAssertGreaterThanOrEqual(padFrames.keyboardButton.minX, padFrames.joystickButton.maxX + 7.5)
-            XCTAssertLessThanOrEqual(padFrames.keyboardButton.maxX, 308.5)
-            XCTAssertEqual(padFrames.joystickButton.width, 56, accuracy: 0.5)
-            XCTAssertEqual(padFrames.keyboardButton.width, 56, accuracy: 0.5)
+            XCTAssertGreaterThanOrEqual(padFrames.joystickButton.minX, padFrames.scrollView.maxX + 5.5)
+            XCTAssertGreaterThanOrEqual(padFrames.keyboardButton.minX, padFrames.joystickButton.maxX + 5.5)
+            XCTAssertLessThanOrEqual(padFrames.keyboardButton.maxX, 310.5)
+            XCTAssertEqual(padFrames.joystickButton.width, 48, accuracy: 0.5)
+            XCTAssertEqual(padFrames.keyboardButton.width, 48, accuracy: 0.5)
             let padWidths = hostView.accessoryToolbarButtonWidthsForTesting(width: 320, userInterfaceIdiom: .pad)
             for width in padWidths.scrollable {
-                XCTAssertEqual(width, 64, accuracy: 0.5)
+                XCTAssertEqual(width, 58, accuracy: 0.5)
             }
             for width in padWidths.pinned {
-                XCTAssertEqual(width, 56, accuracy: 0.5)
+                XCTAssertEqual(width, 48, accuracy: 0.5)
             }
 
             hostView.setSoftwareKeyboardVisible(false)
@@ -551,7 +551,7 @@
             let keyboardViewport = hostView.viewportSizeForTesting()
 
             XCTAssertLessThan(keyboardViewport.rows, keyboardOnlyViewport.rows)
-            XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, 322, accuracy: 0.5)
+            XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, 334, accuracy: 0.5)
             XCTAssertEqual(hostView.surfaceHostFrameForTesting().height, phoneBounds.height, accuracy: 0.5)
             XCTAssertEqual(try XCTUnwrap(reportedViewports.last).rows, keyboardViewport.rows)
 
@@ -592,7 +592,7 @@
             hostView.setSoftwareKeyboardVisible(false)
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
-            XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, phoneBounds.height - 58, accuracy: 0.5)
+            XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, phoneBounds.height - 46, accuracy: 0.5)
             let fallbackViewport = hostView.viewportSizeForTesting()
             let surfaceRows = max(fallbackViewport.rows - 12, 1)
             hostView.setSurfaceViewportSizeForTesting(columns: 80, rows: surfaceRows)

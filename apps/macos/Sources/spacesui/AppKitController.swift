@@ -338,6 +338,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let firstResponderTypeName: String?
     }
 
+    struct TerminalRuntimeControlDescriptor: Equatable {
+        enum Kind: Equatable {
+            case process
+            case codingAgent
+            case workspaceTerminal
+        }
+
+        let kind: Kind
+        let workspaceID: String
+        let sessionID: String
+        let title: String
+        let processID: String?
+        let processTemplateID: String?
+        let processKey: String?
+        let agentID: String?
+        let agentLauncherID: String?
+        let agentLauncherName: String?
+        let canRun: Bool
+        let canStop: Bool
+        let canRestart: Bool
+    }
+
     enum WindowFocusRequest: Sendable {
         case workspaceBrowserSession(workspaceID: String, targetURL: String)
         case workspaceWindow(workspaceID: String, index: Int)
@@ -481,7 +503,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 Self.dispatchBuiltInTerminalWindowActionOnMainThread { self?.focusTerminalSessionWindow(sessionID: sessionID, requestID: requestID) }
             },
             builtInTerminalWindowCloser: { [weak self] sessionID in
-                Self.dispatchBuiltInTerminalWindowActionOnMainThread { self?.closeTerminalSessionWindows(sessionID: sessionID) }
+                Self.dispatchBuiltInTerminalWindowActionOnMainThread {
+                    self?.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: true)
+                }
             }, builtInTerminalSessionTerminator: Self.terminateBuiltInTerminalSession,
             builtInTerminalSessionLauncher: Self.launchServiceBuiltInTerminalSession)
     }
@@ -806,9 +830,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             forName: IPCNotification.closeTerminalSessionWindow, object: ipcNotificationObject, queue: .main
         ) { [weak self] notification in
             guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
-            Task { @MainActor [weak self, sessionID] in
+            let sessionIsTerminating =
+                (notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? Bool)
+                ?? ((notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? String) == "true")
+            Task { @MainActor [weak self, sessionID, sessionIsTerminating] in
                 guard let self else { return }
-                self.closeTerminalSessionWindows(sessionID: sessionID)
+                self.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: sessionIsTerminating)
             }
         }
     }
@@ -895,10 +922,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false,
                     attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
                     onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
-                    onWindowClose: { [weak self] sessionID, clientID in
+                    onWindowClose: { [weak self] sessionID, clientID, sessionIsTerminating in
                         if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
-                        self?.removeTerminalSessionWindowController(sessionID: sessionID, clientID: clientID)
-                    },
+                        self?.removeTerminalSessionWindowController(
+                            sessionID: sessionID, clientID: clientID, sessionIsTerminating: sessionIsTerminating)
+                    }, runtimeControlsProvider: { [weak self] sessionID in self?.terminalRuntimeControls(forSessionID: sessionID) },
                     sessionHostProvider: { launchConfiguration, paths in
                         Self.terminalSessionHost(launchConfiguration: launchConfiguration, paths: paths)
                     })
@@ -906,6 +934,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 controller = created
                 reusedExistingWindow = false
             }
+            controller.setRuntimeControls(terminalRuntimeControls(forSessionID: sessionID))
             controller.show(requestID: requestID, route: reusedExistingWindow ? "reuse_existing_window" : "create_window")
             if mode == .owner { controller.requestOwnershipIfNeeded() }
             logPerfMetric(
@@ -981,6 +1010,205 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return (controller, "existing_window")
     }
 
+    private func terminalRuntimeControls(forSessionID sessionID: String) -> TerminalSessionRuntimeControls? {
+        guard let descriptor = terminalRuntimeControlDescriptor(forSessionID: sessionID),
+            descriptor.canRun || descriptor.canStop || descriptor.canRestart
+        else { return nil }
+        let runAction: (@MainActor @Sendable () -> Void)?
+        if descriptor.canRun {
+            runAction = { @MainActor @Sendable [weak self, descriptor] in
+                guard let self else { return }
+                self.runTerminalRuntime(descriptor)
+            }
+        } else {
+            runAction = nil
+        }
+        let stopAction: (@MainActor @Sendable () -> Void)?
+        if descriptor.canStop {
+            stopAction = { @MainActor @Sendable [weak self, descriptor] in
+                guard let self else { return }
+                self.stopTerminalRuntime(descriptor)
+            }
+        } else {
+            stopAction = nil
+        }
+        let restartAction: (@MainActor @Sendable () -> Void)?
+        if descriptor.canRestart {
+            restartAction = { @MainActor @Sendable [weak self, descriptor] in
+                guard let self else { return }
+                self.restartTerminalRuntime(descriptor)
+            }
+        } else {
+            restartAction = nil
+        }
+        return TerminalSessionRuntimeControls(
+            title: descriptor.title, canRun: descriptor.canRun, canStop: descriptor.canStop, canRestart: descriptor.canRestart, onRun: runAction,
+            onStop: stopAction, onRestart: restartAction)
+    }
+
+    private func terminalRuntimeControlDescriptor(forSessionID sessionID: String) -> TerminalRuntimeControlDescriptor? {
+        guard let workspaceID = try? orchestrator.workspaceIDForTerminalSession(sessionID) else { return nil }
+        return Self.terminalRuntimeControlDescriptor(
+            sessionID: sessionID, workspaceID: workspaceID, settings: try? orchestrator.workspaceSettings(workspaceID: workspaceID),
+            runningProcesses: (try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? [],
+            agentWindows: (try? orchestrator.agentWindows(workspaceID: workspaceID)) ?? [],
+            trackedWindows: (try? orchestrator.windows(workspaceID: workspaceID)) ?? [],
+            isSessionRunning: Self.terminalSessionIsRunning(sessionID: sessionID))
+    }
+
+    static func terminalRuntimeControlDescriptor(
+        sessionID: String, workspaceID: String, settings: WorkspaceSettings?, runningProcesses: [RunningProcessRecord],
+        agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord], isSessionRunning: Bool
+    ) -> TerminalRuntimeControlDescriptor? {
+        guard let normalizedSessionID = normalizedTerminalSessionID(sessionID) else { return nil }
+        if let process = runningProcesses.first(where: { terminalSessionID(for: $0) == normalizedSessionID }) {
+            let template = configuredProcessTemplate(for: process, settings: settings)
+            let title = trimmedNonEmpty(template?.name) ?? trimmedNonEmpty(process.templateName) ?? "Process"
+            let processKey = trimmedNonEmpty(template?.name) ?? trimmedNonEmpty(process.templateName)
+            let isRunning = process.status != .exited && isSessionRunning
+            return TerminalRuntimeControlDescriptor(
+                kind: .process, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: process.id,
+                processTemplateID: template?.id, processKey: processKey, agentID: nil, agentLauncherID: nil, agentLauncherName: nil,
+                canRun: template != nil && !isRunning, canStop: true, canRestart: template != nil)
+        }
+
+        if let agent = agentWindows.first(where: { terminalSessionID(for: $0) == normalizedSessionID }) {
+            let launcher = configuredAgentLauncher(for: agent, settings: settings)
+            let windowTitle = terminalWindowTitle(for: agent, trackedWindows: trackedWindows)
+            let title = trimmedNonEmpty(launcher?.name) ?? codingAgentDisplayName(label: agent.label, runtimeWindowTitle: windowTitle)
+            let isRunning = agent.status != .done && isSessionRunning
+            return TerminalRuntimeControlDescriptor(
+                kind: .codingAgent, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil, processTemplateID: nil,
+                processKey: nil, agentID: agent.id, agentLauncherID: launcher?.id, agentLauncherName: launcher?.name,
+                canRun: launcher != nil && !isRunning, canStop: true, canRestart: launcher != nil)
+        }
+
+        let title =
+            trackedWindows.first(where: { terminalSessionID(for: $0) == normalizedSessionID }).flatMap {
+                trimmedNonEmpty($0.name) ?? trimmedNonEmpty($0.detail)
+            } ?? "Terminal"
+        return TerminalRuntimeControlDescriptor(
+            kind: .workspaceTerminal, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil, processTemplateID: nil,
+            processKey: nil, agentID: nil, agentLauncherID: nil, agentLauncherName: nil, canRun: false, canStop: true, canRestart: false)
+    }
+
+    private static func configuredProcessTemplate(for process: RunningProcessRecord, settings: WorkspaceSettings?) -> ProcessTemplate? {
+        guard let settings else { return nil }
+        if let templateID = trimmedNonEmpty(process.templateID) { return settings.processes.first(where: { $0.id == templateID }) }
+        guard let processKey = trimmedNonEmpty(process.templateName).map(normalizedRunRowName) else { return nil }
+        return settings.processes.first { normalizedRunRowName($0.name ?? "") == processKey }
+    }
+
+    private static func configuredAgentLauncher(for agent: AgentWindowRecord, settings: WorkspaceSettings?) -> AgentLauncher? {
+        guard let settings else { return nil }
+        if let launcherID = trimmedNonEmpty(agent.claimedLauncherID) { return settings.agentLaunchers.first(where: { $0.id == launcherID }) }
+        let candidateNames = [agent.claimedLauncherName, agent.label].compactMap(trimmedNonEmpty)
+        guard let launcherName = candidateNames.first.map(normalizedRunRowName) else { return nil }
+        return settings.agentLaunchers.first { normalizedRunRowName($0.name) == launcherName }
+    }
+
+    private static func terminalWindowTitle(for agent: AgentWindowRecord, trackedWindows: [WindowRecord]) -> String? {
+        guard let key = terminalSessionID(for: agent) else { return nil }
+        return trackedWindows.first(where: { terminalSessionID(for: $0) == key }).flatMap { trimmedNonEmpty($0.name) ?? trimmedNonEmpty($0.detail) }
+    }
+
+    private static func terminalSessionID(for process: RunningProcessRecord) -> String? {
+        normalizedTerminalSessionID(process.terminalNativeID ?? process.terminalTrackingID)
+    }
+
+    private static func terminalSessionID(for agent: AgentWindowRecord) -> String? {
+        normalizedTerminalSessionID(agent.terminalNativeID ?? agent.terminalTrackingID)
+    }
+
+    private static func terminalSessionID(for window: WindowRecord) -> String? {
+        normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID)
+    }
+
+    private static func normalizedTerminalSessionID(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    private static func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    private static func terminalSessionIsRunning(sessionID: String) -> Bool {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+            let state = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        else { return true }
+        return state.state.isInteractive
+    }
+
+    private func runTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
+        performTerminalRuntimeMutation(metric: "terminal_runtime_run", descriptor: descriptor) {
+            switch descriptor.kind {
+            case .process:
+                guard let processKey = descriptor.processKey else { throw WorkspaceError.invalidArgument(message: "Configured process not found.") }
+                if let templateID = descriptor.processTemplateID {
+                    try orchestrator.runConfiguredProcess(workspaceID: descriptor.workspaceID, processTemplateID: templateID, processKey: processKey)
+                } else {
+                    try orchestrator.runConfiguredProcess(workspaceID: descriptor.workspaceID, processKey: processKey)
+                }
+            case .codingAgent:
+                if let launcherID = descriptor.agentLauncherID {
+                    _ = try orchestrator.launchAgentLauncher(workspaceID: descriptor.workspaceID, launcherID: launcherID)
+                } else if let launcherName = descriptor.agentLauncherName {
+                    _ = try orchestrator.launchAgentLauncher(workspaceID: descriptor.workspaceID, name: launcherName)
+                } else {
+                    throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
+                }
+            case .workspaceTerminal: throw WorkspaceError.invalidArgument(message: "Workspace terminals do not support Run.")
+            }
+        }
+    }
+
+    private func stopTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
+        performTerminalRuntimeMutation(metric: "terminal_runtime_stop", descriptor: descriptor) {
+            switch descriptor.kind {
+            case .process:
+                guard let processID = descriptor.processID else { return }
+                try orchestrator.stopWorkspaceProcess(workspaceID: descriptor.workspaceID, processID: processID)
+            case .codingAgent:
+                guard let agentID = descriptor.agentID else { return }
+                try orchestrator.stopCodingAgent(workspaceID: descriptor.workspaceID, agentID: agentID)
+            case .workspaceTerminal:
+                _ = try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: descriptor.workspaceID, sessionID: descriptor.sessionID)
+            }
+        }
+    }
+
+    private func restartTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
+        performTerminalRuntimeMutation(metric: "terminal_runtime_restart", descriptor: descriptor) {
+            switch descriptor.kind {
+            case .process:
+                guard let processID = descriptor.processID else { return }
+                try orchestrator.restartWorkspaceProcess(workspaceID: descriptor.workspaceID, processID: processID)
+            case .codingAgent:
+                guard let agentID = descriptor.agentID else { return }
+                _ = try orchestrator.restartCodingAgent(workspaceID: descriptor.workspaceID, agentID: agentID)
+            case .workspaceTerminal: throw WorkspaceError.invalidArgument(message: "Workspace terminals do not support Restart.")
+            }
+        }
+    }
+
+    private func performTerminalRuntimeMutation(metric: String, descriptor: TerminalRuntimeControlDescriptor, _ operation: () throws -> Void) {
+        let startedAt = Date()
+        do {
+            try operation()
+            logPerfMetric(
+                metric, target: "workspace=\(descriptor.workspaceID) session=\(descriptor.sessionID)",
+                elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true, detail: "kind=\(descriptor.kind)")
+            reloadData()
+        } catch {
+            logPerfMetric(
+                metric, target: "workspace=\(descriptor.workspaceID) session=\(descriptor.sessionID)",
+                elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false, detail: "kind=\(descriptor.kind)")
+            showError(error)
+        }
+    }
+
     static func activeOwnerClientID(paths: TerminalSessionPaths) -> String? {
         guard let ownerAttachment = try? TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner }) else {
             return nil
@@ -997,27 +1225,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return activeAttachments.isEmpty
     }
 
-    private func removeTerminalSessionWindowController(sessionID: String, clientID: String) {
+    private func removeTerminalSessionWindowController(sessionID: String, clientID: String, sessionIsTerminating: Bool) {
         guard let controller = terminalSessionWindowControllers[sessionID] else { return }
         guard controller.clientID == clientID else { return }
         terminalSessionWindowControllers.removeValue(forKey: sessionID)
-        terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
+        guard !sessionIsTerminating else { return }
+        stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID)
     }
 
-    private func terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: String, now: Date = Date()) {
+    private func stopBuiltInTerminalSessionClosedByUser(sessionID: String) {
+        guard !keepsTerminalSessionsRunningDuringTermination else { return }
+        do { if try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID) { requestSidebarReload() } } catch { showError(error) }
+    }
+
+    private func terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: String, now: Date = Date()) {
         let workspaceID = try? orchestrator.workspaceIDForTerminalSession(sessionID)
-        guard let workspaceID else { return }
-        let isConfiguredProcessSession = ((try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? []).contains {
-            ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
-        }
+        let sessionOwnsTrackedRuntime =
+            workspaceID.map { workspaceID in
+                let processOwnsSession = ((try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? []).contains {
+                    ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
+                }
+                let agentOwnsSession = ((try? orchestrator.agentWindows(workspaceID: workspaceID)) ?? []).contains {
+                    ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
+                }
+                return processOwnsSession || agentOwnsSession
+            } ?? false
         let paths = try? TerminalSessionPaths.forSession(id: sessionID)
         guard
             Self.shouldTerminateAdHocBuiltInTerminalSession(
-                paths: paths, isConfiguredProcessSession: isConfiguredProcessSession,
+                paths: paths, isConfiguredProcessSession: sessionOwnsTrackedRuntime,
                 isAppTerminatingAndKeepingSessions: keepsTerminalSessionsRunningDuringTermination, now: now)
         else { return }
-        try? TerminalService.terminateSession(id: sessionID)
-        if (try? orchestrator.removeAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
+        if (try? orchestrator.stopAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
     }
 
     private func logWorkspaceDetailIPC(_ message: String) {
@@ -1093,7 +1332,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func handleTerminalAttachmentStateDidChange(sessionID: String) {
         guard terminalSessionWindowControllers[sessionID] == nil else { return }
-        terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
+        terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
     }
 
     private func startPeriodicWorkspaceWindowRefresh() {
@@ -4875,7 +5114,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let fallback = Self.terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
             let shortcut = windowShortcutByListIndex[windowListIndex].map(windowShortcutBadgeText(index:))
             return ProcessesSection.SupplementalRuntimeRow(
-                id: window.id, label: fallback.label, detail: fallback.detail, shortcut: shortcut, status: .idle,
+                id: window.id, label: fallback.label, detail: fallback.detail, shortcut: shortcut, status: .running,
                 onFocus: { [weak self] in
                     guard let self else { return }
                     Task { @MainActor [weak self] in

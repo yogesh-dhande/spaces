@@ -64,4 +64,21 @@ final class SpacesMobileBridgeProtocolTests: XCTestCase {
         XCTAssertEqual(try SpacesMobileBridgeCodec.decodeResponse(SpacesMobileBridgeCodec.encodeResponse(response)), response)
     }
 
+    func testWorkspaceTerminalRowRoundTripsStopAvailability() throws {
+        let row = SpacesMobileWorkspaceTerminalRow(
+            id: "terminal-shell", workspaceID: "workspace-1", title: "shell", workingDirectory: "/repo", sessionID: "session-1", runState: .running,
+            canOpenTerminal: true, canStop: true)
+        let overview = SpacesMobileOverviewPayload(
+            workspaces: [
+                SpacesMobileWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: nil, targetBranch: nil, dir: "/repo",
+                    isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1, terminalRows: [row])
+            ], sessions: [])
+
+        let decoded = try SpacesMobileBridgeCodec.decodeResponse(
+            SpacesMobileBridgeCodec.encodeResponse(SpacesMobileBridgeResponse(ok: true, message: "ok", overview: overview)))
+
+        XCTAssertEqual(decoded.overview?.workspaces.first?.terminalRows.first?.canStop, true)
+    }
+
 }
