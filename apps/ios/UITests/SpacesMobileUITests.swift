@@ -28,6 +28,10 @@ final class SpacesMobileUITests: XCTestCase {
         try runTerminalTakeOverScenario()
     }
 
+    func testTerminalInterruptShowsFinalFrameAndKeepsSecondSessionLive() throws {
+        try runTerminalInterruptFinalFrameScenario()
+    }
+
     func testTerminalTakeOverReopenSameSessionFromList() throws {
         try runTerminalTakeOverScenario()
     }
@@ -54,29 +58,7 @@ final class SpacesMobileUITests: XCTestCase {
 
     private func runTerminalTakeOverScenario() throws {
         let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
-        let app = if configuration.attachToExistingApp {
-            XCUIApplication(bundleIdentifier: configuration.bundleID)
-        } else {
-            XCUIApplication()
-        }
-        if configuration.attachToExistingApp {
-            app.activate()
-            XCTAssertTrue(waitForRunningApp(app, timeout: 20), "Timed out waiting for attached app \(configuration.bundleID) to become active")
-        } else {
-            app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
-            app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
-            app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
-            app.launchEnvironment["SPACES_MOBILE_TEST_TRANSPORT_KEY"] = configuration.transportKey
-            app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
-            app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
-            if let renderDumpPath = configuration.renderDumpPath {
-                app.launchEnvironment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"] = renderDumpPath
-            }
-            if let eventLogPath = configuration.eventLogPath {
-                app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
-            }
-            app.launch()
-        }
+        let app = launchConfiguredApp(configuration)
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(1))
 
@@ -219,6 +201,102 @@ final class SpacesMobileUITests: XCTestCase {
             }
             captureScreenshot(app, name: "post-mac-retakeover", filePath: configuration.finalScreenshotPath)
         }
+    }
+
+    private func runTerminalInterruptFinalFrameScenario() throws {
+        let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
+        let app = launchConfiguredApp(configuration)
+        XCUIDevice.shared.orientation = .portrait
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+
+        try takeOverSessionFromList(
+            in: app,
+            sessionID: configuration.sessionID,
+            timeout: 20,
+            context: "interrupt primary"
+        )
+        guard waitForVisibleTerminalContentIfNeeded(in: app, configuration: configuration, context: "before interrupt", timeout: 8) else {
+            return
+        }
+        XCTAssertNotNil(
+            waitForRenderDump(configuration: configuration, timeout: 20) { dump in
+                dump.sessionID == configuration.sessionID
+                    && dump.isOwner
+                    && dump.combinedText.contains(configuration.expectedInterruptedText)
+            },
+            "The interrupted session did not render the expected pre-interrupt marker"
+        )
+
+        try writeE2ECommandRequest(configuration: configuration, key: "ctrl+c")
+        XCTAssertTrue(
+            waitForE2EEvent(configuration: configuration, kind: "e2e_command_request_consumed", detailContains: "key=ctrl+c", timeout: 10),
+            "The app did not consume the ctrl+c E2E key request"
+        )
+
+        guard let endedDump = waitForRenderDump(configuration: configuration, timeout: 45, predicate: { dump in
+            dump.sessionID == configuration.sessionID
+                && dump.renderMode == "ended"
+                && dump.showsTerminalSurface
+                && !dump.hasError
+                && dump.combinedText.contains(configuration.expectedInterruptedText)
+                && !dump.combinedText.localizedStandardContains("final render was available")
+        }) else {
+            XCTFail("Timed out waiting for the interrupted session final render")
+            return
+        }
+        XCTAssertTrue(endedDump.renderStateKey.hasPrefix("ended|"), "Ended render used an unexpected render state key: \(endedDump)")
+        XCTAssertFalse(app.buttons["terminal.takeover"].exists, "Ended sessions should not show Take Over")
+        copyLatestRenderDump(configuration: configuration, to: configuration.interruptedRenderDumpPath)
+        captureScreenshot(app, name: "post-interrupt-final-frame", filePath: configuration.postInterruptScreenshotPath)
+
+        guard let secondarySessionID = configuration.secondarySessionID else { return }
+        try returnToTerminalList(in: app)
+        try takeOverSessionFromList(in: app, sessionID: secondarySessionID, timeout: 20, context: "post-interrupt secondary")
+        let secondaryDetail = app.descendants(matching: .any)["terminal.detail.\(secondarySessionID)"]
+        XCTAssertTrue(secondaryDetail.exists, "Secondary terminal detail disappeared after primary interrupt")
+        XCTAssertFalse(app.staticTexts["This terminal session ended before a final render was available."].exists)
+        XCTAssertFalse(app.staticTexts["The mobile bridge request timed out."].exists)
+        if !configuration.expectedSecondaryText.isEmpty {
+            XCTAssertNotNil(
+                waitForRenderDump(configuration: configuration, timeout: 20) { dump in
+                    dump.sessionID == secondarySessionID
+                        && dump.renderMode != "ended"
+                        && dump.combinedText.contains(configuration.expectedSecondaryText)
+                },
+                "The secondary session did not render the expected post-interrupt marker"
+            )
+        }
+        captureScreenshot(app, name: "post-interrupt-secondary-live", filePath: configuration.finalScreenshotPath)
+    }
+
+    private func launchConfiguredApp(_ configuration: UITestConfiguration) -> XCUIApplication {
+        let app = if configuration.attachToExistingApp {
+            XCUIApplication(bundleIdentifier: configuration.bundleID)
+        } else {
+            XCUIApplication()
+        }
+        if configuration.attachToExistingApp {
+            app.activate()
+            XCTAssertTrue(waitForRunningApp(app, timeout: 20), "Timed out waiting for attached app \(configuration.bundleID) to become active")
+        } else {
+            app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
+            app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
+            app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
+            app.launchEnvironment["SPACES_MOBILE_TEST_TRANSPORT_KEY"] = configuration.transportKey
+            app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
+            app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
+            if let secondarySessionID = configuration.secondarySessionID {
+                app.launchEnvironment["SPACES_MOBILE_E2E_SECONDARY_SESSION_ID"] = secondarySessionID
+            }
+            if let renderDumpPath = configuration.renderDumpPath {
+                app.launchEnvironment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"] = renderDumpPath
+            }
+            if let eventLogPath = configuration.eventLogPath {
+                app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
+            }
+            app.launch()
+        }
+        return app
     }
 
     private func waitForButton(in app: XCUIApplication, identifier: String, fallbackLabel: String, timeout: TimeInterval) -> XCUIElement? {
@@ -653,6 +731,66 @@ final class SpacesMobileUITests: XCTestCase {
         }
     }
 
+    private func writeE2ECommandRequest(configuration: UITestConfiguration, key: String) throws {
+        guard let eventLogPath = configuration.eventLogPath else {
+            XCTFail("Missing E2E event log path for command request")
+            return
+        }
+        let requestURL = URL(fileURLWithPath: "\(eventLogPath).command-request.json")
+        try FileManager.default.createDirectory(at: requestURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let payload: [String: Any] = [
+            "id": "ui-key-\(Int(Date().timeIntervalSince1970 * 1000))",
+            "key": key,
+            "sendEnter": false,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        try data.write(to: requestURL, options: [.atomic])
+    }
+
+    private func waitForE2EEvent(
+        configuration: UITestConfiguration,
+        kind: String,
+        detailContains: String,
+        timeout: TimeInterval
+    ) -> Bool {
+        guard let eventLogPath = configuration.eventLogPath else { return false }
+        let url = URL(fileURLWithPath: eventLogPath)
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if e2eEventExists(at: url, kind: kind, detailContains: detailContains) {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return e2eEventExists(at: url, kind: kind, detailContains: detailContains)
+    }
+
+    private func e2eEventExists(at url: URL, kind: String, detailContains: String) -> Bool {
+        guard let data = try? Data(contentsOf: url), let text = String(data: data, encoding: .utf8) else { return false }
+        for line in text.split(separator: "\n") {
+            guard let lineData = String(line).data(using: .utf8),
+                let event = try? JSONDecoder().decode(UITestE2EEvent.self, from: lineData),
+                event.kind == kind,
+                event.detail?.contains(detailContains) == true
+            else { continue }
+            return true
+        }
+        return false
+    }
+
+    private func copyLatestRenderDump(configuration: UITestConfiguration, to path: String?) {
+        guard let renderDumpPath = configuration.renderDumpPath, let path else { return }
+        let sourceURL = URL(fileURLWithPath: renderDumpPath)
+        let targetURL = URL(fileURLWithPath: path)
+        do {
+            try FileManager.default.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try Data(contentsOf: sourceURL)
+            try data.write(to: targetURL, options: [.atomic])
+        } catch {
+            XCTFail("Failed copying render dump to \(path): \(error)")
+        }
+    }
+
 }
 
 private struct UITestConfiguration: Decodable {
@@ -688,10 +826,14 @@ private struct UITestConfiguration: Decodable {
     let manualRetakeoverContinuePrefix: String?
     let postFirstCommandScreenshotPath: String?
     let postSecondCommandScreenshotPath: String?
+    let interruptedRenderDumpPath: String?
+    let postInterruptScreenshotPath: String?
     let finalMacRetakeoverRequestPath: String?
     let finalMacRetakeoverObservedPath: String?
     let postFinalMacRetakeoverScreenshotPath: String?
     let finalScreenshotPath: String?
+    let expectedInterruptedText: String
+    let expectedSecondaryText: String
     let scrollbackSwipeCount: Int
     let minimumVisibleTerminalInkBands: Int
     let maximumTerminalTopBlankRatio: Double
@@ -728,10 +870,14 @@ private struct UITestConfiguration: Decodable {
         case manualRetakeoverContinuePrefix
         case postFirstCommandScreenshotPath
         case postSecondCommandScreenshotPath
+        case interruptedRenderDumpPath
+        case postInterruptScreenshotPath
         case finalMacRetakeoverRequestPath
         case finalMacRetakeoverObservedPath
         case postFinalMacRetakeoverScreenshotPath
         case finalScreenshotPath
+        case expectedInterruptedText
+        case expectedSecondaryText
         case scrollbackSwipeCount
         case minimumVisibleTerminalInkBands
         case maximumTerminalTopBlankRatio
@@ -775,10 +921,14 @@ private struct UITestConfiguration: Decodable {
         manualRetakeoverContinuePrefix = try container.decodeIfPresent(String.self, forKey: .manualRetakeoverContinuePrefix)
         postFirstCommandScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postFirstCommandScreenshotPath)
         postSecondCommandScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postSecondCommandScreenshotPath)
+        interruptedRenderDumpPath = try container.decodeIfPresent(String.self, forKey: .interruptedRenderDumpPath)
+        postInterruptScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postInterruptScreenshotPath)
         finalMacRetakeoverRequestPath = try container.decodeIfPresent(String.self, forKey: .finalMacRetakeoverRequestPath)
         finalMacRetakeoverObservedPath = try container.decodeIfPresent(String.self, forKey: .finalMacRetakeoverObservedPath)
         postFinalMacRetakeoverScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postFinalMacRetakeoverScreenshotPath)
         finalScreenshotPath = try container.decodeIfPresent(String.self, forKey: .finalScreenshotPath)
+        expectedInterruptedText = try container.decodeIfPresent(String.self, forKey: .expectedInterruptedText) ?? ""
+        expectedSecondaryText = try container.decodeIfPresent(String.self, forKey: .expectedSecondaryText) ?? ""
         scrollbackSwipeCount = try container.decodeIfPresent(Int.self, forKey: .scrollbackSwipeCount) ?? 0
         minimumVisibleTerminalInkBands = try container.decodeIfPresent(Int.self, forKey: .minimumVisibleTerminalInkBands) ?? 0
         maximumTerminalTopBlankRatio = try container.decodeIfPresent(Double.self, forKey: .maximumTerminalTopBlankRatio) ?? 0
@@ -820,6 +970,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
     let isBusy: Bool
     let isPreparingInput: Bool
     let isInputSurfaceReady: Bool
+    let snapshotText: String?
+    let errorMessage: String?
     let visibleText: String
     let renderedText: String
     let renderStateKey: String
@@ -832,6 +984,8 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         case isBusy
         case isPreparingInput
         case isInputSurfaceReady
+        case snapshotText
+        case errorMessage
         case visibleText
         case renderedText
         case renderStateKey
@@ -846,9 +1000,20 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         isBusy = try container.decode(Bool.self, forKey: .isBusy)
         isPreparingInput = try container.decode(Bool.self, forKey: .isPreparingInput)
         isInputSurfaceReady = try container.decode(Bool.self, forKey: .isInputSurfaceReady)
+        snapshotText = try container.decodeIfPresent(String.self, forKey: .snapshotText)
+        errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
         visibleText = try container.decode(String.self, forKey: .visibleText)
         renderedText = try container.decode(String.self, forKey: .renderedText)
         renderStateKey = try container.decode(String.self, forKey: .renderStateKey)
+    }
+
+    var combinedText: String {
+        [renderedText, snapshotText ?? "", visibleText].joined(separator: "\n")
+    }
+
+    var hasError: Bool {
+        guard let errorMessage else { return false }
+        return !errorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var description: String {
@@ -860,11 +1025,18 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
             "isBusy=\(isBusy)",
             "isPreparingInput=\(isPreparingInput)",
             "isInputSurfaceReady=\(isInputSurfaceReady)",
+            "errorMessage=\(errorMessage ?? "")",
             "visibleText=\(visibleText)",
+            "snapshotTextLength=\(snapshotText?.count ?? 0)",
             "renderedTextLength=\(renderedText.count)",
             "renderStateKey=\(renderStateKey)",
         ].joined(separator: " ")
     }
+}
+
+private struct UITestE2EEvent: Decodable {
+    let kind: String?
+    let detail: String?
 }
 
 private struct TerminalSurfaceInkMetrics: CustomStringConvertible {

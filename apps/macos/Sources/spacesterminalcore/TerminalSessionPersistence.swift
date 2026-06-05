@@ -188,6 +188,39 @@ public enum TerminalSessionPersistence {
         }
     }
 
+    public static func writeRemoteSessionState(_ payload: GhosttyRemoteSessionStatePayload, paths: TerminalSessionPaths) throws {
+        try paths.ensureDirectories()
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        let encodedPayload = try JSONEncoder().encode(payload)
+        guard let payloadJSON = String(data: encodedPayload, encoding: .utf8) else {
+            throw TerminalSessionPersistenceError.invalidValue("payload_json", "<non-utf8>")
+        }
+        try withDatabase(paths: paths) { database in
+            try database.withImmediateTransaction {
+                let sessionID = try existingSessionID(rootDirectory: root, database: database)
+                guard sessionID == payload.sessionID else { throw TerminalSessionPersistenceError.unknownSession(payload.sessionID) }
+                try database.execute(
+                    sql: "DELETE FROM terminal_remote_session_states WHERE root_directory = ? AND session_id <> ?",
+                    bindings: [root, payload.sessionID])
+                try database.execute(
+                    sql: """
+                        INSERT INTO terminal_remote_session_states(session_id, root_directory, reason, payload_json, emitted_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(session_id) DO UPDATE SET
+                          root_directory = excluded.root_directory,
+                          reason = excluded.reason,
+                          payload_json = excluded.payload_json,
+                          emitted_at = excluded.emitted_at,
+                          updated_at = excluded.updated_at
+                        """,
+                    bindings: [
+                        payload.sessionID, root, payload.reason, payloadJSON, payload.emittedAt,
+                        GhosttyRemoteSessionStateTimestamp.string(from: Date()),
+                    ])
+            }
+        }
+    }
+
     public static func readLaunchConfiguration(paths: TerminalSessionPaths) throws -> TerminalSessionLaunchConfiguration {
         let root = normalizedRootDirectory(paths.rootDirectory)
         return try withDatabase(paths: paths) { database in
@@ -238,6 +271,21 @@ public enum TerminalSessionPersistence {
                     """, bindings: [root]
             ).map(decodeAttachment(row:))
             return TerminalSessionAttachmentSnapshot(clients: clients, attachments: attachments)
+        }
+    }
+
+    public static func readRemoteSessionState(paths: TerminalSessionPaths) throws -> GhosttyRemoteSessionStatePayload {
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        return try withDatabase(paths: paths) { database in
+            let row = try database.queryRow(
+                sql: """
+                    SELECT payload_json
+                    FROM terminal_remote_session_states
+                    WHERE root_directory = ?
+                    """, bindings: [root])
+            guard let payloadJSON = row?.first else { throw TerminalSessionPersistenceError.unknownSession(root) }
+            guard let data = payloadJSON.data(using: .utf8) else { throw TerminalSessionPersistenceError.invalidValue("payload_json", "<non-utf8>") }
+            return try JSONDecoder().decode(GhosttyRemoteSessionStatePayload.self, from: data)
         }
     }
 
@@ -331,6 +379,26 @@ public enum TerminalSessionPersistence {
                         SET detached_at = ?
                         WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
                         """, bindings: [detachedAt, root, clientID])
+            }
+        }
+    }
+
+    public static func detachActiveClients(paths: TerminalSessionPaths, detachedAt: String) throws {
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        try withDatabase(paths: paths) { database in
+            try database.withImmediateTransaction {
+                try database.execute(
+                    sql: """
+                        UPDATE terminal_clients
+                        SET disconnected_at = ?
+                        WHERE root_directory = ? AND disconnected_at IS NULL
+                        """, bindings: [detachedAt, root])
+                try database.execute(
+                    sql: """
+                        UPDATE terminal_attachments
+                        SET detached_at = ?
+                        WHERE root_directory = ? AND detached_at IS NULL
+                        """, bindings: [detachedAt, root])
             }
         }
     }

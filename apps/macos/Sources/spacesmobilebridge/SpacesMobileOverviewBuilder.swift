@@ -9,14 +9,30 @@ struct SpacesMobileOverviewBuilder {
         let workspace: WorkspaceRecord
     }
 
-    static func build(workspaces: [WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry]) -> SpacesMobileOverviewPayload {
-        let matchedWorkspaceBySessionID = Dictionary(
-            uniqueKeysWithValues: sessions.map { session in
+    struct WorkspaceTerminalRow: Sendable {
+        let entry: TerminalSessionCatalogEntry
+        let workspace: WorkspaceDescriptor
+        let title: String
+        let rowKind: SpacesMobileTerminalSessionRowKind
+        let rowSourceID: String
+        let hasFinalRender: Bool
+    }
+
+    static func build(workspaces: [WorkspaceDescriptor], workspaceRows: [WorkspaceTerminalRow], liveSessions: [TerminalSessionCatalogEntry])
+        -> SpacesMobileOverviewPayload
+    {
+        let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
+        let matchedWorkspaceByLiveSessionID = Dictionary(
+            uniqueKeysWithValues: liveSessions.map { session in
                 (session.sessionID, matchedWorkspace(for: session.effectiveWorkingDirectory, workspaces: workspaces))
             })
+        let adHocLiveSessions = liveSessions.filter { session in !representedSessionIDs.contains(session.sessionID) }
+        let matchedWorkspaceBySessionID = Dictionary(
+            uniqueKeysWithValues: adHocLiveSessions.map { session in (session.sessionID, matchedWorkspaceByLiveSessionID[session.sessionID] ?? nil) })
 
         let sessionsByWorkspaceID = Dictionary(
-            grouping: matchedWorkspaceBySessionID.compactMap { sessionID, descriptor in descriptor.map { ($0.workspace.id, sessionID) } }, by: \.0)
+            grouping: workspaceRows.map { ($0.workspace.workspace.id, $0.entry.sessionID) }
+                + matchedWorkspaceBySessionID.compactMap { sessionID, descriptor in descriptor.map { ($0.workspace.id, sessionID) } }, by: \.0)
 
         let workspaceSummaries = workspaces.sorted { lhs, rhs in
             if lhs.project.name != rhs.project.name { return lhs.project.name.localizedStandardCompare(rhs.project.name) == .orderedAscending }
@@ -30,25 +46,33 @@ struct SpacesMobileOverviewBuilder {
                 sessionCount: sessionsByWorkspaceID[descriptor.workspace.id]?.count ?? 0)
         }
 
-        let sessionSummaries = sessions.sorted { lhs, rhs in
+        let workspaceSessionSummaries = workspaceRows.sorted { lhs, rhs in
+            if lhs.workspace.project.name != rhs.workspace.project.name {
+                return lhs.workspace.project.name.localizedStandardCompare(rhs.workspace.project.name) == .orderedAscending
+            }
+            if lhs.workspace.workspace.title != rhs.workspace.workspace.title {
+                return lhs.workspace.workspace.title.localizedStandardCompare(rhs.workspace.workspace.title) == .orderedAscending
+            }
+            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }.map { row in
+            summary(
+                for: row.entry, matchedWorkspace: row.workspace, title: row.title, rowKind: row.rowKind, rowSourceID: row.rowSourceID,
+                hasFinalRender: row.hasFinalRender)
+        }
+
+        let adHocSessionSummaries = adHocLiveSessions.sorted { lhs, rhs in
             if lhs.effectiveWorkingDirectory != rhs.effectiveWorkingDirectory {
                 return lhs.effectiveWorkingDirectory.localizedStandardCompare(rhs.effectiveWorkingDirectory) == .orderedAscending
             }
             return lhs.effectiveTitle.localizedStandardCompare(rhs.effectiveTitle) == .orderedAscending
         }.map { session in
             let matchedWorkspace = matchedWorkspaceBySessionID[session.sessionID] ?? nil
-            return SpacesMobileTerminalSessionSummary(
-                id: session.sessionID, title: session.effectiveTitle, workingDirectory: session.effectiveWorkingDirectory,
-                state: session.runtimeState.state, backend: session.launchConfiguration.backend,
-                lifetimePolicy: session.launchConfiguration.lifetimePolicy, servicePID: session.runtimeState.servicePID,
-                childPID: session.runtimeState.childPID, workspaceID: matchedWorkspace?.workspace.id,
-                workspaceTitle: matchedWorkspace?.workspace.title, projectID: matchedWorkspace?.project.id,
-                projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt,
-                updatedAt: session.runtimeState.updatedAt, isControlAvailable: session.isControlAvailable,
-                isSubscriptionAvailable: session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot)
+            return summary(
+                for: session, matchedWorkspace: matchedWorkspace, title: session.effectiveTitle, rowKind: .liveSession, rowSourceID: nil,
+                hasFinalRender: false)
         }
 
-        return SpacesMobileOverviewPayload(workspaces: workspaceSummaries, sessions: sessionSummaries)
+        return SpacesMobileOverviewPayload(workspaces: workspaceSummaries, sessions: workspaceSessionSummaries + adHocSessionSummaries)
     }
 
     static func matchedWorkspace(for workingDirectory: String, workspaces: [WorkspaceDescriptor]) -> WorkspaceDescriptor? {
@@ -57,6 +81,22 @@ struct SpacesMobileOverviewBuilder {
             let workspaceDirectory = normalizedPath(descriptor.workspace.dir)
             return normalizedWorkingDirectory == workspaceDirectory || normalizedWorkingDirectory.hasPrefix(workspaceDirectory + "/")
         }.max { lhs, rhs in normalizedPath(lhs.workspace.dir).count < normalizedPath(rhs.workspace.dir).count }
+    }
+
+    private static func summary(
+        for session: TerminalSessionCatalogEntry, matchedWorkspace: WorkspaceDescriptor?, title: String, rowKind: SpacesMobileTerminalSessionRowKind,
+        rowSourceID: String?, hasFinalRender: Bool
+    ) -> SpacesMobileTerminalSessionSummary {
+        let isInteractive = session.runtimeState.state.isInteractive
+        return SpacesMobileTerminalSessionSummary(
+            id: session.sessionID, title: title, workingDirectory: session.effectiveWorkingDirectory, state: session.runtimeState.state,
+            backend: session.launchConfiguration.backend, lifetimePolicy: session.launchConfiguration.lifetimePolicy,
+            servicePID: session.runtimeState.servicePID, childPID: session.runtimeState.childPID, workspaceID: matchedWorkspace?.workspace.id,
+            workspaceTitle: matchedWorkspace?.workspace.title, projectID: matchedWorkspace?.project.id, projectName: matchedWorkspace?.project.name,
+            createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
+            isControlAvailable: isInteractive && session.isControlAvailable,
+            isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
+            rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender)
     }
 
     private static func normalizedPath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }

@@ -24,6 +24,7 @@ SQLite stores:
 - known client identities and remote lease timestamps
 - owner or viewer attachment history
 - saved terminal window frames
+- final Ghostty remote session-state payloads keyed by session ID
 
 The session directory keeps:
 - `output.log`: append-only terminal output used for `spaces terminal tail` and diagnostics
@@ -38,6 +39,7 @@ Each live session also participates in a service-level control path:
 - `GhosttyEmbeddedSessionHost` is the service-owned runtime for `ghostty-embedded`.
 - It owns one live libghostty-backed session, writes `output.log`, refreshes SQLite runtime state, enforces owner-only input or resize, and expires stale remote leases from SQLite client rows.
 - It also preserves live metadata such as title, working directory, and child PID so attached clients can reopen a session without restarting the shell.
+- During termination it captures the Ghostty render frame before renderer teardown, writes a final `terminated` payload to SQLite, broadcasts that payload to attached clients, marks active attachments detached, and then closes the live stream and renderer.
 - App-created ad hoc workspace terminals use persistent service-owned sessions so they survive app quit. The `.whileAttached` lifetime policy remains available for callers that intentionally want service reaping after the final live attachment detaches or expires.
 - If the service restarts and finds a session left in `starting` or `running` by a dead service PID, it marks that session failed and removes the stale `control.sock`.
 
@@ -51,7 +53,7 @@ Each live session also participates in a service-level control path:
 - `spaces terminal show` asks `SpacesApp` to open a native owner-seeking window for an existing session ID.
 - `spaces terminal send`, `key`, and `takeover` still operate on the per-session control socket that the service owns.
 - `SpacesTerminalService` publishes the first-party TLS-PSK bridge consumed by the iOS client. `spaces mobile status` starts the service if needed and prints address details, while `spaces mobile serve` remains available for standalone harnesses and opens an ephemeral pairing window.
-- `SpacesMobile` discovers the bridge through Bonjour or accepts manual host entry, keeps one selected terminal detail at a time, auto-attempts takeover for the opened session, and renders the owner path from service-published Ghostty render frames.
+- `SpacesMobile` discovers the bridge through Bonjour or accepts manual host entry, keeps one selected terminal detail at a time, auto-attempts takeover for live opened sessions, renders the owner path from service-published Ghostty render frames, and renders ended sessions from persisted final Ghostty state.
 - Workspace process launch, built-in coding-agent launch, app-opened workspace terminals, CLI-created sessions, and mobile-visible sessions use the service-owned path.
 
 ## macOS Window Behavior
@@ -62,6 +64,7 @@ Each live session also participates in a service-level control path:
 - Owner or viewer attachment state is authoritative in SQLite.
 - Only the active owner attachment may send input or drive PTY size.
 - Reopening a built-in window for an existing session reattaches to the same shell session instead of creating a new one.
+- Non-running sessions are treated as read-only even when older attachment rows still name an owner. macOS windows for ended sessions mount the local Ghostty mirror surface from the persisted final render frame and do not take ownership, resize, or send input.
 
 ## Tail and Metadata
 - `spaces terminal tail` reads `output.log`, not a live client window.
@@ -76,6 +79,8 @@ Each live session also participates in a service-level control path:
 - The Mac sidebar mobile connection action opens a compact panel with endpoint details, a five-minute QR/deep-link pairing window, copy-link action, countdown, paired devices, revoke controls, and reset-all pairing rotation.
 - The service advertises `_spaces-mobile._tcp.` with Bonjour so the iOS connection sheet can offer nearby Macs without requiring the user to type an IP address.
 - The bridge serves workspace and terminal overview data plus authenticated attach, subscribe, takeover, send, and key requests over the same session boundary.
+- Terminal overview rows are assembled from workspace runtime rows first: configured processes use `running_processes`, configured coding agents use `agent_sessions`, and both carry the runtime target's terminal session ID. Live ad-hoc terminal sessions are included only when they are not represented by one of those configured rows.
+- The bridge `state` endpoint returns live service state for interactive sessions and the persisted final `terminated` payload for ended sessions. Ended-session `subscribe` requests send that same final payload and complete so stale clients do not report a missing live stream. Attach, takeover, input, resize, and scroll control remain live-session-only operations.
 - Standalone bridge runs used by latency harnesses can apply test-only response and stream shaping through `SPACES_MOBILE_BRIDGE_NETWORK_PROFILE`; the app-supervised bridge path uses the default local profile.
 - Pairing is first-party policy-gated: the Mac bridge issues a per-install auth token after one-time code and nonce verification inside an open pairing window, and persists the paired installation alongside device metadata and the expected iOS bundle identifier.
 - Every later request must use the profile transport key at the TLS layer and present the stored auth token plus allowed bundle identity in the request, so an unpaired or non-first-party client is rejected before it can browse or control sessions.

@@ -10,6 +10,7 @@ import spacesterminalcore
 final class RemoteGhosttySessionHostTests: XCTestCase {
     private var originalDatabasePath: String?
     private var databaseRoot: URL?
+    private final class RuntimeNotificationProbe: @unchecked Sendable { var count = 0 }
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -143,6 +144,90 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         }
         XCTAssertEqual(receivedPayloads[0].outputByteCount, 11)
         XCTAssertEqual(receivedPayloads[0].outputEndByteOffset, 42)
+    }
+
+    @MainActor func testEndedRemoteHostDoesNotReloadFinalStateFromNotificationRefresh() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-final-reentry"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+            createdAt: "2026-06-04T00:00:00Z")
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-06-04T00:00:01Z",
+            exitedAt: "2026-06-04T00:00:01Z", title: "final-title", workingDirectory: "/tmp/final", columns: 5, rows: 1)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+        try TerminalSessionPersistence.writeRemoteSessionState(
+            GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T00:00:01Z", sessionStateRevision: 1,
+                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: "done", sessionRevision: 1)), paths: paths)
+
+        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        let probe = RuntimeNotificationProbe()
+        let observer = NotificationCenter.default.addObserver(forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: nil) {
+            notification in
+            guard notification.userInfo?["sessionID"] as? String == sessionID else { return }
+            MainActor.assumeIsolated {
+                probe.count += 1
+                _ = host.effectiveTitle
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        XCTAssertEqual(host.effectiveTitle, "final-title")
+        XCTAssertEqual(host.snapshotText(), "done")
+        XCTAssertEqual(probe.count, 0)
+    }
+
+    @MainActor func testRemoteHostIgnoresStaleFinalStateWhenRuntimeIsRunning() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-stale-final-live"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+            createdAt: "2026-06-04T00:00:00Z")
+        let runningState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-04T00:00:02Z",
+            title: "live-title", workingDirectory: "/tmp/live", columns: 4, rows: 1)
+        let staleExitedState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-06-04T00:00:01Z",
+            exitedAt: "2026-06-04T00:00:01Z", title: "stale-title", workingDirectory: "/tmp/stale", columns: 5, rows: 1)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(runningState, paths: paths)
+        try TerminalSessionPersistence.writeRemoteSessionState(
+            GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T00:00:01Z", sessionStateRevision: 1,
+                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: staleExitedState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                title: "stale-title", workingDirectory: "/tmp/stale", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: "stale", sessionRevision: 1)), paths: paths)
+
+        let liveRenderUpdate = try renderUpdate(text: "live", sessionRevision: 2)
+        let server = GhosttyRemoteSessionStateStreamServer(
+            socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-host.stale-final-live-test")
+        ) {
+            GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-04T00:00:02Z", sessionStateRevision: 2,
+                sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runningState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                title: "live-title", workingDirectory: "/tmp/live", outputByteCount: nil, renderUpdate: liveRenderUpdate)
+        }
+        try server.start()
+        defer { server.stop() }
+
+        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
+
+        waitForCondition("live stream supersedes stale final state") { host.snapshotText() == "live" }
+        XCTAssertEqual(host.effectiveTitle, "live-title")
     }
 
     @MainActor func testStateStreamClientReceivesRenderUpdatePayloads() throws {

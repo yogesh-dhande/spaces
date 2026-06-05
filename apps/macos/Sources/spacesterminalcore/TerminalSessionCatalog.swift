@@ -31,14 +31,18 @@ public enum TerminalSessionCatalog {
         try TerminalSessionPersistence.listKnownSessions(fileManager: fileManager).compactMap { launchConfiguration in
             let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
             guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
-            guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }
-            guard isProcessAlive(pid: runtimeState.servicePID) else { return nil }
+            guard isInteractiveServiceAlive(for: runtimeState) else { return nil }
             let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? .init()
             return TerminalSessionCatalogEntry(
                 launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, paths: paths,
                 isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
                 isSubscriptionAvailable: fileManager.fileExists(atPath: paths.subscriptionSocketPath))
         }
+    }
+
+    public static func isInteractiveServiceAlive(for runtimeState: TerminalSessionRuntimeState) -> Bool {
+        guard runtimeState.state.isInteractive else { return false }
+        return isProcessAlive(pid: runtimeState.servicePID)
     }
 
     private static func isProcessAlive(pid: Int32) -> Bool {
