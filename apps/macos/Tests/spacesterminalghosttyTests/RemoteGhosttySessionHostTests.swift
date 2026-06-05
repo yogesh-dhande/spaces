@@ -131,6 +131,37 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(mirrorView.debugRecordedBindingActions, ["search:selected-token"])
     }
 
+    @MainActor func testRemoteMirrorIgnoresStaleSearchResultsAfterClose() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-search-stale-results", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-05T00:00:00Z")
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        mirrorView.debugBindingActionHandler = { _ in true }
+
+        mirrorView.applyActionEvent(.startSearch("needle"))
+        mirrorView.applyActionEvent(.searchTotal(3))
+        mirrorView.applyActionEvent(.searchSelected(1))
+        XCTAssertEqual(mirrorView.debugSearchState.total, 3)
+        XCTAssertEqual(mirrorView.debugSearchState.selected, 1)
+
+        mirrorView.applyActionEvent(.endSearch)
+        mirrorView.applyActionEvent(.searchTotal(9))
+        mirrorView.applyActionEvent(.searchSelected(4))
+
+        XCTAssertFalse(mirrorView.debugSearchState.isVisible)
+        XCTAssertNil(mirrorView.debugSearchState.total)
+        XCTAssertNil(mirrorView.debugSearchState.selected)
+
+        mirrorView.applyActionEvent(.startSearch(nil))
+        mirrorView.applyActionEvent(.searchTotal(9))
+        mirrorView.applyActionEvent(.searchSelected(4))
+
+        XCTAssertTrue(mirrorView.debugSearchState.isVisible)
+        XCTAssertEqual(mirrorView.debugSearchState.query, "")
+        XCTAssertNil(mirrorView.debugSearchState.total)
+        XCTAssertNil(mirrorView.debugSearchState.selected)
+    }
+
     @MainActor func testRemoteMirrorSearchFieldEditSubmitsQueryOnce() throws {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-search-single-edit", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
@@ -146,6 +177,35 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         XCTAssertEqual(mirrorView.debugSearchState.query, "needle")
         XCTAssertEqual(mirrorView.debugRecordedBindingActions, ["search:needle"])
+    }
+
+    @MainActor func testRemoteMirrorSearchFieldEditDebouncesShortQueries() async throws {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-search-short-debounce", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-05T00:00:00Z")
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        mirrorView.debugBindingActionHandler = { _ in true }
+        mirrorView.applyActionEvent(.startSearch(nil))
+        let field = try XCTUnwrap(searchField(in: mirrorView))
+
+        field.stringValue = "n"
+        field.sendAction(field.action, to: field.target)
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertEqual(mirrorView.debugSearchState.query, "n")
+        XCTAssertEqual(mirrorView.debugRecordedBindingActions, [])
+
+        field.stringValue = "ne"
+        field.sendAction(field.action, to: field.target)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(mirrorView.debugRecordedBindingActions, [])
+
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(mirrorView.debugRecordedBindingActions, ["search:ne"])
+
+        field.stringValue = "nee"
+        field.sendAction(field.action, to: field.target)
+
+        XCTAssertEqual(mirrorView.debugRecordedBindingActions, ["search:ne", "search:nee"])
     }
 
     @MainActor func testRemoteMirrorReleaseSurfaceResetsSearchOverlay() {
@@ -217,6 +277,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         XCTAssertTrue(mirrorView.debugSearchFieldHasFocus)
 
+        mirrorView.applyActionEvent(.startSearch("missing"))
         mirrorView.applyActionEvent(.searchTotal(0))
 
         XCTAssertTrue(mirrorView.debugSearchStatusVisible)

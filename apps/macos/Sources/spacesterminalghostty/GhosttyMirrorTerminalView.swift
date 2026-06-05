@@ -41,6 +41,7 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     private static let defaultFontSize: CGFloat = 12
     private static let searchUpBindingAction = "navigate_search:next"
     private static let searchDownBindingAction = "navigate_search:previous"
+    private static let shortSearchQueryDebounceDelay: Duration = .milliseconds(300)
 
     private let launchConfiguration: TerminalSessionLaunchConfiguration
     private let surfaceHostView = GhosttyMirrorSurfaceHostView(frame: .zero)
@@ -57,9 +58,11 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     private var lastReportedViewportSize: (columns: Int, rows: Int)?
     private var renderedText = ""
     private var pendingFirstResponderRestoreTask: Task<Void, Never>?
+    private var pendingSearchQueryTask: Task<Void, Never>?
     private var mouseTrackingArea: NSTrackingArea?
     private var searchTotal: Int?
     private var searchSelected: Int?
+    private var submittedSearchQuery: String?
     var debugBindingActionHandler: (@MainActor (String) -> Bool)?
     private(set) var debugRecordedBindingActions: [String] = []
 
@@ -83,6 +86,7 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     deinit {
         MainActor.assumeIsolated {
             pendingFirstResponderRestoreTask?.cancel()
+            pendingSearchQueryTask?.cancel()
             if let surface = mirrorSurface() { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
             if let mirror { ghostty_mirror_free(mirror) }
         }
@@ -280,9 +284,11 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
         case .startSearch(let needle): showSearchOverlay(query: needle, submitSeededQuery: needle != nil)
         case .endSearch: hideSearchOverlay()
         case .searchTotal(let total):
+            guard acceptsSearchResultEvent else { return }
             searchTotal = total
             updateSearchStatusLabel()
         case .searchSelected(let selected):
+            guard acceptsSearchResultEvent else { return }
             searchSelected = selected
             updateSearchStatusLabel()
         case .setTitle, .setWorkingDirectory: break
@@ -338,6 +344,10 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
 
     private var canProcessTerminalInput: Bool { acceptsTerminalInput && window?.isKeyWindow == true && window?.firstResponder === self }
     private var searchOverlayIsVisible: Bool { !searchOverlay.isHidden }
+    private var acceptsSearchResultEvent: Bool {
+        guard searchOverlayIsVisible, let submittedSearchQuery, !submittedSearchQuery.isEmpty else { return false }
+        return submittedSearchQuery == searchField.stringValue
+    }
 
     private var searchFieldHasFocus: Bool {
         guard let window else { return false }
@@ -617,15 +627,35 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
 
     private func updateSearchQuery() {
         guard !searchOverlay.isHidden else { return }
-        submitSearchQuery(searchField.stringValue)
+        scheduleSearchQuery(searchField.stringValue)
     }
 
-    private func submitSearchQuery(_ query: String) {
-        searchTotal = nil
-        searchSelected = nil
-        updateSearchStatusLabel()
+    private func scheduleSearchQuery(_ query: String) {
+        pendingSearchQueryTask?.cancel()
+        pendingSearchQueryTask = nil
+        submittedSearchQuery = nil
+        resetSearchResultCounts()
+        guard Self.shouldDebounceSearchQuery(query) else {
+            submitSearchQuery(query, resetResults: false)
+            return
+        }
+        pendingSearchQueryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: Self.shortSearchQueryDebounceDelay) } catch { return }
+            guard let self, self.searchOverlayIsVisible, self.searchField.stringValue == query else { return }
+            self.pendingSearchQueryTask = nil
+            self.submitSearchQuery(query, resetResults: false)
+        }
+    }
+
+    private func submitSearchQuery(_ query: String, resetResults: Bool = true) {
+        pendingSearchQueryTask?.cancel()
+        pendingSearchQueryTask = nil
+        submittedSearchQuery = query
+        if resetResults { resetSearchResultCounts() }
         _ = sendBindingAction("search:\(query)")
     }
+
+    private static func shouldDebounceSearchQuery(_ query: String) -> Bool { !query.isEmpty && query.count < 3 }
 
     @objc private func searchUpAction() { _ = performBindingAction(Self.searchUpBindingAction) }
 
@@ -639,7 +669,10 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
         } else if action == "end_search" {
             hideSearchOverlay()
         } else if action.hasPrefix("search:") {
-            showSearchOverlay(query: String(action.dropFirst("search:".count)))
+            let query = String(action.dropFirst("search:".count))
+            showSearchOverlay(query: query)
+            submittedSearchQuery = query
+            resetSearchResultCounts()
         }
     }
 
@@ -659,11 +692,18 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
         pendingFirstResponderRestoreTask?.cancel()
         pendingFirstResponderRestoreTask = nil
         searchOverlay.isHidden = true
+        pendingSearchQueryTask?.cancel()
+        pendingSearchQueryTask = nil
+        submittedSearchQuery = nil
+        resetSearchResultCounts()
+        searchField.stringValue = ""
+        if restoreFocus { restoreFirstResponderIfWindowReady() }
+    }
+
+    private func resetSearchResultCounts() {
         searchTotal = nil
         searchSelected = nil
-        searchField.stringValue = ""
         updateSearchStatusLabel()
-        if restoreFocus { restoreFirstResponderIfWindowReady() }
     }
 
     @discardableResult private func sendBindingAction(_ action: String) -> Bool {
