@@ -3,9 +3,23 @@ import Foundation
 import GhosttyKit
 import spacesterminalcore
 
+public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
+    public let isVisible: Bool
+    public let query: String
+    public let total: Int?
+    public let selected: Int?
+
+    public init(isVisible: Bool, query: String, total: Int?, selected: Int?) {
+        self.isVisible = isVisible
+        self.query = query
+        self.total = total
+        self.selected = selected
+    }
+}
+
 @MainActor private final class GhosttyMirrorSurfaceHostView: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
 
-@MainActor final class GhosttyMirrorTerminalView: NSView {
+@MainActor final class GhosttyMirrorTerminalView: NSView, NSSearchFieldDelegate {
     typealias SendTextHandler = @MainActor (String) -> Void
     typealias SendKeyHandler = @MainActor (String) -> Void
     typealias SendScrollHandler = @MainActor (CGFloat, CGFloat, Int32) -> Void
@@ -25,9 +39,17 @@ import spacesterminalcore
     }
 
     private static let defaultFontSize: CGFloat = 12
+    private static let searchUpBindingAction = "navigate_search:next"
+    private static let searchDownBindingAction = "navigate_search:previous"
 
     private let launchConfiguration: TerminalSessionLaunchConfiguration
     private let surfaceHostView = GhosttyMirrorSurfaceHostView(frame: .zero)
+    private let searchOverlay = NSVisualEffectView()
+    private let searchField = NSSearchField()
+    private let searchStatusLabel = NSTextField(labelWithString: "")
+    private let searchUpButton = NSButton()
+    private let searchDownButton = NSButton()
+    private let searchCloseButton = NSButton()
     private var mirror: ghostty_mirror_t?
     private var latestFrame: GhosttyRenderFrame?
     private var renderStateKey = ""
@@ -35,6 +57,9 @@ import spacesterminalcore
     private var lastReportedViewportSize: (columns: Int, rows: Int)?
     private var renderedText = ""
     private var pendingFirstResponderRestoreTask: Task<Void, Never>?
+    private var mouseTrackingArea: NSTrackingArea?
+    private var searchTotal: Int?
+    private var searchSelected: Int?
 
     var acceptsTerminalInput = false { didSet { restoreFirstResponderIfWindowReady() } }
     var onSendText: SendTextHandler?
@@ -48,6 +73,7 @@ import spacesterminalcore
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
         installSurfaceHostView()
+        installSearchOverlay()
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -55,6 +81,7 @@ import spacesterminalcore
     deinit {
         MainActor.assumeIsolated {
             pendingFirstResponderRestoreTask?.cancel()
+            if let surface = mirrorSurface() { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
             if let mirror { ghostty_mirror_free(mirror) }
         }
     }
@@ -89,14 +116,69 @@ import spacesterminalcore
         updateSurfaceGeometry()
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateSearchOverlayAppearance()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let mouseTrackingArea {
+            removeTrackingArea(mouseTrackingArea)
+            self.mouseTrackingArea = nil
+        }
+        let trackingArea = NSTrackingArea(
+            rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(trackingArea)
+        mouseTrackingArea = trackingArea
+    }
+
     override func mouseDown(with event: NSEvent) {
         focusWindow()
-        super.mouseDown(with: event)
+        sendMousePosition(event)
+        _ = sendMouseButton(state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_LEFT, event: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        sendMousePosition(event)
+        _ = sendMouseButton(state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT, event: event)
     }
 
     override func rightMouseDown(with event: NSEvent) {
         focusWindow()
-        super.rightMouseDown(with: event)
+        sendMousePosition(event)
+        if !sendMouseButton(state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_RIGHT, event: event) { super.rightMouseDown(with: event) }
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        sendMousePosition(event)
+        if !sendMouseButton(state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_RIGHT, event: event) { super.rightMouseUp(with: event) }
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        focusWindow()
+        sendMousePosition(event)
+        _ = sendMouseButton(state: GHOSTTY_MOUSE_PRESS, button: Self.ghosttyMouseButton(for: event.buttonNumber), event: event)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        sendMousePosition(event)
+        _ = sendMouseButton(state: GHOSTTY_MOUSE_RELEASE, button: Self.ghosttyMouseButton(for: event.buttonNumber), event: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) { sendMousePosition(event) }
+
+    override func mouseDragged(with event: NSEvent) { sendMousePosition(event) }
+
+    override func rightMouseDragged(with event: NSEvent) { sendMousePosition(event) }
+
+    override func otherMouseDragged(with event: NSEvent) { sendMousePosition(event) }
+
+    override func mouseExited(with event: NSEvent) {
+        guard let surface = mirrorSurface() else { return }
+        guard NSEvent.pressedMouseButtons == 0 else { return }
+        ghostty_surface_mouse_pos(surface, -1, -1, Self.ghosttyMouseModifiers(for: event.modifierFlags))
+        ghostty_surface_refresh(surface)
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -184,6 +266,31 @@ import spacesterminalcore
         return true
     }
 
+    @discardableResult func performBindingAction(_ action: String) -> Bool {
+        let performed = sendBindingAction(action)
+        guard performed || action == "end_search" else { return false }
+        applySearchSideEffect(for: action)
+        return performed || action == "end_search"
+    }
+
+    func applyActionEvent(_ event: GhosttyActionEvent) {
+        switch event {
+        case .startSearch(let needle): showSearchOverlay(query: needle)
+        case .endSearch: hideSearchOverlay()
+        case .searchTotal(let total):
+            searchTotal = total
+            updateSearchStatusLabel()
+        case .searchSelected(let selected):
+            searchSelected = selected
+            updateSearchStatusLabel()
+        case .setTitle, .setWorkingDirectory: break
+        }
+    }
+
+    var debugSearchState: GhosttyTerminalSearchDebugState {
+        .init(isVisible: !searchOverlay.isHidden, query: searchField.stringValue, total: searchTotal, selected: searchSelected)
+    }
+
     static func makeScrollMods(hasPreciseDeltas: Bool, phase: NSEvent.Phase) -> Int32 {
         var mods: Int32 = 0
         if hasPreciseDeltas { mods |= 0b0000_0001 }
@@ -200,12 +307,22 @@ import spacesterminalcore
 
     func focusWindow(_ window: NSWindow?) {
         guard let window else { return }
+        if searchOverlayIsVisible {
+            if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
+            if !searchFieldHasFocus {
+                window.makeFirstResponder(searchField)
+                searchField.selectText(nil)
+            }
+            updateSurfaceFocus()
+            return
+        }
         if window.firstResponder !== self { window.makeFirstResponder(self) }
         if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
         updateSurfaceFocus()
     }
 
     func releaseSurface() {
+        if let surface = mirrorSurface() { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
         if let mirror {
             ghostty_mirror_free(mirror)
             self.mirror = nil
@@ -217,11 +334,21 @@ import spacesterminalcore
     }
 
     private var canProcessTerminalInput: Bool { acceptsTerminalInput && window?.isKeyWindow == true && window?.firstResponder === self }
+    private var searchOverlayIsVisible: Bool { !searchOverlay.isHidden }
+
+    private var searchFieldHasFocus: Bool {
+        guard let window else { return false }
+        return window.firstResponder === searchField || window.firstResponder === searchField.currentEditor()
+    }
 
     private func focusWindow() { focusWindow(window) }
 
     private func restoreFirstResponderIfWindowReady(deferIfNeeded: Bool = true) {
         guard acceptsTerminalInput, let window, window.isKeyWindow else {
+            updateSurfaceFocus()
+            return
+        }
+        guard !searchOverlayIsVisible else {
             updateSurfaceFocus()
             return
         }
@@ -254,6 +381,83 @@ import spacesterminalcore
         ])
     }
 
+    private func installSearchOverlay() {
+        searchOverlay.translatesAutoresizingMaskIntoConstraints = false
+        searchOverlay.material = .hudWindow
+        searchOverlay.blendingMode = .withinWindow
+        searchOverlay.state = .active
+        searchOverlay.isHidden = true
+        searchOverlay.wantsLayer = true
+        searchOverlay.layer?.cornerRadius = 7
+        searchOverlay.layer?.masksToBounds = false
+        searchOverlay.layer?.shadowColor = NSColor.black.cgColor
+        searchOverlay.layer?.shadowOpacity = 0.22
+        searchOverlay.layer?.shadowRadius = 10
+        searchOverlay.layer?.shadowOffset = NSSize(width: 0, height: -1)
+        updateSearchOverlayAppearance()
+
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchField.delegate = self
+        searchField.placeholderString = "Find"
+        searchField.sendsSearchStringImmediately = true
+        searchField.target = self
+        searchField.action = #selector(searchFieldAction)
+        searchField.setAccessibilityIdentifier("terminal-search-field")
+
+        searchStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        searchStatusLabel.font = .systemFont(ofSize: 11)
+        searchStatusLabel.textColor = .secondaryLabelColor
+        searchStatusLabel.alignment = .center
+        searchStatusLabel.isHidden = true
+        searchStatusLabel.setContentHuggingPriority(.required, for: .horizontal)
+        searchStatusLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        configureSearchButton(searchUpButton, symbolName: "chevron.up", action: #selector(searchUpAction), tooltip: "Find Up")
+        configureSearchButton(searchDownButton, symbolName: "chevron.down", action: #selector(searchDownAction), tooltip: "Find Down")
+        configureSearchButton(searchCloseButton, symbolName: "xmark", action: #selector(searchCloseAction), tooltip: "Close Find")
+
+        let stackView = NSStackView(views: [searchField, searchStatusLabel, searchUpButton, searchDownButton, searchCloseButton])
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+        stackView.orientation = .horizontal
+        stackView.alignment = .centerY
+        stackView.spacing = 6
+        stackView.detachesHiddenViews = true
+        searchOverlay.addSubview(stackView)
+        addSubview(searchOverlay)
+
+        NSLayoutConstraint.activate([
+            searchOverlay.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            searchOverlay.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            searchOverlay.widthAnchor.constraint(lessThanOrEqualToConstant: 360),
+            stackView.topAnchor.constraint(equalTo: searchOverlay.topAnchor, constant: 6),
+            stackView.leadingAnchor.constraint(equalTo: searchOverlay.leadingAnchor, constant: 8),
+            stackView.trailingAnchor.constraint(equalTo: searchOverlay.trailingAnchor, constant: -8),
+            stackView.bottomAnchor.constraint(equalTo: searchOverlay.bottomAnchor, constant: -6),
+            searchField.widthAnchor.constraint(equalToConstant: 180),
+        ])
+    }
+
+    private func configureSearchButton(_ button: NSButton, symbolName: String, action: Selector, tooltip: String) {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: tooltip)
+        button.imagePosition = .imageOnly
+        button.isBordered = false
+        button.contentTintColor = .secondaryLabelColor
+        button.target = self
+        button.action = action
+        button.toolTip = tooltip
+        button.setButtonType(.momentaryPushIn)
+        NSLayoutConstraint.activate([button.widthAnchor.constraint(equalToConstant: 24), button.heightAnchor.constraint(equalToConstant: 24)])
+    }
+
+    private func updateSearchOverlayAppearance() {
+        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let backgroundColor = isDark ? NSColor(calibratedWhite: 0.10, alpha: 0.88) : NSColor(calibratedWhite: 0.98, alpha: 0.92)
+        searchOverlay.layer?.backgroundColor = backgroundColor.cgColor
+        searchOverlay.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(isDark ? 0.32 : 0.55).cgColor
+        searchOverlay.layer?.borderWidth = 0.5
+    }
+
     private func ensureMirrorIfNeeded() {
         guard mirror == nil, window != nil else { return }
         do {
@@ -272,6 +476,9 @@ import spacesterminalcore
             lastGeometry = nil
             updateSurfaceGeometry()
             updateSurfaceFocus()
+            if let surface = mirrorSurface() {
+                GhosttyEmbeddedAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.applyActionEvent(event) }
+            }
         } catch { fputs("spaces: ghostty mirror creation failed for session \(launchConfiguration.sessionID): \(error)\n", stderr) }
     }
 
@@ -286,6 +493,21 @@ import spacesterminalcore
     private func mirrorSurface() -> ghostty_surface_t? {
         guard let mirror else { return nil }
         return ghostty_mirror_surface(mirror)
+    }
+
+    @discardableResult private func sendMouseButton(state: ghostty_input_mouse_state_e, button: ghostty_input_mouse_button_e, event: NSEvent) -> Bool
+    {
+        guard let surface = mirrorSurface() else { return false }
+        let consumed = ghostty_surface_mouse_button(surface, state, button, Self.ghosttyMouseModifiers(for: event.modifierFlags))
+        ghostty_surface_refresh(surface)
+        return consumed
+    }
+
+    private func sendMousePosition(_ event: NSEvent) {
+        guard let surface = mirrorSurface() else { return }
+        let position = Self.ghosttyMousePosition(for: event.locationInWindow, in: self)
+        ghostty_surface_mouse_pos(surface, position.x, position.y, Self.ghosttyMouseModifiers(for: event.modifierFlags))
+        ghostty_surface_refresh(surface)
     }
 
     private func updateSurfaceGeometry() {
@@ -388,5 +610,109 @@ import spacesterminalcore
         return CellMetrics(width: max(width, 1), height: max(height, 1))
     }
 
+    @objc private func searchFieldAction() { updateSearchQuery() }
+
+    func controlTextDidChange(_ notification: Notification) { updateSearchQuery() }
+
+    private func updateSearchQuery() {
+        guard !searchOverlay.isHidden else { return }
+        let query = searchField.stringValue
+        searchTotal = nil
+        searchSelected = nil
+        updateSearchStatusLabel()
+        _ = sendBindingAction("search:\(query)")
+    }
+
+    @objc private func searchUpAction() { _ = performBindingAction(Self.searchUpBindingAction) }
+
+    @objc private func searchDownAction() { _ = performBindingAction(Self.searchDownBindingAction) }
+
+    @objc private func searchCloseAction() { _ = performBindingAction("end_search") }
+
+    private func applySearchSideEffect(for action: String) {
+        if action == "start_search" {
+            showSearchOverlay(query: nil)
+        } else if action == "end_search" {
+            hideSearchOverlay()
+        } else if action.hasPrefix("search:") {
+            showSearchOverlay(query: String(action.dropFirst("search:".count)))
+        }
+    }
+
+    private func showSearchOverlay(query: String?) {
+        pendingFirstResponderRestoreTask?.cancel()
+        pendingFirstResponderRestoreTask = nil
+        searchOverlay.isHidden = false
+        if let query { searchField.stringValue = query }
+        window?.makeFirstResponder(searchField)
+        searchField.selectText(nil)
+        updateSearchStatusLabel()
+    }
+
+    private func hideSearchOverlay() {
+        searchOverlay.isHidden = true
+        searchTotal = nil
+        searchSelected = nil
+        searchField.stringValue = ""
+        restoreFirstResponderIfWindowReady()
+    }
+
+    @discardableResult private func sendBindingAction(_ action: String) -> Bool {
+        ensureMirrorIfNeeded()
+        guard let surface = mirrorSurface() else { return false }
+        let performed = action.withCString { pointer in ghostty_surface_binding_action(surface, pointer, UInt(action.lengthOfBytes(using: .utf8))) }
+        if performed { ghostty_surface_refresh(surface) }
+        return performed
+    }
+
+    private func updateSearchStatusLabel() {
+        let statusText: String
+        if let selected = searchSelected, let total = searchTotal, total > 0 {
+            statusText = "\(selected + 1) of \(total)"
+        } else if let total = searchTotal {
+            statusText = total == 0 ? "No matches" : "\(total)"
+        } else {
+            statusText = ""
+        }
+        searchStatusLabel.stringValue = statusText
+        searchStatusLabel.isHidden = statusText.isEmpty
+    }
+
+    static func ghosttyMouseModifiers(for flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {
+        var mods: UInt32 = GHOSTTY_MODS_NONE.rawValue
+        if flags.contains(.shift) { mods |= GHOSTTY_MODS_SHIFT.rawValue }
+        if flags.contains(.control) { mods |= GHOSTTY_MODS_CTRL.rawValue }
+        if flags.contains(.option) { mods |= GHOSTTY_MODS_ALT.rawValue }
+        if flags.contains(.command) { mods |= GHOSTTY_MODS_SUPER.rawValue }
+        return ghostty_input_mods_e(mods)
+    }
+
+    static func ghosttyMousePosition(for locationInWindow: NSPoint, in view: NSView) -> (x: Double, y: Double) {
+        let position = view.convert(locationInWindow, from: nil)
+        return (Double(position.x), Double(view.frame.height - position.y))
+    }
+
+    static func ghosttyMouseButton(for buttonNumber: Int) -> ghostty_input_mouse_button_e {
+        switch buttonNumber {
+        case 0: return GHOSTTY_MOUSE_LEFT
+        case 1: return GHOSTTY_MOUSE_RIGHT
+        case 2: return GHOSTTY_MOUSE_MIDDLE
+        case 3: return GHOSTTY_MOUSE_EIGHT
+        case 4: return GHOSTTY_MOUSE_NINE
+        case 5: return GHOSTTY_MOUSE_SIX
+        case 6: return GHOSTTY_MOUSE_SEVEN
+        case 7: return GHOSTTY_MOUSE_FOUR
+        case 8: return GHOSTTY_MOUSE_FIVE
+        case 9: return GHOSTTY_MOUSE_TEN
+        case 10: return GHOSTTY_MOUSE_ELEVEN
+        default: return GHOSTTY_MOUSE_UNKNOWN
+        }
+    }
+
     static func remoteKeySpecifier(for event: NSEvent) -> String? { GhosttyTerminalInputTranslator.keySpecifier(for: event) }
+
+    var debugSearchFieldHasFocus: Bool { searchFieldHasFocus }
+    var debugSearchStatusVisible: Bool { !searchStatusLabel.isHidden }
+    var debugSearchUpBindingAction: String { Self.searchUpBindingAction }
+    var debugSearchDownBindingAction: String { Self.searchDownBindingAction }
 }

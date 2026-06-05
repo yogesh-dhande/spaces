@@ -26,7 +26,7 @@ struct MXE2ECommand: ParsableCommand {
             FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self,
             SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
             StartTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, OpenMobilePairingWindowCommand.self, RecordScreenCommand.self,
-            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
+            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
         ])
 }
 
@@ -113,6 +113,42 @@ private struct TypeApplicationWindowCommand: ParsableCommand {
                 executableName: executableName, windowTitle: target.title, pointX: point.x, pointY: point.y, textByteCount: inputText.utf8.count,
                 firstKeyDownUptimeNanoseconds: timing.firstKeyDownUptimeNanoseconds, lastKeyUpUptimeNanoseconds: timing.lastKeyUpUptimeNanoseconds,
                 success: true))
+    }
+}
+
+private struct DragApplicationWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "drag-application-window")
+
+    @Option(name: .long) var executableName: String
+    @Option(name: .long) var windowTitleContains: String?
+    @Option(name: .long) var startNormalizedX = 0.1
+    @Option(name: .long) var startNormalizedY = 0.2
+    @Option(name: .long) var endNormalizedX = 0.8
+    @Option(name: .long) var endNormalizedY = 0.2
+    @Option(name: .long) var durationMS = 250
+    @Option(name: .long) var steps = 8
+
+    func run() throws {
+        guard (0...1).contains(startNormalizedX), (0...1).contains(startNormalizedY), (0...1).contains(endNormalizedX),
+            (0...1).contains(endNormalizedY)
+        else { throw ValidationError("Normalized coordinates must be between 0 and 1.") }
+        guard durationMS >= 0 else { throw ValidationError("Duration must be non-negative.") }
+        guard steps > 0 else { throw ValidationError("Steps must be greater than zero.") }
+        let target = try targetApplicationWindow(executableName: executableName, windowTitleContains: windowTitleContains)
+
+        target.application.activate(options: [])
+        axPerformAction(target.window, action: kAXRaiseAction as String)
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let startPoint = CGPoint(
+            x: target.frame.minX + target.frame.width * startNormalizedX, y: target.frame.minY + target.frame.height * startNormalizedY)
+        let endPoint = CGPoint(
+            x: target.frame.minX + target.frame.width * endNormalizedX, y: target.frame.minY + target.frame.height * endNormalizedY)
+        try postMouseDrag(from: startPoint, to: endPoint, durationMS: durationMS, steps: steps)
+        try emitJSON(
+            DragApplicationWindowPayload(
+                executableName: executableName, windowTitle: target.title, startX: startPoint.x, startY: startPoint.y, endX: endPoint.x,
+                endY: endPoint.y, success: true))
     }
 }
 
@@ -792,7 +828,8 @@ private struct DumpTerminalSessionWindowStateCommand: ParsableCommand {
         ]
         if let attachmentMode { userInfo[IPCNotification.terminalAttachmentModeUserInfoKey] = attachmentMode.rawValue }
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.dumpTerminalSessionWindowState, object: nil, userInfo: userInfo, options: [.deliverImmediately])
+            IPCNotification.dumpTerminalSessionWindowState, object: try IPCNotification.currentObject(), userInfo: userInfo,
+            options: [.deliverImmediately])
         try emitJSON(["sessionID": trimmedSessionID, "mode": attachmentMode?.rawValue ?? "any", "outputPath": trimmedOutputPath])
     }
 }
@@ -1177,6 +1214,16 @@ private struct TypeApplicationWindowPayload: Codable {
     let success: Bool
 }
 
+private struct DragApplicationWindowPayload: Codable {
+    let executableName: String
+    let windowTitle: String?
+    let startX: CGFloat
+    let startY: CGFloat
+    let endX: CGFloat
+    let endY: CGFloat
+    let success: Bool
+}
+
 private struct TargetApplicationWindow {
     let application: NSRunningApplication
     let window: AXUIElement
@@ -1385,6 +1432,25 @@ private func postMouseClick(at point: CGPoint) throws {
     else { throw ValidationError("Unable to create mouse click event.") }
     downEvent.post(tap: .cghidEventTap)
     Thread.sleep(forTimeInterval: 0.02)
+    upEvent.post(tap: .cghidEventTap)
+}
+
+private func postMouseDrag(from startPoint: CGPoint, to endPoint: CGPoint, durationMS: Int, steps: Int) throws {
+    let source = CGEventSource(stateID: .hidSystemState)
+    guard let downEvent = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: startPoint, mouseButton: .left),
+        let upEvent = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: endPoint, mouseButton: .left)
+    else { throw ValidationError("Unable to create mouse drag event.") }
+    downEvent.post(tap: .cghidEventTap)
+    let delay = steps > 0 ? Double(durationMS) / Double(steps) / 1000.0 : 0
+    for step in 1...steps {
+        let progress = CGFloat(step) / CGFloat(steps)
+        let point = CGPoint(x: startPoint.x + (endPoint.x - startPoint.x) * progress, y: startPoint.y + (endPoint.y - startPoint.y) * progress)
+        guard let dragEvent = CGEvent(mouseEventSource: source, mouseType: .leftMouseDragged, mouseCursorPosition: point, mouseButton: .left) else {
+            throw ValidationError("Unable to create mouse drag event.")
+        }
+        dragEvent.post(tap: .cghidEventTap)
+        if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+    }
     upEvent.post(tap: .cghidEventTap)
 }
 

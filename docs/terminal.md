@@ -61,6 +61,9 @@ Each live session also participates in a service-level control path:
 - Title and working-directory updates still follow live session metadata emitted by the service.
 - Owner or viewer attachment state is authoritative in SQLite.
 - Only the active owner attachment may send input or drive PTY size.
+- Owner macOS windows dispatch standard edit and find command-key equivalents directly to the terminal session window controller so AppKit menu routing does not bypass the live Ghostty surface. Copy, select-all, find, use-selection-for-find, and find navigation use Ghostty binding actions on the active mirror surface; paste reads the system pasteboard and sends text through the active owner input path because the PTY remains service-owned. `Ctrl+C` and terminal-owned navigation or clear shortcuts continue through the terminal key translator.
+- `GhosttyMirrorTerminalView` forwards mouse press, release, move, and drag events into the local mirror surface using Ghostty's AppKit coordinate convention and modifier bits. The mirror surface owns selection hit testing, copy selection behavior, and search match navigation.
+- Live terminal find uses a compact overlay owned by the macOS mirror view. Ghostty search action events open and close the overlay and update match counts; query edits call `search:<query>`, navigation calls `navigate_search:next` or `navigate_search:previous`, and `Esc` sends `end_search`.
 - Reopening a built-in window for an existing session reattaches to the same shell session instead of creating a new one.
 
 ## Tail and Metadata
@@ -105,7 +108,7 @@ Each live session also participates in a service-level control path:
 
 ## Ghostty Compatibility Boundary
 - The Ghostty fork exposes additive headless-session, render-frame, and mirror-renderer entrypoints for Spaces without changing default Ghostty app behavior. Spaces keeps the v2 render-update protocol behind its first-party service and bridge boundary; current clients materialize v2 updates back into Ghostty mirror snapshots until the prebuilt GhosttyKit contract exposes direct native render-update apply calls.
-- The service remains the only PTY and session-state owner. Client windows and mobile views import service frames into local mirror state and may only send input, resize, mouse, keyboard, or scroll events while their client ID and owner epoch match the active owner.
+- The service remains the only PTY and session-state owner. Client windows and mobile views import service frames into local mirror state and may only send input, resize, mouse, keyboard, binding-action, or scroll events while their client ID and owner epoch match the active owner.
 - The first-party render stream uses v2 render updates only. Full v2 updates are retained for initial baselines and correctness resyncs; steady-state output, prompt redraws, and scrollback movement use deltas with native scroll-rectangle operations when Ghostty provides them.
 - Pixel streaming is not the primary architecture.
 

@@ -336,6 +336,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let surfaceRows: Int?
         let windowIsKey: Bool?
         let firstResponderTypeName: String?
+        let searchVisible: Bool?
+        let searchQuery: String?
+        let searchTotal: Int?
+        let searchSelected: Int?
     }
 
     enum WindowFocusRequest: Sendable {
@@ -815,7 +819,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func setupDumpTerminalSessionWindowStateIPCObserver() {
         dumpTerminalSessionWindowStateIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.dumpTerminalSessionWindowState, object: nil, queue: .main
+            forName: IPCNotification.dumpTerminalSessionWindowState, object: ipcNotificationObject, queue: .main
         ) { [weak self] notification in
             guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
             guard let outputPath = notification.userInfo?[IPCNotification.outputPathUserInfoKey] as? String else { return }
@@ -852,7 +856,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput, summary: debugState?.summary,
             state: debugState?.state, showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
             didClose: debugState?.didCloseWindow, surfaceColumns: debugState?.surfaceColumns, surfaceRows: debugState?.surfaceRows,
-            windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName)
+            windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
+            searchVisible: debugState?.searchVisible, searchQuery: debugState?.searchQuery, searchTotal: debugState?.searchTotal,
+            searchSelected: debugState?.searchSelected)
         writeTerminalSessionWindowStateDump(payload, to: outputPath)
     }
 
@@ -2455,7 +2461,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let editMenuItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(.separator())
+        let findItem = editMenu.addItem(withTitle: "Find", action: #selector(TerminalSessionWindowController.find(_:)), keyEquivalent: "f")
+        findItem.tag = NSTextFinder.Action.showFindInterface.rawValue
+        let findNextItem = editMenu.addItem(
+            withTitle: "Find Next", action: #selector(TerminalSessionWindowController.findNext(_:)), keyEquivalent: "g")
+        findNextItem.tag = NSTextFinder.Action.nextMatch.rawValue
+        let findPreviousItem = editMenu.addItem(
+            withTitle: "Find Previous", action: #selector(TerminalSessionWindowController.findPrevious(_:)), keyEquivalent: "g")
+        findPreviousItem.keyEquivalentModifierMask = [.command, .shift]
+        findPreviousItem.tag = NSTextFinder.Action.previousMatch.rawValue
+        let useSelectionForFindItem = editMenu.addItem(
+            withTitle: "Use Selection for Find", action: #selector(TerminalSessionWindowController.useSelectionForFind(_:)), keyEquivalent: "e")
+        useSelectionForFindItem.tag = NSTextFinder.Action.setSearchString.rawValue
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 

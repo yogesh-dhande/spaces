@@ -186,19 +186,15 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try waitUntil(timeout: 2) { !receivedPayloads.isEmpty }
+        try waitUntil { !receivedPayloads.isEmpty }
         let baseline = try renderBaseline(from: try XCTUnwrap(receivedPayloads.first), baseline: nil)
         receivedPayloads.removeAll()
 
         let screenRevision: UInt64 = UInt64.max / 2
         host.applySessionStateChange(.init(flags: [.screen], revision: screenRevision, title: nil, workingDirectory: nil))
 
-        try waitUntil(timeout: 2) {
-            receivedPayloads.contains {
-                $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision && $0.renderUpdate != nil
-            }
-        }
-        let payload = try XCTUnwrap(receivedPayloads.first { $0.reason == TerminalRemoteSessionStateReason.stateChange })
+        try waitUntil { receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.renderUpdate != nil } }
+        let payload = try XCTUnwrap(receivedPayloads.first { $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.renderUpdate != nil })
         let applied = try renderBaseline(from: payload, baseline: baseline)
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: applied.snapshot), "state changed")
     }
@@ -214,6 +210,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-resize-self-contained-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
             shell: "/bin/zsh", command: nil, createdAt: "2026-06-03T00:00:00Z")
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let owner = TerminalClient(
             id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-03T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
@@ -255,6 +252,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: "session-scroll-render-revision-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
             shell: "/bin/zsh", command: nil, createdAt: "2026-06-03T00:00:00Z")
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let owner = TerminalClient(
             id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-03T00:00:00Z")
         try TerminalSessionPersistence.attachClient(

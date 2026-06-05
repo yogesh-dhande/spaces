@@ -141,6 +141,11 @@ import spacesterminalcore
 
     public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
 
+    @discardableResult public func performBindingAction(_ action: String) -> Bool {
+        guard attachedMode == .owner else { return false }
+        return terminalView.performBindingAction(action)
+    }
+
     @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
         terminalView.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
     }
@@ -152,6 +157,7 @@ import spacesterminalcore
     }
 
     public var debugSurfaceRefreshRequestCount: Int { 0 }
+    public var debugSearchState: GhosttyTerminalSearchDebugState { terminalView.debugSearchState }
     public func debugVisibleSurfaceText() -> String? {
         if let renderedSnapshotText = terminalView.renderedSnapshotText(), !renderedSnapshotText.isEmpty { return renderedSnapshotText }
         if let snapshot = currentSnapshot() { return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot) }

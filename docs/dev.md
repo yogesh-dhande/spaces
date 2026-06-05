@@ -344,6 +344,14 @@ That profiler seeds an isolated fixture workspace, triggers the app-side workspa
 - `terminal_session_wait_ready`
 - `terminal_window_summon`
 
+For real-system verification of live terminal edit and find shortcuts:
+
+```bash
+apps/macos/Tests/e2e_terminal_edit_shortcuts.sh
+```
+
+That harness runs the debug app against an isolated `SPACES_DB_PATH`, opens a `cat` session, verifies `Cmd+V` through `spaces terminal tail`, verifies mouse selection plus `Cmd+C` through `pbpaste`, and verifies `Cmd+F`, `Cmd+G`, `Cmd+Shift+G`, and `Esc` through the terminal-window debug dump. It requires the same Accessibility permissions as the other desktop-control E2E scripts.
+
 For repeatable profiling of the built-in `Spaces terminal -> main window -> tracked process terminal` hotkey loop:
 
 ```bash

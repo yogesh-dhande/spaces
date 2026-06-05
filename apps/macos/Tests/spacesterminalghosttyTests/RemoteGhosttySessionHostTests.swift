@@ -55,6 +55,136 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: false, phase: []), 0)
     }
 
+    @MainActor func testRemoteMirrorMapsMouseModifiersButtonsAndCoordinatesLikeGhosttyAppKitSurface() {
+        let flags: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
+        let mods = GhosttyMirrorTerminalView.ghosttyMouseModifiers(for: flags).rawValue
+
+        XCTAssertNotEqual(mods & GHOSTTY_MODS_SHIFT.rawValue, 0)
+        XCTAssertNotEqual(mods & GHOSTTY_MODS_CTRL.rawValue, 0)
+        XCTAssertNotEqual(mods & GHOSTTY_MODS_ALT.rawValue, 0)
+        XCTAssertNotEqual(mods & GHOSTTY_MODS_SUPER.rawValue, 0)
+        XCTAssertEqual(GhosttyMirrorTerminalView.ghosttyMouseButton(for: 0), GHOSTTY_MOUSE_LEFT)
+        XCTAssertEqual(GhosttyMirrorTerminalView.ghosttyMouseButton(for: 1), GHOSTTY_MOUSE_RIGHT)
+        XCTAssertEqual(GhosttyMirrorTerminalView.ghosttyMouseButton(for: 2), GHOSTTY_MOUSE_MIDDLE)
+        XCTAssertEqual(GhosttyMirrorTerminalView.ghosttyMouseButton(for: 3), GHOSTTY_MOUSE_EIGHT)
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 160))
+        let view = NSView(frame: NSRect(x: 10, y: 20, width: 200, height: 100))
+        container.addSubview(view)
+
+        let position = GhosttyMirrorTerminalView.ghosttyMousePosition(for: NSPoint(x: 60, y: 70), in: view)
+
+        XCTAssertEqual(position.x, 50, accuracy: 0.01)
+        XCTAssertEqual(position.y, 50, accuracy: 0.01)
+    }
+
+    @MainActor func testRemoteMirrorSearchActionEventsUpdateOverlayState() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-search-actions", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-02T00:00:00Z")
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+
+        mirrorView.applyActionEvent(.startSearch("needle"))
+        mirrorView.applyActionEvent(.searchTotal(3))
+        mirrorView.applyActionEvent(.searchSelected(1))
+
+        XCTAssertTrue(mirrorView.debugSearchState.isVisible)
+        XCTAssertEqual(mirrorView.debugSearchState.query, "needle")
+        XCTAssertEqual(mirrorView.debugSearchState.total, 3)
+        XCTAssertEqual(mirrorView.debugSearchState.selected, 1)
+
+        mirrorView.applyActionEvent(.startSearch(nil))
+
+        XCTAssertTrue(mirrorView.debugSearchState.isVisible)
+        XCTAssertEqual(mirrorView.debugSearchState.query, "needle")
+
+        mirrorView.applyActionEvent(.endSearch)
+
+        XCTAssertFalse(mirrorView.debugSearchState.isVisible)
+        XCTAssertEqual(mirrorView.debugSearchState.query, "")
+    }
+
+    @MainActor func testRemoteMirrorInstallsMouseMoveTrackingArea() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-mouse-tracking", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-05T00:00:00Z")
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        mirrorView.frame = NSRect(x: 0, y: 0, width: 320, height: 180)
+
+        mirrorView.updateTrackingAreas()
+
+        let trackingArea = mirrorView.trackingAreas.first { $0.owner === mirrorView }
+        XCTAssertNotNil(trackingArea)
+        XCTAssertEqual(trackingArea?.options.contains(.mouseMoved), true)
+        XCTAssertEqual(trackingArea?.options.contains(.mouseEnteredAndExited), true)
+        XCTAssertEqual(trackingArea?.options.contains(.activeAlways), true)
+        XCTAssertEqual(trackingArea?.options.contains(.inVisibleRect), true)
+    }
+
+    @MainActor func testRemoteMirrorSearchOverlayDoesNotReserveBlankStatusOrLoseFocus() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-search-focus", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-05T00:00:00Z")
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        container.addSubview(mirrorView)
+        mirrorView.frame = container.bounds
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        mirrorView.acceptsTerminalInput = true
+        XCTAssertTrue(window.firstResponder === mirrorView)
+
+        mirrorView.applyActionEvent(.startSearch(nil))
+        XCTAssertTrue(mirrorView.debugSearchFieldHasFocus)
+        XCTAssertFalse(mirrorView.debugSearchStatusVisible)
+        XCTAssertEqual(mirrorView.debugSearchUpBindingAction, "navigate_search:next")
+        XCTAssertEqual(mirrorView.debugSearchDownBindingAction, "navigate_search:previous")
+
+        mirrorView.focusWindow(window)
+
+        XCTAssertTrue(mirrorView.debugSearchFieldHasFocus)
+
+        mirrorView.acceptsTerminalInput = false
+        mirrorView.acceptsTerminalInput = true
+
+        XCTAssertTrue(mirrorView.debugSearchFieldHasFocus)
+
+        mirrorView.applyActionEvent(.searchTotal(0))
+
+        XCTAssertTrue(mirrorView.debugSearchStatusVisible)
+    }
+
+    func testGhosttyActionEventParserParsesSearchEvents() {
+        var start = ghostty_action_s()
+        start.tag = GHOSTTY_ACTION_START_SEARCH
+        "needle".withCString { pointer in
+            start.action.start_search.needle = pointer
+            XCTAssertEqual(GhosttyActionEventParser.parse(start), .startSearch("needle"))
+        }
+
+        var end = ghostty_action_s()
+        end.tag = GHOSTTY_ACTION_END_SEARCH
+        XCTAssertEqual(GhosttyActionEventParser.parse(end), .endSearch)
+
+        var total = ghostty_action_s()
+        total.tag = GHOSTTY_ACTION_SEARCH_TOTAL
+        total.action.search_total = ghostty_action_search_total_s(total: 4)
+        XCTAssertEqual(GhosttyActionEventParser.parse(total), .searchTotal(4))
+        total.action.search_total = ghostty_action_search_total_s(total: -1)
+        XCTAssertEqual(GhosttyActionEventParser.parse(total), .searchTotal(nil))
+
+        var selected = ghostty_action_s()
+        selected.tag = GHOSTTY_ACTION_SEARCH_SELECTED
+        selected.action.search_selected = ghostty_action_search_selected_s(selected: 2)
+        XCTAssertEqual(GhosttyActionEventParser.parse(selected), .searchSelected(2))
+        selected.action.search_selected = ghostty_action_search_selected_s(selected: -1)
+        XCTAssertEqual(GhosttyActionEventParser.parse(selected), .searchSelected(nil))
+    }
+
     @MainActor func testRemoteMirrorWindowKeyHandoffRestoresFirstResponderAndSendsEnter() throws {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-key-handoff", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,

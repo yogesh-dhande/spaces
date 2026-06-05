@@ -49,6 +49,16 @@ import spacesterminalcore
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
+        let databaseRoot = root.appendingPathComponent("profile", isDirectory: true)
+        setenv(SpacesProfile.databasePathEnvironmentVariable, databaseRoot.appendingPathComponent("spaces.db").path, 1)
+        defer {
+            if let originalDatabasePath {
+                setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
+            } else {
+                unsetenv(SpacesProfile.databasePathEnvironmentVariable)
+            }
+        }
         let paths = TerminalSessionPaths(rootDirectory: root.path)
 
         #expect(
