@@ -536,7 +536,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             switch visibleRenderer {
             case .ghosttyOwner: return canPerformLiveTerminalReadOnlyAction
             case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable: return true
-            case .textView: return backend == .ghosttyEmbedded ? isInteractiveRuntimeState(lastObservedRuntimeState) : true
+            case .textView: return true
             }
         case #selector(NSText.paste(_:)):
             switch visibleRenderer {
@@ -545,7 +545,13 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             case .textView: return !inputRowStackView.isHidden && inputField.isEnabled
             }
         case #selector(selectAll(_:)): return visibleRenderer == .ghosttyOwner ? canPerformLiveTerminalReadOnlyAction : true
-        case #selector(find(_:)), #selector(findNext(_:)), #selector(findPrevious(_:)), #selector(useSelectionForFind(_:)), #selector(hideFind(_:)):
+        case #selector(hideFind(_:)):
+            switch visibleRenderer {
+            case .ghosttyOwner: return canPerformLiveTerminalReadOnlyAction && ghosttyRendererHost?.debugSearchState.isVisible == true
+            case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable: return false
+            case .textView: return true
+            }
+        case #selector(find(_:)), #selector(findNext(_:)), #selector(findPrevious(_:)), #selector(useSelectionForFind(_:)):
             switch visibleRenderer {
             case .ghosttyOwner: return canPerformLiveTerminalEditAction
             case .ghosttyTakeoverStatus, .ghosttyEndedFinalRender, .unavailable: return false
@@ -653,7 +659,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     @objc public func hideFind(_ sender: Any?) {
         if visibleRenderer == .ghosttyOwner {
-            _ = performLiveTerminalBindingAction("end_search")
+            _ = performLiveTerminalEndSearchAction()
             return
         }
         performOutputTextFinderAction(.hideFindInterface)
@@ -1450,18 +1456,14 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     }
 
     private func handleTerminalWindowKeyEvent(_ event: NSEvent) -> Bool {
-        guard event.type == .keyDown, backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner,
-            isInteractiveRuntimeState(lastObservedRuntimeState)
-        else { return false }
-        if isFieldEditorFirstResponder {
-            guard Int(event.keyCode) == kVK_Escape, ghosttyRendererHost?.debugSearchState.isVisible == true else { return false }
-            _ = ghosttyRendererHost?.performBindingAction("end_search")
-            return true
+        guard event.type == .keyDown, backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner else {
+            return false
         }
         if Int(event.keyCode) == kVK_Escape, ghosttyRendererHost?.debugSearchState.isVisible == true {
             _ = ghosttyRendererHost?.performBindingAction("end_search")
             return true
         }
+        guard isInteractiveRuntimeState(lastObservedRuntimeState) else { return false }
         return ghosttyRendererHost?.handleKeyEvent(event, for: client.id) ?? false
     }
 
@@ -1729,6 +1731,18 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             return false
         }
         guard ghosttyRendererHost?.performBindingAction(action) == true else {
+            NSSound.beep()
+            return false
+        }
+        return true
+    }
+
+    @discardableResult private func performLiveTerminalEndSearchAction() -> Bool {
+        guard canPerformLiveTerminalReadOnlyAction, ghosttyRendererHost?.debugSearchState.isVisible == true else {
+            NSSound.beep()
+            return false
+        }
+        guard ghosttyRendererHost?.performBindingAction("end_search") == true else {
             NSSound.beep()
             return false
         }
