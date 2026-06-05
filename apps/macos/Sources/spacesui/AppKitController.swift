@@ -3947,26 +3947,45 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Buttons ---
         let saveButton = actionButton(title: "Save", symbol: nil, tooltip: "Save project (⌘S)", action: #selector(saveProject(_:)), primary: true)
         saveButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+        saveButton.setAccessibilityIdentifier("project-settings-save")
         saveButton.keyEquivalent = "\r"
 
         let deleteButton = NSButton(title: "Delete", target: self, action: #selector(deleteProject(_:)))
         deleteButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+        deleteButton.setAccessibilityIdentifier("project-settings-delete")
         Theme.applyTextStyle(to: deleteButton, color: .systemRed)
+
+        let importButton = actionButton(
+            title: "Import", symbol: "square.and.arrow.down", tooltip: "Preview and import spaces.yaml",
+            action: #selector(importProjectSpacesYAML(_:)), primary: false)
+        importButton.setAccessibilityIdentifier("project-settings-import-spaces-yaml")
+        Theme.applySecondaryStyle(to: importButton)
+
+        let exportButton = actionButton(
+            title: "Export", symbol: "square.and.arrow.up", tooltip: "Export this project to spaces.yaml",
+            action: #selector(exportProjectSpacesYAML(_:)), primary: false)
+        exportButton.setAccessibilityIdentifier("project-settings-export-spaces-yaml")
+        Theme.applySecondaryStyle(to: exportButton)
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
         buttonRow.addArrangedSubview(deleteButton)
         buttonRow.addArrangedSubview(NSView())
+        buttonRow.addArrangedSubview(importButton)
+        buttonRow.addArrangedSubview(exportButton)
         buttonRow.addArrangedSubview(saveButton)
         stack.addArrangedSubview(buttonRow)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         showScrollableDetailStack(stack)
 
-        saveButton.tag = storeProjectFields(
+        let fieldsTag = storeProjectFields(
             projectID: project.id, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
+        saveButton.tag = fieldsTag
+        importButton.tag = fieldsTag
+        exportButton.tag = fieldsTag
         registerDirtyTracking(
             setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
@@ -6716,17 +6735,87 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         commitEditing()
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
-            try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
-                config.setupScript = refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue
-                config.stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
-                config.ports = refs.portsSection.currentPorts
-                config.processes = refs.processesSection.currentProcesses
-                config.browserSessions = refs.browserSessionsSection.currentSessions
-                config.agentLaunchers = refs.agentLaunchersSection.currentLaunchers
-            }
+            try persistProjectFields(refs)
             projectHasUnsavedChanges = false
             reloadData()
         } catch { showError(error) }
+    }
+
+    @objc private func exportProjectSpacesYAML(_ sender: NSButton) {
+        commitEditing()
+        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        do {
+            try persistProjectFields(refs)
+            let url = try orchestrator.exportSpacesYAML(projectID: refs.projectID)
+            projectHasUnsavedChanges = false
+            reloadData()
+            showInfoMessage(title: "Exported spaces.yaml", message: url.path)
+        } catch { showError(error) }
+    }
+
+    @objc private func importProjectSpacesYAML(_ sender: NSButton) {
+        commitEditing()
+        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        do {
+            let document = try orchestrator.loadSpacesYAML(projectID: refs.projectID)
+            presentProjectSpacesYAMLImportPreview(projectID: refs.projectID, document: document)
+        } catch { showError(error) }
+    }
+
+    private func presentProjectSpacesYAMLImportPreview(projectID: String, document: SpacesYAMLDocument) {
+        let updateAllWorkspacesCheckbox = NSButton(checkboxWithTitle: "Update all workspaces", target: nil, action: nil)
+        updateAllWorkspacesCheckbox.state = .off
+        updateAllWorkspacesCheckbox.setAccessibilityIdentifier("project-settings-import-update-all-workspaces")
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Import spaces.yaml?"
+        alert.informativeText = "Apply this configuration to the project template."
+        alert.accessoryView = projectSpacesYAMLImportPreviewView(document: document, updateAllWorkspacesCheckbox: updateAllWorkspacesCheckbox)
+        alert.addButton(withTitle: "Apply")
+        alert.addButton(withTitle: "Dismiss")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            try orchestrator.applySpacesYAMLDocument(document, projectID: projectID, updateAllWorkspaces: updateAllWorkspacesCheckbox.state == .on)
+            projectHasUnsavedChanges = false
+            reloadData()
+        } catch { showError(error) }
+    }
+
+    private func projectSpacesYAMLImportPreviewView(document: SpacesYAMLDocument, updateAllWorkspacesCheckbox: NSButton) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let summary = NSTextField(wrappingLabelWithString: projectSpacesYAMLImportSummary(document))
+        summary.font = .systemFont(ofSize: 12)
+        summary.textColor = .secondaryLabelColor
+        summary.maximumNumberOfLines = 0
+        summary.setAccessibilityIdentifier("project-settings-import-summary")
+
+        stack.addArrangedSubview(summary)
+        stack.addArrangedSubview(updateAllWorkspacesCheckbox)
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 84))
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor), stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: container.topAnchor), stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            container.widthAnchor.constraint(equalToConstant: 360),
+        ])
+        return container
+    }
+
+    private func projectSpacesYAMLImportSummary(_ document: SpacesYAMLDocument) -> String {
+        [
+            "Setup script: \(document.setupScript == nil ? "none" : "configured")",
+            "Stop script: \(document.stopScript == nil ? "none" : "configured")", "Ports: \(document.ports.count)",
+            "Processes: \(document.processes.count)", "Browser sessions: \(document.browserSessions.count)",
+            "Coding agents: \(document.agentLaunchers.count)",
+        ].joined(separator: "\n")
     }
 
     @objc private func deleteProject(_ sender: NSButton) {
@@ -9325,20 +9414,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let tag = selectedProjectID.hashValue
         guard let refs = ProjectFieldCache.shared.cache[tag] else { return true }
         do {
-            try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
-                config.setupScript = refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue
-                config.stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
-                config.ports = refs.portsSection.currentPorts
-                config.processes = refs.processesSection.currentProcesses
-                config.browserSessions = refs.browserSessionsSection.currentSessions
-                config.agentLaunchers = refs.agentLaunchersSection.currentLaunchers
-            }
+            try persistProjectFields(refs)
             projectHasUnsavedChanges = false
             reloadData()
             return true
         } catch {
             showError(error)
             return false
+        }
+    }
+
+    private func persistProjectFields(_ refs: ProjectFieldRefs) throws {
+        try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
+            config.setupScript = refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue
+            config.stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
+            config.ports = refs.portsSection.currentPorts
+            config.processes = refs.processesSection.currentProcesses
+            config.browserSessions = refs.browserSessionsSection.currentSessions
+            config.agentLaunchers = refs.agentLaunchersSection.currentLaunchers
         }
     }
 

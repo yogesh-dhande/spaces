@@ -8,7 +8,7 @@ Spaces is a macOS Swift app and CLI built around a shared orchestration layer.
 Core invariants:
 - SQLite is the single source of truth for persisted model data and global preferences.
 - yabai is the source of truth for window IDs and cross-app window focus.
-- Workspace settings are seeded from project templates and preserved as per-workspace overrides.
+- Workspace settings are seeded from project templates at workspace creation and preserved as per-workspace overrides after that.
 - Schema changes must be additive and non-destructive.
 - GUI and CLI both call the same orchestration layer instead of re-implementing behavior independently.
 
@@ -227,6 +227,19 @@ Projects persist:
 
 Managed clone directories under `~/spaces/repos` and managed worktree roots under `~/spaces/workspaces` must be keyed by project identity rather than project name so cleanup, retries, and same-name projects cannot collide on disk ownership.
 - browser-session templates
+
+Project configuration can also be represented as `spaces.yaml` through GUI-only import/export in `workspacecore`. The file is resolved from the default workspace directory: local projects use the project directory, while app-managed Git projects use the checked-out default worktree. The YAML document uses schema version `1`, treats a missing `version` as `1`, rejects versions greater than the supported schema version, and omits internal database IDs. Missing optional keys decode to app-state defaults without rewriting the source file.
+
+The YAML schema contains:
+- `version`
+- `setup_script`
+- `stop_script`
+- `ports[].name`
+- `processes[].name`, `processes[].command`, `processes[].on_exit`, `processes[].execution_mode`
+- `browser_sessions[].name`, `browser_sessions[].url`
+- `agent_launchers[].name`, `agent_launchers[].command`
+
+Import uses the same project/workspace normalization paths as GUI saves so existing port and process IDs are preserved by name or command where possible. Project creation from a local directory applies `spaces.yaml` before the project and default workspace are persisted. Project creation from a Git URL creates the bare clone and default worktree first, then imports from that worktree and uses the managed-project rollback path if YAML parsing or validation fails. Existing-project import updates only the project template by default; the explicit workspace-sync option applies the imported template to every workspace, including archived workspaces. Export encodes the active project template with Yams' Codable encoder and overwrites `spaces.yaml`.
 
 ### Workspaces
 Workspaces persist:

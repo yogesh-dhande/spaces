@@ -538,8 +538,15 @@ public final class WorkspaceOrchestrator {
             throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
         }
         if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
-        let record = try configuredProjectRecord(
-            baseRecord: normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir), update: configure)
+        let importedDocument = try spacesYAMLDocumentIfPresent(in: URL(fileURLWithPath: normalizedDir, isDirectory: true))
+        let record = try configuredProjectRecord(baseRecord: normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir)) {
+            project in
+            guard let importedDocument else {
+                configure(&project)
+                return
+            }
+            importedDocument.applying(to: &project)
+        }
         try store.upsert(project: record)
         do { try ensureDefaultWorkspace(for: record) } catch {
             try? store.deleteProject(id: record.id)
@@ -575,12 +582,21 @@ public final class WorkspaceOrchestrator {
             let record = try configuredProjectRecord(baseRecord: baseRecord, update: configure)
             let defaultWorkspaceDirectory = try importedDefaultWorkspaceDirectory(project: record, branch: defaultBranch)
             try store.upsert(project: record)
-            do { try ensureImportedGitDefaultWorkspace(for: record, branch: defaultBranch) } catch {
+            do {
+                try ensureImportedGitDefaultWorkspace(for: record, branch: defaultBranch)
+                let worktreeURL = URL(fileURLWithPath: defaultWorkspaceDirectory, isDirectory: true)
+                let importedRecord: ProjectRecord
+                if let importedDocument = try spacesYAMLDocumentIfPresent(in: worktreeURL) {
+                    importedRecord = try applySpacesYAMLDocument(importedDocument, projectID: record.id, updateAllWorkspaces: true)
+                } else {
+                    importedRecord = record
+                }
+                shouldCleanupDestination = false
+                return importedRecord
+            } catch {
                 try? rollbackFailedImportedProjectCreation(project: record, workspaceDirectory: defaultWorkspaceDirectory)
                 throw error
             }
-            shouldCleanupDestination = false
-            return record
         } catch {
             if shouldCleanupDestination { try? FileManager.default.removeItem(at: destination) }
             throw error
@@ -589,11 +605,42 @@ public final class WorkspaceOrchestrator {
 
     public func updateProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws {
         guard var record = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
-        let previousRecord = record
         record = try configuredProjectRecord(baseRecord: record, update: update)
         try store.upsert(project: record)
         try ensureDefaultWorkspace(for: record)
-        try syncDefaultWorkspaceSettingsIfTemplateBased(project: record, previousRecord: previousRecord, updatedRecord: record)
+    }
+
+    public func spacesYAMLConfigURL(projectID: String) throws -> URL {
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        return try spacesYAMLConfigURL(project: project)
+    }
+
+    public func loadSpacesYAML(projectID: String) throws -> SpacesYAMLDocument {
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        let document = try SpacesYAMLService.load(from: spacesYAMLConfigURL(project: project))
+        _ = try configuredProjectRecord(baseRecord: project) { record in document.applying(to: &record) }
+        return document
+    }
+
+    @discardableResult public func exportSpacesYAML(projectID: String) throws -> URL {
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        let url = try spacesYAMLConfigURL(project: project)
+        try SpacesYAMLService.write(SpacesYAMLDocument(project: project), to: url)
+        return url
+    }
+
+    @discardableResult public func importSpacesYAML(projectID: String, updateAllWorkspaces: Bool = false) throws -> ProjectRecord {
+        let document = try loadSpacesYAML(projectID: projectID)
+        return try applySpacesYAMLDocument(document, projectID: projectID, updateAllWorkspaces: updateAllWorkspaces)
+    }
+
+    @discardableResult public func applySpacesYAMLDocument(_ document: SpacesYAMLDocument, projectID: String, updateAllWorkspaces: Bool = false)
+        throws -> ProjectRecord
+    {
+        try updateProjectConfig(projectID: projectID) { record in document.applying(to: &record) }
+        guard let updatedProject = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        if updateAllWorkspaces { try applyProjectTemplateToAllWorkspaces(project: updatedProject) }
+        return updatedProject
     }
 
     public func removeProject(dir: String) throws {
@@ -4085,40 +4132,57 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func syncDefaultWorkspaceSettingsIfTemplateBased(project: ProjectRecord, previousRecord: ProjectRecord, updatedRecord: ProjectRecord)
-        throws
-    {
-        guard let defaultWorkspace = try defaultWorkspace(projectID: project.id) else { return }
-
-        let hasSettings = try store.workspaceSettingsExists(workspaceID: defaultWorkspace.id)
-        if !hasSettings {
-            try seedWorkspaceSettings(project: updatedRecord, workspace: defaultWorkspace)
-            return
+    private func spacesYAMLConfigURL(project: ProjectRecord) throws -> URL {
+        let directory: String
+        if let defaultWorkspace = try defaultWorkspace(projectID: project.id) {
+            directory = defaultWorkspace.dir
+        } else if project.isGitRepo {
+            throw WorkspaceError.invalidArgument(message: "Default workspace not found for project \(project.name).")
+        } else {
+            directory = project.dir
         }
-
-        let currentSettings = WorkspaceSettings(
-            stopScript: try store.workspaceStopScript(workspaceID: defaultWorkspace.id),
-            ports: try store.workspacePortDefinitions(workspaceID: defaultWorkspace.id),
-            processes: try store.workspaceProcesses(workspaceID: defaultWorkspace.id),
-            browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id),
-            agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: defaultWorkspace.id))
-
-        let previousTemplate = WorkspaceSettings(
-            stopScript: previousRecord.stopScript, ports: previousRecord.ports, processes: previousRecord.processes,
-            browserSessions: previousRecord.browserSessions, agentLaunchers: previousRecord.agentLaunchers)
-
-        guard workspaceSettingsMatch(currentSettings, previousTemplate) else { return }
-
-        try seedWorkspaceSettings(project: updatedRecord, workspace: defaultWorkspace)
+        return URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent(SpacesYAMLService.fileName)
     }
 
-    private func workspaceSettingsMatch(_ lhs: WorkspaceSettings, _ rhs: WorkspaceSettings) -> Bool {
-        guard lhs.stopScript == rhs.stopScript else { return false }
-        guard lhs.ports == rhs.ports else { return false }
-        guard processTemplatesMatch(lhs.processes, rhs.processes) else { return false }
-        guard browserSessionsMatch(lhs.browserSessions, rhs.browserSessions) else { return false }
-        guard lhs.agentLaunchers == rhs.agentLaunchers else { return false }
-        return true
+    private func spacesYAMLDocumentIfPresent(in directory: URL) throws -> SpacesYAMLDocument? {
+        let url = directory.appendingPathComponent(SpacesYAMLService.fileName)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try SpacesYAMLService.load(from: url)
+    }
+
+    private func applyProjectTemplateToAllWorkspaces(project: ProjectRecord) throws {
+        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+        for workspace in workspaces { try applyProjectTemplate(project, to: workspace, syncPorts: !workspace.isArchived) }
+    }
+
+    private func applyProjectTemplate(_ project: ProjectRecord, to workspace: WorkspaceRecord, syncPorts: Bool) throws {
+        guard var settings = try loadWorkspaceSettings(project: project, workspace: workspace) else {
+            throw WorkspaceError.missingProject(dir: project.dir)
+        }
+        let previousPorts = settings.ports
+        let previousProcesses = settings.processes
+        settings.stopScript = project.stopScript
+        settings.ports = project.ports
+        settings.processes = seededWorkspaceProcesses(from: project.processes)
+        settings.browserSessions = project.browserSessions
+        settings.agentLaunchers = project.agentLaunchers
+        settings.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: settings.ports)
+        settings.ports = try normalizedPortDefinitions(settings.ports)
+        settings.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: settings.processes)
+        try validateProcessTemplates(settings.processes, allowedVariableNames: directProcessVariableNames(portDefinitions: settings.ports))
+        try validateWorkspaceFocusNames(
+            workspaceID: workspace.id, processes: settings.processes, browserSessions: settings.browserSessions,
+            agentLaunchers: settings.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: settings.stopScript)
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: settings.ports)
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: settings.processes)
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: settings.browserSessions)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: settings.agentLaunchers)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
+        if syncPorts {
+            let appConfig = try store.appConfig()
+            _ = try PortAllocator(store: store).syncPorts(workspaceID: workspace.id, definitions: settings.ports, range: appConfig.portRange)
+        }
     }
 
     private func normalizePortDefinitionIDs(previous: [PortDefinition], updated: [PortDefinition]) -> [PortDefinition] {
@@ -4190,24 +4254,6 @@ public final class WorkspaceOrchestrator {
 
             return template
         }
-    }
-
-    private func processTemplatesMatch(_ lhs: [ProcessTemplate], _ rhs: [ProcessTemplate]) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        for (left, right) in zip(lhs, rhs) {
-            if left.name != right.name || left.command != right.command || left.kind != right.kind || left.onExit != right.onExit
-                || left.executionMode != right.executionMode
-            {
-                return false
-            }
-        }
-        return true
-    }
-
-    private func browserSessionsMatch(_ lhs: [BrowserSession], _ rhs: [BrowserSession]) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        for (left, right) in zip(lhs, rhs) where left.name != right.name || left.url != right.url { return false }
-        return true
     }
 
     private func seedWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws {

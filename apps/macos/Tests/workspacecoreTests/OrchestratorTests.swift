@@ -274,8 +274,8 @@ final class OrchestratorTests: XCTestCase {
             }, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
-        try orchestrator.updateProjectConfig(projectID: project.id) { project in
-            project.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex --dangerously-skip-permissions")]
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex --dangerously-skip-permissions")]
         }
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
@@ -330,8 +330,8 @@ final class OrchestratorTests: XCTestCase {
             builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
-        try orchestrator.updateProjectConfig(projectID: project.id) { project in
-            project.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex --dangerously-skip-permissions")]
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex --dangerously-skip-permissions")]
         }
         _ = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "stale-session", terminalNativeID: "stale-session",
@@ -382,8 +382,8 @@ final class OrchestratorTests: XCTestCase {
             })
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
-        try orchestrator.updateProjectConfig(projectID: project.id) { project in
-            project.agentLaunchers = [AgentLauncher(name: "Claude", command: "claude")]
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.agentLaunchers = [AgentLauncher(name: "Claude", command: "claude")]
         }
         let staleRecord = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: nil, terminalNativeID: nil, status: .idle,
@@ -406,6 +406,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let dbPath = root.appendingPathComponent("spaces.db").path
 
         let store = try makeTemporaryStore()
         let openCapture = TerminalOpenCapture()
@@ -422,26 +423,28 @@ final class OrchestratorTests: XCTestCase {
             })
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
-        try orchestrator.updateProjectConfig(projectID: project.id) { project in
-            project.agentLaunchers = [AgentLauncher(name: "Reviewer", command: "review-agent")]
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.agentLaunchers = [AgentLauncher(name: "Reviewer", command: "review-agent")]
         }
-        let paths = try TerminalSessionPaths.forSession(id: "ended-reviewer-session")
-        try paths.ensureDirectories()
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "ended-reviewer-session", title: "Reviewer", workingDirectory: workspace.dir, shell: "/bin/zsh", command: "review-agent",
-                createdAt: "2026-05-18T18:00:00Z"), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(
-                sessionID: "ended-reviewer-session", backend: .ghosttyEmbedded, servicePID: 101, childPID: nil, state: .exited,
-                updatedAt: "2026-05-18T18:01:00Z", exitedAt: "2026-05-18T18:01:00Z", title: "Reviewer", workingDirectory: workspace.dir), paths: paths
-        )
-        let record = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Reviewer", terminalTrackingID: "ended-reviewer-session",
-            terminalNativeID: "ended-reviewer-session", status: .done, claimedLauncherName: "Reviewer")
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: "ended-reviewer-session")
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: "ended-reviewer-session", title: "Reviewer", workingDirectory: workspace.dir, shell: "/bin/zsh",
+                    command: "review-agent", createdAt: "2026-05-18T18:00:00Z"), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                .init(
+                    sessionID: "ended-reviewer-session", backend: .ghosttyEmbedded, servicePID: 101, childPID: nil, state: .exited,
+                    updatedAt: "2026-05-18T18:01:00Z", exitedAt: "2026-05-18T18:01:00Z", title: "Reviewer", workingDirectory: workspace.dir),
+                paths: paths)
+            let record = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Reviewer", terminalTrackingID: "ended-reviewer-session",
+                terminalNativeID: "ended-reviewer-session", status: .done, claimedLauncherName: "Reviewer")
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.focusAgentWindow(record) }
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.focusAgentWindow(record) }
+            }
         }
 
         XCTAssertEqual(focusCapture.sessionIDs, ["ended-reviewer-session"])
@@ -4103,8 +4106,8 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
-    // Tests update project config seeds default workspace when settings match previous template by arranging representative inputs and asserting the expected result.
-    func testUpdateProjectConfigSeedsDefaultWorkspaceWhenSettingsMatchPreviousTemplate() throws {
+    // Tests update project config leaves default workspace settings unchanged even when they match the previous template.
+    func testUpdateProjectConfigDoesNotSyncDefaultWorkspaceWhenSettingsMatchPreviousTemplate() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -4121,9 +4124,9 @@ final class OrchestratorTests: XCTestCase {
         }
 
         let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
-        XCTAssertEqual(settings?.stopScript, "echo stop")
-        XCTAssertEqual(settings?.processes.first?.name, "api")
-        XCTAssertEqual(settings?.browserSessions.first?.url, "https://example.com")
+        XCTAssertNil(settings?.stopScript)
+        XCTAssertTrue(settings?.processes.isEmpty == true)
+        XCTAssertTrue(settings?.browserSessions.isEmpty == true)
     }
 
     // Tests update project config does not overwrite customized default workspace settings by arranging representative inputs and asserting the expected result.
@@ -4160,6 +4163,159 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(settings?.processes.first?.name, "custom")
         XCTAssertEqual(settings?.processes.first?.command, "echo custom")
         XCTAssertEqual(settings?.browserSessions.first?.url, "https://custom.example.com")
+    }
+
+    func testAddProjectDirImportsSpacesYAMLAsAuthoritativeCreateTimeConfig() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        try spacesYAMLFixture(stopScript: "echo yaml-stop").write(
+            to: projectDir.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path) { config in
+            config.stopScript = "echo ignored"
+            config.agentLaunchers = [AgentLauncher(name: "Ignored", command: "ignored")]
+        }
+
+        XCTAssertEqual(project.stopScript, "echo yaml-stop")
+        XCTAssertEqual(project.ports.map(\.name), ["API_PORT"])
+        XCTAssertEqual(project.processes.first?.name, "api")
+        XCTAssertEqual(project.browserSessions.first?.url, "http://localhost:3000")
+        XCTAssertEqual(project.agentLaunchers.first?.command, "codex")
+        let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
+        XCTAssertEqual(settings?.stopScript, "echo yaml-stop")
+        XCTAssertEqual(settings?.ports.map(\.name) ?? [], ["API_PORT"])
+        XCTAssertEqual(settings?.processes.first?.name, "api")
+    }
+
+    func testAddProjectByGitURLImportsSpacesYAMLFromDefaultWorktree() throws {
+        let fixture = try makeTempGitRepo(name: "yaml-git-import")
+        try spacesYAMLFixture(stopScript: "echo git-yaml-stop").write(
+            to: fixture.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        try runGit(["add", "spaces.yaml"], cwd: fixture.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add spaces yaml"], cwd: fixture.path)
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+
+        XCTAssertEqual(project.stopScript, "echo git-yaml-stop")
+        XCTAssertEqual(project.processes.first?.command, "npm run api")
+        let configURL = try orchestrator.spacesYAMLConfigURL(projectID: project.id)
+        XCTAssertTrue(configURL.path.hasPrefix(workspacesRoot.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: configURL.path))
+        let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
+        XCTAssertEqual(settings?.stopScript, "echo git-yaml-stop")
+        XCTAssertEqual(settings?.agentLaunchers.first?.name, "Codex")
+    }
+
+    func testAddProjectByGitURLRollsBackManagedCloneWhenSpacesYAMLIsInvalid() throws {
+        let fixture = try makeTempGitRepo(name: "invalid-yaml-git-import")
+        try "version: 999\n".write(to: fixture.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        try runGit(["add", "spaces.yaml"], cwd: fixture.path)
+        try runGit(
+            ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add invalid spaces yaml"], cwd: fixture.path)
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Unsupported spaces.yaml version 999"))
+        }
+
+        let managedDirname = managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "invalid-yaml-git-import")
+        XCTAssertTrue(try store.projects().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: workspacesRoot.appendingPathComponent(managedDirname, isDirectory: true).appendingPathComponent("main", isDirectory: true)
+                    .path))
+    }
+
+    func testImportSpacesYAMLUpdatesOnlyProjectWhenWorkspaceSyncIsOff() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.ports = [PortDefinition(id: "existing-port", name: "API_PORT")]
+            config.processes = [ProcessTemplate(id: "existing-process", name: "api", command: "npm run api")]
+        }
+        try orchestrator.updateWorkspaceSettings(workspaceID: defaultWorkspace.id) { settings in
+            settings.stopScript = "echo workspace-stop"
+            settings.processes = [ProcessTemplate(name: "workspace", command: "echo workspace")]
+        }
+        try spacesYAMLFixture(stopScript: "echo imported-stop").write(
+            to: try orchestrator.spacesYAMLConfigURL(projectID: project.id), atomically: true, encoding: .utf8)
+
+        let importedProject = try orchestrator.importSpacesYAML(projectID: project.id, updateAllWorkspaces: false)
+
+        XCTAssertEqual(importedProject.stopScript, "echo imported-stop")
+        XCTAssertEqual(importedProject.ports.first?.id, "existing-port")
+        XCTAssertEqual(importedProject.processes.first?.id, "existing-process")
+        let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
+        XCTAssertEqual(settings?.stopScript, "echo workspace-stop")
+        XCTAssertEqual(settings?.processes.first?.name, "workspace")
+    }
+
+    func testImportSpacesYAMLUpdatesActiveAndArchivedWorkspacesWhenWorkspaceSyncIsOn() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let activeWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "active")
+        let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "archived")
+        _ = try orchestrator.archiveWorkspace(workspaceID: archivedWorkspace.id)
+        try spacesYAMLFixture(stopScript: "echo synced-stop").write(
+            to: try orchestrator.spacesYAMLConfigURL(projectID: project.id), atomically: true, encoding: .utf8)
+
+        _ = try orchestrator.importSpacesYAML(projectID: project.id, updateAllWorkspaces: true)
+
+        let activeSettings = try orchestrator.workspaceSettings(workspaceID: activeWorkspace.id)
+        let archivedSettings = try orchestrator.workspaceSettings(workspaceID: archivedWorkspace.id)
+        XCTAssertEqual(activeSettings?.stopScript, "echo synced-stop")
+        XCTAssertEqual(activeSettings?.ports.map(\.name) ?? [], ["API_PORT"])
+        XCTAssertEqual(activeSettings?.processes.first?.name, "api")
+        XCTAssertEqual(archivedSettings?.stopScript, "echo synced-stop")
+        XCTAssertEqual(archivedSettings?.browserSessions.first?.name, "app")
+        XCTAssertTrue(try XCTUnwrap(store.workspace(id: archivedWorkspace.id)).isArchived)
+    }
+
+    func testExportSpacesYAMLOverwritesExistingFile() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let configURL = try orchestrator.spacesYAMLConfigURL(projectID: project.id)
+        try "old: value\n".write(to: configURL, atomically: true, encoding: .utf8)
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.stopScript = "echo exported-stop"
+            config.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex")]
+        }
+
+        let writtenURL = try orchestrator.exportSpacesYAML(projectID: project.id)
+        let exported = try String(contentsOf: writtenURL, encoding: .utf8)
+
+        XCTAssertEqual(writtenURL, configURL)
+        XCTAssertTrue(exported.contains("stop_script: echo exported-stop"))
+        XCTAssertTrue(exported.contains("command: codex"))
+        XCTAssertFalse(exported.contains("old: value"))
     }
 
     // Tests create workspace allows duplicate active titles by arranging representative inputs and asserting the expected result.
@@ -4524,6 +4680,27 @@ final class OrchestratorTests: XCTestCase {
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         mockTmux.createSession(named: "spaces-\(workspace.id)")
         return (orchestrator, store, project, workspace, root)
+    }
+
+    private func spacesYAMLFixture(stopScript: String) -> String {
+        """
+        version: 1
+        setup_script: npm install
+        stop_script: \(stopScript)
+        ports:
+          - name: API_PORT
+        processes:
+          - name: api
+            command: npm run api
+            on_exit: none
+            execution_mode: shell
+        browser_sessions:
+          - name: app
+            url: http://localhost:3000
+        agent_launchers:
+          - name: Codex
+            command: codex
+        """
     }
 
     private func makeMockItermOrchestratorWithWorkspace(
@@ -5811,10 +5988,10 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(config2.portRange.start, 20000)
     }
 
-    // MARK: - updateProjectConfig default workspace sync
+    // MARK: - updateProjectConfig workspace isolation
 
-    // Tests updateProjectConfig syncs default workspace settings when they match the previous template by arranging representative inputs and asserting the expected result.
-    func testUpdateProjectConfigSyncsDefaultWorkspaceSettings() throws {
+    // Tests updateProjectConfig does not sync default workspace settings when they match the previous template.
+    func testUpdateProjectConfigDoesNotSyncDefaultWorkspaceSettings() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -5830,9 +6007,8 @@ final class OrchestratorTests: XCTestCase {
         // Update the project config with a stop script.
         try orchestrator.updateProjectConfig(projectID: project.id) { record in record.stopScript = "echo project-stop" }
 
-        // The default workspace should now have the synced stop script.
-        let syncedScript = try store.workspaceStopScript(workspaceID: defaultWorkspace.id)
-        XCTAssertEqual(syncedScript, "echo project-stop")
+        let workspaceScript = try store.workspaceStopScript(workspaceID: defaultWorkspace.id)
+        XCTAssertNil(workspaceScript)
     }
 
     // Tests updateProjectConfig with git repo project refreshes default workspace by arranging representative inputs and asserting the expected result.
@@ -5874,8 +6050,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
 
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+        let project = try orchestrator.addProject(dir: projectDir.path) { config in
             config.processes = [.init(name: "frontend", command: "npm run dev"), .init(name: "backend", command: "npm run api")]
         }
 
@@ -6691,8 +6866,8 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
-    // Tests syncDefaultWorkspaceSettings reseeds missing settings when updateProjectConfig is called by arranging representative inputs and asserting the expected result.
-    func testSyncDefaultWorkspaceSettingsReseesIfSettingsMissing() throws {
+    // Tests updateProjectConfig leaves missing default workspace settings missing.
+    func testUpdateProjectConfigDoesNotReseedMissingDefaultWorkspaceSettings() throws {
         let store = try makeTemporaryStore()
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -6711,11 +6886,10 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(workspace: workspaceRecord)
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspaceID))
 
-        // updateProjectConfig triggers syncDefaultWorkspaceSettingsIfTemplateBased, which reseeds missing settings.
         let orchestrator = WorkspaceOrchestrator(store: store)
         try orchestrator.updateProjectConfig(projectID: normalizedDir) { _ in }
 
-        XCTAssertTrue(try store.workspaceSettingsExists(workspaceID: workspaceID))
+        XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspaceID))
     }
 
     // Tests createWorkspace rejects a non-ASCII directory name by arranging representative inputs and asserting the expected result.
