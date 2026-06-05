@@ -243,9 +243,22 @@ For the iOS simulator, a pairing link with `127.0.0.1` still works because the d
 For manual real-device verification of the iOS client:
 
 1. Connect the iPhone or iPad to the Mac, unlock it, trust the Mac if prompted, and enable Developer Mode on the device if iOS asks.
-2. Open `apps/ios/SpacesMobile.xcodeproj` in Xcode, select the `SpacesMobile` target, enable Automatically manage signing, and choose the Apple Developer team that should sign the app.
-3. If Xcode reports that `com.yogeshdhande.spacesmobile` cannot be signed by that team, stop there and widen the first-party bundle policy before changing the bundle identifier. The current bridge accepts only that bundle identifier for pairing and reconnect.
-4. Keep the Mac app and mobile bridge on the same `SPACES_DB_PATH`; the daemon bridge binds all IPv4 interfaces on port `47847` by default and persists a profile-specific fallback port if that port is already occupied.
+2. Create a local `.env` from the tracked sample and set `SPACES_IOS_DEVICE_UDID` to the physical-device UDID printed by `xcrun xctrace list devices`. The `.env` file is ignored by git.
+
+```bash
+cp .env.sample .env
+xcrun xctrace list devices
+$EDITOR .env
+```
+
+3. Run the device installer. It builds `SpacesMobile`, installs it on the configured device, and attempts to launch it; if the device is locked, unlock it and tap SpacesMobile or rerun the script.
+
+```bash
+scripts/install-ios-device.sh
+```
+
+4. If Xcode reports that `com.yogeshdhande.spacesmobile` cannot be signed by the selected team, stop there and widen the first-party bundle policy before changing the bundle identifier. The current bridge accepts only that bundle identifier for pairing and reconnect. Set `SPACES_IOS_DEVELOPMENT_TEAM` in `.env` when the command-line build should override the project signing team.
+5. Keep the Mac app and mobile bridge on the same `SPACES_DB_PATH`; the daemon bridge binds all IPv4 interfaces on port `47847` by default and persists a profile-specific fallback port if that port is already occupied.
 
 ```bash
 export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
@@ -255,8 +268,8 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal com
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces mobile status
 ```
 
-5. On the Mac, allow the incoming-network prompt if macOS shows one. In the Mac app, open Mobile Connection, open a pairing window, and scan the QR code or send the full pairing link to the device.
-6. Run the app from Xcode with the physical device selected as the destination. The first connection attempt should trigger the iOS local-network permission prompt; accept it so the app can reach the Mac bridge.
+6. On the Mac, allow the incoming-network prompt if macOS shows one. In the Mac app, open Mobile Connection, open a pairing window, and scan the QR code or send the full pairing link to the device.
+7. The first connection attempt should trigger the iOS local-network permission prompt; accept it so the app can reach the Mac bridge.
 
 For a disposable one-command demo stack that launches the macOS app, uses the daemon-hosted mobile bridge, pairs both the iPad and iPhone simulators, and opens the mobile app on each:
 
