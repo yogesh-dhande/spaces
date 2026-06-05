@@ -729,6 +729,7 @@ extension TerminalGhosttyRendererHosting {
         runtimeStateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                guard self.started else { return }
                 self.expireStaleRemoteClientsIfNeeded()
                 self.refreshRuntimeState(force: false)
             }
@@ -737,6 +738,7 @@ extension TerminalGhosttyRendererHosting {
     }
 
     private func refreshRuntimeState(force: Bool) {
+        guard started || !currentRuntimeStateIsExited() else { return }
         let now = Date()
         let foregroundPID = rendererHostStorage.foregroundPID()
         if let foregroundPID {
@@ -757,6 +759,11 @@ extension TerminalGhosttyRendererHosting {
         lastPersistedRuntimeState = state
         lastRuntimeStateWriteAt = now
         if previousSignature != nextSignature { postRuntimeStateDidChange() }
+    }
+
+    private func currentRuntimeStateIsExited() -> Bool {
+        if lastPersistedRuntimeState?.state == .exited { return true }
+        return (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.state == .exited
     }
 
     @discardableResult func expireStaleRemoteClientsIfNeeded(now: Date = Date()) -> [String] {

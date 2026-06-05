@@ -727,11 +727,30 @@ public final class SQLiteStore {
         let row = try queryRow(
             sql: """
                 SELECT workspace_id
-                FROM runtime_targets rt
-                WHERE rt.tracking_id = ?
-                ORDER BY rt.updated_at DESC, rt.order_index
+                FROM (
+                  SELECT rt.workspace_id, rt.updated_at AS resolved_at, rt.order_index AS resolved_order, 0 AS source_priority
+                  FROM runtime_targets rt
+                  WHERE rt.tracking_id = ?
+
+                  UNION ALL
+
+                  SELECT rp.workspace_id, COALESCE(rt.updated_at, rp.exited_at, rp.last_output_at, rp.started_at, '') AS resolved_at,
+                         COALESCE(rt.order_index, 100000) AS resolved_order, 1 AS source_priority
+                  FROM running_processes rp
+                  LEFT JOIN runtime_targets rt ON rt.id = rp.runtime_target_id
+                  WHERE rp.terminal_session_id = ?
+
+                  UNION ALL
+
+                  SELECT agent_sessions.workspace_id, COALESCE(runtime_targets.updated_at, agent_sessions.updated_at, agent_sessions.created_at) AS resolved_at,
+                         COALESCE(runtime_targets.order_index, 200000) AS resolved_order, 2 AS source_priority
+                  FROM agent_sessions
+                  LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                  WHERE agent_sessions.terminal_session_id = ?
+                )
+                ORDER BY source_priority, resolved_at DESC, resolved_order
                 LIMIT 1
-                """, bindings: [sessionID])
+                """, bindings: [sessionID, sessionID, sessionID])
         return row?.first
     }
 

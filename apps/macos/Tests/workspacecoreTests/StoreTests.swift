@@ -560,6 +560,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(reloaded.terminalApp, TerminalHost.spaces.appName)
         XCTAssertEqual(reloaded.terminalTrackingID, sessionID)
         XCTAssertEqual(reloaded.terminalNativeID, sessionID)
+        XCTAssertEqual(try store.workspaceIDForTerminalSession(sessionID), workspace.id)
     }
 
     // Tests agent-window yabai lookup resolves a workspace by arranging a stored agent window and asserting the lookup result.
@@ -577,6 +578,26 @@ final class StoreTests: XCTestCase {
                 updatedAt: "2026-02-25T00:00:01Z"))
 
         XCTAssertEqual(try store.workspaceIDForAgentWindow(yabaiWindowID: 4242), workspace.id)
+    }
+
+    func testWorkspaceIDForTerminalSessionResolvesPreservedAgentSessionIDAfterRuntimeTargetIsDeleted() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature-agent", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let sessionID = "spaces-agent-session"
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID,
+                codexThreadID: "thread-123", windowID: nil, status: .done, createdAt: "2026-02-25T00:00:00Z", updatedAt: "2026-02-25T00:00:01Z"))
+
+        let loaded = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
+        let runtimeTargetID = try XCTUnwrap(loaded.runtimeTargetID)
+        try store.deleteWindow(id: runtimeTargetID)
+
+        XCTAssertEqual(try store.workspaceIDForTerminalSession(sessionID), workspace.id)
     }
 
     // Tests delete workspace removes dependent rows by arranging representative inputs and asserting the expected result.
