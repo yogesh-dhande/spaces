@@ -354,6 +354,27 @@ import workspacecore
         #expect(entries.map { $0.agentWindow?.id } == ["matched"])
     }
 
+    @Test func staleClaimedLauncherIDDoesNotHideLiveAgentShortcutTarget() {
+        let configuredAgentLaunchers = [AgentLauncher(id: "launcher-codex-new", name: "Codex", command: "codex")]
+        let agentWindows = [
+            AgentWindowRecord(
+                id: "codex-runtime", workspaceID: "workspace", provider: .spaces, label: "Codex",
+                terminalTarget: TerminalTargetRecord(trackingID: "session-codex"), claimedLauncherID: "launcher-codex-old",
+                claimedLauncherName: "Codex", status: .idle, createdAt: "now", updatedAt: "now")
+        ]
+
+        let entries = AppKitController.resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
+        let shortcutIndices = AppKitController.workspaceDetailShortcutIndices(
+            browserSessions: [], processEntries: [], processesByID: [:], configuredAgentLaunchers: configuredAgentLaunchers,
+            agentWindows: agentWindows)
+
+        #expect(entries.map(\.kind) == [.agentLauncher, .agent])
+        #expect(entries.map(\.launcherName) == ["Codex", nil])
+        #expect(entries.map { $0.agentWindow?.id } == [nil, "codex-runtime"])
+        #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(launcherName: "Codex")] == 1)
+        #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(agentWindowID: "codex-runtime")] == 2)
+    }
+
     @Test func missingConfiguredProcessShortcutTargetsRecoveryAction() {
         let processEntries = [
             AppKitController.WorkspaceRunProcessEntry(

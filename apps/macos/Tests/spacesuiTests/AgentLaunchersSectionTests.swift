@@ -50,6 +50,25 @@ import workspacecore
         #expect(section.row(at: 0)?.visibleActionButtonIDsForTesting.contains("agent-launcher-row-stop") == true)
     }
 
+    @Test func codingAgentsSectionKeepsStaleClaimedIDAsUnmatchedRuntimeRow() {
+        let section = AgentLaunchersSection(launchers: [AgentLauncher(id: "launcher-codex-new", name: "Codex", command: "codex")])
+        section.runtimeAgentWindows = [
+            AgentWindowRecord(
+                id: "codex-runtime", workspaceID: "workspace", provider: .spaces, label: "Codex",
+                terminalTarget: TerminalTargetRecord(trackingID: "session-codex"), claimedLauncherID: "launcher-codex-old",
+                claimedLauncherName: "Codex", status: .idle, createdAt: "now", updatedAt: "now")
+        ]
+
+        #expect(section.rowCount == 2)
+        #expect(section.row(at: 0)?.displayNameForTesting == "Codex")
+        #expect(
+            section.row(at: 0)?.visibleActionButtonIDsForTesting == [
+                "agent-launcher-row-run", "agent-launcher-row-edit", "agent-launcher-row-remove",
+            ])
+        #expect(section.row(at: 1)?.displayNameForTesting == "Codex")
+        #expect(section.row(at: 1)?.visibleActionButtonIDsForTesting == ["agent-launcher-row-stop"])
+    }
+
     @Test func adHocRuntimeRowsStayReadOnly() {
         let section = AgentLaunchersSection()
         section.runtimeAgentWindows = [

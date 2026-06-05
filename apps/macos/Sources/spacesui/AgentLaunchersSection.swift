@@ -127,10 +127,10 @@ import workspacecore
         var isEditable: Bool { launcher != nil }
         var isRunning: Bool { agentWindow != nil }
         var canRestart: Bool {
-            guard agentWindow != nil else { return false }
+            guard let agentWindow else { return false }
             if launcher != nil { return true }
-            if agentWindow?.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false { return true }
-            return agentWindow?.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            if agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false { return false }
+            return agentWindow.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         }
     }
 
@@ -152,12 +152,11 @@ import workspacecore
         }
 
         for agentWindow in agentWindows {
-            if let claimedLauncherID = agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty,
-                configuredAgentIDs.contains(claimedLauncherID)
-            {
-                continue
+            if let claimedLauncherID = agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
+                if configuredAgentIDs.contains(claimedLauncherID) { continue }
+            } else {
+                guard !configuredAgentNames.contains(AppKitController.normalizedRunRowName(agentWindow.label ?? "")) else { continue }
             }
-            guard !configuredAgentNames.contains(AppKitController.normalizedRunRowName(agentWindow.label ?? "")) else { continue }
             entries.append(DisplayEntry(launcher: nil, agentWindow: agentWindow, runtimeWindowTitle: runtimeWindowTitleByAgentID[agentWindow.id]))
         }
 

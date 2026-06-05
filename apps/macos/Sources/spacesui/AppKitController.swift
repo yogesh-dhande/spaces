@@ -2389,12 +2389,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         for agentWindow in agentWindows {
-            if let claimedLauncherID = agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty,
-                configuredAgentIDs.contains(claimedLauncherID)
-            {
-                continue
+            if let claimedLauncherID = agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
+                if configuredAgentIDs.contains(claimedLauncherID) { continue }
+            } else {
+                guard !configuredAgentNames.contains(normalizedRunRowName(agentWindow.label ?? "")) else { continue }
             }
-            guard !configuredAgentNames.contains(normalizedRunRowName(agentWindow.label ?? "")) else { continue }
             entries.append(ResolvedCodingAgentRunEntry(launcher: nil, agentWindow: agentWindow))
         }
 
