@@ -30,6 +30,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
     @MainActor private final class FocusableView: NSView { override var acceptsFirstResponder: Bool { true } }
     @MainActor private final class KeyTestWindow: NSWindow { override var isKeyWindow: Bool { true } }
+    @MainActor private final class ActivatingTestWindow: NSWindow {
+        var keyWindowState = false
+        override var isKeyWindow: Bool { keyWindowState }
+        override func makeKeyAndOrderFront(_ sender: Any?) { keyWindowState = true }
+    }
 
     @MainActor private func searchField(in view: NSView) -> NSSearchField? {
         if let searchField = view as? NSSearchField, searchField.accessibilityIdentifier() == "terminal-search-field" { return searchField }
@@ -82,6 +87,38 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         XCTAssertEqual(position.x, 50, accuracy: 0.01)
         XCTAssertEqual(position.y, 50, accuracy: 0.01)
+    }
+
+    @MainActor func testRemoteMirrorSuppressesFocusOnlyMouseClickBeforeForwarding() throws {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-focus-only-mouse", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-05T00:00:00Z")
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        let window = ActivatingTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        container.addSubview(mirrorView)
+        mirrorView.frame = container.bounds
+        mirrorView.acceptsTerminalInput = true
+        mirrorView.debugMouseEventHandler = { _ in true }
+        defer { window.close() }
+
+        XCTAssertFalse(window.isKeyWindow)
+
+        mirrorView.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: window.windowNumber))
+        mirrorView.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: window.windowNumber))
+
+        XCTAssertTrue(window.isKeyWindow)
+        XCTAssertEqual(mirrorView.debugRecordedMouseEvents, [])
+
+        mirrorView.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: window.windowNumber))
+        mirrorView.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: window.windowNumber))
+
+        XCTAssertEqual(mirrorView.debugRecordedMouseEvents.count, 4)
+        XCTAssertEqual(mirrorView.debugRecordedMouseEvents.first, "position")
+        XCTAssertTrue(mirrorView.debugRecordedMouseEvents.contains("button:press:\(GHOSTTY_MOUSE_LEFT.rawValue)"))
+        XCTAssertTrue(mirrorView.debugRecordedMouseEvents.contains("button:release:\(GHOSTTY_MOUSE_LEFT.rawValue)"))
     }
 
     @MainActor func testRemoteMirrorSearchActionEventsUpdateOverlayState() {
@@ -1032,5 +1069,12 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: modifierFlags, timestamp: 0, windowNumber: 0, context: nil, characters: "\u{7F}",
                 charactersIgnoringModifiers: "\u{7F}", isARepeat: false, keyCode: keyCode))
+    }
+
+    @MainActor private func mouseEvent(type: NSEvent.EventType, windowNumber: Int) -> NSEvent {
+        try! XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: type, location: NSPoint(x: 20, y: 30), modifierFlags: [], timestamp: 0, windowNumber: windowNumber, context: nil,
+                eventNumber: 1, clickCount: 1, pressure: 1))
     }
 }

@@ -63,8 +63,11 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     private var searchTotal: Int?
     private var searchSelected: Int?
     private var submittedSearchQuery: String?
+    private var suppressedFocusOnlyMouseButtonNumbers = Set<Int>()
     var debugBindingActionHandler: (@MainActor (String) -> Bool)?
     private(set) var debugRecordedBindingActions: [String] = []
+    var debugMouseEventHandler: (@MainActor (String) -> Bool)?
+    private(set) var debugRecordedMouseEvents: [String] = []
 
     var acceptsTerminalInput = false { didSet { restoreFirstResponderIfWindowReady() } }
     var onSendText: SendTextHandler?
@@ -140,34 +143,40 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if suppressesFocusOnlyMousePress(for: event) { return }
         focusWindow()
         sendMousePosition(event)
         _ = sendMouseButton(state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_LEFT, event: event)
     }
 
     override func mouseUp(with event: NSEvent) {
+        if suppressesFocusOnlyMouseRelease(for: event) { return }
         sendMousePosition(event)
         _ = sendMouseButton(state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT, event: event)
     }
 
     override func rightMouseDown(with event: NSEvent) {
+        if suppressesFocusOnlyMousePress(for: event) { return }
         focusWindow()
         sendMousePosition(event)
         if !sendMouseButton(state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_RIGHT, event: event) { super.rightMouseDown(with: event) }
     }
 
     override func rightMouseUp(with event: NSEvent) {
+        if suppressesFocusOnlyMouseRelease(for: event) { return }
         sendMousePosition(event)
         if !sendMouseButton(state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_RIGHT, event: event) { super.rightMouseUp(with: event) }
     }
 
     override func otherMouseDown(with event: NSEvent) {
+        if suppressesFocusOnlyMousePress(for: event) { return }
         focusWindow()
         sendMousePosition(event)
         _ = sendMouseButton(state: GHOSTTY_MOUSE_PRESS, button: Self.ghosttyMouseButton(for: event.buttonNumber), event: event)
     }
 
     override func otherMouseUp(with event: NSEvent) {
+        if suppressesFocusOnlyMouseRelease(for: event) { return }
         sendMousePosition(event)
         _ = sendMouseButton(state: GHOSTTY_MOUSE_RELEASE, button: Self.ghosttyMouseButton(for: event.buttonNumber), event: event)
     }
@@ -510,6 +519,12 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
 
     @discardableResult private func sendMouseButton(state: ghostty_input_mouse_state_e, button: ghostty_input_mouse_button_e, event: NSEvent) -> Bool
     {
+        if let debugMouseEventHandler {
+            let stateDescription = state.rawValue == GHOSTTY_MOUSE_PRESS.rawValue ? "press" : "release"
+            let description = "button:\(stateDescription):\(button.rawValue)"
+            debugRecordedMouseEvents.append(description)
+            return debugMouseEventHandler(description)
+        }
         guard let surface = mirrorSurface() else { return false }
         let consumed = ghostty_surface_mouse_button(surface, state, button, Self.ghosttyMouseModifiers(for: event.modifierFlags))
         ghostty_surface_refresh(surface)
@@ -517,10 +532,26 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     }
 
     private func sendMousePosition(_ event: NSEvent) {
+        if let debugMouseEventHandler {
+            debugRecordedMouseEvents.append("position")
+            _ = debugMouseEventHandler("position")
+            return
+        }
         guard let surface = mirrorSurface() else { return }
         let position = Self.ghosttyMousePosition(for: event.locationInWindow, in: self)
         ghostty_surface_mouse_pos(surface, position.x, position.y, Self.ghosttyMouseModifiers(for: event.modifierFlags))
         ghostty_surface_refresh(surface)
+    }
+
+    private func suppressesFocusOnlyMousePress(for event: NSEvent) -> Bool {
+        guard let window, !window.isKeyWindow else { return false }
+        suppressedFocusOnlyMouseButtonNumbers.insert(event.buttonNumber)
+        focusWindow(window)
+        return true
+    }
+
+    private func suppressesFocusOnlyMouseRelease(for event: NSEvent) -> Bool {
+        suppressedFocusOnlyMouseButtonNumbers.remove(event.buttonNumber) != nil
     }
 
     private func updateSurfaceGeometry() {
