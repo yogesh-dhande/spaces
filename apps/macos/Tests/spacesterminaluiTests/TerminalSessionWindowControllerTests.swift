@@ -45,6 +45,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         var attachedModes: [TerminalAttachmentMode] = []
         var recordedBindingActions: [String] = []
         var handledKeySpecifiers: [String] = []
+        var handleKeyEventCallCount = 0
         var searchDebugState = GhosttyTerminalSearchDebugState(isVisible: false, query: "", total: nil, selected: nil)
         var activeOwnerClientIDValue: String?
         var debugSurfaceRefreshRequestCount = 0
@@ -58,6 +59,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         func focusWindow(_ window: NSWindow?) { focusWindowCount += 1 }
         @discardableResult func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool {
             _ = clientID
+            handleKeyEventCallCount += 1
             guard let keySpec = GhosttyMirrorTerminalView.remoteKeySpecifier(for: event) else { return false }
             handledKeySpecifiers.append(keySpec)
             return true
@@ -1308,6 +1310,47 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         controller.window?.sendEvent(event)
 
+        XCTAssertEqual(host.recordedBindingActions, ["end_search"])
+        XCTAssertEqual(host.debugSearchState.isVisible, false)
+    }
+
+    @MainActor func testGhosttyOwnerDoesNotForwardSearchFieldTypingToTerminal() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-search-field-typing", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-search-field-typing", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        host.searchDebugState = .init(isVisible: true, query: "", total: nil, selected: nil)
+        let controller = makeGhosttyController(sessionID: "session-search-field-typing", paths: paths, host: host)
+        controller.show()
+        controller.window?.makeKeyAndOrderFront(nil)
+        let fieldEditor = NSTextView(frame: NSRect(x: 0, y: 0, width: 80, height: 20))
+        fieldEditor.isFieldEditor = true
+        controller.window?.contentView?.addSubview(fieldEditor)
+        XCTAssertTrue(controller.window?.makeFirstResponder(fieldEditor) == true)
+
+        let typeEvent = try keyEvent(keyCode: kVK_ANSI_Z, characters: "z", modifiers: [], window: controller.window)
+        controller.window?.sendEvent(typeEvent)
+
+        XCTAssertEqual(host.handleKeyEventCallCount, 0)
+        XCTAssertTrue(host.recordedBindingActions.isEmpty)
+        XCTAssertTrue(host.debugSearchState.isVisible)
+
+        let escapeEvent = try keyEvent(keyCode: kVK_Escape, characters: "\u{1b}", modifiers: [], window: controller.window)
+        controller.window?.sendEvent(escapeEvent)
+
+        XCTAssertEqual(host.handleKeyEventCallCount, 0)
         XCTAssertEqual(host.recordedBindingActions, ["end_search"])
         XCTAssertEqual(host.debugSearchState.isVisible, false)
     }

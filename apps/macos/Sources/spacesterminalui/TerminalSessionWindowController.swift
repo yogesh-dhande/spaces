@@ -1463,6 +1463,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             _ = ghosttyRendererHost?.performBindingAction("end_search")
             return true
         }
+        if isFieldEditorFirstResponder { return false }
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else { return false }
         return ghosttyRendererHost?.handleKeyEvent(event, for: client.id) ?? false
     }
