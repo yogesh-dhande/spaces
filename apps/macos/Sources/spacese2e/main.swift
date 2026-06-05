@@ -427,17 +427,22 @@ private struct SeedFixtureCommand: ParsableCommand {
         let backendCommand = fixtureServiceCommand(
             pythonExecutable: pythonExecutable,
             arguments: ["-m", "spaces_e2e_demo", "backend", "--port", "$API_PORT", "--data-dir", ".spaces-e2e-demo/api"])
+        let fixturePorts = [PortDefinition(name: "APP_PORT"), PortDefinition(name: "API_PORT")]
+        let fixtureStopScript =
+            #"bash -lc 'for port in "$APP_PORT" "$API_PORT"; do if [ -n "$port" ]; then pids=(); while IFS= read -r pid; do [ -n "$pid" ] && pids+=("$pid"); done < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true); for pid in "${pids[@]}"; do kill "$pid" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in "${pids[@]}"; do kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true; done; fi; done; printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
+        let fixtureProcesses = [
+            ProcessTemplate(name: "frontend", command: frontendCommand, executionMode: .shell),
+            ProcessTemplate(name: "backend", command: backendCommand, executionMode: .shell),
+        ]
+        let fixtureBrowserSessions = [BrowserSession(name: "docs", url: docsURL), BrowserSession(name: "admin", url: adminURL)]
+        let fixtureAgentLaunchers: [AgentLauncher] = []
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.ports = [.init(name: "APP_PORT"), .init(name: "API_PORT")]
-            config.stopScript =
-                #"bash -lc 'for port in "$APP_PORT" "$API_PORT"; do if [ -n "$port" ]; then pids=(); while IFS= read -r pid; do [ -n "$pid" ] && pids+=("$pid"); done < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true); for pid in "${pids[@]}"; do kill "$pid" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in "${pids[@]}"; do kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true; done; fi; done; printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
-            config.processes = [
-                .init(name: "frontend", command: frontendCommand, executionMode: .shell),
-                .init(name: "backend", command: backendCommand, executionMode: .shell),
-            ]
-            config.browserSessions = [.init(name: "docs", url: docsURL), .init(name: "admin", url: adminURL)]
-            config.agentLaunchers = []
+            config.ports = fixturePorts
+            config.stopScript = fixtureStopScript
+            config.processes = fixtureProcesses
+            config.browserSessions = fixtureBrowserSessions
+            config.agentLaunchers = fixtureAgentLaunchers
         }
 
         if let workspaceTitle {
@@ -451,7 +456,15 @@ private struct SeedFixtureCommand: ParsableCommand {
         // the manual shell harness needs the concrete reserved port numbers
         // immediately so it can start localhost fixture servers before launch.
         if let workspace = try orchestrator.store.workspace(dir: project.dir) {
-            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in }
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+                settings.stopScript = fixtureStopScript
+                settings.ports = fixturePorts
+                settings.processes = fixtureProcesses.map {
+                    ProcessTemplate(name: $0.name, command: $0.command, kind: $0.kind, onExit: $0.onExit, executionMode: $0.executionMode)
+                }
+                settings.browserSessions = fixtureBrowserSessions
+                settings.agentLaunchers = fixtureAgentLaunchers
+            }
         }
 
         let payload = SeedFixturePayload(
