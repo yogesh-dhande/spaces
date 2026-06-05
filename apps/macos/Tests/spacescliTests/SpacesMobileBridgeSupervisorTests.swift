@@ -378,7 +378,7 @@ import workspacecore
                     port: server.listeningPort, transportKey: transportKey)
             }.value
 
-            XCTAssertEqual(response.sessionState?.renderFrameText, "LIVE-STATE")
+            XCTAssertEqual(response.sessionState?.renderText, "LIVE-STATE")
             XCTAssertNil(response.sessionState?.outputByteCount)
             XCTAssertNil(response.sessionState?.outputEndByteOffset)
         }
@@ -432,9 +432,9 @@ import workspacecore
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 200, state: .exited,
                     updatedAt: "2026-06-04T12:46:31Z", exitedAt: "2026-06-04T12:46:31Z", title: "final-target", workingDirectory: "/tmp/work",
                     columns: 5, rows: 1), attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-target",
-                workingDirectory: "/tmp/work",
-                renderFrame: try GhosttyRenderFrame.encode(.init(sessionRevision: 2, ownerEpoch: 1, snapshot: Self.ghosttySnapshot(text: "FINAL"))),
-                outputByteCount: nil)
+                workingDirectory: "/tmp/work", outputByteCount: nil,
+                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(
+                    .full(.init(sessionRevision: 2, ownerEpoch: 1, snapshot: Self.ghosttySnapshot(text: "FINAL")))))
             let subscriptionServer = MobileBridgeTestSubscriptionServer(
                 socketPath: paths.subscriptionSocketPath, payload: finalPayload, closeAfterPayload: true)
             try subscriptionServer.start()
@@ -456,7 +456,7 @@ import workspacecore
             let receivedPayload = try readStreamPayload(connection, timeout: 5)
 
             XCTAssertEqual(receivedPayload.reason, TerminalRemoteSessionStateReason.terminated)
-            XCTAssertEqual(receivedPayload.renderFrameText, "FINAL")
+            XCTAssertEqual(receivedPayload.renderText, "FINAL")
             XCTAssertTrue(waitForConnectionClosure(connection, timeout: 5))
         }
     }
@@ -477,9 +477,9 @@ import workspacecore
             let finalPayload = GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:23:23Z", sessionStateRevision: 2,
                 sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "final-target", workingDirectory: "/tmp/work",
-                renderFrame: try GhosttyRenderFrame.encode(.init(sessionRevision: 2, ownerEpoch: 1, snapshot: Self.ghosttySnapshot(text: "FINAL"))),
-                outputByteCount: nil)
+                title: "final-target", workingDirectory: "/tmp/work", outputByteCount: nil,
+                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(
+                    .full(.init(sessionRevision: 2, ownerEpoch: 1, snapshot: Self.ghosttySnapshot(text: "FINAL")))))
             try TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths)
             try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
 
@@ -499,7 +499,7 @@ import workspacecore
             let receivedPayload = try readStreamPayload(connection, timeout: 5)
 
             XCTAssertEqual(receivedPayload.reason, TerminalRemoteSessionStateReason.terminated)
-            XCTAssertEqual(receivedPayload.renderFrameText, "FINAL")
+            XCTAssertEqual(receivedPayload.renderText, "FINAL")
             XCTAssertTrue(waitForConnectionClosure(connection, timeout: 5))
         }
     }
@@ -520,9 +520,9 @@ import workspacecore
             let finalPayload = GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:23:23Z", sessionStateRevision: 2,
                 sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "final-target", workingDirectory: "/tmp/work",
-                renderFrame: try GhosttyRenderFrame.encode(.init(sessionRevision: 2, ownerEpoch: 1, snapshot: Self.ghosttySnapshot(text: "FINAL"))),
-                outputByteCount: nil)
+                title: "final-target", workingDirectory: "/tmp/work", outputByteCount: nil,
+                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(
+                    .full(.init(sessionRevision: 2, ownerEpoch: 1, snapshot: Self.ghosttySnapshot(text: "FINAL")))))
             try TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths)
             try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
 
@@ -543,7 +543,7 @@ import workspacecore
 
             XCTAssertTrue(response.ok)
             XCTAssertEqual(response.sessionState?.reason, TerminalRemoteSessionStateReason.terminated)
-            XCTAssertEqual(response.sessionState?.renderFrameText, "FINAL")
+            XCTAssertEqual(response.sessionState?.renderText, "FINAL")
         }
     }
 
@@ -866,11 +866,12 @@ import workspacecore
 
     nonisolated private static func liveTerminalStatePayload(sessionID: String, snapshotText: String) -> GhosttyRemoteSessionStatePayload {
         let snapshot = ghosttySnapshot(text: snapshotText)
+        let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot)
         return GhosttyRemoteSessionStatePayload(
             sessionID: sessionID, reason: "live_state", emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()), sessionStateRevision: 1,
             sessionStateFlags: nil, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live",
-            workingDirectory: "/tmp/work", renderFrame: try? GhosttyRenderFrame.encode(.init(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot)),
-            outputByteCount: nil, outputEndByteOffset: nil)
+            workingDirectory: "/tmp/work", outputByteCount: nil, outputEndByteOffset: nil,
+            renderUpdate: try? GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
     }
 
     nonisolated private static func ghosttySnapshot(text: String) -> GhosttyTerminalSnapshot {

@@ -1,6 +1,5 @@
 import XCTest
 import spacesmobilecore
-import spacesterminalcore
 
 final class SpacesMobileBridgeProtocolTests: XCTestCase {
     func testRequestRoundTripsScrollModsThroughCodec() throws {
@@ -18,4 +17,5 @@ final class SpacesMobileBridgeProtocolTests: XCTestCase {
         XCTAssertEqual(request.scrollVertical, 24)
         XCTAssertNil(request.scrollMods)
     }
+
 }

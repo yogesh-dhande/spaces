@@ -6,18 +6,18 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
     func testMergedPayloadCarriesOutputPositionWithoutRawBytes() throws {
         let initial = GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: "initial", emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
-            renderFrame: try renderFrameData(text: "alpha", sessionRevision: 1, ownerEpoch: 4), outputByteCount: nil)
+            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: nil,
+            renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4))
 
         let outputUpdate = GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: "output", emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 2, sessionStateFlags: 1,
-            screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha", renderFrame: nil,
-            outputByteCount: 2, outputEndByteOffset: 42)
+            screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: 2,
+            outputEndByteOffset: 42)
 
         let merged = initial.merged(with: outputUpdate)
-        XCTAssertEqual(merged.renderFrameText, "alpha")
-        XCTAssertEqual(merged.renderFrameSnapshot?.columns, initial.renderFrameSnapshot?.columns)
-        XCTAssertEqual(merged.renderFrameOwnerEpoch, 4)
+        XCTAssertEqual(merged.renderText, "alpha")
+        XCTAssertEqual(merged.renderSnapshot?.columns, initial.renderSnapshot?.columns)
+        XCTAssertEqual(merged.renderOwnerEpoch, 4)
         XCTAssertEqual(merged.outputByteCount, 2)
         XCTAssertEqual(merged.outputEndByteOffset, 42)
         let decodedOutputUpdate = try GhosttyRemoteSessionStateCodec.decodeLine(try GhosttyRemoteSessionStateCodec.encodeLine(outputUpdate))
@@ -26,28 +26,28 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         let metadataUpdate = GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: "attachment_state", emittedAt: "2026-05-20T00:00:02Z", sessionStateRevision: 2, sessionStateFlags: 1,
             screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "alpha",
-            workingDirectory: "/tmp/alpha", renderFrame: nil, outputByteCount: nil)
+            workingDirectory: "/tmp/alpha", outputByteCount: nil)
 
         let metadataMerged = merged.merged(with: metadataUpdate)
         XCTAssertNil(metadataMerged.outputEndByteOffset)
-        XCTAssertEqual(metadataMerged.renderFrameText, "alpha")
+        XCTAssertEqual(metadataMerged.renderText, "alpha")
     }
 
     func testMergedPayloadClearsScreenStateWhenOwnerChangesWithoutFreshSnapshot() throws {
         let initial = GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: "initial", emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot(ownerID: "mac-window"), title: "alpha",
-            workingDirectory: "/tmp/alpha", renderFrame: try renderFrameData(text: "stale suggestion", sessionRevision: 1, ownerEpoch: 9),
-            outputByteCount: nil)
+            workingDirectory: "/tmp/alpha", outputByteCount: nil,
+            renderUpdate: try renderUpdateData(text: "stale suggestion", sessionRevision: 1, ownerEpoch: 9))
 
         let ownerUpdate = GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: "attachment_state", emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 2, sessionStateFlags: 1,
             screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: attachmentSnapshot(ownerID: "ios-viewer"), title: "alpha",
-            workingDirectory: "/tmp/alpha", renderFrame: nil, outputByteCount: nil)
+            workingDirectory: "/tmp/alpha", outputByteCount: nil)
 
         let merged = initial.merged(with: ownerUpdate)
-        XCTAssertNil(merged.renderFrameSnapshot)
-        XCTAssertNil(merged.renderFrameText)
+        XCTAssertNil(merged.renderSnapshot)
+        XCTAssertNil(merged.renderText)
     }
 
     func testRenderFrameRoundTripsOwnerEpochAndGrid() throws {
@@ -93,8 +93,9 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertTrue(GhosttyRenderFrameMetrics.detailString(attributes).contains("frame_bytes=256"))
     }
 
-    private func renderFrameData(text: String, sessionRevision: UInt64, ownerEpoch: UInt64) throws -> Data {
-        try GhosttyRenderFrame.encode(.init(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text)))
+    private func renderUpdateData(text: String, sessionRevision: UInt64, ownerEpoch: UInt64) throws -> Data {
+        let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
+        return try GhosttyRenderUpdateBinaryCodec.encode(.full(frame))
     }
 
     private func snapshot(text: String) -> GhosttyTerminalSnapshot {

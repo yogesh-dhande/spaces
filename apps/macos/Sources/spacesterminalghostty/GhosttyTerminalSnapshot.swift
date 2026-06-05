@@ -5,6 +5,16 @@ import spacesterminalcore
 public enum GhosttyTerminalSnapshotCapture {
     nonisolated(unsafe) static var sessionCaptureHandlerForTesting: ((ghostty_session_t?) -> GhosttyTerminalSnapshot?)?
 
+    public struct CapturedSnapshot: Sendable, Equatable {
+        public let snapshot: GhosttyTerminalSnapshot
+        public let scrollRects: [GhosttyRenderScrollRectOperation]
+
+        public init(snapshot: GhosttyTerminalSnapshot, scrollRects: [GhosttyRenderScrollRectOperation] = []) {
+            self.snapshot = snapshot
+            self.scrollRects = scrollRects
+        }
+    }
+
     public static func captureFromSurface(_ surface: ghostty_surface_t?) -> GhosttyTerminalSnapshot? {
         guard let surface else { return nil }
         var snapshot = ghostty_terminal_snapshot_s()
@@ -20,6 +30,15 @@ public enum GhosttyTerminalSnapshotCapture {
         guard ghostty_session_export_snapshot(session, &snapshot) else { return nil }
         defer { ghostty_terminal_snapshot_free(&snapshot) }
         return makeSnapshot(from: snapshot)
+    }
+
+    public static func captureRenderStateFromSession(_ session: ghostty_session_t?) -> CapturedSnapshot? {
+        if let sessionCaptureHandlerForTesting { return sessionCaptureHandlerForTesting(session).map { CapturedSnapshot(snapshot: $0) } }
+        guard let session else { return nil }
+        var snapshot = ghostty_terminal_snapshot_s()
+        guard ghostty_session_export_snapshot(session, &snapshot) else { return nil }
+        defer { ghostty_terminal_snapshot_free(&snapshot) }
+        return CapturedSnapshot(snapshot: makeSnapshot(from: snapshot), scrollRects: makeScrollRects(from: snapshot))
     }
 
     public static func captureText(from surface: ghostty_surface_t?) -> String? {
@@ -62,5 +81,16 @@ public enum GhosttyTerminalSnapshotCapture {
             columns: Int(snapshot.columns), rows: Int(snapshot.rows), cursorColumn: Int(snapshot.cursor_column), cursorRow: Int(snapshot.cursor_row),
             cursorVisible: snapshot.cursor_visible, defaultForegroundRGB: snapshot.default_foreground_rgb,
             defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells)
+    }
+
+    private static func makeScrollRects(from snapshot: ghostty_terminal_snapshot_s) -> [GhosttyRenderScrollRectOperation] {
+        let operationCount = Int(snapshot.scroll_rect_count)
+        guard let rawOperations = snapshot.scroll_rects, operationCount > 0 else { return [] }
+        let buffer = UnsafeBufferPointer(start: rawOperations, count: operationCount)
+        return buffer.map {
+            GhosttyRenderScrollRectOperation(
+                rowStart: Int($0.row_start), rowCount: Int($0.row_count), columnStart: Int($0.column_start), columnCount: Int($0.column_count),
+                deltaRows: Int($0.delta_rows), deltaColumns: Int($0.delta_columns))
+        }
     }
 }

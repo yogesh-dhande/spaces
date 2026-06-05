@@ -272,6 +272,10 @@ private final class GhosttyHostManagedOutputPipe: @unchecked Sendable {
 
     func snapshot() -> GhosttyTerminalSnapshot? { GhosttyTerminalSnapshotCapture.captureFromSession(session) }
 
+    func renderStateSnapshot() -> GhosttyTerminalSnapshotCapture.CapturedSnapshot? {
+        GhosttyTerminalSnapshotCapture.captureRenderStateFromSession(session)
+    }
+
     func snapshotText() -> String? {
         guard let snapshot = snapshot() else { return nil }
         return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot)

@@ -9,6 +9,7 @@ import spacesterminalcore
     private var latestState: GhosttyRemoteSessionStatePayload?
     private var persistedFinalStateLoaded = false
     private var persistedFinalStateLoadInProgress = false
+    private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
     private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
     private var lastSubscriptionAttemptAt: Date?
     private var attachedClient: TerminalClient?
@@ -214,12 +215,16 @@ import spacesterminalcore
         return true
     }
 
-    private func applyRemoteState(_ payload: GhosttyRemoteSessionStatePayload) {
-        if payload.runtimeState?.state.isInteractive == true { persistedFinalStateLoaded = false }
+    private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
+        if incomingPayload.runtimeState?.state.isInteractive == true { persistedFinalStateLoaded = false }
         let decodeStartedAt = Date()
-        let decodedFrame = payload.decodedRenderFrame
+        let incomingPayloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(incomingPayload).count) ?? 0
+        let resolvedRenderState = payloadByResolvingRenderUpdate(incomingPayload)
+        let payload = resolvedRenderState.payload
+        let decodedFrame = payload.decodedRenderUpdate?.fullFrame
+        let decodedUpdate = resolvedRenderState.decodedUpdate
         let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
-        let dropReason = renderFrameDropReason(for: payload, decodedFrame: decodedFrame)
+        let dropReason = renderUpdateDropReason(for: payload, decodedFrame: decodedFrame) ?? resolvedRenderState.dropReason
         latestState = latestState?.merged(with: payload) ?? payload
         lastSubscriptionAttemptAt = nil
         let frameForUpdate = currentRenderFrameForRenderUpdate()
@@ -230,37 +235,75 @@ import spacesterminalcore
         let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
         if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
         let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
-        let payloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(payload).count) ?? 0
-        let renderFrameAttributes = GhosttyRenderFrameMetrics.attributes(
-            reason: payload.reason, frame: decodedFrame, frameByteCount: payload.renderFrame?.count, payloadByteCount: payloadBytes,
+        var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
+            reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count, payloadByteCount: incomingPayloadBytes,
             decodeMS: decodeMS, outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
-            dropped: payload.renderFrame == nil ? nil : dropReason != nil, dropReason: dropReason, renderMode: "ghostty-mirror",
-            targetRevision: payload.screenStateRevision,
-            appliedRevision: frameForUpdate == nil ? nil : (payload.screenStateRevision ?? frameForUpdate?.sessionRevision), applyMS: applyMS)
+            dropped: incomingPayload.renderUpdate == nil ? nil : dropReason != nil, dropReason: dropReason, renderMode: "ghostty-mirror",
+            frameKind: decodedUpdate?.frameKindMetricValue ?? "full", baseRevision: decodedUpdate?.baseRevision,
+            targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
+            appliedRevision: frameForUpdate == nil ? nil : (payload.screenStateRevision ?? frameForUpdate?.sessionRevision), applyMS: applyMS,
+            operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
+            scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)
+        renderUpdateAttributes["materialized_render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
+        renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
+        renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
         SpacesMobileTerminalPerformanceLogger.emit(
             .init(
                 sessionID: payload.sessionID, source: "mac-mirror", name: "render_frame_payload_receive",
-                elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), count: payload.renderFrame?.count, attributes: renderFrameAttributes))
+                elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), count: incomingPayload.renderUpdate?.count,
+                attributes: renderUpdateAttributes))
         TerminalPerformance.logMetric(
             "terminal_remote_state_receive", target: "session=\(payload.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
             success: true,
             detail:
-                "reason=\(payload.reason) render_frame=\(payload.renderFrame == nil ? 0 : 1) bytes=\(payload.outputByteCount ?? 0) payload_bytes=\(payloadBytes) frame_bytes=\(payload.renderFrame?.count ?? 0)"
+                "reason=\(payload.reason) render_update=\(incomingPayload.renderUpdate == nil ? 0 : 1) bytes=\(payload.outputByteCount ?? 0) payload_bytes=\(incomingPayloadBytes) render_update_bytes=\(incomingPayload.renderUpdate?.count ?? 0)"
         )
         TerminalPerformance.logMetric(
             "terminal_render_frame_payload_receive", target: "session=\(payload.sessionID)",
             elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
-            detail: GhosttyRenderFrameMetrics.detailString(renderFrameAttributes))
+            detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
         postLocalNotifications(for: payload)
     }
 
-    private func renderFrameDropReason(for payload: GhosttyRemoteSessionStatePayload, decodedFrame: GhosttyRenderFrame?) -> String? {
-        guard payload.renderFrame != nil else { return nil }
+    private func renderUpdateDropReason(for payload: GhosttyRemoteSessionStatePayload, decodedFrame: GhosttyRenderFrame?) -> String? {
+        guard payload.renderUpdate != nil else { return nil }
         guard let decodedFrame else { return "decode_failed" }
         guard Self.shouldUseRenderFrameSnapshot(decodedFrame.snapshot, runtimeState: payload.runtimeState, reason: payload.reason) else {
             return "stale_resize_grid"
         }
         return nil
+    }
+
+    private func payloadByResolvingRenderUpdate(_ payload: GhosttyRemoteSessionStatePayload) -> (
+        payload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?, dropReason: String?
+    ) {
+        guard payload.renderUpdate != nil else { return (payload, nil, nil) }
+        guard let decodedUpdate = payload.decodedRenderUpdate else { return (payload.replacingRenderUpdate(nil), nil, "render_update_decode_failed") }
+        do {
+            let baseline = try GhosttyRenderUpdateApplier.apply(decodedUpdate, to: renderUpdateBaseline)
+            renderUpdateBaseline = baseline
+            let frame = GhosttyRenderFrame(sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
+            let materializedUpdate = try? GhosttyRenderUpdateBinaryCodec.encode(.full(frame))
+            return (payload.replacingRenderUpdate(materializedUpdate), decodedUpdate, nil)
+        } catch {
+            renderUpdateBaseline = nil
+            return (payload.replacingRenderUpdate(nil), decodedUpdate, Self.renderUpdateDropReason(for: error))
+        }
+    }
+
+    private static func renderUpdateDropReason(for error: Error) -> String {
+        switch error as? GhosttyRenderUpdateApplyError {
+        case .missingBaseline: "missing_baseline"
+        case .versionMismatch: "version_mismatch"
+        case .missingFullFrame: "missing_full_frame"
+        case .missingDelta: "missing_delta"
+        case .resyncRequired: "resync_required"
+        case .baseRevisionMismatch: "base_revision_mismatch"
+        case .ownerEpochMismatch: "owner_epoch_mismatch"
+        case .dimensionMismatch: "dimension_mismatch"
+        case .invalidOperation: "invalid_operation"
+        case nil: "render_update_apply_failed"
+        }
     }
 
     private func postLocalNotifications(for payload: GhosttyRemoteSessionStatePayload) {
@@ -290,7 +333,7 @@ import spacesterminalcore
     }
 
     private func currentRenderFrameForRenderUpdate() -> GhosttyRenderFrame? {
-        guard let frame = latestState?.decodedRenderFrame,
+        guard let frame = latestState?.decodedRenderUpdate?.fullFrame,
             Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
         else {
             guard !terminalView.hasRenderedSurfaceContent else { return nil }
@@ -300,7 +343,7 @@ import spacesterminalcore
     }
 
     private func latestSnapshotIfCompatible() -> GhosttyTerminalSnapshot? {
-        guard let snapshot = latestState?.renderFrameSnapshot,
+        guard let snapshot = latestState?.renderSnapshot,
             Self.shouldUseRenderFrameSnapshot(snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)
         else { return nil }
         return snapshot
@@ -317,7 +360,7 @@ import spacesterminalcore
         let snapshotRows = snapshot?.rows ?? 0
         let runtimeColumns = latestState?.runtimeState?.columns ?? 0
         let runtimeRows = latestState?.runtimeState?.rows ?? 0
-        let ownerEpoch = latestState?.renderFrameOwnerEpoch ?? 0
+        let ownerEpoch = latestState?.renderOwnerEpoch ?? 0
         return "runtime=\(runtimeColumns)x\(runtimeRows)|frame=\(snapshotColumns)x\(snapshotRows)|ownerEpoch=\(ownerEpoch)"
     }
 
@@ -327,7 +370,7 @@ import spacesterminalcore
         scrollCoalescer.flush()
         let socketPath = paths.controlSocketPath
         let clientID = client.id
-        let ownerEpoch = latestState?.renderFrameOwnerEpoch
+        let ownerEpoch = latestState?.renderOwnerEpoch
         inputQueue.enqueue(priority: .userInitiated) {
             _ = try TerminalControlClient.send(
                 request: TerminalControlRequest(command: "send", text: text, clientID: clientID, ownerEpoch: ownerEpoch), socketPath: socketPath)
@@ -344,7 +387,7 @@ import spacesterminalcore
         scrollCoalescer.flush()
         let socketPath = paths.controlSocketPath
         let clientID = client.id
-        let ownerEpoch = latestState?.renderFrameOwnerEpoch
+        let ownerEpoch = latestState?.renderOwnerEpoch
         inputQueue.enqueue(priority: .userInitiated) {
             _ = try TerminalControlClient.send(
                 request: TerminalControlRequest(command: "key", key: key, clientID: clientID, ownerEpoch: ownerEpoch), socketPath: socketPath)
@@ -357,7 +400,7 @@ import spacesterminalcore
         scrollCoalescer.flush()
         let socketPath = paths.controlSocketPath
         let clientID = client.id
-        let ownerEpoch = latestState?.renderFrameOwnerEpoch
+        let ownerEpoch = latestState?.renderOwnerEpoch
         inputQueue.enqueue(priority: .userInitiated) {
             _ = try TerminalControlClient.send(
                 request: TerminalControlRequest(command: "clearScreen", clientID: clientID, ownerEpoch: ownerEpoch), socketPath: socketPath)
@@ -376,7 +419,7 @@ import spacesterminalcore
         }
         let socketPath = paths.controlSocketPath
         let clientID = client.id
-        let ownerEpoch = latestState?.renderFrameOwnerEpoch
+        let ownerEpoch = latestState?.renderOwnerEpoch
         inputQueue.enqueue(priority: .userInitiated) {
             defer { Task { @MainActor in onFinished() } }
             _ = try TerminalControlClient.send(
@@ -406,7 +449,7 @@ import spacesterminalcore
         let clientID = client.id
         resizeSerial &+= 1
         let currentResizeSerial = resizeSerial
-        let ownerEpoch = latestState?.renderFrameOwnerEpoch
+        let ownerEpoch = latestState?.renderOwnerEpoch
         let finishResizeRequest: @MainActor @Sendable (Bool) -> Void = { [weak self, requestedSize] success in
             guard let self else { return }
             if let pendingViewportResizeSize = self.pendingViewportResizeSize, pendingViewportResizeSize == requestedSize {

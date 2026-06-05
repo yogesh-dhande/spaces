@@ -40,7 +40,7 @@ public enum TerminalRemoteSessionStatePolicy {
     public static func hasUsableOwnerBootstrapState(
         _ payload: GhosttyRemoteSessionStatePayload?, viewportColumns: Int? = nil, viewportRows: Int? = nil
     ) -> Bool {
-        guard let snapshot = payload?.renderFrameSnapshot else { return false }
+        guard let snapshot = payload?.renderSnapshot else { return false }
         if let viewportColumns, snapshot.columns != viewportColumns { return false }
         if let viewportRows, snapshot.rows != viewportRows { return false }
         return true

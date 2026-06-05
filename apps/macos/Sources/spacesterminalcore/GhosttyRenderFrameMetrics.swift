@@ -5,7 +5,9 @@ public enum GhosttyRenderFrameMetrics {
         reason: String? = nil, frame: GhosttyRenderFrame?, frameByteCount: Int? = nil, frameEncodeMS: Int? = nil, payloadByteCount: Int? = nil,
         payloadEncodeMS: Int? = nil, decodeMS: Int? = nil, outputByteCount: Int? = nil, screenStateRevision: UInt64? = nil, dropped: Bool? = nil,
         dropReason: String? = nil, renderMode: String? = nil, frameKind: String = "full", baseRevision: UInt64? = nil, targetRevision: UInt64? = nil,
-        appliedRevision: UInt64? = nil, applyMS: Int? = nil
+        appliedRevision: UInt64? = nil, applyMS: Int? = nil, operationCount: Int? = nil, changedCellCount: Int? = nil,
+        scrollOperationCount: Int? = nil, fullFrameFallbackReason: String? = nil, coalescedFrameCount: Int? = nil, droppedDeltaCount: Int? = nil,
+        resyncCount: Int? = nil, networkSendBytes: Int? = nil
     ) -> [String: String] {
         let resolvedTargetRevision = targetRevision ?? screenStateRevision ?? frame?.sessionRevision
         var attributes: [String: String] = [
@@ -27,6 +29,14 @@ public enum GhosttyRenderFrameMetrics {
         attributes["drop_reason"] = dropReason ?? (dropped == true ? "unknown" : "none")
         if let renderMode { attributes["render_mode"] = renderMode }
         if let applyMS { attributes["apply_ms"] = String(applyMS) }
+        if let operationCount { attributes["operation_count"] = String(operationCount) }
+        if let changedCellCount { attributes["changed_cell_count"] = String(changedCellCount) }
+        if let scrollOperationCount { attributes["scroll_operation_count"] = String(scrollOperationCount) }
+        attributes["full_frame_fallback_reason"] = fullFrameFallbackReason ?? "none"
+        if let coalescedFrameCount { attributes["coalesced_frame_count"] = String(coalescedFrameCount) }
+        if let droppedDeltaCount { attributes["dropped_delta_count"] = String(droppedDeltaCount) }
+        if let resyncCount { attributes["resync_count"] = String(resyncCount) }
+        if let networkSendBytes { attributes["network_send_bytes"] = String(networkSendBytes) }
         return attributes
     }
 

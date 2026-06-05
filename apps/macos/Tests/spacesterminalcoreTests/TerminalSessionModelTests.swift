@@ -282,7 +282,7 @@ final class TerminalSessionModelTests: XCTestCase {
         let payload = GhosttyRemoteSessionStatePayload(
             sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-05-08T00:00:05Z", sessionStateRevision: 12,
             sessionStateFlags: 3, screenStateRevision: 12, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "final-target", workingDirectory: root.path, renderFrame: Data([1, 2, 3]), outputByteCount: nil)
+            title: "final-target", workingDirectory: root.path, outputByteCount: nil, renderUpdate: Data([1, 2, 3]))
 
         try TerminalSessionPersistence.writeRemoteSessionState(payload, paths: paths)
 

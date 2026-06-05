@@ -2277,7 +2277,7 @@ require(
 require(persisted_final is not None, "Primary session did not persist a final remote state payload.")
 require(persisted_final[0] == "terminated", f"Persisted final payload reason was not terminated: {persisted_final[0]!r}")
 persisted_final_payload = json.loads(persisted_final[1])
-require(bool(persisted_final_payload.get("renderFrame")), "Persisted final payload did not include an encoded render frame.")
+require(bool(persisted_final_payload.get("renderUpdate")), "Persisted final payload did not include an encoded render update.")
 
 overview_response = send_mobile_request({"command": "overview"})
 require(overview_response.get("ok"), f"Bridge overview failed after ctrl+c: {overview_response}")

@@ -23,6 +23,7 @@ apps/web/public/releases/*
 *.zip
 .env
 apps/macos/.local/
+apps/macos/.artifacts/terminal-render-profiles/
 
 .venv
 __pycache__

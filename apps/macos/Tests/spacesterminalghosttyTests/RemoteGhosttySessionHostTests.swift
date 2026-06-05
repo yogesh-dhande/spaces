@@ -166,8 +166,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T00:00:01Z", sessionStateRevision: 1,
                 sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "final-title", workingDirectory: "/tmp/final", renderFrame: try renderFrame(text: "done", sessionRevision: 1),
-                outputByteCount: nil), paths: paths)
+                title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: "done", sessionRevision: 1)), paths: paths)
 
         let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
         let probe = RuntimeNotificationProbe()
@@ -209,17 +209,17 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T00:00:01Z", sessionStateRevision: 1,
                 sessionStateFlags: 1, screenStateRevision: 1, runtimeState: staleExitedState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "stale-title", workingDirectory: "/tmp/stale", renderFrame: try renderFrame(text: "stale", sessionRevision: 1),
-                outputByteCount: nil), paths: paths)
+                title: "stale-title", workingDirectory: "/tmp/stale", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: "stale", sessionRevision: 1)), paths: paths)
 
-        let liveRenderFrame = try renderFrame(text: "live", sessionRevision: 2)
+        let liveRenderUpdate = try renderUpdate(text: "live", sessionRevision: 2)
         let server = GhosttyRemoteSessionStateStreamServer(
             socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-host.stale-final-live-test")
         ) {
             GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-04T00:00:02Z", sessionStateRevision: 2,
                 sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runningState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "live-title", workingDirectory: "/tmp/live", renderFrame: liveRenderFrame, outputByteCount: nil)
+                title: "live-title", workingDirectory: "/tmp/live", outputByteCount: nil, renderUpdate: liveRenderUpdate)
         }
         try server.start()
         defer { server.stop() }
@@ -228,6 +228,37 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         waitForCondition("live stream supersedes stale final state") { host.snapshotText() == "live" }
         XCTAssertEqual(host.effectiveTitle, "live-title")
+    }
+
+    @MainActor func testStateStreamClientReceivesRenderUpdatePayloads() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha"))
+        let initialPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "stream-render-update", reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-03T00:00:00Z",
+            sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "live",
+            workingDirectory: "/tmp/live", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+        let server = GhosttyRemoteSessionStateStreamServer(
+            socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-state-stream-render-update-only")
+        ) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        var receivedPayloads: [GhosttyRemoteSessionStatePayload] = []
+        let client = GhosttyRemoteSessionStateStreamClient(
+            socketPath: paths.subscriptionSocketPath, onEvent: { payload in receivedPayloads.append(payload) })
+        try client.start()
+        defer { client.stop() }
+
+        waitForCondition("render-update stream payload") { receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        let payload = try XCTUnwrap(receivedPayloads.first { $0.reason == TerminalRemoteSessionStateReason.initial })
+        XCTAssertNotNil(payload.renderUpdate)
+        let snapshot = try XCTUnwrap(payload.renderSnapshot)
+        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: snapshot), "alpha")
     }
 
     @MainActor func testRemoteHostPrefersRenderFrameSnapshotWhenAvailable() throws {
@@ -244,7 +275,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-live", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-18T00:00:00Z",
                 title: "live", workingDirectory: "/tmp/live", columns: 5, rows: 1), attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            title: "live", workingDirectory: "/tmp/live", renderFrame: try renderFrame(text: "alpha", sessionRevision: 1), outputByteCount: nil)
+            title: "live", workingDirectory: "/tmp/live", outputByteCount: nil, renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
         let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
         try server.start()
         defer { server.stop() }
@@ -265,8 +296,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "remote-live", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                     updatedAt: "2026-05-18T00:00:01Z", title: "live", workingDirectory: "/tmp/live", columns: 4, rows: 2),
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live",
-                renderFrame: try renderFrame(text: "beta\ngamm", sessionRevision: 2), outputByteCount: 9))
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live", outputByteCount: 9,
+                renderUpdate: try renderUpdate(text: "beta\ngamm", sessionRevision: 2)))
 
         waitForCondition("updated live snapshot") { host.snapshotText() == "beta\ngamm" }
         XCTAssertEqual(host.snapshot()?.rows, 2)
@@ -280,7 +311,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             GhosttyRemoteSessionStatePayload(
                 sessionID: "remote-live", reason: "attachment_state", emittedAt: "2026-05-18T00:00:02Z", sessionStateRevision: 2,
                 sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "live",
-                workingDirectory: "/tmp/live", renderFrame: nil, outputByteCount: nil))
+                workingDirectory: "/tmp/live", outputByteCount: nil))
 
         waitForCondition("owner update without snapshot") { host.activeOwnerClientID() == ownerClient.id }
         XCTAssertEqual(host.snapshotText(), "beta\ngamm")
@@ -306,8 +337,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-stale-size", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-22T00:00:00Z", title: "live", workingDirectory: "/tmp/live", columns: 12, rows: 2),
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live",
-            renderFrame: try renderFrame(text: "tiny", sessionRevision: 1), outputByteCount: nil)
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: "tiny", sessionRevision: 1))
         let server = GhosttyRemoteSessionStateStreamServer(
             socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-host.stale-size-test")
         ) { initialPayload }
@@ -386,8 +417,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-renderable", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-19T00:00:00Z", title: "renderable", workingDirectory: "/tmp/live", columns: 8, rows: 2),
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "renderable", workingDirectory: "/tmp/live",
-            renderFrame: try renderFrame(text: "alpha\nbeta ", sessionRevision: 1), outputByteCount: nil)
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "renderable", workingDirectory: "/tmp/live", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: "alpha\nbeta ", sessionRevision: 1))
         let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
         try server.start()
         defer { server.stop() }
@@ -428,8 +459,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-owner-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-06-02T00:00:00Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "owner", workingDirectory: "/tmp/live",
-            renderFrame: try renderFrame(text: "alpha", sessionRevision: 1), outputByteCount: nil)
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "owner", workingDirectory: "/tmp/live", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
         let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
         try server.start()
         defer { server.stop() }
@@ -463,8 +494,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "remote-owner-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                     updatedAt: "2026-06-02T00:00:01Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "owner", workingDirectory: "/tmp/live",
-                renderFrame: try renderFrame(text: "beta", sessionRevision: 2), outputByteCount: nil))
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "owner", workingDirectory: "/tmp/live", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: "beta", sessionRevision: 2)))
 
         waitForCondition("owner first responder restored") { window.firstResponder is GhosttyMirrorTerminalView }
     }
@@ -483,8 +514,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-attachment-state", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-20T00:00:00Z", title: "renderable", workingDirectory: "/tmp/live", columns: 8, rows: 2),
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "renderable", workingDirectory: "/tmp/live",
-            renderFrame: try renderFrame(text: "alpha\nbeta ", sessionRevision: 1), outputByteCount: nil)
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "renderable", workingDirectory: "/tmp/live", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: "alpha\nbeta ", sessionRevision: 1))
         let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
         try server.start()
         defer { server.stop() }
@@ -518,7 +549,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             GhosttyRemoteSessionStatePayload(
                 sessionID: "remote-attachment-state", reason: "attachment_state", emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 1,
                 sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "renderable",
-                workingDirectory: "/tmp/live", renderFrame: nil, outputByteCount: nil))
+                workingDirectory: "/tmp/live", outputByteCount: nil))
 
         waitForCondition("attachment state owner update") { host.activeOwnerClientID() == ownerClient.id }
         waitForCondition("viewer retains rendered text after attachment state") {
@@ -542,8 +573,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-snapshot-precedence", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-21T00:00:00Z", title: "renderable", workingDirectory: "/tmp/live", columns: 8, rows: 2),
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "renderable", workingDirectory: "/tmp/live", renderFrame: nil,
-            outputByteCount: nil)
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "renderable", workingDirectory: "/tmp/live", outputByteCount: nil)
         let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
         try server.start()
         defer { server.stop() }
@@ -572,8 +602,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "remote-snapshot-precedence", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                     updatedAt: "2026-05-21T00:00:01Z", title: "renderable", workingDirectory: "/tmp/live", columns: 8, rows: 2),
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "renderable", workingDirectory: "/tmp/live",
-                renderFrame: try renderFrame(text: "alpha\nbeta ", sessionRevision: 2), outputByteCount: 5))
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "renderable", workingDirectory: "/tmp/live", outputByteCount: 5,
+                renderUpdate: try renderUpdate(text: "alpha\nbeta ", sessionRevision: 2)))
 
         waitForCondition("viewer renders snapshot instead of output history") {
             self.normalize(self.visibleText(for: host)).contains("alpha") && self.normalize(self.visibleText(for: host)).contains("beta")
@@ -602,8 +632,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-handoff-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-29T00:00:00Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2),
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live", renderFrame: nil,
-            outputByteCount: nil)
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live", outputByteCount: nil)
         let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
         try server.start()
         defer { server.stop() }
@@ -636,8 +665,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "remote-handoff-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                     updatedAt: "2026-05-29T00:00:01Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2),
-                attachmentSnapshot: attachmentSnapshot, title: "live", workingDirectory: "/tmp/live",
-                renderFrame: try renderFrame(text: "alpha\nbeta ", sessionRevision: 2), outputByteCount: nil))
+                attachmentSnapshot: attachmentSnapshot, title: "live", workingDirectory: "/tmp/live", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: "alpha\nbeta ", sessionRevision: 2)))
 
         waitForCondition("owner handoff snapshot") {
             self.normalize(self.visibleText(for: host)).contains("alpha") && self.normalize(self.visibleText(for: host)).contains("beta")
@@ -667,8 +696,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             runtimeState: TerminalSessionRuntimeState(
                 sessionID: "remote-recreate-surface", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-30T00:00:00Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2),
-            attachmentSnapshot: attachmentSnapshot, title: "live", workingDirectory: "/tmp/live",
-            renderFrame: try renderFrame(text: "alpha\nbeta ", sessionRevision: 1), outputByteCount: nil)
+            attachmentSnapshot: attachmentSnapshot, title: "live", workingDirectory: "/tmp/live", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: "alpha\nbeta ", sessionRevision: 1))
         let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
         try server.start()
         defer { server.stop() }
@@ -699,8 +728,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "remote-recreate-surface", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                     updatedAt: "2026-05-30T00:00:01Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2),
-                attachmentSnapshot: attachmentSnapshot, title: "live", workingDirectory: "/tmp/live",
-                renderFrame: try renderFrame(text: "gamma\ndelta", sessionRevision: 2), outputByteCount: nil))
+                attachmentSnapshot: attachmentSnapshot, title: "live", workingDirectory: "/tmp/live", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: "gamma\ndelta", sessionRevision: 2)))
 
         waitForCondition("recreated native mirror") { host.hasRenderableSurface() && self.normalize(self.visibleText(for: host)).contains("gamma") }
         XCTAssertEqual(normalize(visibleText(for: host)), normalize("gamma\ndelta"))
@@ -806,8 +835,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             defaultBackgroundRGB: 0x000000, cells: cells)
     }
 
-    private func renderFrame(text: String, sessionRevision: UInt64? = nil, ownerEpoch: UInt64 = 0) throws -> Data {
-        try GhosttyRenderFrame.encode(.init(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text)))
+    private func renderUpdate(text: String, sessionRevision: UInt64? = nil, ownerEpoch: UInt64 = 0) throws -> Data {
+        let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
+        return try GhosttyRenderUpdateBinaryCodec.encode(.full(frame))
     }
 
     private func remoteStatePayload(sessionID: String, reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil)
@@ -815,7 +845,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     {
         GhosttyRemoteSessionStatePayload(
             sessionID: sessionID, reason: reason, emittedAt: "2026-06-03T00:00:00Z", sessionStateRevision: nil, sessionStateFlags: nil,
-            screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: "live", workingDirectory: "/tmp/live", renderFrame: nil,
+            screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: "live", workingDirectory: "/tmp/live",
             outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset)
     }
 
