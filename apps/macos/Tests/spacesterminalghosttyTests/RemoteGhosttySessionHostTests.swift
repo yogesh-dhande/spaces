@@ -104,6 +104,47 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(mirrorView.debugSearchState.query, "")
     }
 
+    @MainActor func testRemoteMirrorStartSearchWithNeedleSubmitsSeededQuery() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-search-selection", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-05T00:00:00Z")
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        mirrorView.debugBindingActionHandler = { _ in true }
+
+        mirrorView.applyActionEvent(.startSearch("selected-token"))
+
+        XCTAssertTrue(mirrorView.debugSearchState.isVisible)
+        XCTAssertEqual(mirrorView.debugSearchState.query, "selected-token")
+        XCTAssertNil(mirrorView.debugSearchState.total)
+        XCTAssertNil(mirrorView.debugSearchState.selected)
+        XCTAssertEqual(mirrorView.debugRecordedBindingActions, ["search:selected-token"])
+
+        mirrorView.applyActionEvent(.startSearch(nil))
+
+        XCTAssertEqual(mirrorView.debugSearchState.query, "selected-token")
+        XCTAssertEqual(mirrorView.debugRecordedBindingActions, ["search:selected-token"])
+    }
+
+    @MainActor func testRemoteMirrorReleaseSurfaceResetsSearchOverlay() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-search-release", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-05T00:00:00Z")
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+
+        mirrorView.applyActionEvent(.startSearch("needle"))
+        mirrorView.applyActionEvent(.searchTotal(2))
+        mirrorView.applyActionEvent(.searchSelected(0))
+        XCTAssertTrue(mirrorView.debugSearchState.isVisible)
+        XCTAssertEqual(mirrorView.debugSearchState.query, "needle")
+
+        mirrorView.releaseSurface()
+
+        XCTAssertFalse(mirrorView.debugSearchState.isVisible)
+        XCTAssertEqual(mirrorView.debugSearchState.query, "")
+        XCTAssertNil(mirrorView.debugSearchState.total)
+        XCTAssertNil(mirrorView.debugSearchState.selected)
+    }
+
     @MainActor func testRemoteMirrorInstallsMouseMoveTrackingArea() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-mouse-tracking", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
