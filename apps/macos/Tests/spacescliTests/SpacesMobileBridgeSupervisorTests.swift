@@ -461,6 +461,53 @@ import workspacecore
         }
     }
 
+    func testSubscribeDrainsQueuedFinalPayloadWhenEOFArrivesAfterEAGAIN() async throws {
+        try await withTemporaryProfile { _ in
+            let sessionID = "session-final-stream-delayed-eof-\(UUID().uuidString)"
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            let finalPayload = GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T12:46:31Z", sessionStateRevision: 2,
+                sessionStateFlags: 1, screenStateRevision: 2,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 200, state: .exited,
+                    updatedAt: "2026-06-04T12:46:31Z", exitedAt: "2026-06-04T12:46:31Z", title: "final-target", workingDirectory: "/tmp/work",
+                    columns: 5, rows: 1), attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "final-target",
+                workingDirectory: "/tmp/work", outputByteCount: nil,
+                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(
+                    .full(.init(sessionRevision: 2, ownerEpoch: 1, snapshot: Self.ghosttySnapshot(text: "FINAL")))))
+            let subscriptionServer = MobileBridgeTestSubscriptionServer(
+                socketPath: paths.subscriptionSocketPath, payload: finalPayload, closeAfterPayload: true, closeDelayAfterPayload: 0.1)
+            try subscriptionServer.start()
+            defer { subscriptionServer.stop() }
+
+            let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+            let clientApp = SpacesMobileClientApp(
+                installationID: "INSTALLATION-FINAL-STREAM-DELAYED-EOF", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let pairingStore = try SpacesMobilePairingStore()
+            let authToken = try pairingStore.issueToken(for: clientApp)
+            let server = SpacesMobileBridgeServer(
+                host: SpacesMobileBridgeDefaults.loopbackHost, port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore,
+                networkEnvironment: [
+                    "SPACES_MOBILE_BRIDGE_NETWORK_PROFILE": "test-delayed", "SPACES_MOBILE_BRIDGE_NETWORK_RTT_MS": "1000",
+                    "SPACES_MOBILE_BRIDGE_NETWORK_BANDWIDTH_BPS": "0", "SPACES_MOBILE_BRIDGE_NETWORK_CHUNK_BYTES": "0",
+                ])
+            try server.start()
+            defer { server.stop() }
+
+            let connection = try startSubscribeConnection(
+                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort, transportKey: transportKey)
+            defer { connection.cancel() }
+
+            let receivedPayload = try readStreamPayload(connection, timeout: 5)
+
+            XCTAssertEqual(receivedPayload.reason, TerminalRemoteSessionStateReason.terminated)
+            XCTAssertEqual(receivedPayload.renderText, "FINAL")
+            XCTAssertTrue(waitForConnectionClosure(connection, timeout: 5))
+        }
+    }
+
     func testSubscribeToEndedSessionWithoutLiveSocketDeliversPersistedFinalPayload() async throws {
         try await withTemporaryProfile { _ in
             let sessionID = "session-ended-subscribe-\(UUID().uuidString)"
@@ -1073,16 +1120,21 @@ private final class MobileBridgeTestSubscriptionServer: @unchecked Sendable {
     private let socketPath: String
     private let payload: GhosttyRemoteSessionStatePayload?
     private let closeAfterPayload: Bool
+    private let closeDelayAfterPayload: TimeInterval
     private let queue = DispatchQueue(label: "spaces.mobile.bridge.supervisor.subscription.test")
     private let accepted = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var listenSocketFD: Int32 = -1
     private var clientSocketFD: Int32 = -1
 
-    init(socketPath: String, payload: GhosttyRemoteSessionStatePayload? = nil, closeAfterPayload: Bool = false) {
+    init(
+        socketPath: String, payload: GhosttyRemoteSessionStatePayload? = nil, closeAfterPayload: Bool = false,
+        closeDelayAfterPayload: TimeInterval = 0
+    ) {
         self.socketPath = socketPath
         self.payload = payload
         self.closeAfterPayload = closeAfterPayload
+        self.closeDelayAfterPayload = closeDelayAfterPayload
     }
 
     func start() throws {
@@ -1139,12 +1191,20 @@ private final class MobileBridgeTestSubscriptionServer: @unchecked Sendable {
         accepted.signal()
         writePayloadIfNeeded(to: clientFD)
         if closeAfterPayload {
-            shutdown(clientFD, SHUT_RDWR)
-            close(clientFD)
-            lock.lock()
-            if clientSocketFD == clientFD { clientSocketFD = -1 }
-            lock.unlock()
+            if closeDelayAfterPayload > 0 {
+                queue.asyncAfter(deadline: .now() + closeDelayAfterPayload) { [weak self] in self?.closeClientSocket(clientFD) }
+            } else {
+                closeClientSocket(clientFD)
+            }
         }
+    }
+
+    private func closeClientSocket(_ clientFD: Int32) {
+        shutdown(clientFD, SHUT_RDWR)
+        close(clientFD)
+        lock.lock()
+        if clientSocketFD == clientFD { clientSocketFD = -1 }
+        lock.unlock()
     }
 
     private func currentListenSocket() -> Int32 {

@@ -336,7 +336,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
 
     init(
         host: String, port: Int, transportKey: String, pairingCoordinator: SpacesMobilePairingCoordinator = SpacesMobilePairingCoordinator(),
-        pairingStoreProtocol: any SpacesMobilePairingStoreProtocol, onPairingSucceeded: (@Sendable (SpacesMobileClientApp) -> Void)? = nil
+        pairingStoreProtocol: any SpacesMobilePairingStoreProtocol, onPairingSucceeded: (@Sendable (SpacesMobileClientApp) -> Void)? = nil,
+        networkEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.host = host
         self.port = port
@@ -344,7 +345,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         self.pairingCoordinator = pairingCoordinator
         self.pairingStore = pairingStoreProtocol
         self.onPairingSucceeded = onPairingSucceeded
-        networkShaper = NetworkShaper()
+        networkShaper = NetworkShaper(environment: networkEnvironment)
         queue = DispatchQueue(label: "spaces.mobile.bridge")
         queue.setSpecific(key: queueKey, value: ())
     }
@@ -771,7 +772,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                 } else {
                     queue.async { [weak self, weak connection] in
                         guard let self, let connection else { return }
-                        self.closeStreamRelayUnlessFinalSendPending(connection: connection)
+                        self.closeStreamRelayAfterQueuedSendsDrain(connection: connection)
                     }
                 }
                 return
@@ -798,19 +799,20 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     {
         queue.async { [weak self, weak connection, data, firstReadUptimeNanoseconds, closeAfterSend] in
             guard let self, let connection else { return }
-            if closeAfterSend, !self.prepareStreamRelayForFinalSend(connection: connection) { return }
+            if closeAfterSend, self.prepareStreamRelayForFinalSend(connection: connection) == nil { return }
             self.sendRelayedStateData(data, firstReadUptimeNanoseconds: firstReadUptimeNanoseconds, to: connection, closeAfterSend: closeAfterSend)
         }
     }
 
-    private func prepareStreamRelayForFinalSend(connection: NWConnection) -> Bool {
+    private func prepareStreamRelayForFinalSend(connection: NWConnection) -> (relay: StreamRelay, didStartClosing: Bool)? {
         let key = ObjectIdentifier(connection)
-        guard let relay = streamRelays[key] else { return false }
-        guard streamRelaysClosingAfterFinalSend.insert(key).inserted else { return true }
+        guard let relay = streamRelays[key] else { return nil }
+        let didStartClosing = streamRelaysClosingAfterFinalSend.insert(key).inserted
+        guard didStartClosing else { return (relay, false) }
         relay.heartbeatTimer?.cancel()
         relay.relaySource.cancel()
         shutdown(relay.relaySocketFD, SHUT_RDWR)
-        return true
+        return (relay, true)
     }
 
     private func sendRelayedStateData(_ data: Data, firstReadUptimeNanoseconds: UInt64?, to connection: NWConnection, closeAfterSend: Bool = false) {
@@ -889,6 +891,15 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private func closeStreamRelayUnlessFinalSendPending(connection: NWConnection) {
         guard !streamRelaysClosingAfterFinalSend.contains(ObjectIdentifier(connection)) else { return }
         closeStreamRelay(connection: connection)
+    }
+
+    private func closeStreamRelayAfterQueuedSendsDrain(connection: NWConnection) {
+        guard let prepared = prepareStreamRelayForFinalSend(connection: connection), prepared.didStartClosing else { return }
+        prepared.relay.sendSequencer.enqueue { [weak self, weak connection] finish in
+            defer { finish(nil) }
+            guard let self, let connection else { return }
+            self.closeStreamRelay(connection: connection)
+        }
     }
 
     private func closeRequestConnection(connection: NWConnection) {
