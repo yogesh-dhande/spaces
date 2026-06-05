@@ -25,26 +25,46 @@ struct SpacesMobileOverviewBuilder {
         }
     }
 
+    struct WorkspaceTerminalRow: Sendable {
+        let entry: TerminalSessionCatalogEntry
+        let workspace: WorkspaceDescriptor
+        let title: String
+        let rowKind: SpacesMobileTerminalSessionRowKind
+        let rowSourceID: String
+        let hasFinalRender: Bool
+    }
+
     static func build(projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry])
         -> SpacesMobileOverviewPayload
-    {
-        let matchedWorkspaceBySessionID = Dictionary(
-            uniqueKeysWithValues: sessions.map { session in
+    { build(projects: projects, workspaces: workspaces, workspaceRows: [], liveSessions: sessions) }
+
+    static func build(
+        projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], workspaceRows: [WorkspaceTerminalRow],
+        liveSessions: [TerminalSessionCatalogEntry]
+    ) -> SpacesMobileOverviewPayload {
+        let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
+        let matchedWorkspaceByLiveSessionID = Dictionary(
+            uniqueKeysWithValues: liveSessions.map { session in
                 (session.sessionID, matchedWorkspace(for: session.effectiveWorkingDirectory, workspaces: workspaces))
             })
+        let adHocLiveSessions = liveSessions.filter { session in !representedSessionIDs.contains(session.sessionID) }
+        let matchedWorkspaceBySessionID = Dictionary(
+            uniqueKeysWithValues: adHocLiveSessions.map { session in (session.sessionID, matchedWorkspaceByLiveSessionID[session.sessionID] ?? nil) })
 
         let sessionsByWorkspaceID = Dictionary(
-            grouping: matchedWorkspaceBySessionID.compactMap { sessionID, descriptor in descriptor.map { ($0.workspace.id, sessionID) } }, by: \.0)
-        let liveSessionIDs = Set(sessions.map(\.sessionID))
-        let sessionsByID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.sessionID, $0) })
+            grouping: workspaceRows.map { ($0.workspace.workspace.id, $0.entry.sessionID) }
+                + matchedWorkspaceBySessionID.compactMap { sessionID, descriptor in descriptor.map { ($0.workspace.id, sessionID) } }, by: \.0)
 
+        let sessionEntriesByID = Dictionary(
+            (liveSessions + workspaceRows.map(\.entry)).map { ($0.sessionID, $0) }, uniquingKeysWith: { liveSession, _ in liveSession })
+        let availableSessionIDs = Set(sessionEntriesByID.keys)
         let projectSummaries = projectSummaries(from: projects.isEmpty ? workspaces.map(\.project) : projects)
 
         let workspaceSummaries = workspaces.sorted { lhs, rhs in
             if lhs.project.name != rhs.project.name { return lhs.project.name.localizedStandardCompare(rhs.project.name) == .orderedAscending }
             return lhs.workspace.title.localizedStandardCompare(rhs.workspace.title) == .orderedAscending
         }.map { descriptor in
-            let runtimeRows = workspaceRows(for: descriptor, liveSessionIDs: liveSessionIDs, sessionsByID: sessionsByID)
+            let runtimeRows = runtimeRows(for: descriptor, availableSessionIDs: availableSessionIDs, sessionsByID: sessionEntriesByID)
             return SpacesMobileWorkspaceSummary(
                 id: descriptor.workspace.id, projectID: descriptor.project.id, projectName: descriptor.project.name,
                 title: descriptor.workspace.title, branch: descriptor.workspace.branch, targetBranch: descriptor.workspace.targetBranch,
@@ -54,25 +74,34 @@ struct SpacesMobileOverviewBuilder {
                 codingAgentRows: runtimeRows.agents, terminalRows: runtimeRows.terminals)
         }
 
-        let sessionSummaries = sessions.sorted { lhs, rhs in
+        let workspaceSessionSummaries = workspaceRows.sorted { lhs, rhs in
+            if lhs.workspace.project.name != rhs.workspace.project.name {
+                return lhs.workspace.project.name.localizedStandardCompare(rhs.workspace.project.name) == .orderedAscending
+            }
+            if lhs.workspace.workspace.title != rhs.workspace.workspace.title {
+                return lhs.workspace.workspace.title.localizedStandardCompare(rhs.workspace.workspace.title) == .orderedAscending
+            }
+            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }.map { row in
+            summary(
+                for: row.entry, matchedWorkspace: row.workspace, title: row.title, rowKind: row.rowKind, rowSourceID: row.rowSourceID,
+                hasFinalRender: row.hasFinalRender)
+        }
+
+        let adHocSessionSummaries = adHocLiveSessions.sorted { lhs, rhs in
             if lhs.effectiveWorkingDirectory != rhs.effectiveWorkingDirectory {
                 return lhs.effectiveWorkingDirectory.localizedStandardCompare(rhs.effectiveWorkingDirectory) == .orderedAscending
             }
             return lhs.effectiveTitle.localizedStandardCompare(rhs.effectiveTitle) == .orderedAscending
         }.map { session in
             let matchedWorkspace = matchedWorkspaceBySessionID[session.sessionID] ?? nil
-            return SpacesMobileTerminalSessionSummary(
-                id: session.sessionID, title: session.effectiveTitle, workingDirectory: session.effectiveWorkingDirectory,
-                state: session.runtimeState.state, backend: session.launchConfiguration.backend,
-                lifetimePolicy: session.launchConfiguration.lifetimePolicy, servicePID: session.runtimeState.servicePID,
-                childPID: session.runtimeState.childPID, workspaceID: matchedWorkspace?.workspace.id,
-                workspaceTitle: matchedWorkspace?.workspace.title, projectID: matchedWorkspace?.project.id,
-                projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt,
-                updatedAt: session.runtimeState.updatedAt, isControlAvailable: session.isControlAvailable,
-                isSubscriptionAvailable: session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot)
+            return summary(
+                for: session, matchedWorkspace: matchedWorkspace, title: session.effectiveTitle, rowKind: .liveSession, rowSourceID: nil,
+                hasFinalRender: false)
         }
 
-        return SpacesMobileOverviewPayload(projects: projectSummaries, workspaces: workspaceSummaries, sessions: sessionSummaries)
+        return SpacesMobileOverviewPayload(
+            projects: projectSummaries, workspaces: workspaceSummaries, sessions: workspaceSessionSummaries + adHocSessionSummaries)
     }
 
     static func matchedWorkspace(for workingDirectory: String, workspaces: [WorkspaceDescriptor]) -> WorkspaceDescriptor? {
@@ -81,6 +110,22 @@ struct SpacesMobileOverviewBuilder {
             let workspaceDirectory = normalizedPath(descriptor.workspace.dir)
             return normalizedWorkingDirectory == workspaceDirectory || normalizedWorkingDirectory.hasPrefix(workspaceDirectory + "/")
         }.max { lhs, rhs in normalizedPath(lhs.workspace.dir).count < normalizedPath(rhs.workspace.dir).count }
+    }
+
+    private static func summary(
+        for session: TerminalSessionCatalogEntry, matchedWorkspace: WorkspaceDescriptor?, title: String, rowKind: SpacesMobileTerminalSessionRowKind,
+        rowSourceID: String?, hasFinalRender: Bool
+    ) -> SpacesMobileTerminalSessionSummary {
+        let isInteractive = session.runtimeState.state.isInteractive
+        return SpacesMobileTerminalSessionSummary(
+            id: session.sessionID, title: title, workingDirectory: session.effectiveWorkingDirectory, state: session.runtimeState.state,
+            backend: session.launchConfiguration.backend, lifetimePolicy: session.launchConfiguration.lifetimePolicy,
+            servicePID: session.runtimeState.servicePID, childPID: session.runtimeState.childPID, workspaceID: matchedWorkspace?.workspace.id,
+            workspaceTitle: matchedWorkspace?.workspace.title, projectID: matchedWorkspace?.project.id, projectName: matchedWorkspace?.project.name,
+            createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
+            isControlAvailable: isInteractive && session.isControlAvailable,
+            isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
+            rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender)
     }
 
     private static func normalizedPath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
@@ -112,18 +157,17 @@ struct SpacesMobileOverviewBuilder {
         let claimedTerminalKeys: Set<String>
     }
 
-    private static func workspaceRows(
-        for descriptor: WorkspaceDescriptor, liveSessionIDs: Set<String>, sessionsByID: [String: TerminalSessionCatalogEntry]
+    private static func runtimeRows(
+        for descriptor: WorkspaceDescriptor, availableSessionIDs: Set<String>, sessionsByID: [String: TerminalSessionCatalogEntry]
     ) -> WorkspaceRows {
-        let processRows = processRows(for: descriptor, liveSessionIDs: liveSessionIDs)
-        let agentRows = codingAgentRows(for: descriptor, liveSessionIDs: liveSessionIDs)
+        let processRows = processRows(for: descriptor, availableSessionIDs: availableSessionIDs)
+        let agentRows = codingAgentRows(for: descriptor, sessionsByID: sessionsByID)
         let claimedTerminalKeys = processRows.claimedTerminalKeys.union(agentRows.claimedTerminalKeys)
-        let terminalRows = workspaceTerminalRows(
-            for: descriptor, liveSessionIDs: liveSessionIDs, sessionsByID: sessionsByID, claimedTerminalKeys: claimedTerminalKeys)
+        let terminalRows = workspaceTerminalRows(for: descriptor, sessionsByID: sessionsByID, claimedTerminalKeys: claimedTerminalKeys)
         return WorkspaceRows(processes: processRows.rows, agents: agentRows.rows, terminals: terminalRows)
     }
 
-    private static func processRows(for descriptor: WorkspaceDescriptor, liveSessionIDs: Set<String>) -> ProcessRows {
+    private static func processRows(for descriptor: WorkspaceDescriptor, availableSessionIDs: Set<String>) -> ProcessRows {
         var usedProcessIDs = Set<String>()
         var claimedTerminalKeys = Set<String>()
         var rows: [SpacesMobileWorkspaceProcessRow] = []
@@ -144,12 +188,12 @@ struct SpacesMobileOverviewBuilder {
             }
             let state = processRunState(runningProcess)
             let rawSessionID = terminalSessionID(for: runningProcess)
-            let liveSessionID = rawSessionID.flatMap { liveSessionIDs.contains($0) ? $0 : nil }
+            let availableSessionID = rawSessionID.flatMap { availableSessionIDs.contains($0) ? $0 : nil }
             let isRunning = state == .running
             rows.append(
                 SpacesMobileWorkspaceProcessRow(
                     id: template.id, workspaceID: descriptor.workspace.id, name: template.name ?? "", command: template.command,
-                    templateID: template.id, processID: runningProcess?.id, sessionID: liveSessionID, runState: state, canRun: !isRunning,
+                    templateID: template.id, processID: runningProcess?.id, sessionID: availableSessionID, runState: state, canRun: !isRunning,
                     canStop: isRunning, canRestart: isRunning))
         }
 
@@ -157,19 +201,19 @@ struct SpacesMobileOverviewBuilder {
             if let claimedKey = terminalTrackingKey(runningProcess) { claimedTerminalKeys.insert(claimedKey) }
             let state = processRunState(runningProcess)
             let rawSessionID = terminalSessionID(for: runningProcess)
-            let liveSessionID = rawSessionID.flatMap { liveSessionIDs.contains($0) ? $0 : nil }
+            let availableSessionID = rawSessionID.flatMap { availableSessionIDs.contains($0) ? $0 : nil }
             let isRunning = state == .running
             let name = runningProcess.templateName.trimmingCharacters(in: .whitespacesAndNewlines)
             rows.append(
                 SpacesMobileWorkspaceProcessRow(
                     id: "process-runtime:\(runningProcess.id)", workspaceID: descriptor.workspace.id, name: name.isEmpty ? "Process" : name,
-                    command: runningProcess.command, templateID: runningProcess.templateID, processID: runningProcess.id, sessionID: liveSessionID,
-                    runState: state, canRun: false, canStop: isRunning, canRestart: false))
+                    command: runningProcess.command, templateID: runningProcess.templateID, processID: runningProcess.id,
+                    sessionID: availableSessionID, runState: state, canRun: false, canStop: isRunning, canRestart: false))
         }
         return ProcessRows(rows: rows, claimedTerminalKeys: claimedTerminalKeys)
     }
 
-    private static func codingAgentRows(for descriptor: WorkspaceDescriptor, liveSessionIDs: Set<String>) -> CodingAgentRows {
+    private static func codingAgentRows(for descriptor: WorkspaceDescriptor, sessionsByID: [String: TerminalSessionCatalogEntry]) -> CodingAgentRows {
         var usedAgentIDs = Set<String>()
         var claimedTerminalKeys = Set<String>()
         var rows: [SpacesMobileWorkspaceCodingAgentRow] = []
@@ -198,7 +242,7 @@ struct SpacesMobileOverviewBuilder {
             rows.append(
                 codingAgentRow(
                     id: "configured-agent:\(descriptor.workspace.id):\(launcher.id)", workspaceID: descriptor.workspace.id, name: launcher.name,
-                    command: launcher.command, launcherID: launcher.id, agent: agent, isConfigured: true, liveSessionIDs: liveSessionIDs))
+                    command: launcher.command, launcherID: launcher.id, agent: agent, isConfigured: true, sessionsByID: sessionsByID))
         }
 
         for agent in descriptor.agentWindows where !usedAgentIDs.contains(agent.id) {
@@ -207,46 +251,45 @@ struct SpacesMobileOverviewBuilder {
                 codingAgentRow(
                     id: "agent:\(agent.id)", workspaceID: descriptor.workspace.id, name: agent.label ?? agent.claimedLauncherName ?? "Coding Agent",
                     command: terminalDetail(for: agent, windows: descriptor.windows) ?? "", launcherID: agent.claimedLauncherID, agent: agent,
-                    isConfigured: false, liveSessionIDs: liveSessionIDs))
+                    isConfigured: false, sessionsByID: sessionsByID))
         }
         return CodingAgentRows(rows: rows, claimedTerminalKeys: claimedTerminalKeys)
     }
 
     private static func codingAgentRow(
         id: String, workspaceID: String, name: String, command: String, launcherID: String?, agent: AgentWindowRecord?, isConfigured: Bool,
-        liveSessionIDs: Set<String>
+        sessionsByID: [String: TerminalSessionCatalogEntry]
     ) -> SpacesMobileWorkspaceCodingAgentRow {
         let rawSessionID = terminalSessionID(for: agent)
-        let liveSessionID = rawSessionID.flatMap { liveSessionIDs.contains($0) ? $0 : nil }
-        let runState = agentRunState(agent: agent, liveSessionID: liveSessionID)
+        let session = rawSessionID.flatMap { sessionsByID[$0] }
+        let runState = agentRunState(agent: agent, session: session)
         let canRun = isConfigured && runState != .running
         let canStop = agent != nil
         let hasClaimedLauncherID = agent?.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         let hasClaimedLauncherName = agent?.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         let canRestart = agent != nil && (isConfigured || hasClaimedLauncherID || hasClaimedLauncherName)
         return SpacesMobileWorkspaceCodingAgentRow(
-            id: id, workspaceID: workspaceID, name: name, command: command, launcherID: launcherID, agentID: agent?.id, sessionID: liveSessionID,
+            id: id, workspaceID: workspaceID, name: name, command: command, launcherID: launcherID, agentID: agent?.id, sessionID: session?.sessionID,
             isConfigured: isConfigured, runState: runState, activityState: activityState(for: agent), canRun: canRun, canStop: canStop,
             canRestart: canRestart)
     }
 
     private static func workspaceTerminalRows(
-        for descriptor: WorkspaceDescriptor, liveSessionIDs: Set<String>, sessionsByID: [String: TerminalSessionCatalogEntry],
-        claimedTerminalKeys: Set<String>
+        for descriptor: WorkspaceDescriptor, sessionsByID: [String: TerminalSessionCatalogEntry], claimedTerminalKeys: Set<String>
     ) -> [SpacesMobileWorkspaceTerminalRow] {
         var rows: [SpacesMobileWorkspaceTerminalRow] = []
         var includedSessionIDs = Set<String>()
         for window in descriptor.windows where window.role == "terminal" {
             if let key = terminalTrackingKey(window), claimedTerminalKeys.contains(key) { continue }
             let rawSessionID = terminalSessionID(for: window)
-            let liveSessionID = rawSessionID.flatMap { liveSessionIDs.contains($0) ? $0 : nil }
+            let session = rawSessionID.flatMap { sessionsByID[$0] }
             if let rawSessionID { includedSessionIDs.insert(rawSessionID) }
-            let runState: SpacesMobileRunState = liveSessionID != nil ? .running : (rawSessionID == nil ? .running : .exited)
+            let runState = session.map(runState(for:)) ?? (rawSessionID == nil ? .running : .exited)
             rows.append(
                 SpacesMobileWorkspaceTerminalRow(
                     id: "terminal-window:\(window.id)", workspaceID: descriptor.workspace.id,
-                    title: window.name ?? sessionsByID[liveSessionID ?? ""]?.effectiveTitle ?? "Workspace Terminal",
-                    workingDirectory: descriptor.workspace.dir, sessionID: liveSessionID, runState: runState, canOpenTerminal: liveSessionID != nil))
+                    title: window.name ?? session?.effectiveTitle ?? "Workspace Terminal", workingDirectory: descriptor.workspace.dir,
+                    sessionID: session?.sessionID, runState: runState, canOpenTerminal: session != nil))
         }
 
         for (sessionID, session) in sessionsByID where !includedSessionIDs.contains(sessionID) {
@@ -258,7 +301,8 @@ struct SpacesMobileOverviewBuilder {
             rows.append(
                 SpacesMobileWorkspaceTerminalRow(
                     id: "terminal-session:\(sessionID)", workspaceID: descriptor.workspace.id, title: session.effectiveTitle,
-                    workingDirectory: session.effectiveWorkingDirectory, sessionID: sessionID, runState: .running, canOpenTerminal: true))
+                    workingDirectory: session.effectiveWorkingDirectory, sessionID: sessionID, runState: runState(for: session), canOpenTerminal: true
+                ))
         }
 
         return rows.sorted { lhs, rhs in lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending }
@@ -269,9 +313,14 @@ struct SpacesMobileOverviewBuilder {
         return process.status == .exited ? .exited : .running
     }
 
-    private static func agentRunState(agent: AgentWindowRecord?, liveSessionID: String?) -> SpacesMobileRunState {
+    private static func agentRunState(agent: AgentWindowRecord?, session: TerminalSessionCatalogEntry?) -> SpacesMobileRunState {
         guard agent != nil else { return .notStarted }
-        return liveSessionID == nil ? .exited : .running
+        guard let session else { return .exited }
+        return runState(for: session)
+    }
+
+    private static func runState(for session: TerminalSessionCatalogEntry) -> SpacesMobileRunState {
+        session.runtimeState.state.isInteractive ? .running : .exited
     }
 
     private static func activityState(for agent: AgentWindowRecord?) -> SpacesMobileCodingAgentActivityState {

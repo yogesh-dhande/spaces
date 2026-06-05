@@ -87,6 +87,7 @@ private enum TerminalViewerRenderMode: String {
     private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
     private var reportedOwnerReadyEpochID: String?
     private var reportedOwnerNonblankEpochID: String?
+    private var hasRetriedEndedStateAfterStreamClose = false
     @ObservationIgnored private lazy var scrollCoalescer = TerminalScrollCoalescer(frameInterval: Self.scrollCoalescingInterval) { [weak self] batch, finish in
         guard let self else {
             finish()
@@ -98,6 +99,7 @@ private enum TerminalViewerRenderMode: String {
     private static let inputBatchDelay: Duration = .milliseconds(35)
     private static let scrollCoalescingInterval: Duration = .milliseconds(16)
     private static let inputRequestTimeout: Duration = .seconds(6)
+    private static let stateRequestTimeout: Duration = .seconds(12)
     private static let ownerRecoveryGraceInterval: TimeInterval = 2
     private static let silentReconnectDelay: Duration = .milliseconds(150)
     private static let viewportSyncWaitStep: Duration = .milliseconds(50)
@@ -167,13 +169,14 @@ private enum TerminalViewerRenderMode: String {
         return "Live terminal rendering is limited to the active owner.\nCurrent owner: \(ownerLabel)"
     }
     var attachmentSnapshot: TerminalSessionAttachmentSnapshot { latestState?.attachmentSnapshot ?? session.attachmentSnapshot }
-    var isOwner: Bool { activeOwnerClientID == remoteClient.id }
+    var isOwner: Bool { !isEndedState && activeOwnerClientID == remoteClient.id }
     var isOwnershipSynchronizationPending: Bool { isOwnershipSynchronizationScheduled || isSynchronizingOwnership }
     var isTakingOver: Bool { !isOwner && (isAwaitingTakeoverConfirmation || isBusy || isOwnershipSynchronizationPending) }
-    var acceptsInput: Bool { isOwner && !isBusy && !isConnecting && !isOwnershipSynchronizationPending && !isSessionUnavailable }
-    var keepsTerminalInputSurfaceActive: Bool { isOwner && !isConnecting && !isSessionUnavailable }
+    var acceptsInput: Bool { !isEndedState && isOwner && !isBusy && !isConnecting && !isOwnershipSynchronizationPending && !isSessionUnavailable }
+    var keepsTerminalInputSurfaceActive: Bool { !isEndedState && isOwner && !isConnecting && !isSessionUnavailable }
+    var showsTakeOverAction: Bool { !isEndedState && !isSessionUnavailable && !isOwner && !isTakingOver && !isConnecting }
     var isPreparingInput: Bool {
-        guard isOwner && !isSessionUnavailable else { return false }
+        guard !isEndedState, isOwner && !isSessionUnavailable else { return false }
         guard ownerRenderEpochState != nil, isInputSurfaceReady else { return true }
         return isBusy || isConnecting
     }
@@ -191,28 +194,38 @@ private enum TerminalViewerRenderMode: String {
         isStopping = false
         isSessionUnavailable = false
         hasAttemptedAutomaticTakeover = false
+        hasRetriedEndedStateAfterStreamClose = false
         trace("start")
+        if isEndedState {
+            reconnectTask = Task { [weak self] in
+                await self?.loadEndedState()
+            }
+            return
+        }
         scheduleReconnect(after: .zero)
     }
 
     func stop() {
-        guard let currentChannel = beginStop() else { return }
+        guard let stopContext = beginStop() else { return }
         trace("stop")
         Task {
-            await detachForStop(using: currentChannel, timeout: Self.dismissalDetachTimeout)
+            await detachForStop(
+                using: stopContext.channel, shouldDetach: stopContext.shouldDetach, timeout: Self.dismissalDetachTimeout)
         }
     }
 
     func prepareForBackNavigation() async {
-        guard let currentChannel = beginStop() else { return }
+        guard let stopContext = beginStop() else { return }
         trace("back_detach_begin")
-        await detachForStop(using: currentChannel, timeout: Self.dismissalDetachTimeout)
+        await detachForStop(
+            using: stopContext.channel, shouldDetach: stopContext.shouldDetach, timeout: Self.dismissalDetachTimeout)
         trace("back_detach_end")
     }
 
-    private func beginStop() -> SpacesMobileBridgeCommandChannel? {
+    private func beginStop() -> (channel: SpacesMobileBridgeCommandChannel, shouldDetach: Bool)? {
         guard !hasSentStopDetach else { return nil }
         hasSentStopDetach = true
+        let shouldDetach = hasAttachedToSession && !isEndedState
         isStopping = true
         isAwaitingTakeoverConfirmation = false
         hasAttachedToSession = false
@@ -237,25 +250,38 @@ private enum TerminalViewerRenderMode: String {
         ownerRecoveryGraceDeadline = nil
         reportedOwnerReadyEpochID = nil
         reportedOwnerNonblankEpochID = nil
+        hasRetriedEndedStateAfterStreamClose = false
         isOwnershipSynchronizationScheduled = false
         isSynchronizingOwnership = false
         streamHandle?.cancel()
         streamHandle = nil
-        return commandChannel
+        return (commandChannel, shouldDetach)
     }
 
-    private func detachForStop(using currentChannel: SpacesMobileBridgeCommandChannel, timeout: Duration) async {
-        do {
-            try await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id, timeout: timeout, commandChannel: currentChannel)
-            trace("detach_success")
-        } catch {
-            trace("detach_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
+    private func detachForStop(using currentChannel: SpacesMobileBridgeCommandChannel, shouldDetach: Bool, timeout: Duration) async {
+        if shouldDetach {
+            do {
+                try await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id, timeout: timeout, commandChannel: currentChannel)
+                trace("detach_success")
+            } catch {
+                trace("detach_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
+            }
         }
         await currentChannel.close()
     }
 
+    private func loadEndedState() async {
+        isConnecting = true
+        defer {
+            isConnecting = false
+            reconnectTask = nil
+        }
+        trace("ended_state_load")
+        _ = await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: false, reason: "ended_initial")
+    }
+
     private var renderModeValue: TerminalViewerRenderMode {
-        if shouldRenderEndedTerminalSurface { return .ended }
+        if isEndedState { return .ended }
         if isOwner {
             return hasConfirmedOwnerInputReadiness && ownerRenderEpochState != nil ? .ownerLive : .ownerBootstrapping
         }
@@ -263,6 +289,7 @@ private enum TerminalViewerRenderMode: String {
     }
 
     func takeOver() async {
+        guard !isEndedState else { return }
         guard !isBusy else { return }
         hasAttemptedAutomaticTakeover = true
         isBusy = true
@@ -299,6 +326,7 @@ private enum TerminalViewerRenderMode: String {
     }
 
     func updateViewportSize(columns: Int, rows: Int) {
+        guard !isEndedState else { return }
         let resolved = (columns: max(columns, 1), rows: max(rows, 1))
         guard viewportSize?.columns != resolved.columns || viewportSize?.rows != resolved.rows else { return }
         viewportSize = resolved
@@ -552,6 +580,7 @@ private enum TerminalViewerRenderMode: String {
 
     private func scheduleReconnect(after delay: Duration) {
         guard !isStopping else { return }
+        guard !isEndedState else { return }
         trace("schedule_reconnect delay_ms=\(Self.traceDurationMilliseconds(delay)) silent=\(shouldReconnectSilently ? 1 : 0)")
         reconnectTask?.cancel()
         reconnectTask = Task { [weak self] in
@@ -566,6 +595,10 @@ private enum TerminalViewerRenderMode: String {
     private func connect() async {
         guard !isStopping else {
             reconnectTask = nil
+            return
+        }
+        if isEndedState {
+            await loadEndedState()
             return
         }
 
@@ -599,7 +632,7 @@ private enum TerminalViewerRenderMode: String {
             reconnectTask = nil
             trace("connect_subscribe_success")
             if !isOwner {
-                let refreshedState = await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap")
+                let refreshedState = await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap")
                 if refreshedState == nil, !isOwner, !isStopping {
                     isConnecting = false
                 }
@@ -608,7 +641,7 @@ private enum TerminalViewerRenderMode: String {
             reconnectTask = nil
             isConnecting = false
             trace("connect_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
-            handleConnectError(error)
+            await handleConnectError(error)
         }
     }
 
@@ -687,8 +720,22 @@ private enum TerminalViewerRenderMode: String {
             isInputSurfaceReady = false
         }
         if isStopping { return }
+        if isEndedState {
+            isBusy = false
+            isConnecting = false
+            isAwaitingTakeoverConfirmation = false
+            errorMessage = nil
+            if latestState?.renderSnapshot == nil, !hasRetriedEndedStateAfterStreamClose {
+                hasRetriedEndedStateAfterStreamClose = true
+                await loadEndedState()
+            }
+            return
+        }
         if let error {
             if handleAuthenticationFailure(error) { return }
+            if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "disconnect_missing_live_stream") {
+                return
+            }
             if let unavailableMessage = unavailableMessage(for: error) {
                 isSessionUnavailable = true
                 errorMessage = unavailableMessage
@@ -703,9 +750,12 @@ private enum TerminalViewerRenderMode: String {
         scheduleReconnect(after: reconnectSilently ? Self.silentReconnectDelay : .seconds(1))
     }
 
-    private func handleConnectError(_ error: Error) {
+    private func handleConnectError(_ error: Error) async {
         trace("connect_error error=\(sanitizedTraceDetail(error.localizedDescription)) silent=\(shouldReconnectSilently ? 1 : 0)")
         if handleAuthenticationFailure(error) { return }
+        if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "connect_missing_live_stream") {
+            return
+        }
         if let unavailableMessage = unavailableMessage(for: error) {
             isSessionUnavailable = true
             errorMessage = unavailableMessage
@@ -719,8 +769,30 @@ private enum TerminalViewerRenderMode: String {
         scheduleReconnect(after: shouldReconnectSilently ? Self.silentReconnectDelay : .seconds(1))
     }
 
+    private func recoverEndedStateIfLiveStreamIsMissing(_ error: Error, reason: String) async -> Bool {
+        guard Self.isMissingLiveStateStreamError(error), !isStopping else { return false }
+        trace("missing_live_stream_state_refresh reason=\(reason)")
+        isBusy = false
+        isConnecting = true
+        let refreshedState = await refreshLatestState(
+            timeout: Self.stateRequestTimeout,
+            ignoreTransientTimeout: true,
+            reason: reason
+        )
+        isConnecting = false
+        guard let refreshedState else { return false }
+        if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || refreshedState.runtimeState?.state.isInteractive == false {
+            isSessionUnavailable = false
+            isAwaitingTakeoverConfirmation = false
+            errorMessage = nil
+            return true
+        }
+        return false
+    }
+
     private var shouldReconnectSilently: Bool {
-        latestState != nil && (isWithinOwnerRecoveryGracePeriod || isAwaitingTakeoverConfirmation || isOwner)
+        guard !isEndedState else { return false }
+        return latestState != nil && (isWithinOwnerRecoveryGracePeriod || isAwaitingTakeoverConfirmation || isOwner)
     }
 
     private var isEndedState: Bool {
@@ -741,6 +813,7 @@ private enum TerminalViewerRenderMode: String {
     }
 
     private func attemptAutomaticTakeoverIfNeeded() {
+        guard !isEndedState else { return }
         guard !hasAttemptedAutomaticTakeover else { return }
         guard !isOwner else { return }
         guard !isSessionUnavailable else { return }
@@ -763,6 +836,7 @@ private enum TerminalViewerRenderMode: String {
     }
 
     private func scheduleOwnershipSynchronization() {
+        guard !isEndedState else { return }
         guard isOwner else { return }
         guard !isBusy else { return }
         if isSynchronizingOwnership {
@@ -901,7 +975,7 @@ private enum TerminalViewerRenderMode: String {
                 return
             }
             let refreshedState = await refreshLatestState(
-                timeout: Self.inputRequestTimeout,
+                timeout: Self.stateRequestTimeout,
                 ignoreTransientTimeout: true,
                 reason: "owner_bootstrap_refresh"
             )
@@ -1062,6 +1136,16 @@ private enum TerminalViewerRenderMode: String {
         }
     }
 
+    private static func isMissingLiveStateStreamError(_ error: Error) -> Bool {
+        switch error {
+        case SpacesMobileBridgeClientError.requestFailed(let message),
+             SpacesMobileBridgeClientError.streamFailed(let message):
+            return message.localizedStandardContains("no live state stream")
+        default:
+            return false
+        }
+    }
+
     private static func transientPOSIXErrorCode(_ error: Error) -> Int? {
         let nsError = error as NSError
         guard nsError.domain == NSPOSIXErrorDomain else { return nil }
@@ -1069,13 +1153,15 @@ private enum TerminalViewerRenderMode: String {
     }
 
     private var shouldAttachBeforeSubscribing: Bool {
+        guard !isEndedState else { return false }
         guard !hasAttachedToSession else { return false }
         guard let latestState else { return true }
         return !activeAttachmentExists(in: latestState.attachmentSnapshot)
     }
 
     private var activeOwnerClientID: String? {
-        attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
+        guard !isEndedState else { return nil }
+        return attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
     }
 
     private func activeAttachmentExists(in snapshot: TerminalSessionAttachmentSnapshot?) -> Bool {
@@ -1118,6 +1204,34 @@ private enum TerminalViewerRenderMode: String {
             isAwaitingTakeoverConfirmation = false
             hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
         }
+        if isEndedState {
+            streamHandle?.cancel()
+            streamHandle = nil
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            bufferedInputFlushTask?.cancel()
+            bufferedInputFlushTask = nil
+            scrollCoalescer.cancel()
+            inputSendQueue.cancelAll()
+            ownershipSynchronizationTask?.cancel()
+            ownershipSynchronizationTask = nil
+            bufferedInputText = ""
+            viewportSize = nil
+            lastSentResizeSize = nil
+            resizeSerial = 0
+            needsOwnershipSynchronizationAfterCurrentRun = false
+            ownerRecoveryGraceDeadline = nil
+            ownerRenderEpochState = nil
+            reportedOwnerReadyEpochID = nil
+            reportedOwnerNonblankEpochID = nil
+            isBusy = false
+            isConnecting = false
+            isAwaitingTakeoverConfirmation = false
+            hasConfirmedOwnerInputReadiness = false
+            isInputSurfaceReady = false
+            isOwnershipSynchronizationScheduled = false
+            isSynchronizingOwnership = false
+        }
         let isOwnerAfterMerge = isOwner
         if isOwnerAfterMerge, payload.renderSnapshot != nil {
             if ownerRenderEpochState == nil || !wasOwner {
@@ -1132,7 +1246,7 @@ private enum TerminalViewerRenderMode: String {
             trace("takeover_confirmed_by_stream")
         }
         if !isOwnerAfterMerge {
-            if wasOwner, let latestState {
+            if wasOwner, !isEndedState, let latestState {
                 self.latestState = payloadByClearingScreenState(latestState)
             }
             if wasOwner { renderUpdateBaseline = nil }
@@ -1229,6 +1343,11 @@ private enum TerminalViewerRenderMode: String {
     }
 
     func setInputSurfaceReady(_ ready: Bool) {
+        guard !isEndedState else {
+            trace("host_input_readiness ready=\(ready ? 1 : 0) ignored_after_end")
+            isInputSurfaceReady = false
+            return
+        }
         if ready {
             trace("host_input_readiness ready=1 accepts_input=\(acceptsInput ? 1 : 0)")
             isInputSurfaceReady = true

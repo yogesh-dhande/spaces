@@ -796,7 +796,7 @@ private final class StreamLifecycle: @unchecked Sendable {
 }
 
 private final class StreamSubscription: @unchecked Sendable {
-    private static let initialEventTimeout: Duration = .seconds(3)
+    private static let initialEventTimeout: Duration = .seconds(12)
 
     private let connection: NWConnection
     private let host: String

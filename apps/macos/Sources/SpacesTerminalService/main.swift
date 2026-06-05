@@ -9,11 +9,9 @@ import spacesterminalghostty
     private let socketPath: String
     private let serverQueue = DispatchQueue(label: "spaces.terminal.service")
     private lazy var server = TerminalServiceServer(socketPath: socketPath, queue: serverQueue) { [weak self] request in
-        DispatchQueue.main.sync {
-            MainActor.assumeIsolated {
-                guard let self else { return TerminalServiceResponse(ok: false, message: "Terminal service is shutting down.") }
-                return self.handle(request)
-            }
+        Self.runOnMainActorSynchronously {
+            guard let self else { return TerminalServiceResponse(ok: false, message: "Terminal service is shutting down.") }
+            return self.handle(request)
         }
     }
     private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
@@ -170,8 +168,7 @@ import spacesterminalghostty
     private func startLifecycleTimer() {
         lifecycleTimer?.invalidate()
         lifecycleTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            MainActor.assumeIsolated { self.reapInactiveSessions() }
+            Task { @MainActor [weak self] in self?.reapInactiveSessions() }
         }
         if let lifecycleTimer { RunLoop.main.add(lifecycleTimer, forMode: .common) }
     }
@@ -200,6 +197,7 @@ import spacesterminalghostty
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, columns: runtimeState.columns,
                 rows: runtimeState.rows)
             try? TerminalSessionPersistence.writeRuntimeState(failedState, paths: paths)
+            try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: now)
             try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
             try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
         }
@@ -214,7 +212,17 @@ import spacesterminalghostty
     private static func isLive(_ runtimeState: TerminalSessionRuntimeState) -> Bool {
         runtimeState.state == .starting || runtimeState.state == .running
     }
+
+    private nonisolated static func runOnMainActorSynchronously<T: Sendable>(_ work: @escaping @MainActor () -> T) -> T {
+        if Thread.isMainThread { return MainActor.assumeIsolated { work() } }
+        let box = MainActorSyncBox<T>()
+        DispatchQueue.main.sync { box.value = MainActor.assumeIsolated { work() } }
+        guard let value = box.value else { preconditionFailure("Terminal service main-actor work did not return a value.") }
+        return value
+    }
 }
+
+private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
 
 @MainActor private final class SpacesTerminalServiceAppDelegate: NSObject, NSApplicationDelegate {
     private let controller: SpacesTerminalServiceController

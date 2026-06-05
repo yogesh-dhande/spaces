@@ -217,6 +217,12 @@ public struct SpacesMobileWorkspaceSummary: Codable, Sendable, Equatable, Identi
     }
 }
 
+public enum SpacesMobileTerminalSessionRowKind: String, Codable, Sendable, Equatable {
+    case liveSession
+    case process
+    case agent
+}
+
 public struct SpacesMobileTerminalSessionSummary: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let title: String
@@ -235,12 +241,16 @@ public struct SpacesMobileTerminalSessionSummary: Codable, Sendable, Equatable, 
     public let isControlAvailable: Bool
     public let isSubscriptionAvailable: Bool
     public let attachmentSnapshot: TerminalSessionAttachmentSnapshot
+    public let rowKind: SpacesMobileTerminalSessionRowKind
+    public let rowSourceID: String?
+    public let hasFinalRender: Bool
 
     public init(
         id: String, title: String, workingDirectory: String, state: TerminalSessionState, backend: TerminalSessionBackendKind,
         lifetimePolicy: TerminalSessionLifetimePolicy, servicePID: Int32, childPID: Int32?, workspaceID: String?, workspaceTitle: String?,
         projectID: String?, projectName: String?, createdAt: String, updatedAt: String, isControlAvailable: Bool, isSubscriptionAvailable: Bool,
-        attachmentSnapshot: TerminalSessionAttachmentSnapshot
+        attachmentSnapshot: TerminalSessionAttachmentSnapshot, rowKind: SpacesMobileTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil,
+        hasFinalRender: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -259,6 +269,57 @@ public struct SpacesMobileTerminalSessionSummary: Codable, Sendable, Equatable, 
         self.isControlAvailable = isControlAvailable
         self.isSubscriptionAvailable = isSubscriptionAvailable
         self.attachmentSnapshot = attachmentSnapshot
+        self.rowKind = rowKind
+        self.rowSourceID = rowSourceID
+        self.hasFinalRender = hasFinalRender
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case workingDirectory
+        case state
+        case backend
+        case lifetimePolicy
+        case servicePID
+        case childPID
+        case workspaceID
+        case workspaceTitle
+        case projectID
+        case projectName
+        case createdAt
+        case updatedAt
+        case isControlAvailable
+        case isSubscriptionAvailable
+        case attachmentSnapshot
+        case rowKind
+        case rowSourceID
+        case hasFinalRender
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
+        state = try container.decode(TerminalSessionState.self, forKey: .state)
+        backend = try container.decode(TerminalSessionBackendKind.self, forKey: .backend)
+        lifetimePolicy = try container.decode(TerminalSessionLifetimePolicy.self, forKey: .lifetimePolicy)
+        servicePID = try container.decode(Int32.self, forKey: .servicePID)
+        childPID = try container.decodeIfPresent(Int32.self, forKey: .childPID)
+        workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
+        workspaceTitle = try container.decodeIfPresent(String.self, forKey: .workspaceTitle)
+        projectID = try container.decodeIfPresent(String.self, forKey: .projectID)
+        projectName = try container.decodeIfPresent(String.self, forKey: .projectName)
+        createdAt = try container.decode(String.self, forKey: .createdAt)
+        updatedAt = try container.decode(String.self, forKey: .updatedAt)
+        isControlAvailable = try container.decode(Bool.self, forKey: .isControlAvailable)
+        isSubscriptionAvailable = try container.decode(Bool.self, forKey: .isSubscriptionAvailable)
+        attachmentSnapshot =
+            try container.decodeIfPresent(TerminalSessionAttachmentSnapshot.self, forKey: .attachmentSnapshot) ?? TerminalSessionAttachmentSnapshot()
+        rowKind = try container.decodeIfPresent(SpacesMobileTerminalSessionRowKind.self, forKey: .rowKind) ?? .liveSession
+        rowSourceID = try container.decodeIfPresent(String.self, forKey: .rowSourceID)
+        hasFinalRender = try container.decodeIfPresent(Bool.self, forKey: .hasFinalRender) ?? false
     }
 }
 

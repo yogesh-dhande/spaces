@@ -3,8 +3,49 @@
     import Foundation
     import UIKit
     import XCTest
+    import spacesmobilecore
     import spacesterminalcore
+    @testable import SpacesMobile
     @testable import spacesterminalmobileghostty
+
+    @MainActor
+    final class TerminalViewerModelTests: XCTestCase {
+        func testEndedSessionDoesNotOfferTakeOverWhenFinalRenderIsMissing() {
+            var settings = SpacesMobileConnectionSettings()
+            settings.host = "127.0.0.1"
+            settings.port = 12345
+            settings.authToken = "token"
+            settings.transportKey = "transport-key"
+            let session = SpacesMobileTerminalSessionSummary(
+                id: "ended-session",
+                title: "ended",
+                workingDirectory: "/tmp/work",
+                state: .exited,
+                backend: .ghosttyEmbedded,
+                lifetimePolicy: .persistent,
+                servicePID: 100,
+                childPID: 200,
+                workspaceID: nil,
+                workspaceTitle: nil,
+                projectID: nil,
+                projectName: nil,
+                createdAt: "2026-06-04T14:23:10Z",
+                updatedAt: "2026-06-04T14:23:23Z",
+                isControlAvailable: false,
+                isSubscriptionAvailable: false,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                rowKind: .process,
+                rowSourceID: "process-row",
+                hasFinalRender: false
+            )
+            let model = TerminalViewerModel(session: session, settings: settings) { _ in }
+
+            XCTAssertEqual(model.renderMode, "ended")
+            XCTAssertFalse(model.showsTakeOverAction)
+            XCTAssertFalse(model.acceptsInput)
+            XCTAssertEqual(model.visibleText, "This terminal session ended before a final render was available.")
+        }
+    }
 
     @MainActor
     final class GhosttyMobileAppServiceTests: XCTestCase {

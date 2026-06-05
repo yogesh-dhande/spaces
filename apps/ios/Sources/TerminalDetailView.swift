@@ -233,7 +233,7 @@ struct TerminalDetailView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 28)
                 .accessibilityIdentifier("terminal.statusText")
-            if !model.isOwner && !model.isTakingOver && !model.isConnecting {
+            if model.showsTakeOverAction {
                 takeOverButton
                     .padding(.top, 4)
             }
@@ -362,14 +362,17 @@ struct TerminalDetailView: View {
         while !Task.isCancelled {
             if let data = try? Data(contentsOf: requestURL) {
                 if let request = try? JSONDecoder().decode(E2ECommandRequest.self, from: data) {
+                    let requestDetail = request.detail
                     writeE2EEventIfNeeded(
                         kind: "e2e_command_request_consumed",
-                        detail: "id=\(request.id) sendEnter=\(request.sendEnter ?? true) text=\(request.text)"
+                        detail: requestDetail
                     )
-                    if request.sendEnter ?? true {
-                        await model.sendText(request.text, appendNewline: true)
-                    } else {
-                        await model.sendText(request.text)
+                    if let key = request.key?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
+                        await model.sendKey(key)
+                    } else if request.sendEnter ?? true, let text = request.text {
+                        await model.sendText(text, appendNewline: true)
+                    } else if let text = request.text {
+                        await model.sendText(text)
                     }
                 } else {
                     writeE2EEventIfNeeded(kind: "e2e_command_request_invalid", detail: requestURL.lastPathComponent)
@@ -383,6 +386,16 @@ struct TerminalDetailView: View {
 
 private struct E2ECommandRequest: Decodable {
     let id: String
-    let text: String
+    let text: String?
+    let key: String?
     let sendEnter: Bool?
+
+    var detail: String {
+        [
+            "id=\(id)",
+            "sendEnter=\(sendEnter ?? true)",
+            "text=\(text ?? "")",
+            "key=\(key ?? "")",
+        ].joined(separator: " ")
+    }
 }

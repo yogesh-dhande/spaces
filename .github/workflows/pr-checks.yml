@@ -84,14 +84,8 @@ jobs:
       - name: Resolve SwiftPM dependencies
         run: scripts/swiftpm.sh package resolve
 
-      - name: Lint Swift sources
-        run: scripts/lint.sh
-
-      - name: Build macOS app and CLI
-        run: scripts/swiftpm.sh build
-
-      - name: Run Swift coverage suite
-        run: scripts/coverage.sh
+      - name: Run Swift verification
+        run: scripts/verify.sh
 
       - name: Build static website
         working-directory: apps/web

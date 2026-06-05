@@ -7,6 +7,8 @@ import spacesterminalcore
     private let paths: TerminalSessionPaths
     private let terminalView: GhosttyMirrorTerminalView
     private var latestState: GhosttyRemoteSessionStatePayload?
+    private var persistedFinalStateLoaded = false
+    private var persistedFinalStateLoadInProgress = false
     private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
     private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
     private var lastSubscriptionAttemptAt: Date?
@@ -45,7 +47,8 @@ import spacesterminalcore
 
     public func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
         attachedClient = client
-        attachedMode = mode
+        let isInteractive = isInteractiveRuntimeStateForControl()
+        attachedMode = isInteractive ? mode : .viewer
         if mode != .owner {
             pendingViewportResizeTask?.cancel()
             pendingViewportResizeTask = nil
@@ -56,7 +59,7 @@ import spacesterminalcore
             pendingViewportResizeSize = nil
             lastRequestedViewportSize = nil
         }
-        terminalView.acceptsTerminalInput = mode == .owner
+        terminalView.acceptsTerminalInput = isInteractive && mode == .owner
         terminalView.onSendText = { [weak self] text in self?.sendRemoteInput(text) }
         terminalView.onSendKey = { [weak self] key in self?.sendRemoteKey(key) }
         terminalView.onSendScroll = { [weak self] horizontal, vertical, scrollMods in
@@ -80,7 +83,7 @@ import spacesterminalcore
             container.layoutSubtreeIfNeeded()
         }
         terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
-        if mode == .owner { sendCurrentViewportResizeIfNeeded(force: true) }
+        if isInteractive && mode == .owner { sendCurrentViewportResizeIfNeeded(force: true) }
     }
 
     public func releaseRendererSurface() { terminalView.releaseSurface() }
@@ -96,18 +99,19 @@ import spacesterminalcore
     public func focusWindow(_ window: NSWindow?) { terminalView.focusWindow(window) }
 
     @discardableResult public func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool {
-        guard clientID == attachedClient?.id, attachedMode == .owner else { return false }
+        guard isInteractiveRuntimeStateForControl(), clientID == attachedClient?.id, attachedMode == .owner else { return false }
         return terminalView.handleTerminalKeyEvent(event, requireFirstResponder: false)
     }
 
     @discardableResult public func synchronizeSurfaceGeometry() -> Bool {
-        guard attachedMode == .owner else { return false }
+        guard isInteractiveRuntimeStateForControl(), attachedMode == .owner else { return false }
         sendCurrentViewportResizeIfNeeded(force: true)
         return true
     }
 
     public func activeOwnerClientID() -> String? {
         ensureStateStreamStartedIfNeeded()
+        guard isInteractiveRuntimeStateForControl() else { return nil }
         if let attachmentSnapshot = latestState?.attachmentSnapshot {
             return attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
         }
@@ -142,11 +146,12 @@ import spacesterminalcore
     public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
 
     @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
-        terminalView.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+        guard isInteractiveRuntimeStateForControl() else { return false }
+        return terminalView.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
     }
 
     @discardableResult public func clearScreenAndScrollback() -> Bool {
-        guard attachedClient != nil, attachedMode == .owner else { return false }
+        guard isInteractiveRuntimeStateForControl(), attachedClient != nil, attachedMode == .owner else { return false }
         sendRemoteClearScreenAndScrollback()
         return true
     }
@@ -170,6 +175,10 @@ import spacesterminalcore
     }
 
     private func ensureStateStreamStartedIfNeeded(now: Date = Date()) {
+        guard isInteractiveRuntimeStateForControl() else {
+            loadPersistedFinalStateIfAvailable()
+            return
+        }
         if stateStreamClient?.isConnected == true { return }
         if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
         lastSubscriptionAttemptAt = now
@@ -185,9 +194,29 @@ import spacesterminalcore
     private func handleStreamDisconnect() {
         stateStreamClient = nil
         lastSubscriptionAttemptAt = Date()
+        if !isInteractiveRuntimeStateForControl() { loadPersistedFinalStateIfAvailable() }
+    }
+
+    @discardableResult private func loadPersistedFinalStateIfAvailable() -> Bool {
+        guard !persistedFinalStateLoaded, !persistedFinalStateLoadInProgress else { return latestState != nil }
+        if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), runtimeState.state.isInteractive { return false }
+        guard let payload = try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) else { return false }
+        guard payload.runtimeState?.state.isInteractive != true else { return false }
+        persistedFinalStateLoadInProgress = true
+        persistedFinalStateLoaded = true
+        defer { persistedFinalStateLoadInProgress = false }
+        applyRemoteState(payload)
+        return true
+    }
+
+    private func isInteractiveRuntimeStateForControl() -> Bool {
+        if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) { return runtimeState.state.isInteractive }
+        if let runtimeState = latestState?.runtimeState { return runtimeState.state.isInteractive }
+        return true
     }
 
     private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
+        if incomingPayload.runtimeState?.state.isInteractive == true { persistedFinalStateLoaded = false }
         let decodeStartedAt = Date()
         let incomingPayloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(incomingPayload).count) ?? 0
         let resolvedRenderState = payloadByResolvingRenderUpdate(incomingPayload)
@@ -336,6 +365,7 @@ import spacesterminalcore
     }
 
     private func sendRemoteInput(_ text: String) {
+        guard isInteractiveRuntimeStateForControl() else { return }
         guard let client = attachedClient else { return }
         scrollCoalescer.flush()
         let socketPath = paths.controlSocketPath
@@ -348,6 +378,7 @@ import spacesterminalcore
     }
 
     private func sendRemoteKey(_ key: String) {
+        guard isInteractiveRuntimeStateForControl() else { return }
         if TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
             sendRemoteClearScreenAndScrollback()
             return
@@ -364,6 +395,7 @@ import spacesterminalcore
     }
 
     private func sendRemoteClearScreenAndScrollback() {
+        guard isInteractiveRuntimeStateForControl() else { return }
         guard let client = attachedClient else { return }
         scrollCoalescer.flush()
         let socketPath = paths.controlSocketPath
@@ -376,12 +408,12 @@ import spacesterminalcore
     }
 
     private func sendRemoteScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) {
-        guard attachedClient != nil, attachedMode == .owner else { return }
+        guard isInteractiveRuntimeStateForControl(), attachedClient != nil, attachedMode == .owner else { return }
         scrollCoalescer.append(horizontal: Double(horizontal), vertical: Double(vertical), scrollMods: scrollMods)
     }
 
     private func enqueueRemoteScrollBatch(_ batch: TerminalScrollCoalescer.Batch, onFinished: @escaping TerminalScrollCoalescer.FinishHandler) {
-        guard let client = attachedClient, attachedMode == .owner else {
+        guard isInteractiveRuntimeStateForControl(), let client = attachedClient, attachedMode == .owner else {
             onFinished()
             return
         }
@@ -398,12 +430,12 @@ import spacesterminalcore
     }
 
     private func sendCurrentViewportResizeIfNeeded(force: Bool) {
-        guard attachedMode == .owner, let size = terminalView.surfaceCellSize() else { return }
+        guard isInteractiveRuntimeStateForControl(), attachedMode == .owner, let size = terminalView.surfaceCellSize() else { return }
         handleViewportSizeChange(columns: size.columns, rows: size.rows, force: force)
     }
 
     private func handleViewportSizeChange(columns: Int, rows: Int, force: Bool = false) {
-        guard attachedMode == .owner, let client = attachedClient else { return }
+        guard isInteractiveRuntimeStateForControl(), attachedMode == .owner, let client = attachedClient else { return }
         let requestedSize: (columns: Int, rows: Int) = (columns, rows)
         let runtimeSize = latestState?.runtimeState.map { runtimeState in (columns: runtimeState.columns ?? 0, rows: runtimeState.rows ?? 0) }
         guard

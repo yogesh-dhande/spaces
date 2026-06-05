@@ -246,6 +246,7 @@ extension TerminalGhosttyRendererHosting {
     private var stateStreamServer: GhosttyRemoteSessionStateStreamServer?
     private var outputHandle: FileHandle?
     private var started = false
+    private var didTerminateCurrentRun = false
     private var currentTitle: String?
     private var currentWorkingDirectory: String?
     private var lastKnownChildPID: Int32?
@@ -304,12 +305,14 @@ extension TerminalGhosttyRendererHosting {
             try ensureOutputHandle()
             rendererHostStorage.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
             rendererHostStorage.setInputActivityHandler { [weak self] byteCount in self?.handleOwnerInputActivity(byteCount: byteCount) }
+            didTerminateCurrentRun = false
+            started = true
             try rendererHostStorage.startSessionIfNeeded()
+            guard started, !didTerminateCurrentRun else { return }
             try startControlServer()
             try startStateStreamServer()
             startRuntimeStateTimer()
             refreshRuntimeState(force: true)
-            started = true
             sessionStartedAt = startedAt
             didLogFirstOutput = false
             broadcastCurrentState(reason: "initial")
@@ -320,6 +323,7 @@ extension TerminalGhosttyRendererHosting {
             TerminalPerformance.logMetric(
                 "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            started = false
             throw error
         }
     }
@@ -361,11 +365,13 @@ extension TerminalGhosttyRendererHosting {
     public func takeover(client: TerminalClient) throws { try attachClient(client, mode: .owner) }
 
     public func isOwner(clientID: String) -> Bool {
-        ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).contains { $0.clientID == clientID && $0.mode == .owner }
+        guard isRuntimeInteractiveForControl() else { return false }
+        return ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).contains { $0.clientID == clientID && $0.mode == .owner }
     }
 
     public func activeOwnerClientID() -> String? {
-        ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).first(where: { $0.mode == .owner })?.clientID
+        guard isRuntimeInteractiveForControl() else { return nil }
+        return ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).first(where: { $0.mode == .owner })?.clientID
     }
 
     private func hasActiveAttachments() -> Bool { !((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).isEmpty }
@@ -380,6 +386,8 @@ extension TerminalGhosttyRendererHosting {
     }
 
     public var rendererHost: any TerminalGhosttyRendererHosting { rendererHostStorage }
+    var isStarted: Bool { started }
+
     public func terminate() {
         let now = ISO8601DateFormatter().string(from: Date())
         let childPID = observedChildPID()
@@ -390,23 +398,36 @@ extension TerminalGhosttyRendererHosting {
         controlServer?.stop()
         controlServer = nil
         TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
+        didTerminateCurrentRun = true
         started = false
-        rendererHostStorage.terminateSession()
-        try? outputHandle?.synchronize()
-        try? outputHandle?.close()
-        outputHandle = nil
         let exitedState = TerminalSessionRuntimeState(
             sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: childPID, state: .exited,
             updatedAt: now, exitedAt: now, title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, columns: lastKnownSurfaceSize?.columns,
             rows: lastKnownSurfaceSize?.rows)
-        try? TerminalSessionPersistence.writeRuntimeState(exitedState, paths: paths)
-        lastPersistedRuntimeState = exitedState
-        postRuntimeStateDidChange()
-        postAttachmentStateDidChange()
-        broadcastCurrentState(reason: "terminated")
+        persistExitedRuntimeState(exitedState)
+        try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: now)
+        let finalPayload = currentRemoteSessionState(reason: TerminalRemoteSessionStateReason.terminated, outputByteCount: nil)
+        if let finalPayload {
+            try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths)
+            persistExitedRuntimeState(exitedState)
+            broadcastRemoteStatePayload(finalPayload, startedAt: Date(), ownerClient: nil, outputByteCount: nil)
+        }
+        NotificationCenter.default.post(
+            name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+        NotificationCenter.default.post(
+            name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+        rendererHostStorage.terminateSession()
+        try? outputHandle?.synchronize()
+        try? outputHandle?.close()
+        outputHandle = nil
         stateStreamServer?.stop()
         stateStreamServer = nil
         GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
+    }
+
+    private func persistExitedRuntimeState(_ state: TerminalSessionRuntimeState) {
+        try? TerminalSessionPersistence.writeRuntimeState(state, paths: paths)
+        lastPersistedRuntimeState = state
     }
 
     private func handleSessionClosed() {
@@ -420,11 +441,9 @@ extension TerminalGhosttyRendererHosting {
 
     private func startControlServer() throws {
         let controlServer = TerminalControlServer(socketPath: paths.controlSocketPath, queue: controlQueue) { [weak self] request in
-            DispatchQueue.main.sync {
-                MainActor.assumeIsolated {
-                    guard let self else { return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.") }
-                    return self.handleControlRequest(request)
-                }
+            Self.runOnMainActorSynchronously {
+                guard let self else { return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.") }
+                return self.handleControlRequest(request)
             }
         }
         try controlServer.start()
@@ -434,16 +453,17 @@ extension TerminalGhosttyRendererHosting {
     private func startStateStreamServer() throws {
         let stateStreamServer = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: stateStreamQueue) {
             [weak self] in
-            DispatchQueue.main.sync {
-                MainActor.assumeIsolated { self?.currentRemoteSessionState(reason: "initial", outputByteCount: nil, markNextBroadcastFull: true) }
-            }
+            Self.runOnMainActorSynchronously { self?.currentRemoteSessionState(reason: "initial", outputByteCount: nil, markNextBroadcastFull: true) }
         }
         try stateStreamServer.start()
         self.stateStreamServer = stateStreamServer
     }
 
     func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
-        switch request.command {
+        trace(
+            "control_request command=\(request.command) client=\(request.clientID ?? request.client?.id ?? "nil") target_session=\(launchConfiguration.sessionID)"
+        )
+        return switch request.command {
         case "attach": controlResponseForAttachRequest(request)
         case "detach": controlResponseForDetachRequest(request)
         case "heartbeat": controlResponseForHeartbeatRequest(request)
@@ -501,6 +521,7 @@ extension TerminalGhosttyRendererHosting {
 
     private func controlResponseForAttachRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
         let startedAt = Date()
+        guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
         guard let client = request.client else {
             TerminalPerformance.logMetric(
                 "terminal_control_attach", target: "session=\(launchConfiguration.sessionID)",
@@ -580,6 +601,7 @@ extension TerminalGhosttyRendererHosting {
 
     private func controlResponseForSendRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
         let startedAt = Date()
+        guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
         if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
         if let rejection = ownerRequestRejection(for: request, commandName: "send", startedAt: startedAt) { return rejection }
         guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
@@ -593,6 +615,7 @@ extension TerminalGhosttyRendererHosting {
 
     private func controlResponseForKeyRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
         let startedAt = Date()
+        guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
         if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
         if let rejection = ownerRequestRejection(for: request, commandName: "key", startedAt: startedAt) { return rejection }
         if let key = request.key, TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
@@ -614,6 +637,7 @@ extension TerminalGhosttyRendererHosting {
     private func controlResponseForClearScreenRequest(_ request: TerminalControlRequest, startedAt: Date = Date(), touchClient: Bool = true)
         -> TerminalControlResponse
     {
+        guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
         if touchClient, let clientID = request.clientID {
             try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
         }
@@ -628,6 +652,7 @@ extension TerminalGhosttyRendererHosting {
 
     private func controlResponseForScrollRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
         let startedAt = Date()
+        guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
         if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
         if let rejection = ownerRequestRejection(for: request, commandName: "scroll", startedAt: startedAt) { return rejection }
         let horizontal = CGFloat(request.scrollHorizontal ?? 0)
@@ -648,6 +673,7 @@ extension TerminalGhosttyRendererHosting {
 
     private func controlResponseForTakeoverRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
         let startedAt = Date()
+        guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
         guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
         do {
             try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
@@ -676,6 +702,7 @@ extension TerminalGhosttyRendererHosting {
 
     private func controlResponseForResizeRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
         let startedAt = Date()
+        guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
         if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
         if let rejection = ownerRequestRejection(for: request, commandName: "resize", startedAt: startedAt) { return rejection }
         if let rejection = staleResizeSerialRejection(for: request, startedAt: startedAt) { return rejection }
@@ -712,8 +739,9 @@ extension TerminalGhosttyRendererHosting {
     private func startRuntimeStateTimer() {
         runtimeStateTimer?.invalidate()
         runtimeStateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.started else { return }
                 self.expireStaleRemoteClientsIfNeeded()
                 self.refreshRuntimeState(force: false)
             }
@@ -722,6 +750,8 @@ extension TerminalGhosttyRendererHosting {
     }
 
     private func refreshRuntimeState(force: Bool) {
+        guard !didTerminateCurrentRun else { return }
+        guard started || !currentRuntimeStateIsExited() else { return }
         let now = Date()
         let foregroundPID = rendererHostStorage.foregroundPID()
         if let foregroundPID {
@@ -742,6 +772,11 @@ extension TerminalGhosttyRendererHosting {
         lastPersistedRuntimeState = state
         lastRuntimeStateWriteAt = now
         if previousSignature != nextSignature { postRuntimeStateDidChange() }
+    }
+
+    private func currentRuntimeStateIsExited() -> Bool {
+        if lastPersistedRuntimeState?.state == .exited { return true }
+        return (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.state == .exited
     }
 
     @discardableResult func expireStaleRemoteClientsIfNeeded(now: Date = Date()) -> [String] {
@@ -771,7 +806,7 @@ extension TerminalGhosttyRendererHosting {
         return staleClientIDs
     }
 
-    private func appendOutput(_ data: Data, interactiveResync: Bool = false) {
+    private func appendOutput(_ data: Data, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) {
         let startedAt = Date()
         do {
             let outputHandle = try ensureOutputHandle()
@@ -779,7 +814,9 @@ extension TerminalGhosttyRendererHosting {
             let outputEndByteOffset = (try? outputHandle.seekToEnd()).map(Self.clampedInt)
             requestSurfaceRefreshAction()
             GhosttyEmbeddedAppService.shared.tick()
-            postOutputDidChange(data: data, outputEndByteOffset: outputEndByteOffset, interactiveResync: interactiveResync)
+            postOutputDidChange(
+                data: data, outputEndByteOffset: outputEndByteOffset, interactiveResync: interactiveResync, shouldBroadcastState: shouldBroadcastState
+            )
             TerminalPerformance.logMetric(
                 "terminal_output_write", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(data.count)")
@@ -819,9 +856,9 @@ extension TerminalGhosttyRendererHosting {
     }
 
     func applySessionStateChange(_ change: GhosttyEmbeddedSessionStateChange) {
-        lastSessionStateRevision = change.revision
+        lastSessionStateRevision = max(lastSessionStateRevision ?? change.revision, change.revision)
         lastSessionStateFlags = change.flags
-        if change.flags.contains(.screen) { lastScreenStateRevision = change.revision }
+        if change.flags.contains(.screen) { lastScreenStateRevision = max(lastScreenStateRevision ?? change.revision, change.revision) }
         if change.flags.contains(.screen) {
             requestSurfaceRefreshAction()
             logMobileTakeoverPerformance(
@@ -888,7 +925,7 @@ extension TerminalGhosttyRendererHosting {
         broadcastCurrentState(reason: "runtime_state")
     }
 
-    private func postOutputDidChange(data: Data, outputEndByteOffset: Int?, interactiveResync: Bool = false) {
+    private func postOutputDidChange(data: Data, outputEndByteOffset: Int?, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) {
         NotificationCenter.default.post(
             name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID, "byteCount": data.count])
         if interactiveResync {
@@ -899,6 +936,7 @@ extension TerminalGhosttyRendererHosting {
             pendingInputOutputResync = false
             scheduleInputOutputResync()
         }
+        guard shouldBroadcastState else { return }
         broadcastCurrentState(reason: "output", outputByteCount: data.count, outputEndByteOffset: outputEndByteOffset)
     }
 
@@ -919,14 +957,12 @@ extension TerminalGhosttyRendererHosting {
     private func scheduleInputStateBroadcast() {
         guard !inputStateBroadcastScheduled else { return }
         inputStateBroadcastScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.inputStateBroadcastScheduled = false
-                self.requestSurfaceRefreshAction()
-                GhosttyEmbeddedAppService.shared.tick()
-                self.broadcastCurrentState(reason: "input")
-            }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.inputStateBroadcastScheduled = false
+            self.requestSurfaceRefreshAction()
+            GhosttyEmbeddedAppService.shared.tick()
+            self.broadcastCurrentState(reason: "input")
         }
     }
 
@@ -951,7 +987,7 @@ extension TerminalGhosttyRendererHosting {
     private func scheduleInputOutputResync() {
         inputOutputResyncWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.inputOutputResyncWorkItem = nil
                 self.requestSurfaceRefreshAction()
@@ -988,10 +1024,18 @@ extension TerminalGhosttyRendererHosting {
     }
 
     private func activeOwnerClient() -> TerminalClient? {
+        guard isRuntimeInteractiveForControl() else { return nil }
         guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths),
             let attachment = snapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })
         else { return nil }
         return snapshot.clients.first(where: { $0.id == attachment.clientID })
+    }
+
+    private func isRuntimeInteractiveForControl() -> Bool {
+        if started { return true }
+        let runtimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastPersistedRuntimeState
+        guard let runtimeState else { return true }
+        return runtimeState.state.isInteractive
     }
 
     nonisolated static func shouldClearFocusAfterDetachingClient(detachedClientWasOwner: Bool, remainingOwnerClientID: String?) -> Bool {
@@ -1029,7 +1073,7 @@ extension TerminalGhosttyRendererHosting {
     private func flushPendingIncomingOutputForStateExport() {
         let coalescedData = incomingOutputBuffer.drain()
         guard !coalescedData.data.isEmpty else { return }
-        appendOutput(coalescedData.data, interactiveResync: coalescedData.isInteractive)
+        appendOutput(coalescedData.data, interactiveResync: coalescedData.isInteractive, shouldBroadcastState: false)
     }
 
     func prepareRenderStateExport() { flushPendingIncomingOutputForStateExport() }
@@ -1041,18 +1085,24 @@ extension TerminalGhosttyRendererHosting {
         trace(
             "broadcast_state_begin reason=\(reason) include_screen=\(includeScreenState ? 1 : 0) runtime=\(traceSize(observedSurfaceSize())) output_bytes=\(outputByteCount ?? 0)"
         )
-        guard let stateStreamServer,
+        guard stateStreamServer != nil,
             let payload = currentRemoteSessionState(
                 reason: reason, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, broadcastExport: true)
         else { return }
+        broadcastRemoteStatePayload(payload, startedAt: startedAt, ownerClient: ownerClient, outputByteCount: outputByteCount)
+    }
+
+    private func broadcastRemoteStatePayload(
+        _ payload: GhosttyRemoteSessionStatePayload, startedAt: Date, ownerClient: TerminalClient?, outputByteCount: Int?
+    ) {
         let payloadEncodeStartedAt = Date()
         let encodedPayload = try? GhosttyRemoteSessionStateCodec.encodeLine(payload)
         let payloadEncodeMS = TerminalPerformance.elapsedMS(since: payloadEncodeStartedAt)
-        stateStreamServer.broadcast(payload)
+        stateStreamServer?.broadcast(payload)
         let payloadBytes = encodedPayload?.count ?? 0
         let decodedUpdate = payload.decodedRenderUpdate
         let renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
-            reason: reason, frame: decodedUpdate?.fullFrame, payloadByteCount: payloadBytes, payloadEncodeMS: payloadEncodeMS,
+            reason: payload.reason, frame: decodedUpdate?.fullFrame, payloadByteCount: payloadBytes, payloadEncodeMS: payloadEncodeMS,
             outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision,
             frameKind: decodedUpdate?.frameKindMetricValue ?? "full", baseRevision: decodedUpdate?.baseRevision,
             targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision, operationCount: decodedUpdate?.operationCount,
@@ -1061,7 +1111,7 @@ extension TerminalGhosttyRendererHosting {
         logMobileTakeoverPerformance(
             name: "remote_state_publish", count: payloadBytes,
             attributes: [
-                "reason": reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "output_bytes": String(outputByteCount ?? 0),
+                "reason": payload.reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "output_bytes": String(outputByteCount ?? 0),
                 "payload_bytes": String(payloadBytes), "render_update": payload.renderUpdate == nil ? "0" : "1",
                 "render_update_bytes": String(payload.renderUpdate?.count ?? 0),
             ])
@@ -1069,13 +1119,13 @@ extension TerminalGhosttyRendererHosting {
             name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: payloadBytes,
             attributes: renderUpdateAttributes)
         trace(
-            "broadcast_state_end reason=\(reason) render_update=\(payload.renderUpdate == nil ? 0 : 1) runtime=\(traceSize(columns: payload.runtimeState?.columns, rows: payload.runtimeState?.rows)) owner_epoch=\(ownerEpoch)"
+            "broadcast_state_end reason=\(payload.reason) render_update=\(payload.renderUpdate == nil ? 0 : 1) runtime=\(traceSize(columns: payload.runtimeState?.columns, rows: payload.runtimeState?.rows)) owner_epoch=\(ownerEpoch)"
         )
         TerminalPerformance.logMetric(
             "terminal_remote_state_publish", target: "session=\(launchConfiguration.sessionID)",
             elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
             detail:
-                "reason=\(reason) render_update=\(payload.renderUpdate == nil ? 0 : 1) bytes=\(outputByteCount ?? 0) payload_bytes=\(payloadBytes) render_update_bytes=\(payload.renderUpdate?.count ?? 0)"
+                "reason=\(payload.reason) render_update=\(payload.renderUpdate == nil ? 0 : 1) bytes=\(outputByteCount ?? 0) payload_bytes=\(payloadBytes) render_update_bytes=\(payload.renderUpdate?.count ?? 0)"
         )
         TerminalPerformance.logMetric(
             "terminal_render_frame_payload_publish", target: "session=\(launchConfiguration.sessionID)",
@@ -1155,16 +1205,17 @@ extension TerminalGhosttyRendererHosting {
         let forceFullForExplicitResync =
             reason == TerminalRemoteSessionStateReason.initial || reason == TerminalRemoteSessionStateReason.stateChange
             || reason == TerminalRemoteSessionStateReason.inputOutput || reason == TerminalRemoteSessionStateReason.resize
+            || reason == TerminalRemoteSessionStateReason.terminated
         let forceFull =
             forceFullForExplicitResync || lastRenderUpdateBaseline?.sessionRevision == frame.sessionRevision || forceFullForSubscriberBaseline
         let forceFullReason =
             if reason == TerminalRemoteSessionStateReason.initial {
                 "initial_baseline"
-            } else if reason == TerminalRemoteSessionStateReason.stateChange || reason == TerminalRemoteSessionStateReason.inputOutput {
-                "explicit_resync"
-            } else if reason == TerminalRemoteSessionStateReason.resize { "resize_self_contained" } else if forceFullForSubscriberBaseline {
-                "subscriber_baseline_reset"
-            } else { "baseline_already_current" }
+            } else if reason == TerminalRemoteSessionStateReason.stateChange || reason == TerminalRemoteSessionStateReason.inputOutput
+                || reason == TerminalRemoteSessionStateReason.terminated
+            { "explicit_resync" } else if reason == TerminalRemoteSessionStateReason.resize {
+                "resize_self_contained"
+            } else if forceFullForSubscriberBaseline { "subscriber_baseline_reset" } else { "baseline_already_current" }
         let update = GhosttyRenderUpdateFactory.makeUpdate(
             target: frame, baseline: lastRenderUpdateBaseline, forceFull: forceFull, forceFullReason: forceFullReason,
             nativeScrollRects: nativeScrollRects)
@@ -1240,6 +1291,14 @@ extension TerminalGhosttyRendererHosting {
     var debugCurrentTitle: String? { currentTitle }
     var debugCurrentWorkingDirectory: String? { currentWorkingDirectory }
     func debugHandleIncomingOutput(_ data: Data) { appendOutput(data, interactiveResync: interactiveOutputGate.consumeIfActive()) }
+    func debugBufferIncomingOutputForStateExport(_ data: Data) { _ = incomingOutputBuffer.append(data, interactive: false) }
+    func debugStartStateStreamServerForTesting() throws { try startStateStreamServer() }
+    func debugStopStateStreamServerForTesting() {
+        stateStreamServer?.stop()
+        stateStreamServer = nil
+        GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
+    }
+    func debugBroadcastCurrentStateForTesting(reason: String) { broadcastCurrentState(reason: reason) }
     func debugHandleOwnerInputActivity(byteCount: Int = 1) { handleOwnerInputActivity(byteCount: byteCount) }
     func debugCurrentRemoteSessionState(reason: String) -> GhosttyRemoteSessionStatePayload? {
         currentRemoteSessionState(reason: reason, outputByteCount: nil, broadcastExport: true)
@@ -1267,7 +1326,17 @@ extension TerminalGhosttyRendererHosting {
             .init(
                 sessionID: launchConfiguration.sessionID, source: "mac-host", name: name, elapsedMS: elapsedMS, count: count, attributes: attributes))
     }
+
+    private nonisolated static func runOnMainActorSynchronously<T: Sendable>(_ work: @escaping @MainActor () -> T) -> T {
+        if Thread.isMainThread { return MainActor.assumeIsolated { work() } }
+        let box = GhosttyMainActorSyncBox<T>()
+        DispatchQueue.main.sync { box.value = MainActor.assumeIsolated { work() } }
+        guard let value = box.value else { preconditionFailure("Ghostty session main-actor work did not return a value.") }
+        return value
+    }
 }
+
+private final class GhosttyMainActorSyncBox<T>: @unchecked Sendable { var value: T? }
 
 @MainActor public final class GhosttyEmbeddedSessionHost {
     public let core: GhosttyEmbeddedSessionCore
@@ -1292,6 +1361,7 @@ extension TerminalGhosttyRendererHosting {
         let startedAt = Date()
         do {
             try core.startIfNeeded()
+            guard core.isStarted else { return }
             try core.rendererHost.attach(client: client, mode: mode, into: container)
             try core.attachClient(client, mode: mode)
             if mode == .owner, let container {
@@ -1377,6 +1447,10 @@ extension TerminalGhosttyRendererHosting {
     var debugCurrentTitle: String? { core.debugCurrentTitle }
     var debugCurrentWorkingDirectory: String? { core.debugCurrentWorkingDirectory }
     func debugHandleIncomingOutput(_ data: Data) { core.debugHandleIncomingOutput(data) }
+    func debugBufferIncomingOutputForStateExport(_ data: Data) { core.debugBufferIncomingOutputForStateExport(data) }
+    func debugStartStateStreamServerForTesting() throws { try core.debugStartStateStreamServerForTesting() }
+    func debugStopStateStreamServerForTesting() { core.debugStopStateStreamServerForTesting() }
+    func debugBroadcastCurrentStateForTesting(reason: String) { core.debugBroadcastCurrentStateForTesting(reason: reason) }
     func debugHandleOwnerInputActivity(byteCount: Int = 1) { core.debugHandleOwnerInputActivity(byteCount: byteCount) }
     func debugCurrentRemoteSessionState(reason: String) -> GhosttyRemoteSessionStatePayload? { core.debugCurrentRemoteSessionState(reason: reason) }
     func debugPersistRuntimeState(force: Bool = true) { core.debugPersistRuntimeState(force: force) }
