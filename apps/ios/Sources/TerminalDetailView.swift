@@ -15,6 +15,7 @@ struct TerminalDetailView: View {
     let onBack: () -> Void
 
     @State private var hasMountedTerminalSurface = false
+    @State private var isBackNavigationInProgress = false
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
@@ -140,11 +141,12 @@ struct TerminalDetailView: View {
     private var topOverlay: some View {
         HStack(spacing: 12) {
             chromeButton(accessibilityIdentifier: "terminal.back", accessibilityLabel: "Back") {
-                onBack()
+                beginBackNavigation()
             } label: {
-                Image(systemName: "chevron.left")
+                Image(systemName: isBackNavigationInProgress ? "arrow.triangle.2.circlepath" : "chevron.left")
                     .font(.headline.weight(.semibold))
             }
+            .disabled(isBackNavigationInProgress)
 
             Spacer(minLength: 0)
 
@@ -176,6 +178,15 @@ struct TerminalDetailView: View {
             .frame(minWidth: Self.chromeControlHeight, alignment: .trailing)
         }
         .frame(height: Self.chromeControlHeight)
+    }
+
+    private func beginBackNavigation() {
+        guard !isBackNavigationInProgress else { return }
+        isBackNavigationInProgress = true
+        Task {
+            await model.prepareForBackNavigation()
+            onBack()
+        }
     }
 
     /// Brand-primary Take Over control (teal fill, dark ink) for viewers.

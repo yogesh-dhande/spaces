@@ -135,6 +135,122 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    func testStopCodingAgentRemovesRuntimeAndPreservesConfiguredLauncher() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-codex", workspaceID: workspace.id, app: "Spaces", name: "Codex", windowID: nil, terminalTrackingID: "session-codex",
+                terminalNativeID: "session-codex", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", runtimeTargetID: "window-codex",
+                terminalTarget: TerminalTargetRecord(runtimeTargetID: "window-codex", trackingID: "session-codex"), sessionKey: nil,
+                claimedLauncherName: "Codex", status: .idle, createdAt: "now", updatedAt: "now"))
+        let closed = TerminalCloseCapture()
+        let terminated = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowCloser: { closed.sessionIDs.append($0) },
+            builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
+
+        try orchestrator.stopCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")
+
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertEqual(try store.workspaceAgentLaunchers(workspaceID: workspace.id).map(\.name), ["Codex"])
+        XCTAssertEqual(closed.sessionIDs, ["session-codex"])
+        XCTAssertEqual(terminated.sessionIDs, ["session-codex"])
+    }
+
+    func testRestartCodingAgentRelaunchesClaimedLauncher() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "old-session",
+                codexThreadID: nil, windowID: nil, status: .idle, createdAt: "now", updatedAt: "now"))
+        let launches = TerminalLaunchConfigurationCapture()
+        let terminated = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
+            builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) },
+            builtInTerminalSessionLauncher: { configuration in
+                launches.append(configuration)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
+                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)")
+            })
+
+        let relaunched = try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")
+
+        XCTAssertEqual(terminated.sessionIDs, ["old-session"])
+        XCTAssertEqual(launches.snapshot().map(\.title), ["Codex"])
+        XCTAssertEqual(relaunched.label, "Codex")
+        XCTAssertEqual(try store.workspaceAgentLaunchers(workspaceID: workspace.id).map(\.name), ["Codex"])
+    }
+
+    func testRestartCodingAgentRejectsUnconfiguredAdHocRuntime() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-review", workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "session-review",
+                codexThreadID: nil, windowID: nil, status: .idle, createdAt: "now", updatedAt: "now"))
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        XCTAssertThrowsError(try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-review")) { error in
+            XCTAssertEqual(error.localizedDescription, "Invalid argument: Unconfigured live coding agents cannot be restarted from Spaces.")
+        }
+    }
+
+    func testRestartCodingAgentRejectsStaleClaimedLauncherBeforeStopping() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.setWorkspaceAgentLaunchers(
+            workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-current", name: "Reviewer", command: "codex --review")])
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "old-session",
+                codexThreadID: nil, windowID: nil, status: .idle, createdAt: "now", updatedAt: "now"))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex",
+                terminalTarget: TerminalTargetRecord(trackingID: "old-session"), claimedLauncherID: "launcher-codex", claimedLauncherName: "Codex",
+                status: .idle, createdAt: "now", updatedAt: "now"))
+        let terminated = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
+
+        XCTAssertThrowsError(try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")) { error in
+            XCTAssertEqual(error.localizedDescription, "Invalid argument: Configured coding agent not found.")
+        }
+
+        XCTAssertEqual(terminated.sessionIDs, [])
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), ["agent-codex"])
+    }
+
     func testUpdateProjectConfigRejectsUnknownDirectProcessVariableAtSaveTime() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()

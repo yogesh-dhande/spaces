@@ -338,6 +338,22 @@ import workspacecore
         #expect(entries.map { $0.agentWindow?.id } == ["matched", nil, "adhoc"])
     }
 
+    @Test func resolvedCodingAgentEntriesMatchRenamedLaunchersByID() {
+        let configuredAgentLaunchers = [AgentLauncher(id: "launcher-codex", name: "Codex Renamed", command: "codex")]
+        let agentWindows = [
+            AgentWindowRecord(
+                id: "matched", workspaceID: "workspace", provider: .spaces, label: "Codex",
+                terminalTarget: TerminalTargetRecord(trackingID: "session-codex"), claimedLauncherID: "launcher-codex", claimedLauncherName: "Codex",
+                status: .idle, createdAt: "now", updatedAt: "now")
+        ]
+
+        let entries = AppKitController.resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
+
+        #expect(entries.map(\.kind) == [.agent])
+        #expect(entries.map(\.launcherName) == ["Codex Renamed"])
+        #expect(entries.map { $0.agentWindow?.id } == ["matched"])
+    }
+
     @Test func missingConfiguredProcessShortcutTargetsRecoveryAction() {
         let processEntries = [
             AppKitController.WorkspaceRunProcessEntry(

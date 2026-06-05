@@ -36,6 +36,20 @@ import workspacecore
         #expect(section.row(at: 2)?.displayNameForTesting == "reviewer")
     }
 
+    @Test func codingAgentsSectionMatchesRenamedLaunchersByID() {
+        let section = AgentLaunchersSection(launchers: [AgentLauncher(id: "launcher-codex", name: "Codex Renamed", command: "codex")])
+        section.runtimeAgentWindows = [
+            AgentWindowRecord(
+                id: "codex-runtime", workspaceID: "workspace", provider: .spaces, label: "Codex",
+                terminalTarget: TerminalTargetRecord(windowID: 201, trackingID: "session-codex"), claimedLauncherID: "launcher-codex",
+                claimedLauncherName: "Codex", status: .idle, createdAt: "now", updatedAt: "now")
+        ]
+
+        #expect(section.rowCount == 1)
+        #expect(section.row(at: 0)?.displayNameForTesting == "Codex Renamed")
+        #expect(section.row(at: 0)?.visibleActionButtonIDsForTesting.contains("agent-launcher-row-stop") == true)
+    }
+
     @Test func adHocRuntimeRowsStayReadOnly() {
         let section = AgentLaunchersSection()
         section.runtimeAgentWindows = [
@@ -75,6 +89,57 @@ import workspacecore
         #expect(cancelButton?.title == "Cancel")
         #expect(saveButton?.title == "Save")
     }
+
+    @Test func configuredIdleRowsShowRunBeforeEditAndRemove() {
+        let row = AgentLauncherRowView(launcher: AgentLauncher(name: "claude", command: "claude"))
+        #expect(row.visibleActionButtonIDsForTesting == ["agent-launcher-row-run", "agent-launcher-row-edit", "agent-launcher-row-remove"])
+    }
+
+    @Test func configurationOnlySectionsHideRuntimeControls() {
+        let section = AgentLaunchersSection(launchers: [AgentLauncher(name: "claude", command: "claude")], showsRuntimeControls: false)
+
+        #expect(section.row(at: 0)?.visibleActionButtonIDsForTesting == ["agent-launcher-row-edit", "agent-launcher-row-remove"])
+    }
+
+    @Test func configuredLiveRowsShowStopAndRestartBeforeEditAndRemove() {
+        let row = AgentLauncherRowView(launcher: AgentLauncher(name: "claude", command: "claude"), status: .idle, isRunning: true, canRestart: true)
+        #expect(
+            row.visibleActionButtonIDsForTesting == [
+                "agent-launcher-row-stop", "agent-launcher-row-restart", "agent-launcher-row-edit", "agent-launcher-row-remove",
+            ])
+    }
+
+    @Test func unconfiguredRuntimeRowsShowStopWithoutRestart() {
+        let row = AgentLauncherRowView(
+            launcher: AgentLauncher(name: "reviewer", command: "review notes"), status: .spinning, isEditable: false, isRunning: true,
+            canRestart: false)
+        #expect(row.visibleActionButtonIDsForTesting == ["agent-launcher-row-stop"])
+    }
+
+    @Test func runStopAndRestartCallbacksReceiveConfiguredAndRuntimeRows() {
+        let section = AgentLaunchersSection(launchers: [AgentLauncher(name: "claude", command: "claude")])
+        section.runtimeAgentWindows = [
+            AgentWindowRecord(
+                id: "claude-runtime", workspaceID: "workspace", provider: .spaces, label: "claude", terminalTrackingID: "session-claude",
+                codexThreadID: nil, windowID: 101, yabaiWindowID: 101, status: .idle, createdAt: "now", updatedAt: "now")
+        ]
+        var stoppedID: String?
+        var restartedID: String?
+        section.onStopAgentWindow = { stoppedID = $0.id }
+        section.onRestartAgentWindow = { restartedID = $0.id }
+
+        section.row(at: 0)?.onStop?()
+        section.row(at: 0)?.onRestart?()
+
+        #expect(stoppedID == "claude-runtime")
+        #expect(restartedID == "claude-runtime")
+
+        let idleSection = AgentLaunchersSection(launchers: [AgentLauncher(name: "codex", command: "codex")])
+        var ranName: String?
+        idleSection.onRunLauncher = { ranName = $0.name }
+        idleSection.row(at: 0)?.onRun?()
+        #expect(ranName == "codex")
+    }
 }
 
 extension AgentLaunchersSection {
@@ -109,6 +174,13 @@ extension AgentLauncherRowView {
 
     func buttonForTesting(accessibilityID: String) -> NSButton? {
         subviewsRecursiveForAgentTests().compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier() == accessibilityID }
+    }
+
+    var visibleActionButtonIDsForTesting: [String] {
+        subviewsRecursiveForAgentTests().compactMap { $0 as? NSButton }.compactMap { button in
+            guard !button.isHidden else { return nil }
+            return button.accessibilityIdentifier()
+        }
     }
 }
 

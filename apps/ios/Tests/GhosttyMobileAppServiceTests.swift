@@ -698,6 +698,46 @@
             window.isHidden = true
         }
 
+        func testRemoteTerminalHostViewTeardownRetiresNativeMirrorWithoutBlocking() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            viewController.view.addSubview(hostView)
+            window.isHidden = false
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(),
+                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=native-teardown",
+                fallbackText: "Waiting for terminal state..."
+            )
+
+            let mirrorDeadline = Date().addingTimeInterval(2)
+            while !hostView.hasMirrorSurfaceForTesting && Date() < mirrorDeadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
+            XCTAssertTrue(hostView.hasMirrorSurfaceForTesting)
+
+            let retiredMirrorCount = GhosttyRemoteTerminalHostView.retiredMirrorCountForTesting
+
+            let startedAt = Date()
+            hostView.prepareForDismantle()
+            let elapsed = Date().timeIntervalSince(startedAt)
+
+            XCTAssertLessThan(elapsed, 0.2)
+            XCTAssertFalse(hostView.hasActiveSessionForTesting)
+            XCTAssertFalse(hostView.hasMirrorSurfaceForTesting)
+            XCTAssertFalse(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
+            XCTAssertEqual(GhosttyRemoteTerminalHostView.retiredMirrorCountForTesting, retiredMirrorCount + 1)
+
+            window.isHidden = true
+        }
+
         func testRemoteTerminalHostViewDoesNotRepublishInputReadinessWhenInstallingCallback() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()

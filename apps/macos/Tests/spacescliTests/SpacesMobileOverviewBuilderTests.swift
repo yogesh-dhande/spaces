@@ -48,6 +48,171 @@ final class SpacesMobileOverviewBuilderTests: XCTestCase {
         XCTAssertNil(overview.sessions.first(where: { $0.id == "session-2" })?.workspaceID)
     }
 
+    func testBuildsConfiguredProcessRowsWithLiveAndExitedState() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let runningSession = makeSessionCatalogEntry(
+            sessionID: "session-api", title: "api", workingDirectory: workspace.dir, attachmentSnapshot: .init())
+        let runningProcess = RunningProcessRecord(
+            id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces", windowID: nil,
+            terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "now", exitedAt: nil)
+        let exitedProcess = RunningProcessRecord(
+            id: "process-worker", workspaceID: workspace.id, templateName: "worker", command: "npm run worker", terminalApp: "Spaces", windowID: nil,
+            terminalTrackingID: "session-worker", terminalNativeID: "session-worker", pid: nil, status: .exited, logPath: nil, lastOutputAt: nil,
+            startedAt: "now", exitedAt: "later")
+
+        let overview = SpacesMobileOverviewBuilder.build(
+            projects: [project],
+            workspaces: [
+                .init(
+                    project: project, workspace: workspace,
+                    settings: WorkspaceSettings(processes: [
+                        ProcessTemplate(id: "template-api", name: "api", command: "npm run dev"),
+                        ProcessTemplate(id: "template-worker", name: "worker", command: "npm run worker"),
+                        ProcessTemplate(id: "template-web", name: "web", command: "npm run web"),
+                    ]), runningProcesses: [runningProcess, exitedProcess])
+            ], sessions: [runningSession])
+
+        let rows = overview.workspaces.first?.processRows ?? []
+        XCTAssertEqual(rows.first(where: { $0.name == "api" })?.runState, .running)
+        XCTAssertEqual(rows.first(where: { $0.name == "api" })?.sessionID, "session-api")
+        XCTAssertEqual(rows.first(where: { $0.name == "worker" })?.runState, .exited)
+        XCTAssertNil(rows.first(where: { $0.name == "worker" })?.sessionID)
+        XCTAssertEqual(rows.first(where: { $0.name == "web" })?.runState, .notStarted)
+    }
+
+    func testMatchesRenamedConfiguredProcessByTemplateID() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let processSession = makeSessionCatalogEntry(
+            sessionID: "session-api", title: "old-api", workingDirectory: workspace.dir, attachmentSnapshot: .init())
+        let runningProcess = RunningProcessRecord(
+            id: "process-api", workspaceID: workspace.id, templateID: "template-api", templateName: "old-api", command: "npm run dev",
+            terminalApp: "Spaces", windowID: nil, terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running,
+            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        let processWindow = WindowRecord(
+            id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "old-api", windowID: nil, terminalTrackingID: "session-api",
+            terminalNativeID: "session-api", role: "terminal", orderIndex: 1, lastSeenAt: "now")
+
+        let overview = SpacesMobileOverviewBuilder.build(
+            projects: [project],
+            workspaces: [
+                .init(
+                    project: project, workspace: workspace,
+                    settings: WorkspaceSettings(processes: [ProcessTemplate(id: "template-api", name: "new-api", command: "npm run dev")]),
+                    runningProcesses: [runningProcess], windows: [processWindow])
+            ], sessions: [processSession])
+
+        let workspaceOverview = overview.workspaces.first
+        let processRow = workspaceOverview?.processRows.first
+        XCTAssertEqual(processRow?.name, "new-api")
+        XCTAssertEqual(processRow?.templateID, "template-api")
+        XCTAssertEqual(processRow?.processID, "process-api")
+        XCTAssertEqual(processRow?.sessionID, "session-api")
+        XCTAssertEqual(workspaceOverview?.terminalRows.first(where: { $0.sessionID == "session-api" }), nil)
+    }
+
+    func testBuildsConfiguredAndAdHocCodingAgentRows() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let codexSession = makeSessionCatalogEntry(
+            sessionID: "session-codex", title: "Codex", workingDirectory: workspace.dir, attachmentSnapshot: .init())
+        let configuredAgent = AgentWindowRecord(
+            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-codex", codexThreadID: nil,
+            windowID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
+        let adHocAgent = AgentWindowRecord(
+            id: "agent-review", workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "missing-session",
+            codexThreadID: nil, windowID: nil, status: .waiting, createdAt: "now", updatedAt: "now")
+
+        let overview = SpacesMobileOverviewBuilder.build(
+            projects: [project],
+            workspaces: [
+                .init(
+                    project: project, workspace: workspace,
+                    settings: WorkspaceSettings(agentLaunchers: [AgentLauncher(name: "codex", command: "codex")]),
+                    agentWindows: [configuredAgent, adHocAgent])
+            ], sessions: [codexSession])
+
+        let rows = overview.workspaces.first?.codingAgentRows ?? []
+        XCTAssertEqual(rows.first(where: { $0.name == "codex" })?.runState, .running)
+        XCTAssertEqual(rows.first(where: { $0.name == "codex" })?.activityState, .spinning)
+        XCTAssertEqual(rows.first(where: { $0.name == "codex" })?.sessionID, "session-codex")
+        XCTAssertEqual(rows.first(where: { $0.name == "reviewer" })?.runState, .exited)
+        XCTAssertEqual(rows.first(where: { $0.name == "reviewer" })?.canStop, true)
+        XCTAssertEqual(rows.first(where: { $0.name == "reviewer" })?.canRestart, false)
+    }
+
+    func testMatchesRenamedConfiguredAgentByLauncherID() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let codexSession = makeSessionCatalogEntry(
+            sessionID: "session-codex", title: "Old Codex", workingDirectory: workspace.dir, attachmentSnapshot: .init())
+        let configuredAgent = AgentWindowRecord(
+            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Old Codex", terminalTrackingID: "session-codex",
+            codexThreadID: nil, windowID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
+        let claimedAgent = AgentWindowRecord(
+            id: configuredAgent.id, workspaceID: configuredAgent.workspaceID, provider: configuredAgent.provider, label: configuredAgent.label,
+            runtimeTargetID: configuredAgent.runtimeTargetID, terminalTarget: configuredAgent.terminalTarget, sessionKey: configuredAgent.sessionKey,
+            claimedLauncherID: "launcher-codex", claimedLauncherName: "Old Codex", status: configuredAgent.status,
+            createdAt: configuredAgent.createdAt, updatedAt: configuredAgent.updatedAt)
+
+        let overview = SpacesMobileOverviewBuilder.build(
+            projects: [project],
+            workspaces: [
+                .init(
+                    project: project, workspace: workspace,
+                    settings: WorkspaceSettings(agentLaunchers: [AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")]),
+                    agentWindows: [claimedAgent])
+            ], sessions: [codexSession])
+
+        let row = overview.workspaces.first?.codingAgentRows.first
+        XCTAssertEqual(row?.name, "Codex")
+        XCTAssertEqual(row?.launcherID, "launcher-codex")
+        XCTAssertEqual(row?.agentID, "agent-codex")
+        XCTAssertEqual(row?.sessionID, "session-codex")
+    }
+
+    func testBuildsWorkspaceTerminalRowsWithoutClaimedProcessAndAgentSessions() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let shellSession = makeSessionCatalogEntry(
+            sessionID: "session-shell", title: "Shell", workingDirectory: workspace.dir, attachmentSnapshot: .init())
+        let processSession = makeSessionCatalogEntry(
+            sessionID: "session-api", title: "api", workingDirectory: workspace.dir, attachmentSnapshot: .init())
+        let process = RunningProcessRecord(
+            id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces", windowID: nil,
+            terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "now", exitedAt: nil)
+        let terminalWindow = WindowRecord(
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", windowID: nil, terminalTrackingID: "session-shell",
+            terminalNativeID: "session-shell", role: "terminal", orderIndex: 0, lastSeenAt: "now")
+        let processWindow = WindowRecord(
+            id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "api", windowID: nil, terminalTrackingID: "session-api",
+            terminalNativeID: "session-api", role: "terminal", orderIndex: 1, lastSeenAt: "now")
+
+        let overview = SpacesMobileOverviewBuilder.build(
+            projects: [project],
+            workspaces: [.init(project: project, workspace: workspace, runningProcesses: [process], windows: [terminalWindow, processWindow])],
+            sessions: [shellSession, processSession])
+
+        let rows = overview.workspaces.first?.terminalRows ?? []
+        XCTAssertEqual(rows.map(\.sessionID), ["session-shell"])
+        XCTAssertEqual(rows.first?.runState, .running)
+        XCTAssertEqual(overview.workspaces.first?.processRows.first?.id, "process-runtime:process-api")
+        XCTAssertEqual(overview.workspaces.first?.processRows.first?.canRun, false)
+    }
+
     private func makeSessionCatalogEntry(
         sessionID: String, title: String, workingDirectory: String, attachmentSnapshot: TerminalSessionAttachmentSnapshot
     ) -> TerminalSessionCatalogEntry {

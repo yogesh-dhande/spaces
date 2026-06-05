@@ -18,4 +18,50 @@ final class SpacesMobileBridgeProtocolTests: XCTestCase {
         XCTAssertNil(request.scrollMods)
     }
 
+    func testMutationRequestRoundTripsWorkspaceAndRuntimeFields() throws {
+        let request = SpacesMobileBridgeRequest(
+            command: "createWorkspace", authToken: "SECRET", projectID: "project-1", workspaceID: "workspace-1", workspaceTitle: "Feature",
+            branch: "feature", targetBranch: "main", directoryName: "feature-dir", allowExistingBranchReuse: true, processKey: "api",
+            processID: "process-1", processTemplateID: "template-1", agentName: "Codex", agentID: "agent-1", agentLauncherID: "launcher-1")
+
+        XCTAssertEqual(try SpacesMobileBridgeCodec.decodeRequest(SpacesMobileBridgeCodec.encodeRequest(request)), request)
+    }
+
+    func testLegacyOverviewDecodesWithProjectAndRowDefaults() throws {
+        let payload = """
+            {
+              "workspaces": [{
+                "id": "workspace-1",
+                "projectID": "project-1",
+                "projectName": "Project",
+                "title": "Main",
+                "dir": "/repo",
+                "isRunning": false,
+                "isArchived": false,
+                "isHidden": false,
+                "isDefault": true,
+                "sessionCount": 0
+              }],
+              "sessions": []
+            }
+            """.data(using: .utf8)!
+
+        let overview = try JSONDecoder().decode(SpacesMobileOverviewPayload.self, from: payload)
+
+        XCTAssertEqual(overview.projects, [])
+        XCTAssertEqual(overview.workspaces.first?.processRows, [])
+        XCTAssertEqual(overview.workspaces.first?.codingAgentRows, [])
+        XCTAssertEqual(overview.workspaces.first?.terminalRows, [])
+    }
+
+    func testResponseRoundTripsMutationOutputsAndCreateOptions() throws {
+        let options = SpacesMobileWorkspaceCreateOptions(
+            projects: [SpacesMobileProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")],
+            selectedProjectID: "project-1", branchOptions: ["main"])
+        let response = SpacesMobileBridgeResponse(
+            ok: true, message: "ok", workspaceCreateOptions: options, workspaceID: "workspace-1", sessionID: "session-1")
+
+        XCTAssertEqual(try SpacesMobileBridgeCodec.decodeResponse(SpacesMobileBridgeCodec.encodeResponse(response)), response)
+    }
+
 }

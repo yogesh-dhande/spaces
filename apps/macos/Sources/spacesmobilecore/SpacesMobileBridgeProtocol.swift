@@ -19,6 +19,127 @@ public struct SpacesMobileClientApp: Codable, Sendable, Equatable {
     }
 }
 
+public struct SpacesMobileProjectSummary: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let name: String
+    public let dir: String
+    public let isGitRepo: Bool
+    public let defaultBranch: String?
+    public let isCollapsed: Bool
+
+    public init(id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isCollapsed: Bool = false) {
+        self.id = id
+        self.name = name
+        self.dir = dir
+        self.isGitRepo = isGitRepo
+        self.defaultBranch = defaultBranch
+        self.isCollapsed = isCollapsed
+    }
+}
+
+public enum SpacesMobileRunState: String, Codable, Sendable, Equatable, Hashable {
+    case notStarted
+    case running
+    case exited
+}
+
+public enum SpacesMobileCodingAgentActivityState: String, Codable, Sendable, Equatable, Hashable {
+    case idle
+    case spinning
+    case waiting
+    case done
+}
+
+public struct SpacesMobileWorkspaceProcessRow: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let workspaceID: String
+    public let name: String
+    public let command: String
+    public let templateID: String?
+    public let processID: String?
+    public let sessionID: String?
+    public let runState: SpacesMobileRunState
+    public let canRun: Bool
+    public let canStop: Bool
+    public let canRestart: Bool
+
+    public init(
+        id: String, workspaceID: String, name: String, command: String, templateID: String? = nil, processID: String?, sessionID: String?,
+        runState: SpacesMobileRunState, canRun: Bool, canStop: Bool, canRestart: Bool
+    ) {
+        self.id = id
+        self.workspaceID = workspaceID
+        self.name = name
+        self.command = command
+        self.templateID = templateID
+        self.processID = processID
+        self.sessionID = sessionID
+        self.runState = runState
+        self.canRun = canRun
+        self.canStop = canStop
+        self.canRestart = canRestart
+    }
+}
+
+public struct SpacesMobileWorkspaceCodingAgentRow: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let workspaceID: String
+    public let name: String
+    public let command: String
+    public let launcherID: String?
+    public let agentID: String?
+    public let sessionID: String?
+    public let isConfigured: Bool
+    public let runState: SpacesMobileRunState
+    public let activityState: SpacesMobileCodingAgentActivityState
+    public let canRun: Bool
+    public let canStop: Bool
+    public let canRestart: Bool
+
+    public init(
+        id: String, workspaceID: String, name: String, command: String, launcherID: String? = nil, agentID: String?, sessionID: String?,
+        isConfigured: Bool, runState: SpacesMobileRunState, activityState: SpacesMobileCodingAgentActivityState, canRun: Bool, canStop: Bool,
+        canRestart: Bool
+    ) {
+        self.id = id
+        self.workspaceID = workspaceID
+        self.name = name
+        self.command = command
+        self.launcherID = launcherID
+        self.agentID = agentID
+        self.sessionID = sessionID
+        self.isConfigured = isConfigured
+        self.runState = runState
+        self.activityState = activityState
+        self.canRun = canRun
+        self.canStop = canStop
+        self.canRestart = canRestart
+    }
+}
+
+public struct SpacesMobileWorkspaceTerminalRow: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let workspaceID: String
+    public let title: String
+    public let workingDirectory: String
+    public let sessionID: String?
+    public let runState: SpacesMobileRunState
+    public let canOpenTerminal: Bool
+
+    public init(
+        id: String, workspaceID: String, title: String, workingDirectory: String, sessionID: String?, runState: SpacesMobileRunState,
+        canOpenTerminal: Bool
+    ) {
+        self.id = id
+        self.workspaceID = workspaceID
+        self.title = title
+        self.workingDirectory = workingDirectory
+        self.sessionID = sessionID
+        self.runState = runState
+        self.canOpenTerminal = canOpenTerminal
+    }
+}
+
 public struct SpacesMobileWorkspaceSummary: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let projectID: String
@@ -32,10 +153,14 @@ public struct SpacesMobileWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let isHidden: Bool
     public let isDefault: Bool
     public let sessionCount: Int
+    public let processRows: [SpacesMobileWorkspaceProcessRow]
+    public let codingAgentRows: [SpacesMobileWorkspaceCodingAgentRow]
+    public let terminalRows: [SpacesMobileWorkspaceTerminalRow]
 
     public init(
         id: String, projectID: String, projectName: String, title: String, branch: String?, targetBranch: String?, dir: String, isRunning: Bool,
-        isArchived: Bool, isHidden: Bool, isDefault: Bool, sessionCount: Int
+        isArchived: Bool, isHidden: Bool, isDefault: Bool, sessionCount: Int, processRows: [SpacesMobileWorkspaceProcessRow] = [],
+        codingAgentRows: [SpacesMobileWorkspaceCodingAgentRow] = [], terminalRows: [SpacesMobileWorkspaceTerminalRow] = []
     ) {
         self.id = id
         self.projectID = projectID
@@ -49,6 +174,46 @@ public struct SpacesMobileWorkspaceSummary: Codable, Sendable, Equatable, Identi
         self.isHidden = isHidden
         self.isDefault = isDefault
         self.sessionCount = sessionCount
+        self.processRows = processRows
+        self.codingAgentRows = codingAgentRows
+        self.terminalRows = terminalRows
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case projectID
+        case projectName
+        case title
+        case branch
+        case targetBranch
+        case dir
+        case isRunning
+        case isArchived
+        case isHidden
+        case isDefault
+        case sessionCount
+        case processRows
+        case codingAgentRows
+        case terminalRows
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        projectID = try container.decode(String.self, forKey: .projectID)
+        projectName = try container.decode(String.self, forKey: .projectName)
+        title = try container.decode(String.self, forKey: .title)
+        branch = try container.decodeIfPresent(String.self, forKey: .branch)
+        targetBranch = try container.decodeIfPresent(String.self, forKey: .targetBranch)
+        dir = try container.decode(String.self, forKey: .dir)
+        isRunning = try container.decode(Bool.self, forKey: .isRunning)
+        isArchived = try container.decode(Bool.self, forKey: .isArchived)
+        isHidden = try container.decodeIfPresent(Bool.self, forKey: .isHidden) ?? false
+        isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
+        sessionCount = try container.decodeIfPresent(Int.self, forKey: .sessionCount) ?? 0
+        processRows = try container.decodeIfPresent([SpacesMobileWorkspaceProcessRow].self, forKey: .processRows) ?? []
+        codingAgentRows = try container.decodeIfPresent([SpacesMobileWorkspaceCodingAgentRow].self, forKey: .codingAgentRows) ?? []
+        terminalRows = try container.decodeIfPresent([SpacesMobileWorkspaceTerminalRow].self, forKey: .terminalRows) ?? []
     }
 }
 
@@ -98,12 +263,41 @@ public struct SpacesMobileTerminalSessionSummary: Codable, Sendable, Equatable, 
 }
 
 public struct SpacesMobileOverviewPayload: Codable, Sendable, Equatable {
+    public let projects: [SpacesMobileProjectSummary]
     public let workspaces: [SpacesMobileWorkspaceSummary]
     public let sessions: [SpacesMobileTerminalSessionSummary]
 
-    public init(workspaces: [SpacesMobileWorkspaceSummary], sessions: [SpacesMobileTerminalSessionSummary]) {
+    public init(
+        projects: [SpacesMobileProjectSummary] = [], workspaces: [SpacesMobileWorkspaceSummary], sessions: [SpacesMobileTerminalSessionSummary]
+    ) {
+        self.projects = projects
         self.workspaces = workspaces
         self.sessions = sessions
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case projects
+        case workspaces
+        case sessions
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        projects = try container.decodeIfPresent([SpacesMobileProjectSummary].self, forKey: .projects) ?? []
+        workspaces = try container.decodeIfPresent([SpacesMobileWorkspaceSummary].self, forKey: .workspaces) ?? []
+        sessions = try container.decodeIfPresent([SpacesMobileTerminalSessionSummary].self, forKey: .sessions) ?? []
+    }
+}
+
+public struct SpacesMobileWorkspaceCreateOptions: Codable, Sendable, Equatable {
+    public let projects: [SpacesMobileProjectSummary]
+    public let selectedProjectID: String?
+    public let branchOptions: [String]
+
+    public init(projects: [SpacesMobileProjectSummary], selectedProjectID: String?, branchOptions: [String]) {
+        self.projects = projects
+        self.selectedProjectID = selectedProjectID
+        self.branchOptions = branchOptions
     }
 }
 
@@ -127,12 +321,28 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
     public let scrollVertical: Double?
     public let scrollMods: Int32?
     public let appendNewline: Bool
+    public let projectID: String?
+    public let workspaceID: String?
+    public let workspaceTitle: String?
+    public let branch: String?
+    public let targetBranch: String?
+    public let directoryName: String?
+    public let allowExistingBranchReuse: Bool
+    public let processKey: String?
+    public let processID: String?
+    public let processTemplateID: String?
+    public let agentName: String?
+    public let agentID: String?
+    public let agentLauncherID: String?
 
     public init(
         command: String, authToken: String? = nil, pairingCode: String? = nil, pairingNonce: String? = nil, clientApp: SpacesMobileClientApp? = nil,
         sessionID: String? = nil, clientID: String? = nil, client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil,
         text: String? = nil, key: String? = nil, columns: Int? = nil, rows: Int? = nil, ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil,
-        scrollHorizontal: Double? = nil, scrollVertical: Double? = nil, scrollMods: Int32? = nil, appendNewline: Bool = false
+        scrollHorizontal: Double? = nil, scrollVertical: Double? = nil, scrollMods: Int32? = nil, appendNewline: Bool = false,
+        projectID: String? = nil, workspaceID: String? = nil, workspaceTitle: String? = nil, branch: String? = nil, targetBranch: String? = nil,
+        directoryName: String? = nil, allowExistingBranchReuse: Bool = false, processKey: String? = nil, processID: String? = nil,
+        processTemplateID: String? = nil, agentName: String? = nil, agentID: String? = nil, agentLauncherID: String? = nil
     ) {
         self.command = command
         self.authToken = authToken
@@ -153,6 +363,19 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         self.scrollVertical = scrollVertical
         self.scrollMods = scrollMods
         self.appendNewline = appendNewline
+        self.projectID = projectID
+        self.workspaceID = workspaceID
+        self.workspaceTitle = workspaceTitle
+        self.branch = branch
+        self.targetBranch = targetBranch
+        self.directoryName = directoryName
+        self.allowExistingBranchReuse = allowExistingBranchReuse
+        self.processKey = processKey
+        self.processID = processID
+        self.processTemplateID = processTemplateID
+        self.agentName = agentName
+        self.agentID = agentID
+        self.agentLauncherID = agentLauncherID
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -175,6 +398,19 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         case scrollVertical
         case scrollMods
         case appendNewline
+        case projectID
+        case workspaceID
+        case workspaceTitle
+        case branch
+        case targetBranch
+        case directoryName
+        case allowExistingBranchReuse
+        case processKey
+        case processID
+        case processTemplateID
+        case agentName
+        case agentID
+        case agentLauncherID
     }
 
     public init(from decoder: any Decoder) throws {
@@ -198,6 +434,19 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         scrollVertical = try container.decodeIfPresent(Double.self, forKey: .scrollVertical)
         scrollMods = try container.decodeIfPresent(Int32.self, forKey: .scrollMods)
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
+        projectID = try container.decodeIfPresent(String.self, forKey: .projectID)
+        workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
+        workspaceTitle = try container.decodeIfPresent(String.self, forKey: .workspaceTitle)
+        branch = try container.decodeIfPresent(String.self, forKey: .branch)
+        targetBranch = try container.decodeIfPresent(String.self, forKey: .targetBranch)
+        directoryName = try container.decodeIfPresent(String.self, forKey: .directoryName)
+        allowExistingBranchReuse = try container.decodeIfPresent(Bool.self, forKey: .allowExistingBranchReuse) ?? false
+        processKey = try container.decodeIfPresent(String.self, forKey: .processKey)
+        processID = try container.decodeIfPresent(String.self, forKey: .processID)
+        processTemplateID = try container.decodeIfPresent(String.self, forKey: .processTemplateID)
+        agentName = try container.decodeIfPresent(String.self, forKey: .agentName)
+        agentID = try container.decodeIfPresent(String.self, forKey: .agentID)
+        agentLauncherID = try container.decodeIfPresent(String.self, forKey: .agentLauncherID)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -221,6 +470,19 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(scrollVertical, forKey: .scrollVertical)
         try container.encodeIfPresent(scrollMods, forKey: .scrollMods)
         try container.encode(appendNewline, forKey: .appendNewline)
+        try container.encodeIfPresent(projectID, forKey: .projectID)
+        try container.encodeIfPresent(workspaceID, forKey: .workspaceID)
+        try container.encodeIfPresent(workspaceTitle, forKey: .workspaceTitle)
+        try container.encodeIfPresent(branch, forKey: .branch)
+        try container.encodeIfPresent(targetBranch, forKey: .targetBranch)
+        try container.encodeIfPresent(directoryName, forKey: .directoryName)
+        try container.encode(allowExistingBranchReuse, forKey: .allowExistingBranchReuse)
+        try container.encodeIfPresent(processKey, forKey: .processKey)
+        try container.encodeIfPresent(processID, forKey: .processID)
+        try container.encodeIfPresent(processTemplateID, forKey: .processTemplateID)
+        try container.encodeIfPresent(agentName, forKey: .agentName)
+        try container.encodeIfPresent(agentID, forKey: .agentID)
+        try container.encodeIfPresent(agentLauncherID, forKey: .agentLauncherID)
     }
 }
 
@@ -230,16 +492,23 @@ public struct SpacesMobileBridgeResponse: Codable, Sendable, Equatable {
     public let overview: SpacesMobileOverviewPayload?
     public let issuedAuthToken: String?
     public let sessionState: GhosttyRemoteSessionStatePayload?
+    public let workspaceCreateOptions: SpacesMobileWorkspaceCreateOptions?
+    public let workspaceID: String?
+    public let sessionID: String?
 
     public init(
         ok: Bool, message: String, overview: SpacesMobileOverviewPayload? = nil, issuedAuthToken: String? = nil,
-        sessionState: GhosttyRemoteSessionStatePayload? = nil
+        sessionState: GhosttyRemoteSessionStatePayload? = nil, workspaceCreateOptions: SpacesMobileWorkspaceCreateOptions? = nil,
+        workspaceID: String? = nil, sessionID: String? = nil
     ) {
         self.ok = ok
         self.message = message
         self.overview = overview
         self.issuedAuthToken = issuedAuthToken
         self.sessionState = sessionState
+        self.workspaceCreateOptions = workspaceCreateOptions
+        self.workspaceID = workspaceID
+        self.sessionID = sessionID
     }
 }
 

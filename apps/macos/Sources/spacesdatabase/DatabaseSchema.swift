@@ -2,12 +2,15 @@ import Foundation
 import SQLite3
 
 public enum DatabaseSchema {
-    public static let currentVersion = 2
+    public static let currentVersion = 3
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "terminal metadata tables", requiresBackup: false) { database in
             try executeBatch(sql: terminalSchemaSQL, database: database)
-        }
+        },
+        DatabaseMigrationStep(fromVersion: 2, toVersion: 3, description: "stable runtime configuration identifiers", requiresBackup: false) {
+            database in try executeBatch(sql: stableRuntimeIdentityMigrationSQL, database: database)
+        },
     ]
 
     static let terminalSchemaSQL = """
@@ -93,6 +96,42 @@ public enum DatabaseSchema {
             );
         """
 
+    static let stableRuntimeIdentityMigrationSQL = """
+            ALTER TABLE project_agent_launchers ADD COLUMN id TEXT NOT NULL DEFAULT '';
+            UPDATE project_agent_launchers
+            SET id = lower(hex(randomblob(16)))
+            WHERE length(trim(id)) = 0;
+
+            ALTER TABLE workspace_agent_launchers ADD COLUMN id TEXT NOT NULL DEFAULT '';
+            UPDATE workspace_agent_launchers
+            SET id = lower(hex(randomblob(16)))
+            WHERE length(trim(id)) = 0;
+
+            ALTER TABLE running_processes ADD COLUMN template_id TEXT;
+            UPDATE running_processes
+            SET template_id = (
+              SELECT workspace_processes.id
+              FROM workspace_processes
+              WHERE workspace_processes.workspace_id = running_processes.workspace_id
+                AND lower(coalesce(workspace_processes.name, '')) = lower(running_processes.template_name)
+              LIMIT 1
+            )
+            WHERE template_id IS NULL OR length(trim(template_id)) = 0;
+
+            ALTER TABLE agent_sessions ADD COLUMN claimed_launcher_id TEXT;
+            UPDATE agent_sessions
+            SET claimed_launcher_id = (
+              SELECT workspace_agent_launchers.id
+              FROM workspace_agent_launchers
+              WHERE workspace_agent_launchers.workspace_id = agent_sessions.workspace_id
+                AND lower(workspace_agent_launchers.name) = lower(agent_sessions.claimed_launcher_name)
+              LIMIT 1
+            )
+            WHERE (claimed_launcher_id IS NULL OR length(trim(claimed_launcher_id)) = 0)
+              AND claimed_launcher_name IS NOT NULL
+              AND length(trim(claimed_launcher_name)) > 0;
+        """
+
     public static let latestSchemaSQL = """
             CREATE TABLE IF NOT EXISTS projects (
               id TEXT PRIMARY KEY,
@@ -136,6 +175,7 @@ public enum DatabaseSchema {
 
             CREATE TABLE IF NOT EXISTS project_agent_launchers (
               project_id TEXT NOT NULL,
+              id TEXT NOT NULL,
               name TEXT NOT NULL,
               command TEXT NOT NULL,
               order_index INTEGER NOT NULL,
@@ -218,6 +258,7 @@ public enum DatabaseSchema {
 
             CREATE TABLE IF NOT EXISTS workspace_agent_launchers (
               workspace_id TEXT NOT NULL,
+              id TEXT NOT NULL,
               name TEXT NOT NULL,
               command TEXT NOT NULL,
               order_index INTEGER NOT NULL,
@@ -228,6 +269,7 @@ public enum DatabaseSchema {
             CREATE TABLE IF NOT EXISTS running_processes (
               id TEXT PRIMARY KEY,
               workspace_id TEXT NOT NULL,
+              template_id TEXT,
               template_name TEXT NOT NULL,
               command TEXT NOT NULL,
               runtime_target_id TEXT,
@@ -282,6 +324,7 @@ public enum DatabaseSchema {
               status TEXT NOT NULL DEFAULT 'idle',
               runtime_target_id TEXT,
               session_key TEXT,
+              claimed_launcher_id TEXT,
               claimed_launcher_name TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,

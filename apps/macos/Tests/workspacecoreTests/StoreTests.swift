@@ -36,6 +36,7 @@ final class StoreTests: XCTestCase {
         let projectPortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "project_port_definitions")
         let workspaceProcessColumns = try readTableColumns(dbURL: dbURL, table: "workspace_processes")
         let projectProcessColumns = try readTableColumns(dbURL: dbURL, table: "project_processes")
+        let runningProcessColumns = try readTableColumns(dbURL: dbURL, table: "running_processes")
         let workspaceBrowserSessionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_browser_sessions")
         let projectBrowserSessionColumns = try readTableColumns(dbURL: dbURL, table: "project_browser_sessions")
         let workspaceAgentLauncherColumns = try readTableColumns(dbURL: dbURL, table: "workspace_agent_launchers")
@@ -47,21 +48,22 @@ final class StoreTests: XCTestCase {
         let terminalClientColumns = try readTableColumns(dbURL: dbURL, table: "terminal_clients")
         let terminalAttachmentColumns = try readTableColumns(dbURL: dbURL, table: "terminal_attachments")
         let workspaceForeignKeys = try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspaces')")
-        XCTAssertEqual(version, 2)
+        XCTAssertEqual(version, 3)
         XCTAssertTrue(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
         XCTAssertTrue(projectColumns.contains("is_collapsed"))
         XCTAssertTrue(workspaceProcessColumns.contains("execution_mode"))
         XCTAssertTrue(projectProcessColumns.contains("execution_mode"))
+        XCTAssertTrue(runningProcessColumns.contains("template_id"))
         XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
         XCTAssertTrue(workspacePortColumns.contains("definition_id"))
         XCTAssertTrue(workspacePortDefinitionColumns.contains("id"))
         XCTAssertTrue(projectPortDefinitionColumns.contains("id"))
         XCTAssertFalse(workspaceBrowserSessionColumns.contains("id"))
         XCTAssertFalse(projectBrowserSessionColumns.contains("id"))
-        XCTAssertFalse(workspaceAgentLauncherColumns.contains("id"))
-        XCTAssertFalse(projectAgentLauncherColumns.contains("id"))
+        XCTAssertTrue(workspaceAgentLauncherColumns.contains("id"))
+        XCTAssertTrue(projectAgentLauncherColumns.contains("id"))
         XCTAssertTrue(runtimeTargetColumns.contains("type"))
         XCTAssertTrue(runtimeTargetColumns.contains("tracking_id"))
         XCTAssertTrue(runtimeTargetColumns.contains("updated_at"))
@@ -73,6 +75,7 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(browserTargetColumns.contains("resolved_url"))
         XCTAssertTrue(agentSessionColumns.contains("runtime_target_id"))
         XCTAssertTrue(agentSessionColumns.contains("session_key"))
+        XCTAssertTrue(agentSessionColumns.contains("claimed_launcher_id"))
         XCTAssertTrue(agentSessionColumns.contains("claimed_launcher_name"))
         XCTAssertTrue(terminalSessionColumns.contains("root_directory"))
         XCTAssertTrue(terminalClientColumns.contains("lease_refreshed_at"))
@@ -100,7 +103,7 @@ final class StoreTests: XCTestCase {
         _ = try SQLiteStore(path: dbURL.path)
         _ = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 2)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
@@ -120,17 +123,102 @@ final class StoreTests: XCTestCase {
                   setup_script TEXT,
                   stop_script TEXT
                 );
+                CREATE TABLE workspaces (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  dir TEXT NOT NULL,
+                  dirname TEXT,
+                  branch TEXT,
+                  target_branch TEXT,
+                  is_default INTEGER NOT NULL,
+                  is_archived INTEGER NOT NULL,
+                  is_hidden INTEGER NOT NULL DEFAULT 0,
+                  is_running INTEGER NOT NULL,
+                  last_launched_at TEXT,
+                  notes TEXT
+                );
+                CREATE TABLE workspace_processes (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  name TEXT,
+                  command TEXT NOT NULL,
+                  on_exit TEXT NOT NULL DEFAULT 'none',
+                  execution_mode TEXT NOT NULL DEFAULT 'direct',
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE running_processes (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  template_name TEXT NOT NULL,
+                  command TEXT NOT NULL,
+                  runtime_target_id TEXT,
+                  pid INTEGER,
+                  status TEXT NOT NULL,
+                  log_path TEXT,
+                  last_output_at TEXT,
+                  started_at TEXT,
+                  exited_at TEXT
+                );
+                CREATE TABLE project_agent_launchers (
+                  project_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  command TEXT NOT NULL,
+                  order_index INTEGER NOT NULL,
+                  PRIMARY KEY (project_id, order_index)
+                );
+                CREATE TABLE workspace_agent_launchers (
+                  workspace_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  command TEXT NOT NULL,
+                  order_index INTEGER NOT NULL,
+                  PRIMARY KEY (workspace_id, order_index)
+                );
+                CREATE TABLE agent_sessions (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  label TEXT,
+                  status TEXT NOT NULL DEFAULT 'idle',
+                  runtime_target_id TEXT,
+                  session_key TEXT,
+                  claimed_launcher_name TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
                 CREATE TABLE migration_state (current_version INTEGER NOT NULL);
                 INSERT INTO projects(id, name, dir, is_git, is_collapsed) VALUES ('project-1', 'Project', '/tmp/project', 1, 0);
+                INSERT INTO workspaces(id, project_id, title, dir, is_default, is_archived, is_running)
+                VALUES ('workspace-1', 'project-1', 'feature', '/tmp/project/feature', 0, 0, 1);
+                INSERT INTO workspace_processes(id, workspace_id, name, command, order_index)
+                VALUES ('process-template-1', 'workspace-1', 'frontend', 'npm run dev', 0);
+                INSERT INTO running_processes(id, workspace_id, template_name, command, status)
+                VALUES ('process-runtime-1', 'workspace-1', 'frontend', 'npm run dev', 'running');
+                INSERT INTO project_agent_launchers(project_id, name, command, order_index)
+                VALUES ('project-1', 'Codex', 'codex', 0);
+                INSERT INTO workspace_agent_launchers(workspace_id, name, command, order_index)
+                VALUES ('workspace-1', 'Codex', 'codex', 0);
+                INSERT INTO agent_sessions(id, workspace_id, provider, label, status, claimed_launcher_name, created_at, updated_at)
+                VALUES ('agent-1', 'workspace-1', 'codex', 'Codex', 'idle', 'Codex', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
                 INSERT INTO migration_state(current_version) VALUES (1);
                 """)
 
         _ = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 2)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
         XCTAssertTrue(try tableExists(dbURL: dbURL, table: "terminal_sessions"))
         XCTAssertTrue(try tableExists(dbURL: dbURL, table: "terminal_clients"))
         XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "SELECT name FROM projects WHERE id = 'project-1'"), "Project")
+        XCTAssertEqual(
+            try readSingleText(dbURL: dbURL, sql: "SELECT template_id FROM running_processes WHERE id = 'process-runtime-1'"), "process-template-1")
+        let workspaceAgentLauncherID = try readSingleText(
+            dbURL: dbURL, sql: "SELECT id FROM workspace_agent_launchers WHERE workspace_id = 'workspace-1' AND name = 'Codex'")
+        XCTAssertFalse(workspaceAgentLauncherID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertEqual(
+            try readSingleText(dbURL: dbURL, sql: "SELECT claimed_launcher_id FROM agent_sessions WHERE id = 'agent-1'"), workspaceAgentLauncherID)
+        XCTAssertFalse(
+            try readSingleText(dbURL: dbURL, sql: "SELECT id FROM project_agent_launchers WHERE project_id = 'project-1' AND name = 'Codex'")
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
@@ -361,10 +449,11 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(sessions[0].url, "https://example.com")
         XCTAssertEqual(sessions[0].extractedWindow?.targetURL, "https://example.com")
 
-        try store.setWorkspaceAgentLaunchers(
-            workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex"), AgentLauncher(name: "Claude", command: "claude")])
+        let codexLauncher = AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")
+        let claudeLauncher = AgentLauncher(id: "launcher-claude", name: "Claude", command: "claude")
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [codexLauncher, claudeLauncher])
         let launchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
-        XCTAssertEqual(launchers, [AgentLauncher(name: "Codex", command: "codex"), AgentLauncher(name: "Claude", command: "claude")])
+        XCTAssertEqual(launchers, [codexLauncher, claudeLauncher])
         XCTAssertEqual(sessions[0].extractedWindow?.windowID, 303)
         XCTAssertEqual(sessions[0].extractedWindow?.isValid, true)
         XCTAssertNil(sessions[1].name)

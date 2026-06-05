@@ -60,7 +60,9 @@ import workspacecore
             let name = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let command = row.commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty, !command.isEmpty else { return nil }
-            return AgentLauncher(name: name, command: command)
+            let id = row.launcherID ?? UUID().uuidString
+            row.launcherID = id
+            return AgentLauncher(id: id, name: name, command: command)
         }
     }
 
@@ -71,6 +73,7 @@ import workspacecore
         rowsStack.addArrangedSubview(row.container)
         row.container.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
         if let launcher {
+            row.launcherID = launcher.id
             row.nameField.stringValue = launcher.name
             row.commandField.stringValue = launcher.command
         }
@@ -87,6 +90,7 @@ import workspacecore
     @objc private func addRowFromButton() { addRow(with: nil) }
 
     @MainActor private final class AgentLauncherRowRefs {
+        var launcherID: String?
         let container = NSStackView()
         let nameField = NSTextField(string: "")
         let commandField = NSTextField(string: "")

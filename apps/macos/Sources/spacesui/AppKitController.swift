@@ -2132,6 +2132,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         -> [ResolvedCodingAgentRunEntry]
     {
         let configuredAgentNames = Set(configuredAgentLaunchers.map(\.name).map(normalizedRunRowName).filter { !$0.isEmpty })
+        let configuredAgentIDs = Set(configuredAgentLaunchers.map(\.id).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
         var entries: [ResolvedCodingAgentRunEntry] = []
 
         // Configured coding agents always own the first slots in the Coding Agents
@@ -2140,11 +2141,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for launcher in configuredAgentLaunchers {
             let normalizedName = normalizedRunRowName(launcher.name)
             guard !normalizedName.isEmpty else { continue }
-            let matchedAgent = agentWindows.first(where: { normalizedRunRowName($0.label ?? "") == normalizedName })
+            let matchedAgent = agentWindows.first(where: { agentWindow in
+                if agentWindow.claimedLauncherID == launcher.id { return true }
+                guard agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else { return false }
+                return normalizedRunRowName(agentWindow.label ?? "") == normalizedName
+            })
             entries.append(ResolvedCodingAgentRunEntry(launcher: launcher, agentWindow: matchedAgent))
         }
 
         for agentWindow in agentWindows {
+            if let claimedLauncherID = agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty,
+                configuredAgentIDs.contains(claimedLauncherID)
+            {
+                continue
+            }
             guard !configuredAgentNames.contains(normalizedRunRowName(agentWindow.label ?? "")) else { continue }
             entries.append(ResolvedCodingAgentRunEntry(launcher: nil, agentWindow: agentWindow))
         }
@@ -3910,7 +3920,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let browserSessionsSection = BrowserSessionsSection(
             sessions: fullProject?.browserSessions ?? [], subtitle: "Optional names with URL prefixes to open automatically.")
         let agentLaunchersSection = AgentLaunchersSection(
-            launchers: fullProject?.agentLaunchers ?? [], subtitle: "Named interactive coding agents that open in the built-in Spaces terminal.")
+            launchers: fullProject?.agentLaunchers ?? [], subtitle: "Named interactive coding agents that open in the built-in Spaces terminal.",
+            showsRuntimeControls: false)
 
         setupScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
         stopScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
@@ -4189,7 +4200,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let portsSection = PortsSection(subtitle: "Named ports allocated per workspace, available as env vars.")
         let processesSection = ProcessesSection(subtitle: "Commands that run inside each workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(subtitle: "Browser windows opened automatically on launch.")
-        let agentLaunchersSection = AgentLaunchersSection(subtitle: "Interactive coding agents that open in the built-in Spaces terminal.")
+        let agentLaunchersSection = AgentLaunchersSection(
+            subtitle: "Interactive coding agents that open in the built-in Spaces terminal.", showsRuntimeControls: false)
 
         // --- Source section: segmented control on top, input below ---
         let localSourceSection = NSStackView()
@@ -4942,6 +4954,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { $0.agentLaunchers = updated }
                 reloadData()
             } catch { showError(error) }
+        }
+        section.onRunLauncher = { [weak self] launcher in
+            guard let self else { return }
+            do {
+                _ = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: launcher.name)
+                reloadData()
+            } catch {
+                reloadData()
+                showError(error)
+            }
+        }
+        section.onStopAgentWindow = { [weak self] agentWindow in
+            guard let self else { return }
+            do {
+                try orchestrator.stopCodingAgent(workspaceID: workspace.id, agentID: agentWindow.id)
+                reloadData()
+            } catch {
+                reloadData()
+                showError(error)
+            }
+        }
+        section.onRestartAgentWindow = { [weak self] agentWindow in
+            guard let self else { return }
+            do {
+                try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: agentWindow.id)
+                reloadData()
+            } catch {
+                reloadData()
+                showError(error)
+            }
         }
         var identityToIndex: [String: Int] = [:]
         var shortcutMap: [String: String] = [:]

@@ -204,6 +204,9 @@ These are examples of how the general guidelines apply to important parts of the
 - The iOS companion app uses the same brand language as the macOS GUI: warm-neutral surfaces, restrained teal accenting, and the status-dot / type-icon-tile / chip / section-card vocabulary.
 - iOS mirrors the macOS `Theme` tokens as SwiftUI `Color`s in `apps/ios/Sources/Theme.swift`; the macOS `Theme` and `apps/web/app/globals.css` remain the source of truth, so token values are kept in sync rather than redefined independently.
 - Shared iOS row and section primitives live in `apps/ios/Sources/RowPrimitives.swift` (status dot, type-icon tile, metadata chip, section card/header, primary button). Extend those before introducing one-off iOS styles.
+- The iOS workspace home uses a compact search field beside an icon-only filter button. Filters are session-local and use grouped toggles for row type and run state rather than persistent settings.
+- iOS workspace rows reuse the same status-dot, type-icon tile, chip, and trailing icon-action language as macOS list rows. A row tap opens the live terminal when a session exists; otherwise the visible primary action starts the configured process or coding agent.
+- Workspace creation on iOS uses a focused sheet with labeled fields and project-aware branch controls. Git-only fields are hidden for non-git projects so the form stays compact.
 - Terminal surfaces stay dark in both appearances, so the iOS terminal view uses a fixed brand-dark background and light-on-dark text rather than the appearance-adaptive tokens, which would otherwise flip with the app's light/dark mode.
 
 ## Implementation Guidance

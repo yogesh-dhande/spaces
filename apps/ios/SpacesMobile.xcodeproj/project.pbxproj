@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		053C34166110A5C90FCCD9A9 /* SpacesMobileAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4159C5F22837F10A5A814E23 /* SpacesMobileAppModelTests.swift */; };
 		07BF7831235AE0F2E2CA97B3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B0B57F94C61B24E0729B79F1 /* Assets.xcassets */; };
 		0E7F176A6DFB6F22E4C67688 /* RowPrimitives.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6930FB499F3E9C3B13AA59E /* RowPrimitives.swift */; };
 		1BF92F57C51FD34F3F9B3E05 /* spacesterminalmobileghostty in Frameworks */ = {isa = PBXBuildFile; productRef = 5C91403688DCC6A2B90B5AC8 /* spacesterminalmobileghostty */; };
@@ -30,6 +31,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		3FD5F9EECB8244393A627D3D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 40FC7BE745B5FC2BE6F64E8A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 4949E5F0DB06D967871C1581;
+			remoteInfo = SpacesMobile;
+		};
 		94ED4BD14F2CA26295F56C83 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 40FC7BE745B5FC2BE6F64E8A /* Project object */;
@@ -44,6 +52,7 @@
 		1C274F10D0826B130F984E6E /* SpacesMobileBridgeDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileBridgeDiscovery.swift; sourceTree = "<group>"; };
 		2A942269988694E66C1CA6F4 /* SpacesMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SpacesMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModel.swift; sourceTree = "<group>"; };
+		4159C5F22837F10A5A814E23 /* SpacesMobileAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModelTests.swift; sourceTree = "<group>"; };
 		41C157DD37A42EDAF1DC5407 /* macos */ = {isa = PBXFileReference; lastKnownFileType = folder; name = macos; path = ../macos; sourceTree = SOURCE_ROOT; };
 		5B16B0331923D686A4D0AEE5 /* SpacesMobileUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalDetailView.swift; sourceTree = "<group>"; };
@@ -114,6 +123,7 @@
 			isa = PBXGroup;
 			children = (
 				89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */,
+				4159C5F22837F10A5A814E23 /* SpacesMobileAppModelTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -243,6 +253,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				B1502EF3CA22E9855FD6C983 /* PBXTargetDependency */,
 			);
 			name = SpacesMobileTests;
 			packageProductDependencies = (
@@ -334,6 +345,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				4073E59B929A6A3937DC57A8 /* GhosttyMobileAppServiceTests.swift in Sources */,
+				053C34166110A5C90FCCD9A9 /* SpacesMobileAppModelTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -348,6 +360,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		B1502EF3CA22E9855FD6C983 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 4949E5F0DB06D967871C1581 /* SpacesMobile */;
+			targetProxy = 3FD5F9EECB8244393A627D3D /* PBXContainerItemProxy */;
+		};
 		E45C753C89796A5F0734DC9F /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 4949E5F0DB06D967871C1581 /* SpacesMobile */;
@@ -565,6 +582,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.yogeshdhande.spacesmobile.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SpacesMobile.app/SpacesMobile";
 			};
 			name = Release;
 		};
@@ -585,6 +603,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.yogeshdhande.spacesmobile.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SpacesMobile.app/SpacesMobile";
 			};
 			name = Debug;
 		};

@@ -78,6 +78,7 @@ private enum TerminalViewerRenderMode: String {
         }
     }
     private var isStopping = false
+    private var hasSentStopDetach = false
     private var hasAttachedToSession = false
     private var hasAttemptedAutomaticTakeover = false
     private var hasConfirmedOwnerInputReadiness = false
@@ -104,6 +105,7 @@ private enum TerminalViewerRenderMode: String {
     private static let ownershipSyncDebounce: Duration = .milliseconds(120)
     private static let postResizeStateSettleStep: Duration = .milliseconds(50)
     private static let postResizeStateSettleIterations = 6
+    private static let dismissalDetachTimeout: Duration = .seconds(3)
 
     init(
         session: SpacesMobileTerminalSessionSummary,
@@ -194,7 +196,23 @@ private enum TerminalViewerRenderMode: String {
     }
 
     func stop() {
+        guard let currentChannel = beginStop() else { return }
         trace("stop")
+        Task {
+            await detachForStop(using: currentChannel, timeout: Self.dismissalDetachTimeout)
+        }
+    }
+
+    func prepareForBackNavigation() async {
+        guard let currentChannel = beginStop() else { return }
+        trace("back_detach_begin")
+        await detachForStop(using: currentChannel, timeout: Self.dismissalDetachTimeout)
+        trace("back_detach_end")
+    }
+
+    private func beginStop() -> SpacesMobileBridgeCommandChannel? {
+        guard !hasSentStopDetach else { return nil }
+        hasSentStopDetach = true
         isStopping = true
         isAwaitingTakeoverConfirmation = false
         hasAttachedToSession = false
@@ -223,11 +241,17 @@ private enum TerminalViewerRenderMode: String {
         isSynchronizingOwnership = false
         streamHandle?.cancel()
         streamHandle = nil
-        let currentChannel = commandChannel
-        Task {
-            try? await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id)
-            await currentChannel.close()
+        return commandChannel
+    }
+
+    private func detachForStop(using currentChannel: SpacesMobileBridgeCommandChannel, timeout: Duration) async {
+        do {
+            try await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id, timeout: timeout, commandChannel: currentChannel)
+            trace("detach_success")
+        } catch {
+            trace("detach_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
         }
+        await currentChannel.close()
     }
 
     private var renderModeValue: TerminalViewerRenderMode {

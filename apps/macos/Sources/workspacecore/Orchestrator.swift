@@ -1387,7 +1387,14 @@ public final class WorkspaceOrchestrator {
     private func handleProcessExit(workspaceID: String, process: RunningProcessRecord, project: ProjectRecord, workspace: WorkspaceRecord) throws {
         // Find the process template to get the on-exit behavior
         guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else { return }
-        guard let processTemplate = config.processes.first(where: { ($0.name ?? $0.command) == process.templateName }) else { return }
+        guard
+            let processTemplate = config.processes.first(where: { template in
+                if let templateID = process.templateID?.trimmingCharacters(in: .whitespacesAndNewlines), !templateID.isEmpty {
+                    return template.id == templateID
+                }
+                return processKey(for: template) == process.templateName
+            })
+        else { return }
         switch processTemplate.onExit {
         case .none:
             // Do nothing - just log the exit
@@ -1435,7 +1442,7 @@ public final class WorkspaceOrchestrator {
         }
         let now = nowISO8601()
         let restartedProcess = RunningProcessRecord(
-            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: template.command,
+            id: process.id, workspaceID: process.workspaceID, templateID: template.id, templateName: process.templateName, command: template.command,
             runtimeTargetID: process.runtimeTargetID, terminalApp: TerminalHost.spaces.appName, windowID: session.windowID,
             terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, terminalContainerID: nil, itermTabIndex: nil,
             tmuxWindowID: nil, pid: session.childPID, status: .running, logPath: session.outputPath, lastOutputAt: nil, startedAt: now, exitedAt: nil)
@@ -3229,6 +3236,11 @@ public final class WorkspaceOrchestrator {
         -> ProcessTemplate
     {
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
+        if let templateID = process.templateID?.trimmingCharacters(in: .whitespacesAndNewlines), !templateID.isEmpty,
+            let template = settings?.processes.first(where: { $0.id == templateID })
+        {
+            return template
+        }
         let processKey = process.templateName.trimmingCharacters(in: .whitespacesAndNewlines)
         if let template = settings?.processes.first(where: { self.processKey(for: $0) == processKey }) { return template }
         return ProcessTemplate(name: process.templateName, command: process.command)
@@ -4392,17 +4404,18 @@ public final class WorkspaceOrchestrator {
             guard let runningProcess = runningByKey[edit.previousKey] else { continue }
             if edit.commandChanged || edit.modeChanged {
                 let restartedProcess = RunningProcessRecord(
-                    id: runningProcess.id, workspaceID: runningProcess.workspaceID, templateName: edit.updatedKey, command: edit.updated.command,
-                    runtimeTargetID: runningProcess.runtimeTargetID, terminalApp: runningProcess.terminalApp, windowID: runningProcess.windowID,
-                    terminalTrackingID: runningProcess.terminalTrackingID, terminalNativeID: runningProcess.terminalNativeID,
-                    terminalContainerID: runningProcess.terminalContainerID, itermTabIndex: runningProcess.itermTabIndex,
-                    tmuxWindowID: runningProcess.tmuxWindowID, pid: runningProcess.pid, status: runningProcess.status,
-                    logPath: runningProcess.logPath, lastOutputAt: runningProcess.lastOutputAt, startedAt: runningProcess.startedAt,
-                    exitedAt: runningProcess.exitedAt)
+                    id: runningProcess.id, workspaceID: runningProcess.workspaceID, templateID: edit.updated.id, templateName: edit.updatedKey,
+                    command: edit.updated.command, runtimeTargetID: runningProcess.runtimeTargetID, terminalApp: runningProcess.terminalApp,
+                    windowID: runningProcess.windowID, terminalTrackingID: runningProcess.terminalTrackingID,
+                    terminalNativeID: runningProcess.terminalNativeID, terminalContainerID: runningProcess.terminalContainerID,
+                    itermTabIndex: runningProcess.itermTabIndex, tmuxWindowID: runningProcess.tmuxWindowID, pid: runningProcess.pid,
+                    status: runningProcess.status, logPath: runningProcess.logPath, lastOutputAt: runningProcess.lastOutputAt,
+                    startedAt: runningProcess.startedAt, exitedAt: runningProcess.exitedAt)
                 try restartProcessInTerminal(workspaceID: workspace.id, process: restartedProcess, templateOverride: edit.updated)
             } else if edit.keyChanged {
                 try relabelRunningProcess(
-                    workspaceID: workspace.id, process: runningProcess, templateName: edit.updatedKey, command: runningProcess.command)
+                    workspaceID: workspace.id, process: runningProcess, templateID: edit.updated.id, templateName: edit.updatedKey,
+                    command: runningProcess.command)
             }
         }
     }
@@ -4419,13 +4432,16 @@ public final class WorkspaceOrchestrator {
         try validateProcessTemplate(updatedTemplate, env: env)
     }
 
-    private func relabelRunningProcess(workspaceID: String, process: RunningProcessRecord, templateName: String, command: String) throws {
+    private func relabelRunningProcess(
+        workspaceID: String, process: RunningProcessRecord, templateID: String? = nil, templateName: String, command: String
+    ) throws {
         let updatedProcess = RunningProcessRecord(
-            id: process.id, workspaceID: process.workspaceID, templateName: templateName, command: command, runtimeTargetID: process.runtimeTargetID,
-            terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
-            terminalNativeID: process.terminalNativeID, terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex,
-            tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status, logPath: process.logPath,
-            lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
+            id: process.id, workspaceID: process.workspaceID, templateID: templateID ?? process.templateID, templateName: templateName,
+            command: command, runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
+            terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
+            terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
+            pid: process.pid, status: process.status, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+            exitedAt: process.exitedAt)
         try store.upsert(runningProcess: updatedProcess)
         if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: {
             $0.role == "terminal"
@@ -4507,8 +4523,8 @@ public final class WorkspaceOrchestrator {
 
         for (desired, process) in toRelabel {
             let updated = RunningProcessRecord(
-                id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: process.command,
-                runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
+                id: process.id, workspaceID: workspace.id, templateID: desired.template.id, templateName: desired.desiredKey,
+                command: process.command, runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
                 terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
                 terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
                 pid: process.pid, status: process.status, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
@@ -4533,9 +4549,9 @@ public final class WorkspaceOrchestrator {
         for (desired, process) in toRestart {
             let name = desired.desiredKey
             let updatedProcess = RunningProcessRecord(
-                id: process.id, workspaceID: process.workspaceID, templateName: name, command: desired.template.command,
-                runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
-                terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
+                id: process.id, workspaceID: process.workspaceID, templateID: desired.template.id, templateName: name,
+                command: desired.template.command, runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp,
+                windowID: process.windowID, terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
                 terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
                 pid: process.pid, status: process.status, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
                 exitedAt: process.exitedAt)
@@ -4777,7 +4793,7 @@ public final class WorkspaceOrchestrator {
                     readinessPolicy: .sessionReady)
                 let now = nowISO8601()
                 let running = RunningProcessRecord(
-                    id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command,
+                    id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
                     terminalApp: terminalAppName(for: terminalHost), windowID: session.windowID, terminalTrackingID: session.sessionID,
                     terminalNativeID: session.sessionID, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: session.childPID,
                     status: .running, logPath: session.outputPath, lastOutputAt: nil, startedAt: now, exitedAt: nil)
@@ -4813,7 +4829,7 @@ public final class WorkspaceOrchestrator {
             let terminalNativeID = storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle)
             let terminalContainerID = storedTerminalContainerID(terminalHost: terminalHost, handle: terminalHandle)
             let running = RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command,
+                id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
                 terminalApp: terminalAppName(for: terminalHost), windowID: windowID, terminalTrackingID: hookSessionID,
                 terminalNativeID: terminalNativeID, terminalContainerID: terminalContainerID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id,
                 pid: pid, status: .running, logPath: nil, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
@@ -5516,7 +5532,8 @@ public final class WorkspaceOrchestrator {
     @discardableResult public func registerAgentWindow(
         workspaceID: String, provider: AgentProvider, label: String? = nil, terminalTrackingID: String? = nil, tmuxWindowID: String? = nil,
         terminalNativeID: String? = nil, codexThreadID: String? = nil, yabaiWindowID: Int? = nil, status: AgentWindowStatus = .idle,
-        claimedLauncherName: String? = nil, eventType: String = "register", eventSource: String = "orchestrator", environmentKeys: [String]? = nil
+        claimedLauncherID: String? = nil, claimedLauncherName: String? = nil, eventType: String = "register", eventSource: String = "orchestrator",
+        environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let existingAgentWindows = try store.agentWindows(workspaceID: workspaceID)
@@ -5537,7 +5554,7 @@ public final class WorkspaceOrchestrator {
         let allowConfiguredSpacesLabelFallback: Bool
         if provider == .spaces {
             let matchesConfiguredLauncher = try spacesAgentLabelMatchesConfiguredLauncher(workspaceID: workspaceID, label: label)
-            allowConfiguredSpacesLabelFallback = claimedLauncherName != nil || matchesConfiguredLauncher
+            allowConfiguredSpacesLabelFallback = claimedLauncherID != nil || claimedLauncherName != nil || matchesConfiguredLauncher
         } else {
             allowConfiguredSpacesLabelFallback = false
         }
@@ -5559,7 +5576,7 @@ public final class WorkspaceOrchestrator {
                             provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: finalTerminalNativeID)
                             ? nil : existing.windowID),
                     trackingID: terminalTrackingID ?? finalTerminalNativeID ?? resolvedTmuxWindowID ?? existing.terminalTrackingID),
-                sessionKey: codexThreadID ?? existing.codexThreadID,
+                sessionKey: codexThreadID ?? existing.codexThreadID, claimedLauncherID: claimedLauncherID ?? existing.claimedLauncherID,
                 claimedLauncherName: claimedLauncherName ?? existing.claimedLauncherName ?? existing.label, status: status,
                 createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
@@ -5581,7 +5598,7 @@ public final class WorkspaceOrchestrator {
             terminalTarget: TerminalTargetRecord(
                 runtimeTargetID: trackedWindow?.id, windowID: resolvedWindowID,
                 trackingID: terminalTrackingID ?? finalTerminalNativeID ?? resolvedTmuxWindowID), sessionKey: codexThreadID,
-            claimedLauncherName: claimedLauncherName, status: status, createdAt: now, updatedAt: now)
+            claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName, status: status, createdAt: now, updatedAt: now)
         try validateWorkspaceFocusNames(
             workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID), agentWindows: existingAgentWindows + [record])
@@ -5633,7 +5650,7 @@ public final class WorkspaceOrchestrator {
                             provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: finalTerminalNativeID)
                             ? nil : existing.windowID),
                     trackingID: terminalTrackingID ?? finalTerminalNativeID ?? resolvedTmuxWindowID ?? existing.terminalTrackingID),
-                sessionKey: codexThreadID ?? existing.codexThreadID,
+                sessionKey: codexThreadID ?? existing.codexThreadID, claimedLauncherID: existing.claimedLauncherID,
                 claimedLauncherName: claimedLauncherName ?? existing.claimedLauncherName ?? existing.label, status: status,
                 createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
@@ -5700,6 +5717,68 @@ public final class WorkspaceOrchestrator {
         try setActiveWorkspace(id: record.workspaceID)
     }
 
+    public func stopCodingAgent(workspaceID: String, agentID: String) throws {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard let record = try store.agentWindows(workspaceID: workspaceID).first(where: { $0.id == agentID }) else { return }
+            try stopCodingAgentRecord(record)
+            try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
+        }
+    }
+
+    @discardableResult public func restartCodingAgent(workspaceID: String, agentID: String) throws -> AgentWindowRecord {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard let record = try store.agentWindows(workspaceID: workspaceID).first(where: { $0.id == agentID }) else {
+                throw WorkspaceError.invalidArgument(message: "Coding agent is not running.")
+            }
+            let launcher = try restartableCodingAgentLauncher(record)
+            try stopCodingAgentRecord(record)
+            return try launchAgentLauncher(workspaceID: workspaceID, launcherID: launcher.id)
+        }
+    }
+
+    private func stopCodingAgentRecord(_ record: AgentWindowRecord) throws {
+        let windowID = try trackedAgentWindowID(record) ?? record.yabaiWindowID ?? record.windowID
+        if let sessionID = record.terminalNativeID ?? record.terminalTrackingID, !sessionID.isEmpty {
+            if record.provider == .spaces {
+                builtInTerminalWindowCloser(sessionID)
+                terminateBuiltInTerminalSession(sessionID, provider: record.provider)
+            }
+        }
+        if let tmuxWindowID = record.tmuxWindowID, !tmuxWindowID.isEmpty { try? tmux.killWindow(windowID: tmuxWindowID) }
+        if record.provider != .spaces, let windowID { _ = try? yabai.closeWindow(id: windowID) }
+        appendAgentSessionEvent(
+            agentSessionID: record.id, eventType: "stop", source: "orchestrator",
+            message: agentSessionEventMessage(
+                provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID,
+                terminalNativeID: record.terminalNativeID, codexThreadID: record.codexThreadID, yabaiWindowID: windowID), createdAt: nowISO8601())
+        try store.deleteAgentWindow(id: record.id)
+        try removeAdHocTrackedWindowForAgent(
+            workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID,
+            yabaiWindowID: record.yabaiWindowID ?? record.windowID, tmuxWindowID: record.tmuxWindowID)
+    }
+
+    private func restartableCodingAgentLauncher(_ record: AgentWindowRecord) throws -> AgentLauncher {
+        let launchers = try store.workspaceAgentLaunchers(workspaceID: record.workspaceID)
+        if let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
+            guard let launcher = launchers.first(where: { $0.id == claimedLauncherID }) else {
+                throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
+            }
+            return launcher
+        }
+        if let claimedLauncherName = record.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherName.isEmpty {
+            guard let launcher = launchers.first(where: { normalizedFocusName($0.name) == normalizedFocusName(claimedLauncherName) }) else {
+                throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
+            }
+            return launcher
+        }
+        if let label = record.label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty,
+            let launcher = launchers.first(where: { normalizedFocusName($0.name) == normalizedFocusName(label) })
+        {
+            return launcher
+        }
+        throw WorkspaceError.invalidArgument(message: "Unconfigured live coding agents cannot be restarted from Spaces.")
+    }
+
     private func terminateBuiltInTerminalSession(_ sessionID: String?, provider: AgentProvider? = nil) {
         guard let sessionID = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !sessionID.isEmpty else { return }
         if let provider, provider != .spaces { return }
@@ -5729,17 +5808,20 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String) throws {
+    public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String, processTemplateID: String? = nil) throws {
         let recoverStartedAt = currentDate()
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
-        guard let template = (settings?.processes ?? []).first(where: { configuredProcessMatchesKey($0, key: processKey) }) else {
-            throw WorkspaceError.invalidArgument(message: "Configured process not found.")
-        }
+        let trimmedTemplateID = processTemplateID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let template: ProcessTemplate? =
+            if !trimmedTemplateID.isEmpty { (settings?.processes ?? []).first(where: { $0.id == trimmedTemplateID }) } else {
+                (settings?.processes ?? []).first(where: { configuredProcessMatchesKey($0, key: processKey) })
+            }
+        guard let template else { throw WorkspaceError.invalidArgument(message: "Configured process not found.") }
 
         let running = try store.runningProcesses(workspaceID: workspaceID)
         let expectedKey = configuredProcessMatchKey(name: template.name)
-        if let existing = running.first(where: { runningProcessMatchKey(name: $0.templateName) == expectedKey }) {
+        if let existing = running.first(where: { runningProcessMatchesTemplate($0, template: template, fallbackKey: expectedKey) }) {
             if existing.status == .exited {
                 try restartProcessInTerminal(
                     workspaceID: workspaceID, process: existing, templateOverride: template, terminalHostOverride: try configuredTerminalHost())
@@ -5765,6 +5847,10 @@ public final class WorkspaceOrchestrator {
         try recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
     }
 
+    public func runConfiguredProcess(workspaceID: String, processTemplateID: String, processKey: String) throws {
+        try recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID)
+    }
+
     @discardableResult public func launchAgentLauncher(workspaceID: String, name: String, background: Bool = false) throws -> AgentWindowRecord {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Coding agent name is required.") }
@@ -5773,9 +5859,29 @@ public final class WorkspaceOrchestrator {
         guard let launcher = settings?.agentLaunchers.first(where: { normalizedFocusName($0.name) == normalizedFocusName(trimmedName) }) else {
             throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
         }
+        return try launchAgentLauncher(launcher, project: project, workspace: workspace, background: background)
+    }
 
+    @discardableResult public func launchAgentLauncher(workspaceID: String, launcherID: String, background: Bool = false) throws -> AgentWindowRecord
+    {
+        let trimmedID = launcherID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedID.isEmpty else { throw WorkspaceError.invalidArgument(message: "Coding agent ID is required.") }
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
+        guard let launcher = settings?.agentLaunchers.first(where: { $0.id == trimmedID }) else {
+            throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
+        }
+        return try launchAgentLauncher(launcher, project: project, workspace: workspace, background: background)
+    }
+
+    @discardableResult private func launchAgentLauncher(
+        _ launcher: AgentLauncher, project: ProjectRecord, workspace: WorkspaceRecord, background: Bool
+    ) throws -> AgentWindowRecord {
+        let workspaceID = workspace.id
         if let existing = try store.agentWindows(workspaceID: workspaceID).first(where: {
-            normalizedFocusName($0.label ?? "") == normalizedFocusName(launcher.name)
+            if $0.claimedLauncherID == launcher.id { return true }
+            guard $0.claimedLauncherID == nil else { return false }
+            return normalizedFocusName($0.label ?? $0.claimedLauncherName ?? "") == normalizedFocusName(launcher.name)
         }) {
             if existing.provider == .spaces, !builtInAgentSessionIsStillLive(existing) {
                 try removeStaleAgentWindow(existing)
@@ -5834,7 +5940,7 @@ public final class WorkspaceOrchestrator {
             workspaceID: workspace.id, provider: agentProvider(for: terminalHost), label: launcher.name,
             terminalTrackingID: storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle),
             terminalNativeID: storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle), yabaiWindowID: capturedWindowID,
-            status: .idle, claimedLauncherName: launcher.name)
+            status: .idle, claimedLauncherID: launcher.id, claimedLauncherName: launcher.name)
         try markWorkspaceRunningIfNeeded(workspace)
         return record
     }
@@ -5842,6 +5948,13 @@ public final class WorkspaceOrchestrator {
     private func configuredProcessMatchesKey(_ template: ProcessTemplate, key: String) -> Bool {
         let trimmedName = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return !trimmedName.isEmpty && trimmedName == key
+    }
+
+    private func runningProcessMatchesTemplate(_ process: RunningProcessRecord, template: ProcessTemplate, fallbackKey: String) -> Bool {
+        if let templateID = process.templateID?.trimmingCharacters(in: .whitespacesAndNewlines), !templateID.isEmpty {
+            return templateID == template.id
+        }
+        return !fallbackKey.isEmpty && runningProcessMatchKey(name: process.templateName) == fallbackKey
     }
 
     private func wrappedAgentLauncherCommand(name: String, command: String, shellPath: String?) -> String {
@@ -6036,7 +6149,7 @@ public final class WorkspaceOrchestrator {
                 readinessPolicy: .sessionReady)
             let now = nowISO8601()
             let record = RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command,
+                id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
                 terminalApp: terminalAppName(for: terminalHost), windowID: session.windowID, terminalTrackingID: session.sessionID,
                 terminalNativeID: session.sessionID, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: session.childPID,
                 status: .running, logPath: session.outputPath, lastOutputAt: nil, startedAt: now, exitedAt: nil)
@@ -6062,7 +6175,7 @@ public final class WorkspaceOrchestrator {
         let terminalNativeID = storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle)
         let terminalContainerID = storedTerminalContainerID(terminalHost: terminalHost, handle: terminalHandle)
         let record = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command,
+            id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
             terminalApp: terminalAppName(for: terminalHost), windowID: capturedWindowID, terminalTrackingID: hookSessionID,
             terminalNativeID: terminalNativeID, terminalContainerID: terminalContainerID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id,
             pid: tmuxWindow?.panePID, status: .running, logPath: nil, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
@@ -6281,12 +6394,21 @@ public final class WorkspaceOrchestrator {
     private func focusAgentWindowOrLaunchClaimedLauncher(_ record: AgentWindowRecord, requestID: String?) throws -> Bool {
         guard let claimedLauncherName = record.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherName.isEmpty
         else { return try focusAgentWindowRecord(record, requestID: requestID) }
+        let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines)
         if record.provider == .spaces, !builtInAgentSessionIsStillLive(record) {
-            _ = try launchAgentLauncher(workspaceID: record.workspaceID, name: claimedLauncherName)
+            if let claimedLauncherID, !claimedLauncherID.isEmpty {
+                _ = try launchAgentLauncher(workspaceID: record.workspaceID, launcherID: claimedLauncherID)
+            } else {
+                _ = try launchAgentLauncher(workspaceID: record.workspaceID, name: claimedLauncherName)
+            }
             return true
         }
         if try focusAgentWindowRecord(record, requestID: requestID) { return true }
-        _ = try launchAgentLauncher(workspaceID: record.workspaceID, name: claimedLauncherName)
+        if let claimedLauncherID, !claimedLauncherID.isEmpty {
+            _ = try launchAgentLauncher(workspaceID: record.workspaceID, launcherID: claimedLauncherID)
+        } else {
+            _ = try launchAgentLauncher(workspaceID: record.workspaceID, name: claimedLauncherName)
+        }
         return true
     }
 
