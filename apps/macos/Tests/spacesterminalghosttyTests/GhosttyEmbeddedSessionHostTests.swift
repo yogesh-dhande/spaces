@@ -163,7 +163,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(refreshRequestCount, 1)
     }
 
-    @MainActor func testScreenStateChangePublishesUnexportedLocalOwnerFrame() throws {
+    @MainActor func testScreenStateChangeBuildsUnexportedLocalOwnerFrame() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -180,25 +180,19 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         let localOwner = TerminalClient(
             id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z")
-        try host.attach(client: localOwner, mode: .owner, into: nil)
+        try host.startIfNeeded()
 
-        var receivedPayloads: [GhosttyRemoteSessionStatePayload] = []
-        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
-        try client.start()
-        defer { client.stop() }
-        try waitUntil(timeout: 2) { !receivedPayloads.isEmpty }
-        let baseline = try renderBaseline(from: try XCTUnwrap(receivedPayloads.first), baseline: nil)
-        receivedPayloads.removeAll()
+        try host.attach(client: localOwner, mode: .owner, into: nil)
+        let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial))
+        let baseline = try renderBaseline(from: initialPayload, baseline: nil)
 
         let screenRevision: UInt64 = UInt64.max / 2
         host.applySessionStateChange(.init(flags: [.screen], revision: screenRevision, title: nil, workingDirectory: nil))
 
-        try waitUntil(timeout: 2) {
-            receivedPayloads.contains {
-                $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision && $0.renderUpdate != nil
-            }
-        }
-        let payload = try XCTUnwrap(receivedPayloads.first { $0.reason == TerminalRemoteSessionStateReason.stateChange })
+        let payload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.stateChange))
+        XCTAssertEqual(payload.reason, TerminalRemoteSessionStateReason.stateChange)
+        XCTAssertEqual(payload.screenStateRevision, screenRevision)
+        XCTAssertNotNil(payload.renderUpdate)
         let applied = try renderBaseline(from: payload, baseline: baseline)
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: applied.snapshot), "state changed")
     }
@@ -215,6 +209,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             shell: "/bin/zsh", command: nil, createdAt: "2026-06-03T00:00:00Z")
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let owner = TerminalClient(
             id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-03T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
@@ -257,6 +252,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             shell: "/bin/zsh", command: nil, createdAt: "2026-06-03T00:00:00Z")
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         let owner = TerminalClient(
             id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-03T00:00:00Z")
         try TerminalSessionPersistence.attachClient(

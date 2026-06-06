@@ -40,6 +40,15 @@ final class SpacesMobileBridgeStreamHandle: @unchecked Sendable {
 
 struct SpacesMobileBridgeClient: Sendable {
     let settings: SpacesMobileConnectionSettings
+    private let requestOverride: (@Sendable (SpacesMobileBridgeRequest) async throws -> SpacesMobileBridgeResponse)?
+
+    init(
+        settings: SpacesMobileConnectionSettings,
+        requestOverride: (@Sendable (SpacesMobileBridgeRequest) async throws -> SpacesMobileBridgeResponse)? = nil
+    ) {
+        self.settings = settings
+        self.requestOverride = requestOverride
+    }
 
     func makeCommandChannel() -> SpacesMobileBridgeCommandChannel {
         SpacesMobileBridgeCommandChannel(settings: settings, clientApp: clientAppIdentity)
@@ -65,6 +74,158 @@ struct SpacesMobileBridgeClient: Sendable {
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
         guard let overview = response.overview else { throw SpacesMobileBridgeClientError.missingOverview }
         return overview
+    }
+
+    func fetchWorkspaceCreateOptions(
+        projectID: String? = nil,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileWorkspaceCreateOptions {
+        let response = try await sendRequest(
+            .init(
+                command: "workspaceCreateOptions",
+                authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity,
+                projectID: projectID
+            ),
+            commandChannel: commandChannel
+        )
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+        guard let options = response.workspaceCreateOptions else {
+            throw SpacesMobileBridgeClientError.requestFailed("The mobile bridge did not return workspace create options.")
+        }
+        return options
+    }
+
+    func createWorkspace(
+        projectID: String,
+        title: String,
+        branch: String?,
+        targetBranch: String?,
+        directoryName: String?,
+        allowExistingBranchReuse: Bool,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileBridgeResponse {
+        try await mutation(
+            .init(
+                command: "createWorkspace",
+                authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity,
+                projectID: projectID,
+                workspaceTitle: title,
+                branch: branch,
+                targetBranch: targetBranch,
+                directoryName: directoryName,
+                allowExistingBranchReuse: allowExistingBranchReuse
+            ),
+            commandChannel: commandChannel
+        )
+    }
+
+    func openWorkspaceTerminal(
+        workspaceID: String,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileBridgeResponse {
+        try await mutation(
+            .init(command: "openWorkspaceTerminal", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, workspaceID: workspaceID),
+            commandChannel: commandChannel
+        )
+    }
+
+    func stopWorkspaceTerminal(
+        workspaceID: String,
+        sessionID: String,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileBridgeResponse {
+        try await mutation(
+            .init(
+                command: "stopWorkspaceTerminal", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, sessionID: sessionID,
+                workspaceID: workspaceID),
+            commandChannel: commandChannel
+        )
+    }
+
+    func runWorkspaceProcess(
+        workspaceID: String,
+        processKey: String,
+        processTemplateID: String?,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileBridgeResponse {
+        try await mutation(
+            .init(
+                command: "runWorkspaceProcess", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, workspaceID: workspaceID,
+                processKey: processKey, processTemplateID: processTemplateID),
+            commandChannel: commandChannel
+        )
+    }
+
+    func stopWorkspaceProcess(
+        workspaceID: String,
+        processID: String,
+        processKey: String?,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileBridgeResponse {
+        try await mutation(
+            .init(
+                command: "stopWorkspaceProcess", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, workspaceID: workspaceID,
+                processKey: processKey, processID: processID),
+            commandChannel: commandChannel
+        )
+    }
+
+    func restartWorkspaceProcess(
+        workspaceID: String,
+        processID: String,
+        processKey: String?,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileBridgeResponse {
+        try await mutation(
+            .init(
+                command: "restartWorkspaceProcess", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, workspaceID: workspaceID,
+                processKey: processKey, processID: processID),
+            commandChannel: commandChannel
+        )
+    }
+
+    func runCodingAgent(
+        workspaceID: String,
+        agentName: String,
+        agentLauncherID: String?,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileBridgeResponse {
+        try await mutation(
+            .init(
+                command: "runCodingAgent", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, workspaceID: workspaceID,
+                agentName: agentName, agentLauncherID: agentLauncherID),
+            commandChannel: commandChannel
+        )
+    }
+
+    func stopCodingAgent(
+        workspaceID: String,
+        agentID: String,
+        agentName: String?,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileBridgeResponse {
+        try await mutation(
+            .init(
+                command: "stopCodingAgent", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, workspaceID: workspaceID,
+                agentName: agentName, agentID: agentID),
+            commandChannel: commandChannel
+        )
+    }
+
+    func restartCodingAgent(
+        workspaceID: String,
+        agentID: String,
+        agentName: String?,
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileBridgeResponse {
+        try await mutation(
+            .init(
+                command: "restartCodingAgent", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity, workspaceID: workspaceID,
+                agentName: agentName, agentID: agentID),
+            commandChannel: commandChannel
+        )
     }
 
     func fetchState(
@@ -107,6 +268,7 @@ struct SpacesMobileBridgeClient: Sendable {
     func detach(
         sessionID: String,
         clientID: String,
+        timeout: Duration = .seconds(3),
         commandChannel: SpacesMobileBridgeCommandChannel? = nil
     ) async throws {
         let request = SpacesMobileBridgeRequest(
@@ -116,7 +278,7 @@ struct SpacesMobileBridgeClient: Sendable {
             sessionID: sessionID,
             clientID: clientID
         )
-        let response = try await sendRequest(request, commandChannel: commandChannel)
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
@@ -269,6 +431,15 @@ struct SpacesMobileBridgeClient: Sendable {
         return SpacesMobileBridgeStreamHandle { endpoint.connection.cancel() }
     }
 
+    private func mutation(
+        _ request: SpacesMobileBridgeRequest,
+        commandChannel: SpacesMobileBridgeCommandChannel?
+    ) async throws -> SpacesMobileBridgeResponse {
+        let response = try await sendRequest(request, timeout: .seconds(30), commandChannel: commandChannel)
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+        return response
+    }
+
     private func sendRequest(_ request: SpacesMobileBridgeRequest, timeout: Duration = .seconds(3)) async throws -> SpacesMobileBridgeResponse {
         try await sendRequest(request, timeout: timeout, commandChannel: nil)
     }
@@ -278,6 +449,9 @@ struct SpacesMobileBridgeClient: Sendable {
         timeout: Duration = .seconds(3),
         commandChannel: SpacesMobileBridgeCommandChannel?
     ) async throws -> SpacesMobileBridgeResponse {
+        if let requestOverride {
+            return try await requestOverride(request)
+        }
         if let commandChannel {
             return try await commandChannel.send(request: request, timeout: timeout)
         }

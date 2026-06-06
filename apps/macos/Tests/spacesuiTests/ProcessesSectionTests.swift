@@ -29,6 +29,15 @@ import workspacecore
         #expect(section.rowCount == 2)
     }
 
+    @Test func supplementalRuntimeRowsRenderRunningStatusDot() {
+        let section = ProcessesSection()
+        section.supplementalRows = [
+            .init(id: "window-1", label: "shell-1", detail: "~/projects/frontend-demo", shortcut: "⌘2", status: .running, onFocus: nil)
+        ]
+
+        #expect(section.row(at: 0)?.statusDotForTesting?.kind == .running)
+    }
+
     @Test func collapsedIsTheDefaultState() {
         let section = ProcessesSection(processes: [ProcessTemplate(name: "api", command: "bun run dev")])
         #expect(section.isEditing(at: 0) == false)

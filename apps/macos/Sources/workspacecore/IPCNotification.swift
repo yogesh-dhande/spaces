@@ -24,6 +24,7 @@ public enum IPCNotification {
     public static let cycleDirectionUserInfoKey = "cycle_direction"
     public static let terminalSessionIDUserInfoKey = "terminal_session_id"
     public static let terminalAttachmentModeUserInfoKey = "terminal_attachment_mode"
+    public static let terminalSessionIsTerminatingUserInfoKey = "terminal_session_is_terminating"
     public static let focusRequestIDUserInfoKey = "focus_request_id"
     public static let outputPathUserInfoKey = "output_path"
 
