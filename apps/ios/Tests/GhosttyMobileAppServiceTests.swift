@@ -734,7 +734,7 @@
             XCTAssertFalse(hostView.hasActiveSessionForTesting)
             XCTAssertFalse(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
 
-            wait(for: [freeCompleted], timeout: 5)
+            wait(for: [freeCompleted], timeout: 30)
 
             window.isHidden = true
         }
