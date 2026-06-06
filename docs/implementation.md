@@ -332,16 +332,13 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Configured process restart closes the old native Spaces terminal window and terminates the old service session before the replacement session is recorded as current. The process row remains the configured slot; the terminal session identity changes only through that explicit replacement path.
 - Immediate process-start failures should be surfaced from the recent built-in session output itself so launch errors report the real command failure instead of a follow-on recovery error.
 - Core external dependencies that the GUI invokes directly, such as `yabai` and `git`, are resolved through a shared executable-locator path instead of relying on the Finder app environment to provide a complete `PATH`.
-- App-level settings such as shell-mode process shell are persisted in the shared store but are configured through the app rather than through `spaces`.
 - Global app settings also store the app-toggle hotkey and the separate command-palette hotkey.
 - Global settings also store the shared window focus pulse color and enabled state behind window-scoped keys.
-- Each `ProcessTemplate` persists an `execution_mode` of `direct` or `shell`. Missing fields in older saved data decode as `direct`.
-- Direct mode is parsed as an executable plus argv and rejects shell-only syntax such as pipelines, redirection, command substitution, and backticks.
-- Before launching a direct-mode process, Spaces validates `$...` usage against a narrow allowlist and only interpolates simple Spaces-provided variables such as named ports and `SPACES_*` paths inside tokens without invoking a shell.
-- Supported direct-mode variable references are limited to `$NAME` and `${NAME}`. Unknown variable names and unsupported shell expansion forms such as `${NAME:-fallback}`, `$$`, and `$?` fail validation against the raw user command instead of being passed through literally.
-- Shell mode treats the command text as shell input and launches it through the global app `process_shell` setting with a consistent `<shell> -lc <command>` invocation. The allowed shell values are `zsh`, `bash`, and `sh`, with `zsh` as the default.
-- Project and workspace editors, workspace launch, running-process restart validation, JSON import/export, and CLI text output all preserve the same execution-mode semantics.
-- Configured coding-agent launchers remain shell-string based rather than using process `executionMode`. Spaces wraps those launchers in an inner interactive login shell so user shell PATH setup and tool bootstrap from files such as `.zshrc` are available without changing deterministic process-launch behavior.
+- Each `ProcessTemplate` stores name, command, kind, and on-exit behavior. Legacy persisted `execution_mode` data is ignored.
+- Process commands are validated as non-empty shell command strings.
+- Process launch exports the workspace environment, including named ports and `SPACES_*` directory variables, then executes the command through the user's resolved login shell.
+- Project and workspace editors, workspace launch, running-process restart validation, JSON import/export, and CLI text output all preserve shell-string process semantics.
+- Configured coding-agent launchers also run as shell strings through an inner interactive login shell so user shell PATH setup and tool bootstrap from files such as `.zshrc` are available.
 
 ## Window and Focus Architecture
 - yabai provides stable window identity and cross-app focusing.

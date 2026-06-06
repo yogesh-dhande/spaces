@@ -15,10 +15,7 @@ enum CLITextRenderer {
         lines.append(contentsOf: settings.ports.isEmpty ? ["port\t-"] : settings.ports.map { "port\t\($0.name)" })
         lines.append(
             contentsOf: settings.processes.isEmpty
-                ? ["process\t-"]
-                : settings.processes.map {
-                    "process\t\($0.name ?? "-")\t\($0.command)\ton-exit=\($0.onExit.rawValue)\tmode=\($0.executionMode.rawValue)"
-                })
+                ? ["process\t-"] : settings.processes.map { "process\t\($0.name ?? "-")\t\($0.command)\ton-exit=\($0.onExit.rawValue)" })
         lines.append(
             contentsOf: settings.browserSessions.isEmpty
                 ? ["browser-session\t-"] : settings.browserSessions.map { "browser-session\t\($0.name ?? "-")\t\($0.url ?? "-")" })
