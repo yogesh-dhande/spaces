@@ -478,6 +478,73 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(probe.count, 0)
     }
 
+    @MainActor func testEndedRemoteHostPermitsReadOnlyBindingsForFinalRenderViewer() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-final-read-only-bindings"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+            createdAt: "2026-06-05T00:00:00Z")
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-06-05T00:00:01Z",
+            exitedAt: "2026-06-05T00:00:01Z", title: "final-title", workingDirectory: "/tmp/final", columns: 4, rows: 1)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+        try TerminalSessionPersistence.writeRemoteSessionState(
+            GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:01Z", sessionStateRevision: 1,
+                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: "done", sessionRevision: 1)), paths: paths)
+
+        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        host.debugSetBindingActionHandler { _ in true }
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
+            mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+
+        XCTAssertEqual(host.snapshotText(), "done")
+        XCTAssertTrue(host.performBindingAction("select_all"))
+        XCTAssertTrue(host.performBindingAction("copy_to_clipboard"))
+        XCTAssertTrue(host.performBindingAction("end_search"))
+        XCTAssertFalse(host.performBindingAction("start_search"))
+        XCTAssertFalse(host.performBindingAction("search:done"))
+        XCTAssertFalse(host.performBindingAction("clear_screen"))
+        XCTAssertEqual(host.debugRecordedBindingActions, ["select_all", "copy_to_clipboard", "end_search"])
+    }
+
+    @MainActor func testRunningRemoteHostRejectsViewerBindingActions() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-running-viewer-bindings"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "live", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+            createdAt: "2026-06-05T00:00:00Z")
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-05T00:00:01Z",
+                title: "live", workingDirectory: "/tmp/work", columns: 4, rows: 1), paths: paths)
+
+        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        host.debugSetBindingActionHandler { _ in true }
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
+            mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+
+        XCTAssertFalse(host.performBindingAction("select_all"))
+        XCTAssertFalse(host.performBindingAction("copy_to_clipboard"))
+        XCTAssertFalse(host.performBindingAction("end_search"))
+        XCTAssertEqual(host.debugRecordedBindingActions, [])
+    }
+
     @MainActor func testRemoteHostIgnoresStaleFinalStateWhenRuntimeIsRunning() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

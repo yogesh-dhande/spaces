@@ -146,7 +146,8 @@ import spacesterminalcore
     public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
 
     @discardableResult public func performBindingAction(_ action: String) -> Bool {
-        guard attachedMode == .owner else { return false }
+        let permitsFinalRenderReadOnlyAction = !isInteractiveRuntimeStateForControl() && Self.isReadOnlyBindingAction(action)
+        guard attachedMode == .owner || permitsFinalRenderReadOnlyAction else { return false }
         return terminalView.performBindingAction(action)
     }
 
@@ -168,6 +169,9 @@ import spacesterminalcore
         if let snapshot = currentSnapshot() { return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot) }
         return terminalView.snapshotText()
     }
+
+    func debugSetBindingActionHandler(_ handler: (@MainActor (String) -> Bool)?) { terminalView.debugBindingActionHandler = handler }
+    var debugRecordedBindingActions: [String] { terminalView.debugRecordedBindingActions }
 
     public var effectiveTitle: String {
         ensureStateStreamStartedIfNeeded()
@@ -219,6 +223,13 @@ import spacesterminalcore
         if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) { return runtimeState.state.isInteractive }
         if let runtimeState = latestState?.runtimeState { return runtimeState.state.isInteractive }
         return true
+    }
+
+    private static func isReadOnlyBindingAction(_ action: String) -> Bool {
+        switch action {
+        case "copy_to_clipboard", "select_all", "end_search": return true
+        default: return false
+        }
     }
 
     private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
