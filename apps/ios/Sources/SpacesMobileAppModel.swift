@@ -191,14 +191,197 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
     let sessions: [SpacesMobileTerminalSessionSummary]
 }
 
+enum SpacesMobileWorkspaceRowType: String, CaseIterable, Identifiable, Hashable {
+    case processes
+    case codingAgents
+    case workspaceTerminals
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .processes: "Processes"
+        case .codingAgents: "Coding Agents"
+        case .workspaceTerminals: "Workspace Terminals"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .processes: "terminal"
+        case .codingAgents: "cpu"
+        case .workspaceTerminals: "terminal.fill"
+        }
+    }
+}
+
+extension SpacesMobileRunState {
+    var mobileLabel: String {
+        switch self {
+        case .notStarted: "Not Started"
+        case .running: "Running"
+        case .exited: "Exited"
+        }
+    }
+}
+
+struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
+    enum Source: Sendable {
+        case process(SpacesMobileWorkspaceProcessRow)
+        case codingAgent(SpacesMobileWorkspaceCodingAgentRow)
+        case terminal(SpacesMobileWorkspaceTerminalRow)
+    }
+
+    let source: Source
+
+    var id: String {
+        switch source {
+        case .process(let row): "process:\(row.id)"
+        case .codingAgent(let row): "agent:\(row.id)"
+        case .terminal(let row): "terminal:\(row.id)"
+        }
+    }
+
+    var workspaceID: String {
+        switch source {
+        case .process(let row): row.workspaceID
+        case .codingAgent(let row): row.workspaceID
+        case .terminal(let row): row.workspaceID
+        }
+    }
+
+    var type: SpacesMobileWorkspaceRowType {
+        switch source {
+        case .process: .processes
+        case .codingAgent: .codingAgents
+        case .terminal: .workspaceTerminals
+        }
+    }
+
+    var title: String {
+        switch source {
+        case .process(let row): row.name
+        case .codingAgent(let row): row.name
+        case .terminal(let row): row.title
+        }
+    }
+
+    var detail: String {
+        switch source {
+        case .process(let row): row.command
+        case .codingAgent(let row): row.command
+        case .terminal(let row): row.workingDirectory
+        }
+    }
+
+    var sessionID: String? {
+        switch source {
+        case .process(let row): row.sessionID
+        case .codingAgent(let row): row.sessionID
+        case .terminal(let row): row.sessionID
+        }
+    }
+
+    var runState: SpacesMobileRunState {
+        switch source {
+        case .process(let row): row.runState
+        case .codingAgent(let row): row.runState
+        case .terminal(let row): row.runState
+        }
+    }
+
+    var canRun: Bool {
+        switch source {
+        case .process(let row): row.canRun
+        case .codingAgent(let row): row.canRun
+        case .terminal: false
+        }
+    }
+
+    var canStop: Bool {
+        switch source {
+        case .process(let row): row.canStop
+        case .codingAgent(let row): row.canStop
+        case .terminal(let row): row.canStop
+        }
+    }
+
+    var canRestart: Bool {
+        switch source {
+        case .process(let row): row.canRestart
+        case .codingAgent(let row): row.canRestart
+        case .terminal: false
+        }
+    }
+
+    var canStopFromTerminalDetail: Bool {
+        switch source {
+        case .process(let row):
+            row.processID != nil && row.sessionID != nil
+        case .codingAgent(let row):
+            row.agentID != nil && row.sessionID != nil
+        case .terminal(let row):
+            row.canStop
+        }
+    }
+
+    var canRestartFromTerminalDetail: Bool {
+        switch source {
+        case .process(let row):
+            row.processID != nil && row.templateID != nil && row.sessionID != nil
+        case .codingAgent(let row):
+            row.agentID != nil && (row.isConfigured || row.launcherID != nil) && row.sessionID != nil
+        case .terminal:
+            false
+        }
+    }
+
+    var hasTerminalDetailActions: Bool { canRun || canStopFromTerminalDetail || canRestartFromTerminalDetail }
+}
+
+struct SpacesMobileWorkspaceGroup: Identifiable {
+    let workspace: SpacesMobileWorkspaceSummary
+    let rows: [SpacesMobileWorkspaceRuntimeRow]
+
+    var id: String { workspace.id }
+}
+
+private enum SpacesMobileMutationTimeoutRecovery {
+    case acceptCachedOverview
+    case requireFreshOverview(previousSessionID: String?)
+
+    var acceptsCachedOverview: Bool {
+        switch self {
+        case .acceptCachedOverview: true
+        case .requireFreshOverview: false
+        }
+    }
+
+    func acceptsFreshSession(_ session: SpacesMobileTerminalSessionSummary?) -> SpacesMobileTerminalSessionSummary? {
+        guard let session else { return nil }
+        switch self {
+        case .acceptCachedOverview:
+            return session
+        case .requireFreshOverview(let previousSessionID):
+            return session.id == previousSessionID ? nil : session
+        }
+    }
+}
+
 @MainActor @Observable final class SpacesMobileAppModel {
     var settings: SpacesMobileConnectionSettings
     var overview: SpacesMobileOverviewPayload?
     var isLoading = false
+    var isMutating = false
     var isShowingConnectionSettings = false
+    var isShowingWorkspaceCreateSheet = false
     var connectionNotice: String?
     var pendingPairingLink: SpacesMobilePairingLink?
     var errorMessage: String?
+    var searchText = ""
+    var visibleRowTypes: Set<SpacesMobileWorkspaceRowType> = Set(SpacesMobileWorkspaceRowType.allCases)
+    var visibleRunStates: Set<SpacesMobileRunState> = Set([.notStarted, .running, .exited])
+    var workspaceCreateOptions: SpacesMobileWorkspaceCreateOptions?
     @ObservationIgnored private var bridgeClient: SpacesMobileBridgeClient
     @ObservationIgnored private var commandChannel: SpacesMobileBridgeCommandChannel
 
@@ -209,6 +392,30 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
         SpacesMobileSettingsStore.save(loadedSettings)
+    }
+
+    init(settings: SpacesMobileConnectionSettings, bridgeClient: SpacesMobileBridgeClient) {
+        self.settings = settings
+        self.bridgeClient = bridgeClient
+        commandChannel = bridgeClient.makeCommandChannel()
+    }
+
+    var workspaceGroups: [SpacesMobileWorkspaceGroup] {
+        let allFiltersSelected =
+            visibleRowTypes.count == SpacesMobileWorkspaceRowType.allCases.count
+            && visibleRunStates.count == 3
+            && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (overview?.workspaces ?? []).filter { !$0.isArchived }.compactMap { workspace in
+            let allRows = workspaceRuntimeRows(for: workspace)
+            let filteredRows = allRows.filter { row in rowMatchesFilters(row, workspace: workspace, query: query) }
+            if allFiltersSelected { return SpacesMobileWorkspaceGroup(workspace: workspace, rows: allRows) }
+            if workspaceMatchesSearch(workspace, query: query), visibleRowTypes.count == SpacesMobileWorkspaceRowType.allCases.count {
+                return SpacesMobileWorkspaceGroup(workspace: workspace, rows: filteredRows)
+            }
+            guard !filteredRows.isEmpty else { return nil }
+            return SpacesMobileWorkspaceGroup(workspace: workspace, rows: filteredRows)
+        }
     }
 
     var terminalGroups: [SpacesMobileTerminalWorkspaceGroup] {
@@ -238,6 +445,24 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
 
     var connectionSummary: String { "\(settings.trimmedHost):\(settings.port)" }
 
+    func toggleRowTypeFilter(_ type: SpacesMobileWorkspaceRowType) {
+        if visibleRowTypes.contains(type) {
+            guard visibleRowTypes.count > 1 else { return }
+            visibleRowTypes.remove(type)
+        } else {
+            visibleRowTypes.insert(type)
+        }
+    }
+
+    func toggleRunStateFilter(_ state: SpacesMobileRunState) {
+        if visibleRunStates.contains(state) {
+            guard visibleRunStates.count > 1 else { return }
+            visibleRunStates.remove(state)
+        } else {
+            visibleRunStates.insert(state)
+        }
+    }
+
     func refresh() async {
         guard !isLoading else { return }
         isLoading = true
@@ -265,6 +490,7 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
         commandChannel = bridgeClient.makeCommandChannel()
         SpacesMobileSettingsStore.save(settings)
         overview = nil
+        workspaceCreateOptions = nil
         connectionNotice = nil
         pendingPairingLink = nil
         Task { await previousCommandChannel.close() }
@@ -281,6 +507,7 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
         commandChannel = bridgeClient.makeCommandChannel()
         SpacesMobileSettingsStore.save(settings)
         overview = nil
+        workspaceCreateOptions = nil
         connectionNotice = message
         pendingPairingLink = nil
         errorMessage = nil
@@ -299,6 +526,114 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
         }
     }
 
+    func loadWorkspaceCreateOptions(projectID: String? = nil) async {
+        do {
+            workspaceCreateOptions = try await bridgeClient.fetchWorkspaceCreateOptions(projectID: projectID, commandChannel: commandChannel)
+        } catch {
+            handleBridgeError(error)
+        }
+    }
+
+    func createWorkspace(
+        projectID: String,
+        title: String,
+        branch: String?,
+        targetBranch: String?,
+        directoryName: String?,
+        allowExistingBranchReuse: Bool
+    ) async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            let response = try await bridgeClient.createWorkspace(
+                projectID: projectID, title: title, branch: branch, targetBranch: targetBranch, directoryName: directoryName,
+                allowExistingBranchReuse: allowExistingBranchReuse, commandChannel: commandChannel)
+            applyMutationResponse(response)
+            isShowingWorkspaceCreateSheet = false
+        } catch {
+            handleBridgeError(error)
+        }
+    }
+
+    func openWorkspaceTerminal(workspaceID: String) async -> SpacesMobileTerminalSessionSummary? {
+        await performMutationReturningSession {
+            try await bridgeClient.openWorkspaceTerminal(workspaceID: workspaceID, commandChannel: commandChannel)
+        }
+    }
+
+    func run(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesMobileTerminalSessionSummary? {
+        let timeoutRecovery = SpacesMobileMutationTimeoutRecovery.requireFreshOverview(previousSessionID: row.sessionID)
+        switch row.source {
+        case .process(let process):
+            guard process.canRun else { return nil }
+            return await performMutationReturningSession(fallbackRowID: row.id, timeoutRecovery: timeoutRecovery) {
+                try await bridgeClient.runWorkspaceProcess(
+                    workspaceID: process.workspaceID, processKey: process.name, processTemplateID: process.templateID ?? process.id,
+                    commandChannel: commandChannel)
+            }
+        case .codingAgent(let agent):
+            guard agent.canRun else { return nil }
+            return await performMutationReturningSession(fallbackRowID: row.id, timeoutRecovery: timeoutRecovery) {
+                try await bridgeClient.runCodingAgent(
+                    workspaceID: agent.workspaceID, agentName: agent.name, agentLauncherID: agent.launcherID, commandChannel: commandChannel)
+            }
+        case .terminal:
+            return nil
+        }
+    }
+
+    func performPrimaryAction(for row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesMobileTerminalSessionSummary? {
+        if let session = terminalSession(for: row) { return session }
+        return await run(row: row)
+    }
+
+    func stop(row: SpacesMobileWorkspaceRuntimeRow) async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            let response: SpacesMobileBridgeResponse
+            switch row.source {
+            case .process(let process):
+                guard let processID = process.processID else { return }
+                response = try await bridgeClient.stopWorkspaceProcess(
+                    workspaceID: process.workspaceID, processID: processID, processKey: process.name, commandChannel: commandChannel)
+            case .codingAgent(let agent):
+                guard let agentID = agent.agentID else { return }
+                response = try await bridgeClient.stopCodingAgent(
+                    workspaceID: agent.workspaceID, agentID: agentID, agentName: agent.name, commandChannel: commandChannel)
+            case .terminal(let terminal):
+                guard let sessionID = terminal.sessionID else { return }
+                response = try await bridgeClient.stopWorkspaceTerminal(
+                    workspaceID: terminal.workspaceID, sessionID: sessionID, commandChannel: commandChannel)
+            }
+            applyMutationResponse(response)
+        } catch {
+            handleBridgeError(error)
+        }
+    }
+
+    func restart(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesMobileTerminalSessionSummary? {
+        let timeoutRecovery = SpacesMobileMutationTimeoutRecovery.requireFreshOverview(previousSessionID: row.sessionID)
+        switch row.source {
+        case .process(let process):
+            guard let processID = process.processID else { return nil }
+            return await performMutationReturningSession(fallbackRowID: row.id, timeoutRecovery: timeoutRecovery) {
+                try await bridgeClient.restartWorkspaceProcess(
+                    workspaceID: process.workspaceID, processID: processID, processKey: process.name, commandChannel: commandChannel)
+            }
+        case .codingAgent(let agent):
+            guard let agentID = agent.agentID else { return nil }
+            return await performMutationReturningSession(fallbackRowID: row.id, timeoutRecovery: timeoutRecovery) {
+                try await bridgeClient.restartCodingAgent(
+                    workspaceID: agent.workspaceID, agentID: agentID, agentName: agent.name, commandChannel: commandChannel)
+            }
+        case .terminal:
+            return nil
+        }
+    }
+
     private func groupSort(_ lhs: SpacesMobileTerminalWorkspaceGroup, _ rhs: SpacesMobileTerminalWorkspaceGroup) -> Bool {
         if lhs.projectName.localizedStandardCompare(rhs.projectName) != .orderedSame {
             return lhs.projectName.localizedStandardCompare(rhs.projectName) == .orderedAscending
@@ -314,5 +649,116 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
             return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
         }
         return lhs.createdAt < rhs.createdAt
+    }
+
+    private func workspaceRuntimeRows(for workspace: SpacesMobileWorkspaceSummary) -> [SpacesMobileWorkspaceRuntimeRow] {
+        workspace.processRows.map { .init(source: .process($0)) }
+            + workspace.codingAgentRows.map { .init(source: .codingAgent($0)) }
+            + workspace.terminalRows.map { .init(source: .terminal($0)) }
+    }
+
+    private func rowMatchesFilters(_ row: SpacesMobileWorkspaceRuntimeRow, workspace: SpacesMobileWorkspaceSummary, query: String) -> Bool {
+        guard visibleRowTypes.contains(row.type), visibleRunStates.contains(row.runState) else { return false }
+        guard !query.isEmpty else { return true }
+        return [workspace.projectName, workspace.title, workspace.dir, row.title, row.detail].contains { value in
+            value.localizedStandardContains(query)
+        }
+    }
+
+    private func workspaceMatchesSearch(_ workspace: SpacesMobileWorkspaceSummary, query: String) -> Bool {
+        guard !query.isEmpty else { return true }
+        return [workspace.projectName, workspace.title, workspace.dir].contains { $0.localizedStandardContains(query) }
+    }
+
+    func terminalSession(for row: SpacesMobileWorkspaceRuntimeRow) -> SpacesMobileTerminalSessionSummary? {
+        row.sessionID.flatMap { sessionID in overview?.sessions.first(where: { $0.id == sessionID }) }
+    }
+
+    func runtimeRow(forSessionID sessionID: String) -> SpacesMobileWorkspaceRuntimeRow? {
+        overview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first { $0.sessionID == sessionID }
+    }
+
+    func refreshedSession(forRowID rowID: String) -> SpacesMobileTerminalSessionSummary? {
+        overview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first(where: { $0.id == rowID }).flatMap(terminalSession(for:))
+    }
+
+    private func performMutationReturningSession(
+        fallbackRowID: String? = nil,
+        timeoutRecovery: SpacesMobileMutationTimeoutRecovery = .acceptCachedOverview,
+        _ operation: () async throws -> SpacesMobileBridgeResponse
+    ) async -> SpacesMobileTerminalSessionSummary? {
+        guard !isMutating else { return nil }
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            let response = try await operation()
+            applyMutationResponse(response)
+            if let sessionID = response.sessionID {
+                return overview?.sessions.first(where: { $0.id == sessionID })
+            }
+            if let fallbackRowID {
+                return refreshedSession(forRowID: fallbackRowID)
+            }
+            return nil
+        } catch {
+            if let fallbackRowID,
+                isMutationTimeout(error),
+                let session = await reconciledSessionAfterMutationTimeout(rowID: fallbackRowID, timeoutRecovery: timeoutRecovery)
+            {
+                return session
+            }
+            handleBridgeError(error)
+            return nil
+        }
+    }
+
+    private func applyMutationResponse(_ response: SpacesMobileBridgeResponse) {
+        if let overview = response.overview {
+            self.overview = overview
+            connectionNotice = nil
+            errorMessage = nil
+        }
+    }
+
+    private func handleBridgeError(_ error: Error) {
+        if error is CancellationError {
+            return
+        }
+        if let recoveryMessage = SpacesMobileBridgeAuthentication.recoveryMessage(for: error) {
+            handleAuthenticationFailure(message: recoveryMessage)
+            return
+        }
+        errorMessage = error.localizedDescription
+    }
+
+    private func reconciledSessionAfterMutationTimeout(
+        rowID: String,
+        timeoutRecovery: SpacesMobileMutationTimeoutRecovery
+    ) async -> SpacesMobileTerminalSessionSummary? {
+        if timeoutRecovery.acceptsCachedOverview, let session = refreshedSession(forRowID: rowID) {
+            errorMessage = nil
+            connectionNotice = nil
+            return session
+        }
+        do {
+            overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
+            errorMessage = nil
+            connectionNotice = nil
+            return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID))
+        } catch {
+            return nil
+        }
+    }
+
+    private func isMutationTimeout(_ error: Error) -> Bool {
+        switch error {
+        case SpacesMobileBridgeClientError.requestTimedOut:
+            return true
+        case SpacesMobileBridgeClientError.requestFailed(let message),
+            SpacesMobileBridgeClientError.streamFailed(let message):
+            return message.localizedStandardContains("timed out")
+        default:
+            return false
+        }
     }
 }

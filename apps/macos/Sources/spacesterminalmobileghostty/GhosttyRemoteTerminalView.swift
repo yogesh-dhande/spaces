@@ -144,6 +144,11 @@ import Foundation
             let scale: Double
         }
 
+        private struct RetiredMirror: @unchecked Sendable {
+            let mirror: ghostty_mirror_t
+            let retainedHostView: UIView
+        }
+
         private enum AccessoryModifier: String, CaseIterable {
             case control = "ctrl"
             case command = "cmd"
@@ -177,10 +182,11 @@ import Foundation
 
         private static let defaultFontSize: CGFloat = 11
         private static let contentInsets = GhosttyRemoteTerminalViewport.contentInsets
-        private static let accessoryToolbarHeight: CGFloat = 58
+        private static let accessoryToolbarHeight: CGFloat = 46
 
         nonisolated(unsafe) static var sessionFreeHandlerForTesting: @Sendable (UnsafeRawPointer?) -> Void = { _ in }
         nonisolated(unsafe) static var nativeMirrorEnabledForTesting = true
+        nonisolated(unsafe) private static var retiredMirrors: [RetiredMirror] = []
 
         private let surfaceHostView = UIView(frame: .zero)
         private var mirror: ghostty_mirror_t?
@@ -304,7 +310,7 @@ import Foundation
         deinit {
             MainActor.assumeIsolated {
                 momentumDisplayLink?.invalidate()
-                if let mirror { ghostty_mirror_free(mirror) }
+                if let mirror { retireMirror(mirror) }
             }
         }
 
@@ -332,7 +338,7 @@ import Foundation
             currentRenderedSnapshot = nil
             lastSurfaceGeometry = nil
             if let mirror {
-                ghostty_mirror_free(mirror)
+                retireMirror(mirror)
                 self.mirror = nil
             }
             reportInputReadinessIfNeeded(force: true)
@@ -340,6 +346,18 @@ import Foundation
                 let handler = Self.sessionFreeHandlerForTesting
                 _ = Task.detached(priority: .utility) { handler(nil) }
             }
+        }
+
+        private func retireMirror(_ mirror: ghostty_mirror_t) {
+            if let surface = ghostty_mirror_surface(mirror) {
+                ghostty_surface_set_focus(surface, false)
+                ghostty_surface_set_occlusion(surface, false)
+            }
+            // GhosttyKit can block indefinitely while freeing iOS mirror
+            // surfaces because free rebinds the renderer host during teardown.
+            // Retiring keeps navigation responsive and lets process exit reclaim
+            // the native mirror resources.
+            Self.retiredMirrors.append(RetiredMirror(mirror: mirror, retainedHostView: surfaceHostView))
         }
 
         public func setTerminalVisible(_ visible: Bool) {
@@ -435,6 +453,7 @@ import Foundation
         public func capturedSnapshotForTesting() -> GhosttyTerminalSnapshot? { currentRenderedSnapshot }
         public var hasActiveSessionForTesting: Bool { currentRenderedSnapshot != nil }
         public var hasMirrorSurfaceForTesting: Bool { mirrorSurface() != nil }
+        public static var retiredMirrorCountForTesting: Int { retiredMirrors.count }
         public var hasRetainedSessionStandardInputWriteDescriptorForTesting: Bool { false }
 
         @discardableResult public func debugSendScrollForTesting(
@@ -997,11 +1016,11 @@ import Foundation
                 let fontSize: CGFloat
 
                 static let regular = Metrics(
-                    horizontalInset: 12, verticalInset: 10, spacing: 8, textButtonWidth: 64, iconButtonWidth: 56, buttonHeight: 38, cornerRadius: 8,
-                    fontSize: 17)
+                    horizontalInset: 10, verticalInset: 6, spacing: 6, textButtonWidth: 58, iconButtonWidth: 48, buttonHeight: 34, cornerRadius: 7,
+                    fontSize: 15)
                 static let phone = Metrics(
-                    horizontalInset: 8, verticalInset: 10, spacing: 6, textButtonWidth: 50, iconButtonWidth: 46, buttonHeight: 36, cornerRadius: 7,
-                    fontSize: 16)
+                    horizontalInset: 6, verticalInset: 6, spacing: 5, textButtonWidth: 44, iconButtonWidth: 40, buttonHeight: 34, cornerRadius: 6,
+                    fontSize: 14)
             }
 
             var pendingModifiers: Set<AccessoryModifier> = [] { didSet { updateModifierButtonAppearances() } }

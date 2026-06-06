@@ -215,7 +215,7 @@ import spacesterminalcore
         persistedFinalStateLoadInProgress = true
         persistedFinalStateLoaded = true
         defer { persistedFinalStateLoadInProgress = false }
-        applyRemoteState(payload)
+        applyRemoteState(payload, postNotifications: false)
         return true
     }
 
@@ -232,7 +232,7 @@ import spacesterminalcore
         }
     }
 
-    private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
+    private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload, postNotifications: Bool = true) {
         if incomingPayload.runtimeState?.state.isInteractive == true { persistedFinalStateLoaded = false }
         let decodeStartedAt = Date()
         let incomingPayloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(incomingPayload).count) ?? 0
@@ -279,7 +279,7 @@ import spacesterminalcore
             "terminal_render_frame_payload_receive", target: "session=\(payload.sessionID)",
             elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
             detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
-        postLocalNotifications(for: payload)
+        if postNotifications { postLocalNotifications(for: payload) }
     }
 
     private func renderUpdateDropReason(for payload: GhosttyRemoteSessionStatePayload, decodedFrame: GhosttyRenderFrame?) -> String? {

@@ -8,6 +8,7 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let runtimeTargetID: String?
     public let terminalTarget: TerminalTargetRecord?
     public let sessionKey: String?
+    public let claimedLauncherID: String?
     public let claimedLauncherName: String?
     public let status: AgentWindowStatus
     public let createdAt: String
@@ -15,8 +16,8 @@ public struct AgentWindowRecord: Codable, Sendable {
 
     public init(
         id: String, workspaceID: String, provider: AgentProvider, label: String?, runtimeTargetID: String? = nil,
-        terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil, claimedLauncherName: String? = nil, status: AgentWindowStatus,
-        createdAt: String, updatedAt: String
+        terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil, claimedLauncherID: String? = nil, claimedLauncherName: String? = nil,
+        status: AgentWindowStatus, createdAt: String, updatedAt: String
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -25,6 +26,7 @@ public struct AgentWindowRecord: Codable, Sendable {
         self.runtimeTargetID = runtimeTargetID
         self.terminalTarget = terminalTarget
         self.sessionKey = sessionKey
+        self.claimedLauncherID = claimedLauncherID
         self.claimedLauncherName = claimedLauncherName
         self.status = status
         self.createdAt = createdAt

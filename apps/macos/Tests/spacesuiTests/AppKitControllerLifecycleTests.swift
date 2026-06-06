@@ -48,7 +48,6 @@ import spacesterminalcore
     @Test func adHocSessionTeardownSkipsWhenQuitKeepsSessionsRunning() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
         let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
         let databaseRoot = root.appendingPathComponent("profile", isDirectory: true)
         setenv(SpacesProfile.databasePathEnvironmentVariable, databaseRoot.appendingPathComponent("spaces.db").path, 1)
@@ -58,8 +57,13 @@ import spacesterminalcore
             } else {
                 unsetenv(SpacesProfile.databasePathEnvironmentVariable)
             }
+            try? FileManager.default.removeItem(at: root)
         }
         let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: "ad-hoc-lifecycle-\(UUID().uuidString)", title: "Terminal", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+                createdAt: "2026-06-04T00:00:00Z"), paths: paths)
 
         #expect(
             AppKitController.shouldTerminateAdHocBuiltInTerminalSession(

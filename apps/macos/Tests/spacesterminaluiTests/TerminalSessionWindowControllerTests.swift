@@ -158,7 +158,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil, detachClientAction: (@Sendable (String) throws -> Void)? = nil,
         copySelectionAction: (@MainActor () -> Bool)? = nil, detachClientSynchronouslyOnClose: Bool = true,
         pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
-        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
         sessionHostProvider: (@MainActor @Sendable (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? =
             nil
     ) -> TerminalSessionWindowController {
@@ -188,6 +188,42 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertNotNil(controller.window)
         XCTAssertEqual(controller.window?.title, "Terminal session-1")
         XCTAssertEqual(controller.window?.tabbingMode, .disallowed)
+    }
+
+    @MainActor func testRuntimeToolbarShowsRightAlignedLifecycleControlsWithoutDuplicatedTitle() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var didRun = false
+        var didStop = false
+        var didRestart = false
+        let controller = TerminalSessionWindowController(sessionID: "session-controls", paths: .init(rootDirectory: root.path))
+
+        controller.setRuntimeControls(
+            TerminalSessionRuntimeControls(
+                title: "frontend", canRun: true, canStop: true, canRestart: true, onRun: { didRun = true }, onStop: { didStop = true },
+                onRestart: { didRestart = true }))
+
+        XCTAssertTrue(controller.debugShowsHeader)
+        XCTAssertTrue(controller.debugShowsRuntimeToolbar)
+        XCTAssertEqual(controller.debugRuntimeToolbarTitle, "frontend")
+        XCTAssertFalse(controller.debugShowsRuntimeToolbarTitle)
+        XCTAssertTrue(controller.debugShowsRuntimeRunButton)
+        XCTAssertTrue(controller.debugShowsRuntimeStopButton)
+        XCTAssertTrue(controller.debugShowsRuntimeRestartButton)
+        XCTAssertFalse(controller.debugShowsSummaryLabel)
+        XCTAssertFalse(controller.debugShowsStateLabel)
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertEqual(controller.debugRuntimeToolbarTrailingGap, 0, accuracy: 1)
+
+        controller.debugRunRuntimeToolbarAction()
+        controller.debugStopRuntimeToolbarAction()
+        controller.debugRestartRuntimeToolbarAction()
+
+        XCTAssertTrue(didRun)
+        XCTAssertTrue(didStop)
+        XCTAssertTrue(didRestart)
     }
 
     @MainActor func testShowAttachesClientAndCloseDetachesClient() throws {
@@ -1861,11 +1897,13 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         let cleanup = expectation(description: "cleanup callback")
         var closedSessionID: String?
         var closedClientID: String?
+        var closedForTermination: Bool?
         let controller = TerminalSessionWindowController(
             sessionID: "session-5", paths: .init(rootDirectory: root.path),
-            onWindowClose: { sessionID, clientID in
+            onWindowClose: { sessionID, clientID, isTerminating in
                 closedSessionID = sessionID
                 closedClientID = clientID
+                closedForTermination = isTerminating
                 cleanup.fulfill()
             })
 
@@ -1875,6 +1913,23 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         wait(for: [cleanup], timeout: 1)
         XCTAssertEqual(closedSessionID, "session-5")
         XCTAssertEqual(closedClientID, expectedClientID)
+        XCTAssertEqual(closedForTermination, false)
+    }
+
+    @MainActor func testWindowCloseCallbackMarksSessionTerminationClose() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var closedForTermination: Bool?
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-termination-close", paths: .init(rootDirectory: root.path),
+            onWindowClose: { _, _, isTerminating in closedForTermination = isTerminating })
+
+        controller.closeForSessionTermination()
+        if closedForTermination == nil { controller.windowWillClose(Notification(name: NSWindow.willCloseNotification)) }
+
+        XCTAssertEqual(closedForTermination, true)
     }
 
     @MainActor func testGhosttyControllersRefreshOwnershipAfterTakeover() throws {

@@ -5,6 +5,8 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
     public let sessionID: String
     public let backend: TerminalSessionBackendKind
     public let lifetimePolicy: TerminalSessionLifetimePolicy
+    public let workspaceID: String?
+    public let kind: TerminalSessionKind
     public let title: String
     public let workingDirectory: String
     public let shell: String
@@ -15,9 +17,20 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
         sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent,
         title: String, workingDirectory: String, shell: String, command: String?, createdAt: String
     ) {
+        self.init(
+            sessionID: sessionID, backend: backend, lifetimePolicy: lifetimePolicy, title: title, workingDirectory: workingDirectory, shell: shell,
+            command: command, createdAt: createdAt, workspaceID: nil, kind: .shell)
+    }
+
+    public init(
+        sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent,
+        title: String, workingDirectory: String, shell: String, command: String?, createdAt: String, workspaceID: String?, kind: TerminalSessionKind
+    ) {
         self.sessionID = sessionID
         self.backend = backend
         self.lifetimePolicy = lifetimePolicy
+        self.workspaceID = workspaceID
+        self.kind = kind
         self.title = title
         self.workingDirectory = workingDirectory
         self.shell = shell
@@ -29,6 +42,8 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
         case sessionID
         case backend
         case lifetimePolicy
+        case workspaceID
+        case kind
         case title
         case workingDirectory
         case shell
@@ -41,6 +56,8 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
         sessionID = try container.decode(String.self, forKey: .sessionID)
         backend = try container.decodeIfPresent(TerminalSessionBackendKind.self, forKey: .backend) ?? .ghosttyEmbedded
         lifetimePolicy = try container.decodeIfPresent(TerminalSessionLifetimePolicy.self, forKey: .lifetimePolicy) ?? .persistent
+        workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
+        kind = try container.decodeIfPresent(TerminalSessionKind.self, forKey: .kind) ?? .shell
         title = try container.decode(String.self, forKey: .title)
         workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
         shell = try container.decode(String.self, forKey: .shell)
@@ -132,13 +149,15 @@ public enum TerminalSessionPersistence {
                 try database.execute(
                     sql: """
                         INSERT INTO terminal_sessions(
-                          session_id, root_directory, backend, lifetime_policy, title, working_directory, shell, command, created_at
+                          session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, command, created_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?)
+                        VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?)
                         ON CONFLICT(session_id) DO UPDATE SET
                           root_directory = excluded.root_directory,
                           backend = excluded.backend,
                           lifetime_policy = excluded.lifetime_policy,
+                          workspace_id = excluded.workspace_id,
+                          kind = excluded.kind,
                           title = excluded.title,
                           working_directory = excluded.working_directory,
                           shell = excluded.shell,
@@ -146,8 +165,9 @@ public enum TerminalSessionPersistence {
                           created_at = excluded.created_at
                         """,
                     bindings: [
-                        configuration.sessionID, root, configuration.backend.rawValue, configuration.lifetimePolicy.rawValue, configuration.title,
-                        configuration.workingDirectory, configuration.shell, configuration.command ?? "", configuration.createdAt,
+                        configuration.sessionID, root, configuration.backend.rawValue, configuration.lifetimePolicy.rawValue,
+                        configuration.workspaceID ?? "", configuration.kind.rawValue, configuration.title, configuration.workingDirectory,
+                        configuration.shell, configuration.command ?? "", configuration.createdAt,
                     ])
             }
         }
@@ -226,7 +246,8 @@ public enum TerminalSessionPersistence {
         return try withDatabase(paths: paths) { database in
             let row = try database.queryRow(
                 sql: """
-                    SELECT session_id, backend, lifetime_policy, title, working_directory, shell, COALESCE(command, ''), created_at
+                    SELECT session_id, backend, lifetime_policy, COALESCE(workspace_id, ''), kind, title, working_directory, shell, COALESCE(command, ''),
+                           created_at
                     FROM terminal_sessions
                     WHERE root_directory = ?
                     """, bindings: [root])
@@ -508,7 +529,8 @@ public enum TerminalSessionPersistence {
         try withProfileDatabase { database in
             try database.queryRows(
                 sql: """
-                    SELECT session_id, backend, lifetime_policy, title, working_directory, shell, COALESCE(command, ''), created_at
+                    SELECT session_id, backend, lifetime_policy, COALESCE(workspace_id, ''), kind, title, working_directory, shell, COALESCE(command, ''),
+                           created_at
                     FROM terminal_sessions
                     ORDER BY created_at, session_id
                     """
@@ -613,16 +635,17 @@ public enum TerminalSessionPersistence {
     }
 
     private static func decodeLaunchConfiguration(row: [String]) throws -> TerminalSessionLaunchConfiguration {
-        guard row.count >= 8 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+        guard row.count >= 10 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
         guard let backend = TerminalSessionBackendKind(rawValue: row[1]) else {
             throw TerminalSessionPersistenceError.invalidValue("backend", row[1])
         }
         guard let lifetimePolicy = TerminalSessionLifetimePolicy(rawValue: row[2]) else {
             throw TerminalSessionPersistenceError.invalidValue("lifetime_policy", row[2])
         }
+        guard let kind = TerminalSessionKind(rawValue: row[4]) else { throw TerminalSessionPersistenceError.invalidValue("kind", row[4]) }
         return TerminalSessionLaunchConfiguration(
-            sessionID: row[0], backend: backend, lifetimePolicy: lifetimePolicy, title: row[3], workingDirectory: row[4], shell: row[5],
-            command: row[6].isEmpty ? nil : row[6], createdAt: row[7])
+            sessionID: row[0], backend: backend, lifetimePolicy: lifetimePolicy, title: row[5], workingDirectory: row[6], shell: row[7],
+            command: row[8].isEmpty ? nil : row[8], createdAt: row[9], workspaceID: row[3].isEmpty ? nil : row[3], kind: kind)
     }
 
     private static func decodeRuntimeState(row: [String]) throws -> TerminalSessionRuntimeState {

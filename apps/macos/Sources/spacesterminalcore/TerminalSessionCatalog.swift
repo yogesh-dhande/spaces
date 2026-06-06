@@ -22,6 +22,8 @@ public struct TerminalSessionCatalogEntry: Sendable, Equatable {
     }
 
     public var sessionID: String { launchConfiguration.sessionID }
+    public var workspaceID: String? { launchConfiguration.workspaceID }
+    public var kind: TerminalSessionKind { launchConfiguration.kind }
     public var effectiveTitle: String { runtimeState.title ?? launchConfiguration.title }
     public var effectiveWorkingDirectory: String { runtimeState.workingDirectory ?? launchConfiguration.workingDirectory }
 }

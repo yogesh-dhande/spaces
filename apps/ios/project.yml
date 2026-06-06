@@ -58,6 +58,7 @@ targets:
         "ARCHS[sdk=iphonesimulator*]": arm64
         "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
     dependencies:
+      - target: SpacesMobile
       - package: SpacesPackage
         product: spacesterminalcore
       - package: SpacesPackage

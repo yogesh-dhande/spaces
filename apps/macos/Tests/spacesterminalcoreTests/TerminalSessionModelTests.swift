@@ -23,17 +23,6 @@ final class TerminalSessionModelTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    func testTerminalSessionSupportsTmuxFreeOwnerModel() {
-        let session = TerminalSession(
-            workspaceID: "workspace-1", kind: .process, title: "api", workingDirectory: "/tmp/project", command: "npm run api", shell: nil,
-            ownerClientID: "client-1", state: .running, createdAt: "2026-05-08T00:00:00Z", updatedAt: "2026-05-08T00:00:00Z")
-
-        XCTAssertEqual(session.workspaceID, "workspace-1")
-        XCTAssertEqual(session.kind, .process)
-        XCTAssertEqual(session.ownerClientID, "client-1")
-        XCTAssertEqual(session.state, .running)
-    }
-
     func testTerminalAttachmentSeparatesOwnerFromViewer() {
         let owner = TerminalAttachment(sessionID: "session-1", clientID: "client-owner", mode: .owner, attachedAt: "2026-05-08T00:00:00Z")
         let viewer = TerminalAttachment(sessionID: "session-1", clientID: "client-viewer", mode: .viewer, attachedAt: "2026-05-08T00:00:01Z")
@@ -53,12 +42,24 @@ final class TerminalSessionModelTests: XCTestCase {
         let sessionPaths = try TerminalSessionPaths.forSession(id: "session-1")
         let metadata = TerminalSessionLaunchConfiguration(
             sessionID: "session-1", title: "session", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-            createdAt: "2026-05-08T00:00:00Z")
+            createdAt: "2026-05-08T00:00:00Z", workspaceID: "workspace-1", kind: .process)
         try TerminalSessionPersistence.writeLaunchConfiguration(metadata, paths: sessionPaths)
 
         let sessions = try TerminalSessionPersistence.listKnownSessions()
 
         XCTAssertEqual(sessions, [metadata])
+    }
+
+    func testLaunchConfigurationEncodesWorkspaceIDAndKind() throws {
+        let configuration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-encoded", title: "api", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "npm run api",
+            createdAt: "2026-05-08T00:00:00Z", workspaceID: "workspace-1", kind: .process)
+
+        let data = try JSONEncoder().encode(configuration)
+        let decoded = try JSONDecoder().decode(TerminalSessionLaunchConfiguration.self, from: data)
+
+        XCTAssertEqual(decoded.workspaceID, "workspace-1")
+        XCTAssertEqual(decoded.kind, .process)
     }
 
     func testLaunchConfigurationDefaultsLegacyMetadataToGhosttyEmbedded() throws {
@@ -78,6 +79,20 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(decoded.backend, .ghosttyEmbedded)
         XCTAssertEqual(decoded.lifetimePolicy, .persistent)
         XCTAssertEqual(decoded.sessionID, "session-legacy")
+        XCTAssertNil(decoded.workspaceID)
+        XCTAssertEqual(decoded.kind, .shell)
+    }
+
+    func testLaunchConfigurationPersistenceRoundTripsWorkspaceIDAndKind() throws {
+        let sessionID = "session-metadata"
+        let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)
+        let configuration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, title: "agent", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "codex",
+            createdAt: "2026-05-08T00:00:00Z", workspaceID: "workspace-1", kind: .agent)
+
+        try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: sessionPaths)
+
+        XCTAssertEqual(try TerminalSessionPersistence.readLaunchConfiguration(paths: sessionPaths), configuration)
     }
 
     func testRuntimeStateDefaultsLegacyStateToGhosttyEmbedded() throws {

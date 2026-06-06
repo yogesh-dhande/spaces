@@ -70,6 +70,31 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public let searchSelected: Int?
 }
 
+@MainActor public struct TerminalSessionRuntimeControls {
+    public let title: String
+    public let canRun: Bool
+    public let canStop: Bool
+    public let canRestart: Bool
+    public let onRun: (@MainActor @Sendable () -> Void)?
+    public let onStop: (@MainActor @Sendable () -> Void)?
+    public let onRestart: (@MainActor @Sendable () -> Void)?
+
+    public init(
+        title: String, canRun: Bool, canStop: Bool, canRestart: Bool, onRun: (@MainActor @Sendable () -> Void)? = nil,
+        onStop: (@MainActor @Sendable () -> Void)? = nil, onRestart: (@MainActor @Sendable () -> Void)? = nil
+    ) {
+        self.title = title
+        self.canRun = canRun
+        self.canStop = canStop
+        self.canRestart = canRestart
+        self.onRun = onRun
+        self.onStop = onStop
+        self.onRestart = onRestart
+    }
+
+    public var hasActions: Bool { canRun || canStop || canRestart }
+}
+
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
     private static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
     private static let fallbackRefreshInterval: Duration = .milliseconds(500)
@@ -111,6 +136,13 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private let summaryLabel = NSTextField(labelWithString: "")
     private let stateLabel = NSTextField(labelWithString: "")
     private let rendererLabel = NSTextField(labelWithString: "")
+    private let runtimeToolbarStackView = NSStackView()
+    private let runtimeToolbarTitleLabel = NSTextField(labelWithString: "")
+    private let runtimeToolbarRunButton = NSButton()
+    private let runtimeToolbarStopButton = NSButton()
+    private let runtimeToolbarRestartButton = NSButton()
+    private let runtimeToolbarButtonStackView = NSStackView()
+    private let runtimeToolbarSpacerView = NSView()
     private let inputField = NSTextField(string: "")
     private let inputStatusLabel = NSTextField(labelWithString: "")
     private let sendButton = NSButton(title: "Send", target: nil, action: nil)
@@ -153,7 +185,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private let ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)?
     private let ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)?
     private let onWindowFocus: (@MainActor (String) -> Void)?
-    private let onWindowClose: (@MainActor (String, String) -> Void)?
+    private let onWindowClose: (@MainActor (String, String, Bool) -> Void)?
+    private let runtimeControlsProvider: (@MainActor (String) -> TerminalSessionRuntimeControls?)?
     private let loadWindowFrameAction: (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?
     private let saveWindowFrameAction: (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void
     private let sessionHostProvider: @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
@@ -176,6 +209,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var lastObservedOwnerClientID: String?
     private var lastObservedRuntimeState: TerminalSessionRuntimeState?
     private var shouldShowOwnerStateLabel = true
+    private var runtimeControls: TerminalSessionRuntimeControls?
     private var inputStatusIsError = false
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
@@ -203,7 +237,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
         detachClientSynchronouslyOnClose: Bool = true, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
         ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
-        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
+        runtimeControlsProvider: (@MainActor (String) -> TerminalSessionRuntimeControls?)? = nil,
         loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
         saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil,
         sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
@@ -214,7 +249,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             detachClientAction: detachClientAction, copySelectionAction: copySelectionAction,
             detachClientSynchronouslyOnClose: detachClientSynchronouslyOnClose, pasteClipboardAction: pasteClipboardAction,
             ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowFocus: onWindowFocus,
-            onWindowClose: onWindowClose, loadWindowFrameAction: loadWindowFrameAction, saveWindowFrameAction: saveWindowFrameAction,
+            onWindowClose: onWindowClose, runtimeControlsProvider: runtimeControlsProvider, loadWindowFrameAction: loadWindowFrameAction,
+            saveWindowFrameAction: saveWindowFrameAction,
             sessionHostProvider: sessionHostProvider ?? { launchConfiguration, paths in
                 RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
             })
@@ -229,7 +265,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
         detachClientSynchronouslyOnClose: Bool = true, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
         ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
-        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
+        runtimeControlsProvider: (@MainActor (String) -> TerminalSessionRuntimeControls?)? = nil,
         loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
         saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil,
         sessionHostProvider: @escaping @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
@@ -279,6 +316,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         self.ownerSurfaceFocusAction = ownerSurfaceFocusAction
         self.onWindowFocus = onWindowFocus
         self.onWindowClose = onWindowClose
+        self.runtimeControlsProvider = runtimeControlsProvider
         self.loadWindowFrameAction = loadWindowFrameAction ?? { mode in try TerminalSessionPersistence.readWindowFrame(mode: mode, paths: paths) }
         self.saveWindowFrameAction =
             saveWindowFrameAction ?? { frame, mode in try TerminalSessionPersistence.writeWindowFrame(frame, mode: mode, paths: paths) }
@@ -298,6 +336,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         window.terminalCommandKeyEquivalentHandler = { [weak self] event in self?.handleTerminalWindowCommandKeyEquivalent(event) ?? false }
         startObservingApplicationActivation()
         buildUI()
+        refreshRuntimeControls()
         if performInitialRefresh { refreshNow() }
     }
 
@@ -500,6 +539,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         window?.close()
     }
 
+    public func setRuntimeControls(_ controls: TerminalSessionRuntimeControls?) {
+        runtimeControls = controls
+        updateRuntimeToolbar()
+    }
+
     public func windowWillClose(_ notification: Notification) {
         let sessionIsTerminating = closesForSessionTermination
         closesForSessionTermination = false
@@ -518,7 +562,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         }
         refreshTask?.cancel()
         refreshTask = nil
-        onWindowClose?(sessionID, client.id)
+        onWindowClose?(sessionID, client.id, sessionIsTerminating)
     }
 
     public func windowDidBecomeKey(_ notification: Notification) {
@@ -799,6 +843,42 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         rendererLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         rendererLabel.stringValue = rendererMode.statusSummary
 
+        runtimeToolbarTitleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        runtimeToolbarTitleLabel.textColor = .labelColor
+        runtimeToolbarTitleLabel.lineBreakMode = .byTruncatingTail
+        runtimeToolbarTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        runtimeToolbarTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        runtimeToolbarTitleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        runtimeToolbarButtonStackView.translatesAutoresizingMaskIntoConstraints = false
+        runtimeToolbarButtonStackView.orientation = .horizontal
+        runtimeToolbarButtonStackView.alignment = .centerY
+        runtimeToolbarButtonStackView.spacing = 4
+        configureRuntimeToolbarButton(runtimeToolbarRunButton, symbol: "play.fill", tooltip: "Run", action: #selector(runRuntimeFromToolbar))
+        configureRuntimeToolbarButton(
+            runtimeToolbarRestartButton, symbol: "arrow.clockwise", tooltip: "Restart", action: #selector(restartRuntimeFromToolbar))
+        configureRuntimeToolbarButton(runtimeToolbarStopButton, symbol: "stop.fill", tooltip: "Stop", action: #selector(stopRuntimeFromToolbar))
+        runtimeToolbarRunButton.setAccessibilityIdentifier("terminal-runtime-run")
+        runtimeToolbarRestartButton.setAccessibilityIdentifier("terminal-runtime-restart")
+        runtimeToolbarStopButton.setAccessibilityIdentifier("terminal-runtime-stop")
+        for button in [runtimeToolbarRunButton, runtimeToolbarRestartButton, runtimeToolbarStopButton] {
+            runtimeToolbarButtonStackView.addArrangedSubview(button)
+            NSLayoutConstraint.activate([button.widthAnchor.constraint(equalToConstant: 22), button.heightAnchor.constraint(equalToConstant: 20)])
+        }
+        runtimeToolbarSpacerView.translatesAutoresizingMaskIntoConstraints = false
+        runtimeToolbarSpacerView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        runtimeToolbarSpacerView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        runtimeToolbarStackView.translatesAutoresizingMaskIntoConstraints = false
+        runtimeToolbarStackView.orientation = .horizontal
+        runtimeToolbarStackView.alignment = .centerY
+        runtimeToolbarStackView.distribution = .fill
+        runtimeToolbarStackView.spacing = 6
+        runtimeToolbarStackView.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+        runtimeToolbarStackView.addArrangedSubview(runtimeToolbarSpacerView)
+        runtimeToolbarStackView.addArrangedSubview(runtimeToolbarButtonStackView)
+        runtimeToolbarStackView.isHidden = true
+
         inputField.translatesAutoresizingMaskIntoConstraints = false
         inputField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         inputField.placeholderString = "Send input to the session"
@@ -904,10 +984,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
         headerStackView.translatesAutoresizingMaskIntoConstraints = false
         headerStackView.orientation = .vertical
-        headerStackView.alignment = .leading
+        headerStackView.alignment = .width
         headerStackView.distribution = .fill
         headerStackView.spacing = 6
-        for view in [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel] {
+        for view in [runtimeToolbarStackView, titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel] {
             headerStackView.addArrangedSubview(view)
         }
 
@@ -927,7 +1007,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
         [headerStackView, bodyStackView, takeoverContainerView].forEach(contentView.addSubview)
 
-        bodyTopToHeaderConstraint = bodyStackView.topAnchor.constraint(equalTo: headerStackView.bottomAnchor, constant: 12)
+        bodyTopToHeaderConstraint = bodyStackView.topAnchor.constraint(equalTo: headerStackView.bottomAnchor, constant: 6)
         bodyTopToContentConstraint = bodyStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12)
         bodyBottomToContentConstraint = bodyStackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16)
         bodyBottomToTakeoverConstraint = bodyStackView.bottomAnchor.constraint(equalTo: takeoverContainerView.topAnchor, constant: -12)
@@ -939,15 +1019,27 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         takeoverCenterYConstraint = takeoverContainerView.centerYAnchor.constraint(equalTo: contentView.centerYAnchor)
 
         NSLayoutConstraint.activate([
-            headerStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
-            headerStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            headerStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            headerStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
+            headerStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+            headerStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
 
             bodyLeadingConstraint!, bodyTrailingConstraint!, takeoverLeadingConstraint!, takeoverTrailingConstraint!,
             takeoverContainerView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor), takeoverBottomConstraint!,
         ])
 
         updateRendererVisibility()
+    }
+
+    private func configureRuntimeToolbarButton(_ button: NSButton, symbol: String, tooltip: String, action: Selector) {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
+        button.imagePosition = .imageOnly
+        button.bezelStyle = .texturedRounded
+        button.isBordered = false
+        button.contentTintColor = .secondaryLabelColor
+        button.toolTip = tooltip
+        button.target = self
+        button.action = action
     }
 
     private func ensureGhosttyHostAttached(requestID: String? = nil, reason: String, requestWindowFocus: Bool = true) {
@@ -1087,6 +1179,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     private func refreshNow(allowGhosttyOwnerAttach: Bool = true) {
         do {
+            refreshRuntimeControls()
             let currentLaunchConfiguration: TerminalSessionLaunchConfiguration
             if let launchConfiguration {
                 currentLaunchConfiguration = launchConfiguration
@@ -1237,6 +1330,39 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     @objc private func sendInterrupt() { sendKey("ctrl+c") }
     @objc private func sendNewline() { sendKey("enter") }
     @objc private func takeoverOwnershipAction() { takeOverOwnership() }
+    @objc private func runRuntimeFromToolbar() { runtimeControls?.onRun?() }
+    @objc private func stopRuntimeFromToolbar() { runtimeControls?.onStop?() }
+    @objc private func restartRuntimeFromToolbar() { runtimeControls?.onRestart?() }
+
+    private func refreshRuntimeControls() {
+        guard let runtimeControlsProvider else {
+            updateRuntimeToolbar()
+            return
+        }
+        runtimeControls = runtimeControlsProvider(sessionID)
+        updateRuntimeToolbar()
+    }
+
+    private func updateRuntimeToolbar() {
+        guard let runtimeControls, runtimeControls.hasActions else {
+            runtimeToolbarStackView.isHidden = true
+            runtimeToolbarRunButton.isHidden = true
+            runtimeToolbarStopButton.isHidden = true
+            runtimeToolbarRestartButton.isHidden = true
+            updateHeaderLayoutVisibility()
+            return
+        }
+        runtimeToolbarTitleLabel.stringValue = runtimeControls.title
+        runtimeToolbarTitleLabel.isHidden = true
+        runtimeToolbarStackView.isHidden = false
+        runtimeToolbarRunButton.isHidden = !runtimeControls.canRun
+        runtimeToolbarStopButton.isHidden = !runtimeControls.canStop
+        runtimeToolbarRestartButton.isHidden = !runtimeControls.canRestart
+        runtimeToolbarRunButton.isEnabled = runtimeControls.onRun != nil
+        runtimeToolbarStopButton.isEnabled = runtimeControls.onStop != nil
+        runtimeToolbarRestartButton.isEnabled = runtimeControls.onRestart != nil
+        updateHeaderLayoutVisibility()
+    }
 
     private func submitInput() {
         guard !inputRowStackView.isHidden else { return }
@@ -1466,9 +1592,18 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             return
         }
         bodyStackView.isHidden = false
-        headerStackView.isHidden = true
-        bodyTopToHeaderConstraint?.isActive = false
-        bodyTopToContentConstraint?.isActive = true
+        let showsRuntimeToolbar = !runtimeToolbarStackView.isHidden
+        if showsRuntimeToolbar {
+            titleLabel.isHidden = true
+            summaryLabel.isHidden = true
+            stateLabel.isHidden = true
+            rendererLabel.isHidden = true
+            inputRowStackView.isHidden = true
+            inputStatusLabel.isHidden = true
+        }
+        headerStackView.isHidden = !showsRuntimeToolbar
+        bodyTopToHeaderConstraint?.isActive = showsRuntimeToolbar
+        bodyTopToContentConstraint?.isActive = !showsRuntimeToolbar
         bodyBottomToTakeoverConstraint?.isActive = !takeoverContainerView.isHidden
         bodyBottomToContentConstraint?.isActive = takeoverContainerView.isHidden
     }
@@ -1954,6 +2089,19 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     var debugShowsSummaryLabel: Bool { !summaryLabel.isHidden }
     var debugShowsStateLabel: Bool { !stateLabel.isHidden }
     var debugShowsHeader: Bool { !headerStackView.isHidden }
+    var debugRuntimeToolbarTitle: String { runtimeToolbarTitleLabel.stringValue }
+    var debugShowsRuntimeToolbarTitle: Bool { !runtimeToolbarTitleLabel.isHidden }
+    var debugShowsRuntimeToolbar: Bool { !runtimeToolbarStackView.isHidden }
+    var debugShowsRuntimeRunButton: Bool { !runtimeToolbarRunButton.isHidden }
+    var debugShowsRuntimeStopButton: Bool { !runtimeToolbarStopButton.isHidden }
+    var debugShowsRuntimeRestartButton: Bool { !runtimeToolbarRestartButton.isHidden }
+    var debugRuntimeToolbarTrailingGap: CGFloat {
+        runtimeToolbarStackView.layoutSubtreeIfNeeded()
+        return runtimeToolbarStackView.bounds.maxX - runtimeToolbarButtonStackView.frame.maxX
+    }
+    func debugRunRuntimeToolbarAction() { runRuntimeFromToolbar() }
+    func debugStopRuntimeToolbarAction() { stopRuntimeFromToolbar() }
+    func debugRestartRuntimeToolbarAction() { restartRuntimeFromToolbar() }
     var debugShowsTakeoverMessage: Bool { !takeoverMessageLabel.isHidden }
     var debugTakeoverMessage: String { takeoverMessageLabel.stringValue }
     var debugInputStatus: String { inputStatusLabel.stringValue }

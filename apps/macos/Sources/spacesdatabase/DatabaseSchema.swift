@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public enum DatabaseSchema {
-    public static let currentVersion = 4
+    public static let currentVersion = 6
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "terminal metadata tables", requiresBackup: false) { database in
@@ -15,11 +15,44 @@ public enum DatabaseSchema {
             database in
             try addColumnIfNeeded(table: "running_processes", column: "terminal_session_id", definition: "TEXT", database: database)
             try addColumnIfNeeded(table: "agent_sessions", column: "terminal_session_id", definition: "TEXT", database: database)
-            if try tableExists("running_processes", database: database) {
+            if try tableExists("running_processes", database: database), try tableExists("runtime_targets", database: database) {
                 try executeBatch(sql: configuredProcessTerminalSessionIdentityBackfillSQL, database: database)
             }
-            if try tableExists("agent_sessions", database: database) {
+            if try tableExists("agent_sessions", database: database), try tableExists("runtime_targets", database: database) {
                 try executeBatch(sql: configuredAgentTerminalSessionIdentityBackfillSQL, database: database)
+            }
+        },
+        DatabaseMigrationStep(fromVersion: 4, toVersion: 5, description: "stable runtime configuration identifiers", requiresBackup: false) {
+            database in
+            try addColumnIfNeeded(table: "project_agent_launchers", column: "id", definition: "TEXT NOT NULL DEFAULT ''", database: database)
+            try addColumnIfNeeded(table: "workspace_agent_launchers", column: "id", definition: "TEXT NOT NULL DEFAULT ''", database: database)
+            try addColumnIfNeeded(table: "running_processes", column: "template_id", definition: "TEXT", database: database)
+            try addColumnIfNeeded(table: "agent_sessions", column: "claimed_launcher_id", definition: "TEXT", database: database)
+            if try tableExists("project_agent_launchers", database: database) {
+                try executeBatch(sql: projectAgentLauncherIdentityBackfillSQL, database: database)
+            }
+            if try tableExists("workspace_agent_launchers", database: database) {
+                try executeBatch(sql: workspaceAgentLauncherIdentityBackfillSQL, database: database)
+            }
+            if try tableExists("running_processes", database: database), try tableExists("workspace_processes", database: database) {
+                try executeBatch(sql: runningProcessTemplateIdentityBackfillSQL, database: database)
+            }
+            if try tableExists("agent_sessions", database: database), try tableExists("workspace_agent_launchers", database: database) {
+                try executeBatch(sql: agentSessionLauncherIdentityBackfillSQL, database: database)
+            }
+        },
+        DatabaseMigrationStep(fromVersion: 5, toVersion: 6, description: "durable terminal session ownership metadata", requiresBackup: false) {
+            database in
+            try addColumnIfNeeded(table: "terminal_sessions", column: "workspace_id", definition: "TEXT", database: database)
+            try addColumnIfNeeded(table: "terminal_sessions", column: "kind", definition: "TEXT NOT NULL DEFAULT 'shell'", database: database)
+            if try tableExists("terminal_sessions", database: database), try tableExists("running_processes", database: database) {
+                try executeBatch(sql: terminalSessionProcessOwnershipBackfillSQL, database: database)
+            }
+            if try tableExists("terminal_sessions", database: database), try tableExists("agent_sessions", database: database) {
+                try executeBatch(sql: terminalSessionAgentOwnershipBackfillSQL, database: database)
+            }
+            if try tableExists("terminal_sessions", database: database), try tableExists("runtime_targets", database: database) {
+                try executeBatch(sql: terminalSessionRuntimeTargetOwnershipBackfillSQL, database: database)
             }
         },
     ]
@@ -66,6 +99,8 @@ public enum DatabaseSchema {
               root_directory TEXT NOT NULL UNIQUE,
               backend TEXT NOT NULL,
               lifetime_policy TEXT NOT NULL,
+              workspace_id TEXT,
+              kind TEXT NOT NULL DEFAULT 'shell',
               title TEXT NOT NULL,
               working_directory TEXT NOT NULL,
               shell TEXT NOT NULL,
@@ -145,6 +180,109 @@ public enum DatabaseSchema {
             \(terminalRemoteSessionStateSQL)
         """
 
+    static let projectAgentLauncherIdentityBackfillSQL = """
+            UPDATE project_agent_launchers
+            SET id = lower(hex(randomblob(16)))
+            WHERE length(trim(id)) = 0;
+        """
+
+    static let workspaceAgentLauncherIdentityBackfillSQL = """
+            UPDATE workspace_agent_launchers
+            SET id = lower(hex(randomblob(16)))
+            WHERE length(trim(id)) = 0;
+        """
+
+    static let runningProcessTemplateIdentityBackfillSQL = """
+            UPDATE running_processes
+            SET template_id = (
+              SELECT workspace_processes.id
+              FROM workspace_processes
+              WHERE workspace_processes.workspace_id = running_processes.workspace_id
+                AND lower(coalesce(workspace_processes.name, '')) = lower(running_processes.template_name)
+              LIMIT 1
+            )
+            WHERE template_id IS NULL OR length(trim(template_id)) = 0;
+        """
+
+    static let agentSessionLauncherIdentityBackfillSQL = """
+            UPDATE agent_sessions
+            SET claimed_launcher_id = (
+              SELECT workspace_agent_launchers.id
+              FROM workspace_agent_launchers
+              WHERE workspace_agent_launchers.workspace_id = agent_sessions.workspace_id
+                AND lower(workspace_agent_launchers.name) = lower(agent_sessions.claimed_launcher_name)
+              LIMIT 1
+            )
+            WHERE (claimed_launcher_id IS NULL OR length(trim(claimed_launcher_id)) = 0)
+              AND claimed_launcher_name IS NOT NULL
+              AND length(trim(claimed_launcher_name)) > 0;
+        """
+
+    static let terminalSessionProcessOwnershipBackfillSQL = """
+            UPDATE terminal_sessions
+            SET workspace_id = (
+                  SELECT running_processes.workspace_id
+                  FROM running_processes
+                  WHERE running_processes.terminal_session_id = terminal_sessions.session_id
+                    AND length(trim(running_processes.workspace_id)) > 0
+                  ORDER BY COALESCE(running_processes.started_at, running_processes.exited_at, running_processes.last_output_at, '') DESC,
+                           running_processes.id
+                  LIMIT 1
+                ),
+                kind = 'process'
+            WHERE EXISTS (
+              SELECT 1
+              FROM running_processes
+              WHERE running_processes.terminal_session_id = terminal_sessions.session_id
+                AND length(trim(running_processes.workspace_id)) > 0
+            );
+        """
+
+    static let terminalSessionAgentOwnershipBackfillSQL = """
+            UPDATE terminal_sessions
+            SET workspace_id = (
+                  SELECT agent_sessions.workspace_id
+                  FROM agent_sessions
+                  WHERE agent_sessions.terminal_session_id = terminal_sessions.session_id
+                    AND agent_sessions.provider = 'spaces'
+                    AND length(trim(agent_sessions.workspace_id)) > 0
+                  ORDER BY agent_sessions.updated_at DESC, agent_sessions.created_at DESC, agent_sessions.id
+                  LIMIT 1
+                ),
+                kind = 'agent'
+            WHERE (workspace_id IS NULL OR length(trim(workspace_id)) = 0)
+              AND EXISTS (
+                SELECT 1
+                FROM agent_sessions
+                WHERE agent_sessions.terminal_session_id = terminal_sessions.session_id
+                  AND agent_sessions.provider = 'spaces'
+                  AND length(trim(agent_sessions.workspace_id)) > 0
+              );
+        """
+
+    static let terminalSessionRuntimeTargetOwnershipBackfillSQL = """
+            UPDATE terminal_sessions
+            SET workspace_id = (
+                  SELECT runtime_targets.workspace_id
+                  FROM runtime_targets
+                  WHERE runtime_targets.tracking_id = terminal_sessions.session_id
+                    AND runtime_targets.type = 'terminal'
+                    AND runtime_targets.app = 'Spaces'
+                    AND length(trim(runtime_targets.workspace_id)) > 0
+                  ORDER BY runtime_targets.updated_at DESC, runtime_targets.order_index
+                  LIMIT 1
+                )
+            WHERE (workspace_id IS NULL OR length(trim(workspace_id)) = 0)
+              AND EXISTS (
+                SELECT 1
+                FROM runtime_targets
+                WHERE runtime_targets.tracking_id = terminal_sessions.session_id
+                  AND runtime_targets.type = 'terminal'
+                  AND runtime_targets.app = 'Spaces'
+                  AND length(trim(runtime_targets.workspace_id)) > 0
+              );
+        """
+
     public static let latestSchemaSQL = """
             CREATE TABLE IF NOT EXISTS projects (
               id TEXT PRIMARY KEY,
@@ -188,6 +326,7 @@ public enum DatabaseSchema {
 
             CREATE TABLE IF NOT EXISTS project_agent_launchers (
               project_id TEXT NOT NULL,
+              id TEXT NOT NULL,
               name TEXT NOT NULL,
               command TEXT NOT NULL,
               order_index INTEGER NOT NULL,
@@ -270,6 +409,7 @@ public enum DatabaseSchema {
 
             CREATE TABLE IF NOT EXISTS workspace_agent_launchers (
               workspace_id TEXT NOT NULL,
+              id TEXT NOT NULL,
               name TEXT NOT NULL,
               command TEXT NOT NULL,
               order_index INTEGER NOT NULL,
@@ -280,6 +420,7 @@ public enum DatabaseSchema {
             CREATE TABLE IF NOT EXISTS running_processes (
               id TEXT PRIMARY KEY,
               workspace_id TEXT NOT NULL,
+              template_id TEXT,
               template_name TEXT NOT NULL,
               command TEXT NOT NULL,
               runtime_target_id TEXT,
@@ -336,6 +477,7 @@ public enum DatabaseSchema {
               runtime_target_id TEXT,
               terminal_session_id TEXT,
               session_key TEXT,
+              claimed_launcher_id TEXT,
               claimed_launcher_name TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
