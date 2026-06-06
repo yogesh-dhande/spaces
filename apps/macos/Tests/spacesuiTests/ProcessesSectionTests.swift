@@ -193,7 +193,6 @@ import workspacecore
         #expect(row.isEditing)
         #expect(row.formContainsField(accessibilityID: "process-row-edit-name"))
         #expect(row.formContainsField(accessibilityID: "process-row-edit-command"))
-        #expect(row.formContainsField(accessibilityID: "process-row-edit-execution-mode"))
         #expect(row.formContainsField(accessibilityID: "process-row-edit-on-exit"))
     }
 
@@ -212,12 +211,11 @@ import workspacecore
 
         let row = section.row(at: 0)!
         row.enterEditing(prefill: nil, animated: false)
-        row.setEditingFormValues(name: "api", command: "bun run dev --verbose", executionMode: .shell, onExit: .restart)
+        row.setEditingFormValues(name: "api", command: "bun run dev --verbose", onExit: .restart)
         row.triggerSave()
 
         #expect(committed.count == 1)
         #expect(committed.first?.command == "bun run dev --verbose")
-        #expect(committed.first?.executionMode == .shell)
         #expect(committed.first?.onExit == .restart)
         #expect(row.isEditing == false)
     }
@@ -243,7 +241,7 @@ import workspacecore
 
         let row = section.row(at: 0)!
         row.enterEditing(prefill: nil, animated: false)
-        row.setEditingFormValues(name: "api", command: "PORT=$FRONTEND_PORT npm run dev", executionMode: .direct, onExit: .none)
+        row.setEditingFormValues(name: "api", command: "PORT=$FRONTEND_PORT npm run dev", onExit: .none)
         row.triggerSave()
 
         #expect(commitCount == 0)
@@ -368,7 +366,7 @@ extension ProcessRowView {
         subviews.flatMap { $0.subviewsRecursive() }.contains { $0.accessibilityIdentifier() == accessibilityID }
     }
 
-    func setEditingFormValues(name: String, command: String, executionMode: ProcessExecutionMode = .direct, onExit: ProcessExitAction) {
+    func setEditingFormValues(name: String, command: String, onExit: ProcessExitAction) {
         let allFields = subviews.flatMap { $0.subviewsRecursive() }
         if let nameField = allFields.compactMap({ $0 as? NSTextField }).first(where: { $0.accessibilityIdentifier() == "process-row-edit-name" }) {
             nameField.stringValue = name
@@ -376,11 +374,6 @@ extension ProcessRowView {
         if let commandField = allFields.compactMap({ $0 as? NSTextField }).first(where: { $0.accessibilityIdentifier() == "process-row-edit-command" }
         ) {
             commandField.stringValue = command
-        }
-        if let modeSegmented = allFields.compactMap({ $0 as? NSSegmentedControl }).first(where: {
-            $0.accessibilityIdentifier() == "process-row-edit-execution-mode"
-        }), let idx = ProcessExecutionMode.allCases.firstIndex(of: executionMode) {
-            modeSegmented.selectedSegment = idx
         }
         if let onExitSegmented = allFields.compactMap({ $0 as? NSSegmentedControl }).first(where: {
             $0.accessibilityIdentifier() == "process-row-edit-on-exit"

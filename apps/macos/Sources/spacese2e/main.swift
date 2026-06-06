@@ -432,10 +432,7 @@ private struct SeedFixtureCommand: ParsableCommand {
             config.ports = [.init(name: "APP_PORT"), .init(name: "API_PORT")]
             config.stopScript =
                 #"bash -lc 'for port in "$APP_PORT" "$API_PORT"; do if [ -n "$port" ]; then pids=(); while IFS= read -r pid; do [ -n "$pid" ] && pids+=("$pid"); done < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true); for pid in "${pids[@]}"; do kill "$pid" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in "${pids[@]}"; do kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true; done; fi; done; printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
-            config.processes = [
-                .init(name: "frontend", command: frontendCommand, executionMode: .shell),
-                .init(name: "backend", command: backendCommand, executionMode: .shell),
-            ]
+            config.processes = [.init(name: "frontend", command: frontendCommand), .init(name: "backend", command: backendCommand)]
             config.browserSessions = [.init(name: "docs", url: docsURL), .init(name: "admin", url: adminURL)]
             config.agentLaunchers = []
         }
@@ -998,7 +995,7 @@ private struct AddWorkspaceProcessCommand: ParsableCommand {
         guard !trimmedCommand.isEmpty else { throw ValidationError("Missing process command.") }
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.processes.removeAll { ($0.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == trimmedName }
-            settings.processes.append(ProcessTemplate(name: trimmedName, command: trimmedCommand, executionMode: .shell))
+            settings.processes.append(ProcessTemplate(name: trimmedName, command: trimmedCommand))
         }
         guard let updated = try orchestrator.workspaceSettings(workspaceID: workspace.id) else {
             throw ValidationError("Workspace settings missing at: \(normalizedWorkspaceDir)")

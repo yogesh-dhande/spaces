@@ -176,17 +176,13 @@ Spaces focuses those windows; it does not decide their geometry.
 - Closing a process terminal window leaves the process running. If a tracked process window becomes stale while the process remains alive, Spaces should recover the terminal view and reattach when the user opens a new window for it.
 - Workspace titles and tracked-process names are user-controlled text. They may contain visible separator-like substrings without breaking window creation, listing, or focus recovery.
 - Editing workspace settings while a workspace is already running must not start or stop browser sessions or coding agents as part of save-time reconciliation. Process name and on-exit edits should update tracked running processes immediately, while command edits should require explicit confirmation to restart the affected running processes; canceling that prompt should leave the existing process configuration unchanged. New configured rows should appear immediately with their non-running status so the user can decide what to open or recover.
-- Process commands support two execution modes: `Direct` runs an executable with arguments, while `Shell` runs the command through the app-wide shell setting.
-- Direct mode is the recommended deterministic path for plain executable commands such as `scripts/swiftpm.sh build`.
-- Direct mode also supports deterministic interpolation of Spaces-provided environment variables such as named ports and `SPACES_*` paths inside executable arguments and leading env assignments, for example `PORT=$PORT1 npm run dev`.
-- Direct mode accepts only simple Spaces variable references such as `$PORT1` or `${PORT1}`. Other shell expansions such as `${PORT1:-3000}`, `$$`, or `$?` must be rejected and require Shell mode instead.
-- Shell mode supports composite shell behavior such as `cd x && y`, pipes, redirection, and shell expansion.
+- Process commands run as terminal-style shell command strings through the user's resolved login shell.
+- Process commands support normal shell behavior such as environment assignment, `cd x && y`, pipes, redirection, command substitution, and shell expansion.
 - Configured coding-agent launchers should run inside an interactive login shell so user shell PATH and tool initialization are available to commands such as `claude` or `codex`.
 - Configured coding-agent rows should support direct run, stop, and restart controls. Stop should close the tracked native terminal window when present, terminate the backing built-in terminal session, remove runtime state, and keep the configured launcher available. Restart should relaunch configured or claimed launcher rows and report a clear unsupported action for unconfigured live agents.
 - Built-in process and coding-agent terminal windows should keep compact runtime controls visible above the terminal surface. The native window title shows the runtime name, and the control row keeps valid run, stop, and restart icon actions right-aligned. Kept-open exited terminals should offer stop as a cleanup action and run or restart when the configured row still exists.
 - App-level configuration is changed in the app only, not through `spaces`.
-- The global shell choice for shell-mode processes is configurable in Settings; the default is `zsh`.
-- The project and workspace editors validate process commands when they are saved. Direct mode rejects shell-only syntax, while Shell mode requires only a non-empty command.
+- The project and workspace editors validate process commands when they are saved. Process commands must be non-empty.
 - Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
 - Restart performs a stop followed by a fresh launch.
 - `start` is the idempotent "ensure running" path:

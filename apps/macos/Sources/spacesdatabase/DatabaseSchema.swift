@@ -310,7 +310,6 @@ public enum DatabaseSchema {
               name TEXT,
               command TEXT NOT NULL,
               on_exit TEXT NOT NULL DEFAULT 'none',
-              execution_mode TEXT NOT NULL DEFAULT 'direct',
               order_index INTEGER NOT NULL,
               FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
@@ -390,7 +389,6 @@ public enum DatabaseSchema {
               name TEXT,
               command TEXT NOT NULL,
               on_exit TEXT NOT NULL DEFAULT 'none',
-              execution_mode TEXT NOT NULL DEFAULT 'direct',
               order_index INTEGER NOT NULL,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );

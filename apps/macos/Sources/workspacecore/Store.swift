@@ -71,12 +71,8 @@ public final class SQLiteStore {
             try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [project.id])
             for (index, process) in project.processes.enumerated() {
                 try execute(
-                    sql:
-                        "INSERT INTO project_processes(id, project_id, name, command, on_exit, execution_mode, order_index) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    bindings: [
-                        process.id, project.id, process.name ?? "", process.command, process.onExit.rawValue, process.executionMode.rawValue,
-                        String(index),
-                    ])
+                    sql: "INSERT INTO project_processes(id, project_id, name, command, on_exit, order_index) VALUES (?, ?, ?, ?, ?, ?)",
+                    bindings: [process.id, project.id, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
             }
             try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [project.id])
             for (index, session) in project.browserSessions.enumerated() {
@@ -391,13 +387,9 @@ public final class SQLiteStore {
             for (index, process) in processes.enumerated() {
                 try execute(
                     sql: """
-                        INSERT INTO workspace_processes(id, workspace_id, name, command, on_exit, execution_mode, order_index)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                    bindings: [
-                        process.id, workspaceID, process.name ?? "", process.command, process.onExit.rawValue, process.executionMode.rawValue,
-                        String(index),
-                    ])
+                        INSERT INTO workspace_processes(id, workspace_id, name, command, on_exit, order_index)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """, bindings: [process.id, workspaceID, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
             }
         }
     }
@@ -405,7 +397,7 @@ public final class SQLiteStore {
     public func workspaceProcesses(workspaceID: String) throws -> [ProcessTemplate] {
         let rows = try queryRows(
             sql: """
-                SELECT id, name, command, on_exit, execution_mode
+                SELECT id, name, command, on_exit
                 FROM workspace_processes
                 WHERE workspace_id = ?
                 ORDER BY order_index
@@ -413,8 +405,7 @@ public final class SQLiteStore {
         return rows.map { row in
             let id = row[0].isEmpty ? UUID().uuidString : row[0]
             let name = row[1].isEmpty ? nil : row[1]
-            let mode = row.count > 4 ? (ProcessExecutionMode(rawValue: row[4]) ?? .direct) : .direct
-            return ProcessTemplate(id: id, name: name, command: row[2], onExit: ProcessExitAction(rawValue: row[3]) ?? .none, executionMode: mode)
+            return ProcessTemplate(id: id, name: name, command: row[2], onExit: ProcessExitAction(rawValue: row[3]) ?? .none)
         }
     }
 
@@ -792,16 +783,14 @@ public final class SQLiteStore {
 
     public func appConfig() throws -> AppConfig {
         let editor = try setting(key: SettingsKey.appEditor).flatMap { EditorPreference(rawValue: $0) }
-        let processShell = try setting(key: SettingsKey.appProcessShell).flatMap(ProcessShell.init(rawValue:)) ?? .zsh
         let start = try setting(key: SettingsKey.appPortRangeStart).flatMap(Int.init) ?? 20000
         let end = try setting(key: SettingsKey.appPortRangeEnd).flatMap(Int.init) ?? 30000
         let portRange = (start <= 0 || end <= 0 || end <= start) ? PortRange(start: 20000, end: 30000) : PortRange(start: start, end: end)
-        return AppConfig(editor: editor, portRange: portRange, processShell: processShell)
+        return AppConfig(editor: editor, portRange: portRange)
     }
 
     public func setAppConfig(_ config: AppConfig) throws {
         try setSetting(key: SettingsKey.appEditor, value: config.editor?.rawValue)
-        try setSetting(key: SettingsKey.appProcessShell, value: config.processShell.rawValue)
         try setSetting(key: SettingsKey.appPortRangeStart, value: String(config.portRange.start))
         try setSetting(key: SettingsKey.appPortRangeEnd, value: String(config.portRange.end))
     }
@@ -1026,12 +1015,11 @@ public final class SQLiteStore {
         let portRows = try queryRows(sql: "SELECT id, name FROM project_port_definitions WHERE project_id = ? ORDER BY order_index", bindings: [id])
         let ports = portRows.map { row in PortDefinition(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1]) }
         let processes = try queryRows(
-            sql: "SELECT id, name, command, on_exit, execution_mode FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
+            sql: "SELECT id, name, command, on_exit FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in
             ProcessTemplate(
                 id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1].isEmpty ? nil : row[1], command: row[2],
-                onExit: ProcessExitAction(rawValue: row[3]) ?? .none,
-                executionMode: row.count > 4 ? (ProcessExecutionMode(rawValue: row[4]) ?? .direct) : .direct)
+                onExit: ProcessExitAction(rawValue: row[3]) ?? .none)
         }
         let browserSessions = try queryRows(
             sql: "SELECT name, url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]

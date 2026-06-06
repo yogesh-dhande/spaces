@@ -82,56 +82,26 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(try store.appConfig().editor)
     }
 
-    func testValidateDirectProcessTemplateAcceptsWorkspaceVariableInterpolation() throws {
+    func testValidateProcessTemplateAcceptsShellVariableSyntax() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
 
-        XCTAssertNoThrow(
-            try orchestrator.validateProcessTemplate(ProcessTemplate(name: "web", command: "PORT=$FRONTEND_PORT npm run dev", executionMode: .direct))
-        )
+        XCTAssertNoThrow(try orchestrator.validateProcessTemplate(ProcessTemplate(name: "web", command: "PORT=${FRONTEND_PORT:-3000} npm run dev")))
     }
 
-    func testValidateDirectProcessTemplateRejectsUnsupportedExpansionWithRawCommand() throws {
+    func testValidateProcessTemplateAcceptsCompositeShellCommand() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
 
-        XCTAssertThrowsError(
-            try orchestrator.validateProcessTemplate(
-                ProcessTemplate(name: "web", command: "PORT=${FRONTEND_PORT:-3000} npm run dev", executionMode: .direct))
-        ) { error in
-            XCTAssertEqual(
-                error.localizedDescription,
-                "Invalid argument: Direct mode only supports simple Spaces variables like $API_PORT or ${API_PORT}. Unsupported expansion: ${FRONTEND_PORT:-3000}. Command: PORT=${FRONTEND_PORT:-3000} npm run dev"
-            )
-        }
+        XCTAssertNoThrow(try orchestrator.validateProcessTemplate(ProcessTemplate(name: "web", command: "cd app && npm run dev | tee log.txt")))
     }
 
-    func testValidateDirectProcessTemplateStillRejectsShellSyntaxBeforeLaunch() throws {
+    func testValidateProcessTemplateRejectsBlankCommand() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
 
-        XCTAssertThrowsError(
-            try orchestrator.validateProcessTemplate(ProcessTemplate(name: "web", command: "npm run dev | tee log.txt", executionMode: .direct))
-        ) { error in
-            XCTAssertEqual(
-                error.localizedDescription,
-                "Invalid argument: Process commands in Direct mode must be direct executable invocations without shell syntax: npm run dev | tee log.txt. Use Shell mode for composite commands."
-            )
-        }
-    }
-
-    func testValidateDirectProcessTemplateRejectsUnknownVariableWhenWorkspaceEnvIsKnown() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        XCTAssertThrowsError(
-            try orchestrator.validateProcessTemplate(
-                ProcessTemplate(name: "web", command: "PORT=$MISSING_PORT npm run dev", executionMode: .direct), env: ["FRONTEND_PORT": "24001"])
-        ) { error in
-            XCTAssertEqual(
-                error.localizedDescription,
-                "Invalid argument: Direct mode only supports Spaces-provided variables. Unknown variable: $MISSING_PORT. Command: PORT=$MISSING_PORT npm run dev"
-            )
+        XCTAssertThrowsError(try orchestrator.validateProcessTemplate(ProcessTemplate(name: "web", command: " \n\t "))) { error in
+            XCTAssertEqual(error.localizedDescription, "Invalid argument: Process command is required.")
         }
     }
 
@@ -251,23 +221,19 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), ["agent-codex"])
     }
 
-    func testUpdateProjectConfigRejectsUnknownDirectProcessVariableAtSaveTime() throws {
+    func testUpdateProjectConfigAcceptsShellVariableSyntaxAtSaveTime() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: root.path)
 
-        XCTAssertThrowsError(
-            try orchestrator.updateProjectConfig(projectID: project.id) { project in
-                project.ports = [PortDefinition(name: "FRONTEND_PORT")]
-                project.processes = [ProcessTemplate(name: "web", command: "PORT=$TYPO_PORT npm run dev", executionMode: .direct)]
-            }
-        ) { error in
-            XCTAssertEqual(
-                error.localizedDescription,
-                "Invalid argument: Direct mode only supports Spaces-provided variables. Unknown variable: $TYPO_PORT. Command: PORT=$TYPO_PORT npm run dev"
-            )
+        try orchestrator.updateProjectConfig(projectID: project.id) { project in
+            project.ports = [PortDefinition(name: "FRONTEND_PORT")]
+            project.processes = [ProcessTemplate(name: "web", command: "PORT=${TYPO_PORT:-3000} npm run dev | tee log.txt")]
         }
+
+        let updated = try XCTUnwrap(try store.project(id: project.id))
+        XCTAssertEqual(updated.processes.first?.command, "PORT=${TYPO_PORT:-3000} npm run dev | tee log.txt")
     }
 
     func testUpdateProjectConfigRejectsBlankPortNameAtSaveTime() throws {
@@ -281,43 +247,36 @@ final class OrchestratorTests: XCTestCase {
         ) { error in XCTAssertEqual(error.localizedDescription, "Invalid argument: Port name is required.") }
     }
 
-    func testUpdateWorkspaceSettingsRejectsUnknownDirectProcessVariableAtSaveTime() throws {
+    func testUpdateWorkspaceSettingsAcceptsShellVariableSyntaxAtSaveTime() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: root.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
 
-        XCTAssertThrowsError(
-            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-                settings.ports = [PortDefinition(name: "FRONTEND_PORT")]
-                settings.processes = [ProcessTemplate(name: "web", command: "PORT=$TYPO_PORT npm run dev", executionMode: .direct)]
-            }
-        ) { error in
-            XCTAssertEqual(
-                error.localizedDescription,
-                "Invalid argument: Direct mode only supports Spaces-provided variables. Unknown variable: $TYPO_PORT. Command: PORT=$TYPO_PORT npm run dev"
-            )
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.ports = [PortDefinition(name: "FRONTEND_PORT")]
+            settings.processes = [ProcessTemplate(name: "web", command: "PORT=$TYPO_PORT npm run dev")]
         }
+
+        let settings = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: workspace.id))
+        XCTAssertEqual(settings.processes.first?.command, "PORT=$TYPO_PORT npm run dev")
     }
 
-    func testUpdateWorkspaceSettingsRejectsSyntheticPortFallbackVariableAtSaveTime() throws {
+    func testUpdateWorkspaceSettingsAcceptsSyntheticPortFallbackVariableAtSaveTime() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: root.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
 
-        XCTAssertThrowsError(
-            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-                settings.ports = [PortDefinition(name: "API_PORT")]
-                settings.processes = [ProcessTemplate(name: "web", command: "PORT=$PORT0 npm run dev", executionMode: .direct)]
-            }
-        ) { error in
-            XCTAssertEqual(
-                error.localizedDescription,
-                "Invalid argument: Direct mode only supports Spaces-provided variables. Unknown variable: $PORT0. Command: PORT=$PORT0 npm run dev")
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.ports = [PortDefinition(name: "API_PORT")]
+            settings.processes = [ProcessTemplate(name: "web", command: "PORT=$PORT0 npm run dev")]
         }
+
+        let settings = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: workspace.id))
+        XCTAssertEqual(settings.processes.first?.command, "PORT=$PORT0 npm run dev")
     }
 
     func testUpdateWorkspaceSettingsRejectsBlankPortNameAtSaveTime() throws {
@@ -332,20 +291,22 @@ final class OrchestratorTests: XCTestCase {
         ) { error in XCTAssertEqual(error.localizedDescription, "Invalid argument: Port name is required.") }
     }
 
-    func testValidateShellProcessTemplateAcceptsShellSyntax() throws {
+    func testProcessTemplateDecodingIgnoresLegacyExecutionMode() throws {
+        let data = Data(#"{"id":"process-1","name":"web","command":"npm run web","on_exit":"none","execution_mode":"shell"}"#.utf8)
+        let template = try JSONDecoder().decode(ProcessTemplate.self, from: data)
+        let encoded = try JSONEncoder().encode(template)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+
+        XCTAssertEqual(template.command, "npm run web")
+        XCTAssertNil(object["execution_mode"])
+    }
+
+    func testValidateProcessTemplateAcceptsPipelineSyntax() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         XCTAssertNoThrow(
-            try orchestrator.validateProcessTemplate(
-                ProcessTemplate(name: "web", command: "PORT=$FRONTEND_PORT npm run dev | tee log.txt", executionMode: .shell)))
-    }
-
-    func testProcessTemplateDecodeDefaultsExecutionModeToDirect() throws {
-        let data = Data(#"{"id":"process-1","name":"web","command":"npm run web","on_exit":"none"}"#.utf8)
-        let template = try JSONDecoder().decode(ProcessTemplate.self, from: data)
-
-        XCTAssertEqual(template.executionMode, .direct)
+            try orchestrator.validateProcessTemplate(ProcessTemplate(name: "web", command: "PORT=$FRONTEND_PORT npm run dev | tee log.txt")))
     }
 
     func testLaunchAgentLauncherUsesBuiltInSpacesTerminalAndRegistersAgentWindow() throws {
@@ -525,7 +486,8 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
 
-        let store = try makeTemporaryStore()
+        let dbPath = root.appendingPathComponent("spaces-test.db").path
+        let store = try SQLiteStore(path: dbPath)
         let openCapture = TerminalOpenCapture()
         let focusCapture = TerminalFocusCapture()
         let orchestrator = WorkspaceOrchestrator(
@@ -543,23 +505,25 @@ final class OrchestratorTests: XCTestCase {
         try orchestrator.updateProjectConfig(projectID: project.id) { project in
             project.agentLaunchers = [AgentLauncher(name: "Reviewer", command: "review-agent")]
         }
-        let paths = try TerminalSessionPaths.forSession(id: "ended-reviewer-session")
-        try paths.ensureDirectories()
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "ended-reviewer-session", title: "Reviewer", workingDirectory: workspace.dir, shell: "/bin/zsh", command: "review-agent",
-                createdAt: "2026-05-18T18:00:00Z"), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(
-                sessionID: "ended-reviewer-session", backend: .ghosttyEmbedded, servicePID: 101, childPID: nil, state: .exited,
-                updatedAt: "2026-05-18T18:01:00Z", exitedAt: "2026-05-18T18:01:00Z", title: "Reviewer", workingDirectory: workspace.dir), paths: paths
-        )
-        let record = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Reviewer", terminalTrackingID: "ended-reviewer-session",
-            terminalNativeID: "ended-reviewer-session", status: .done, claimedLauncherName: "Reviewer")
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: "ended-reviewer-session")
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: "ended-reviewer-session", title: "Reviewer", workingDirectory: workspace.dir, shell: "/bin/zsh",
+                    command: "review-agent", createdAt: "2026-05-18T18:00:00Z"), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                .init(
+                    sessionID: "ended-reviewer-session", backend: .ghosttyEmbedded, servicePID: 101, childPID: nil, state: .exited,
+                    updatedAt: "2026-05-18T18:01:00Z", exitedAt: "2026-05-18T18:01:00Z", title: "Reviewer", workingDirectory: workspace.dir),
+                paths: paths)
+            let record = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Reviewer", terminalTrackingID: "ended-reviewer-session",
+                terminalNativeID: "ended-reviewer-session", status: .done, claimedLauncherName: "Reviewer")
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.focusAgentWindow(record) }
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.focusAgentWindow(record) }
+            }
         }
 
         XCTAssertEqual(focusCapture.sessionIDs, ["ended-reviewer-session"])
@@ -1803,7 +1767,6 @@ final class OrchestratorTests: XCTestCase {
         let terminalWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
         XCTAssertEqual(terminalWindow.app, TerminalHost.spaces.appName)
         XCTAssertEqual(terminalWindow.terminalTrackingID, terminalWindow.terminalNativeID)
-        XCTAssertEqual(try store.appConfig().processShell, .zsh)
     }
 
     func testOpenWorkspaceTerminalUsesProcessWideBuiltInSessionLauncherOverride() throws {
@@ -2517,7 +2480,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusCapture.requestIDs, [nil])
     }
 
-    // Tests direct process focus throws a recoverable missing-window error when the tracked iTerm window no longer exists.
+    // Tests process focus throws a recoverable missing-window error when the tracked iTerm window no longer exists.
     func testFocusWorkspaceProcessThrowsRecoverableErrorForMissingProcessWindow() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
@@ -3226,8 +3189,6 @@ final class OrchestratorTests: XCTestCase {
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         _ = project
 
-        let existingConfig = try store.appConfig()
-        try store.setAppConfig(.init(editor: existingConfig.editor, portRange: existingConfig.portRange, processShell: existingConfig.processShell))
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
         try store.upsert(
@@ -3437,8 +3398,6 @@ final class OrchestratorTests: XCTestCase {
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         _ = project
 
-        let existingConfig = try store.appConfig()
-        try store.setAppConfig(.init(editor: existingConfig.editor, portRange: existingConfig.portRange, processShell: existingConfig.processShell))
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(
             workspaceID: workspace.id,
@@ -3502,8 +3461,6 @@ final class OrchestratorTests: XCTestCase {
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         _ = project
 
-        let existingConfig = try store.appConfig()
-        try store.setAppConfig(.init(editor: existingConfig.editor, portRange: existingConfig.portRange, processShell: existingConfig.processShell))
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
@@ -3692,39 +3649,10 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
     }
 
-    func testUpdateRunningWorkspaceProcessesRejectsChangedExecutionModeWithoutRestartConfirmation() throws {
+    func testUpdateRunningWorkspaceProcessesRestartsCompositeShellCommand() throws {
         let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        let process = ProcessTemplate(id: "process-web", name: "web", command: "npm run web", onExit: .none, executionMode: .direct)
-        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [process])
-        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
-        try store.upsert(
-            runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
-                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
-
-        XCTAssertThrowsError(
-            try orchestrator.updateRunningWorkspaceProcesses(
-                workspaceID: workspace.id,
-                processes: [ProcessTemplate(id: process.id, name: "web", command: "npm run web", onExit: .none, executionMode: .shell)],
-                restartChangedCommands: false)
-        ) { error in
-            XCTAssertEqual(
-                error.localizedDescription, "Invalid argument: Changing a running process command or execution mode requires restart confirmation.")
-        }
-
-        XCTAssertEqual(try store.workspaceProcesses(workspaceID: workspace.id).first?.executionMode, .direct)
-        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.command), ["npm run web"])
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
-    }
-
-    func testUpdateRunningWorkspaceProcessesRestartsChangedExecutionModeWithConfiguredShell() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
-        _ = try orchestrator.updateProcessShell(.sh)
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        let process = ProcessTemplate(id: "process-web", name: "web", command: "npm run web", onExit: .none, executionMode: .direct)
+        let process = ProcessTemplate(id: "process-web", name: "web", command: "npm run web", onExit: .none)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [process])
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         let processID = UUID().uuidString
@@ -3741,15 +3669,13 @@ final class OrchestratorTests: XCTestCase {
             try orchestrator.updateRunningWorkspaceProcesses(
                 workspaceID: workspace.id,
                 processes: [
-                    ProcessTemplate(
-                        id: process.id, name: "web", command: "cd $SPACES_WORKSPACE_DIR && npm run web", onExit: .none, executionMode: .shell)
+                    ProcessTemplate(id: process.id, name: "web", command: "cd $SPACES_WORKSPACE_DIR && npm run web | tee log.txt", onExit: .none)
                 ], restartChangedCommands: true)
         }
 
-        XCTAssertEqual(try store.workspaceProcesses(workspaceID: workspace.id).first?.executionMode, .shell)
         let running = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(running.map(\.templateName), ["web"])
-        XCTAssertEqual(running.first?.command, "cd $SPACES_WORKSPACE_DIR && npm run web")
+        XCTAssertEqual(running.first?.command, "cd $SPACES_WORKSPACE_DIR && npm run web | tee log.txt")
         XCTAssertEqual(running.first?.terminalApp, TerminalHost.spaces.appName)
         XCTAssertNotEqual(running.first?.terminalTrackingID, "session-web")
         XCTAssertEqual(running.first?.terminalTrackingID, running.first?.terminalNativeID)
@@ -6094,16 +6020,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(updated.portRange.start, 25000)
         XCTAssertEqual(updated.portRange.end, 35000)
         XCTAssertEqual(try orchestrator.appConfig().portRange.start, 25000)
-    }
-
-    func testUpdateProcessShellPersists() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        let updated = try orchestrator.updateProcessShell(.bash)
-
-        XCTAssertEqual(updated.processShell, .bash)
-        XCTAssertEqual(try orchestrator.appConfig().processShell, .bash)
     }
 
     // MARK: - listProjects

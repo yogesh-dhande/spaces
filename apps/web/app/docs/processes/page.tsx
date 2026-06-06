@@ -25,35 +25,29 @@ export default function ProcessesDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Execution Modes</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Shell Commands</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Every process row has an <strong>Execution mode</strong>:
+          Every process command is shell input, like typing into a terminal. Spaces runs the command through your resolved login shell with the workspace environment already exported.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Direct</strong> &mdash; Spaces launches the executable and arguments exactly as entered. This is the recommended path for most dev servers, workers, watchers, and agent commands.</li>
-          <li>• <strong>Shell</strong> &mdash; Spaces hands the full command string to the shell selected in Spaces Settings. Use this when the command depends on shell syntax instead of a single executable plus arguments.</li>
+          <li>• Plain commands such as <code>npm run dev</code> and <code>python manage.py runserver</code> run naturally.</li>
+          <li>• Composite commands can use <code>cd</code>, <code>&amp;&amp;</code>, pipes, redirects, and normal shell expansion.</li>
         </ul>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Use Direct mode for commands like <code>npm run dev</code>, <code>python manage.py runserver</code>, or <code>scripts/swiftpm.sh build</code>. Use Shell mode when you need shell composition such as <code>cd</code>, <code>&amp;&amp;</code>, pipes, redirects, or general shell expansion.
-        </p>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`# Direct mode
+          <code>{`# Env assignment
 PORT=$FRONTEND_PORT npm run dev
 
-# Direct mode with braces
-PORT=\${FRONTEND_PORT} npm run dev
+# Braced expansion
+PORT=\${FRONTEND_PORT:-3000} npm run dev
 
-# Shell mode
+# Directory changes
 cd frontend && PORT=$FRONTEND_PORT npm run dev
 
-# Shell mode with pipelines
+# Pipelines
 npm run dev | tee .logs/frontend.log`}</code>
         </pre>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Direct mode rejects shell-only syntax such as <code>&amp;&amp;</code>, pipes, redirects, command substitution, backticks, and unsupported shell expansion. In Direct mode, Spaces only expands its own variables using <code>$NAME</code> or <code>${"{NAME}"}</code>. Forms like <code>${"{NAME:-fallback}"}</code>, <code>$$</code>, and <code>$?</code> require Shell mode. Shell mode only requires a non-empty command and leaves parsing to the configured shell.
-        </p>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Shell mode uses the global shell selected in Spaces Settings. The default is <code>zsh</code>, and you can switch it globally if your team standardizes on a different shell.
+          Spaces validates that the command is non-empty and leaves parsing to your shell.
         </p>
       </article>
 
@@ -80,7 +74,7 @@ SPACES_PROJECT_DIR                # project directory
 SPACES_WORKSPACE_DIR              # this workspace's directory`}</code>
         </pre>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Reference them directly in your command, for example <code>PORT=$FRONTEND_PORT npm run dev</code>. Direct mode accepts only Spaces-provided variables and keeps the original command text in validation errors when a variable name or expansion form is unsupported.
+          Reference them directly in your command, for example <code>PORT=$FRONTEND_PORT npm run dev</code>. The shell expands those variables when the process starts.
         </p>
       </article>
 
@@ -88,7 +82,7 @@ SPACES_WORKSPACE_DIR              # this workspace's directory`}</code>
         <h2 className="text-2xl font-semibold tracking-tight">Editing While Running</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Add a process &mdash; it appears immediately. You can launch it directly if the workspace is already running.</li>
-          <li>• Change a command or execution mode &mdash; Spaces asks for restart confirmation because the launch semantics changed.</li>
+          <li>• Change a command &mdash; Spaces asks for restart confirmation because the running process must be relaunched.</li>
           <li>• Change only the name or on-exit policy &mdash; Spaces applies the edit immediately when it can.</li>
           <li>• Remove a process &mdash; Spaces stops it and closes its terminal window.</li>
         </ul>
