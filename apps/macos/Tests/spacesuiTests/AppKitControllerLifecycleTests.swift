@@ -46,17 +46,19 @@ import spacesterminalcore
     }
 
     @Test func adHocSessionTeardownSkipsWhenQuitKeepsSessionsRunning() throws {
-        let originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
-        let databaseRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: databaseRoot, withIntermediateDirectories: true)
-        setenv("SPACES_DB_PATH", databaseRoot.appendingPathComponent("spaces.db").path, 1)
-        defer {
-            if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
-            try? FileManager.default.removeItem(at: databaseRoot)
-        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
+        let databaseRoot = root.appendingPathComponent("profile", isDirectory: true)
+        setenv(SpacesProfile.databasePathEnvironmentVariable, databaseRoot.appendingPathComponent("spaces.db").path, 1)
+        defer {
+            if let originalDatabasePath {
+                setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
+            } else {
+                unsetenv(SpacesProfile.databasePathEnvironmentVariable)
+            }
+            try? FileManager.default.removeItem(at: root)
+        }
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(

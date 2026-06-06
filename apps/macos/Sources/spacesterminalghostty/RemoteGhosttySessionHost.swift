@@ -145,6 +145,12 @@ import spacesterminalcore
 
     public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
 
+    @discardableResult public func performBindingAction(_ action: String) -> Bool {
+        let permitsFinalRenderReadOnlyAction = !isInteractiveRuntimeStateForControl() && Self.isReadOnlyBindingAction(action)
+        guard attachedMode == .owner || permitsFinalRenderReadOnlyAction else { return false }
+        return terminalView.performBindingAction(action)
+    }
+
     @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
         guard isInteractiveRuntimeStateForControl() else { return false }
         return terminalView.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
@@ -157,11 +163,15 @@ import spacesterminalcore
     }
 
     public var debugSurfaceRefreshRequestCount: Int { 0 }
+    public var debugSearchState: GhosttyTerminalSearchDebugState { terminalView.debugSearchState }
     public func debugVisibleSurfaceText() -> String? {
         if let renderedSnapshotText = terminalView.renderedSnapshotText(), !renderedSnapshotText.isEmpty { return renderedSnapshotText }
         if let snapshot = currentSnapshot() { return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot) }
         return terminalView.snapshotText()
     }
+
+    func debugSetBindingActionHandler(_ handler: (@MainActor (String) -> Bool)?) { terminalView.debugBindingActionHandler = handler }
+    var debugRecordedBindingActions: [String] { terminalView.debugRecordedBindingActions }
 
     public var effectiveTitle: String {
         ensureStateStreamStartedIfNeeded()
@@ -213,6 +223,13 @@ import spacesterminalcore
         if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) { return runtimeState.state.isInteractive }
         if let runtimeState = latestState?.runtimeState { return runtimeState.state.isInteractive }
         return true
+    }
+
+    private static func isReadOnlyBindingAction(_ action: String) -> Bool {
+        switch action {
+        case "copy_to_clipboard", "select_all", "end_search": return true
+        default: return false
+        }
     }
 
     private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload, postNotifications: Bool = true) {
