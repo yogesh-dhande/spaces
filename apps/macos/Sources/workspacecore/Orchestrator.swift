@@ -1802,14 +1802,7 @@ public final class WorkspaceOrchestrator {
     @discardableResult public func stopBuiltInTerminalSessionClosedByUser(sessionID: String) throws -> Bool {
         guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
         let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
-        if let process = ownership.process {
-            try stopWorkspaceProcess(workspaceID: process.workspaceID, processID: process.id)
-            return true
-        }
-        if let agent = ownership.agent {
-            try stopCodingAgent(workspaceID: agent.workspaceID, agentID: agent.id)
-            return true
-        }
+        guard ownership.process == nil, ownership.agent == nil else { return false }
         guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { return false }
         return try stopAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID)
     }
@@ -4685,7 +4678,13 @@ public final class WorkspaceOrchestrator {
                 continue
             }
             if !existingIDs.contains(id) {
-                if managedTrackedTerminalWindowIsStillLive(window: window, liveGhosttyTrackingIdentities: liveGhosttyTrackingIdentities) { continue }
+                if managedTrackedTerminalWindowIsStillLive(window: window, liveGhosttyTrackingIdentities: liveGhosttyTrackingIdentities) {
+                    if builtInTrackedWindowBelongsToAgent(window) {
+                        try clearStaleBuiltInTerminalWindowBinding(window)
+                        pruned += 1
+                    }
+                    continue
+                }
                 if window.role == "browser" { continue }
                 if let tmuxWindowID = window.tmuxWindowID, liveTmuxWindowIDs.contains(tmuxWindowID) { continue }
                 if window.role == "terminal" {
@@ -4715,8 +4714,17 @@ public final class WorkspaceOrchestrator {
         if builtInSessionBelongsToRunningProcess(sessionID: sessionID, workspaceID: window.workspaceID) {
             return builtInSessionIsStillLive(sessionID: sessionID) || builtInSessionLaunchIsPending(sessionID: sessionID)
         }
+        if builtInSessionBelongsToAgent(sessionID: sessionID, workspaceID: window.workspaceID) {
+            return builtInSessionIsStillLive(sessionID: sessionID) || builtInSessionLaunchIsPending(sessionID: sessionID)
+        }
         if builtInSessionIsStillLive(sessionID: sessionID) && builtInSessionHasActiveAttachments(sessionID: sessionID) { return true }
         return builtInSessionLaunchIsPendingBeforeOwnerAttachment(sessionID: sessionID)
+    }
+
+    private func builtInTrackedWindowBelongsToAgent(_ window: WindowRecord) -> Bool {
+        guard window.role == "terminal", terminalHost(for: window.app) == .spaces else { return false }
+        guard let sessionID = window.terminalNativeID ?? window.terminalTrackingID, !sessionID.isEmpty else { return false }
+        return builtInSessionBelongsToAgent(sessionID: sessionID, workspaceID: window.workspaceID)
     }
 
     private func builtInSessionIsStillLive(sessionID: String) -> Bool {
@@ -4767,6 +4775,10 @@ public final class WorkspaceOrchestrator {
 
     private func builtInSessionBelongsToRunningProcess(sessionID: String, workspaceID: String) -> Bool {
         ((try? store.runningProcesses(workspaceID: workspaceID)) ?? []).contains { ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID }
+    }
+
+    private func builtInSessionBelongsToAgent(sessionID: String, workspaceID: String) -> Bool {
+        ((try? store.agentWindows(workspaceID: workspaceID)) ?? []).contains { ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID }
     }
 
     private func builtInSessionHasActiveAttachments(sessionID: String) -> Bool {
@@ -6460,6 +6472,17 @@ public final class WorkspaceOrchestrator {
         }
     }
 
+    private func clearStaleBuiltInTerminalWindowBinding(_ agent: AgentWindowRecord) throws {
+        guard agent.provider == .spaces else { return }
+        let clearedAgent = AgentWindowRecord(
+            id: agent.id, workspaceID: agent.workspaceID, provider: agent.provider, label: agent.label, runtimeTargetID: agent.runtimeTargetID,
+            terminalTarget: agent.terminalTrackingID.map {
+                TerminalTargetRecord(runtimeTargetID: agent.runtimeTargetID, windowID: nil, trackingID: $0)
+            }, sessionKey: agent.sessionKey, claimedLauncherID: agent.claimedLauncherID, claimedLauncherName: agent.claimedLauncherName,
+            status: agent.status, createdAt: agent.createdAt, updatedAt: nowISO8601())
+        try store.upsertAgentWindow(clearedAgent)
+    }
+
     private func persistBuiltInTerminalWindowBinding(_ process: RunningProcessRecord, workspaceID: String, windowID: Int) throws {
         let reboundProcess = RunningProcessRecord(
             id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
@@ -6471,6 +6494,17 @@ public final class WorkspaceOrchestrator {
         if let trackedWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
             try persistBuiltInTerminalWindowBinding(trackedWindow, windowID: windowID)
         }
+    }
+
+    private func persistBuiltInTerminalWindowBinding(_ agent: AgentWindowRecord, windowID: Int) throws {
+        guard agent.provider == .spaces else { return }
+        let reboundAgent = AgentWindowRecord(
+            id: agent.id, workspaceID: agent.workspaceID, provider: agent.provider, label: agent.label, runtimeTargetID: agent.runtimeTargetID,
+            terminalTarget: agent.terminalTrackingID.map {
+                TerminalTargetRecord(runtimeTargetID: agent.runtimeTargetID, windowID: windowID, trackingID: $0)
+            }, sessionKey: agent.sessionKey, claimedLauncherID: agent.claimedLauncherID, claimedLauncherName: agent.claimedLauncherName,
+            status: agent.status, createdAt: agent.createdAt, updatedAt: nowISO8601())
+        try store.upsertAgentWindow(reboundAgent)
     }
 
     private func persistBuiltInTerminalWindowBinding(_ window: WindowRecord, windowID: Int) throws {
@@ -6547,12 +6581,26 @@ public final class WorkspaceOrchestrator {
         case .sessionRequest:
             focused = true
             focusedExistingWindow = false
-        case .reboundSession:
+        case .reboundSession(let capturedWindowID):
             focused = true
             focusedExistingWindow = false
-        case .reopenedSession:
+            if record.provider == .spaces {
+                if let capturedWindowID {
+                    try persistBuiltInTerminalWindowBinding(record, windowID: capturedWindowID)
+                } else {
+                    try clearStaleBuiltInTerminalWindowBinding(record)
+                }
+            }
+        case .reopenedSession(let capturedWindowID):
             focused = true
             focusedExistingWindow = false
+            if record.provider == .spaces {
+                if let capturedWindowID {
+                    try persistBuiltInTerminalWindowBinding(record, windowID: capturedWindowID)
+                } else {
+                    try clearStaleBuiltInTerminalWindowBinding(record)
+                }
+            }
         case .unavailable:
             if let windowID {
                 let fallbackFocused = (try? yabai.focusWindow(id: windowID)) ?? false

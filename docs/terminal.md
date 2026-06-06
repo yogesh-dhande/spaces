@@ -41,7 +41,7 @@ Each live session also participates in a service-level control path:
 - It also preserves live metadata such as title, working directory, and child PID so attached clients can reopen a session without restarting the shell.
 - During termination it captures the Ghostty render frame before renderer teardown, writes a final `terminated` payload to SQLite, broadcasts that payload to attached clients, marks active attachments detached, and then closes the live stream and renderer.
 - App-created ad hoc workspace terminals use persistent service-owned sessions so they survive app quit. The `.whileAttached` lifetime policy remains available for callers that intentionally want service reaping after the final live attachment detaches or expires.
-- Closing a native Spaces terminal window is an explicit stop request. `workspacecore` maps the session ID to its owning process, coding-agent session, or ad hoc workspace terminal, then stops that runtime and terminates the backing service session when applicable. Programmatic closes used by stop and restart are marked as terminating so AppKit cleanup does not issue a second stop request.
+- Closing a native Spaces terminal window detaches the local window from process and coding-agent sessions while preserving the owning runtime and service session. Ad hoc workspace terminal closes terminate the matching service-owned session. Programmatic closes used by stop and restart are marked as terminating so AppKit cleanup does not issue an ad hoc close cleanup.
 - If the service restarts and finds a session left in `starting` or `running` by a dead service PID, it marks that session failed and removes the stale `control.sock`.
 
 ## App Client Runtime

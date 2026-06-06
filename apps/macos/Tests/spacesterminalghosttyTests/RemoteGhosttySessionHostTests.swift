@@ -169,18 +169,18 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
                 renderUpdate: try renderUpdate(text: "done", sessionRevision: 1)), paths: paths)
 
-        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
         let probe = RuntimeNotificationProbe()
         let observer = NotificationCenter.default.addObserver(forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: nil) {
             notification in
             guard notification.userInfo?["sessionID"] as? String == sessionID else { return }
             MainActor.assumeIsolated {
                 probe.count += 1
-                _ = host.effectiveTitle
+                if probe.count == 1 { _ = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths).effectiveTitle }
             }
         }
         defer { NotificationCenter.default.removeObserver(observer) }
 
+        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
         XCTAssertEqual(host.effectiveTitle, "final-title")
         XCTAssertEqual(host.snapshotText(), "done")
         XCTAssertEqual(probe.count, 0)

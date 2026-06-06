@@ -2811,6 +2811,93 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(windows.map(\.id), ["process-api"])
     }
 
+    func testRefreshWorkspaceWindowsKeepsBuiltInAgentTerminalWindowAfterOwnerCloses() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db")
+        let store = try SQLiteStore(path: dbPath.path, )
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        let sessionID = "spaces-agent-session"
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID,
+                terminalNativeID: sessionID, codexThreadID: nil, windowID: 202, status: .spinning, createdAt: "now", updatedAt: "now"))
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: sessionID, title: "Codex", workingDirectory: projectDir.path, shell: "/bin/zsh", command: "codex",
+                    createdAt: timestamp, workspaceID: workspace.id, kind: .agent), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                .init(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 4321,
+                    state: .running, updatedAt: timestamp), paths: paths)
+            let ownerClient = TerminalClient(
+                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+                connectedAt: timestamp)
+            try TerminalSessionPersistence.attachClient(sessionID: sessionID, client: ownerClient, mode: .owner, paths: paths, attachedAt: timestamp)
+            try TerminalSessionPersistence.detachClient(id: ownerClient.id, paths: paths, detachedAt: timestamp)
+
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
+            }
+        }
+
+        let windows = try orchestrator.windows(workspaceID: workspace.id)
+        XCTAssertEqual(windows.map(\.terminalTrackingID), [sessionID])
+        XCTAssertNil(windows.first?.windowID)
+        let agents = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(agents.map(\.id), ["agent-codex"])
+        XCTAssertEqual(agents.first?.terminalTrackingID, sessionID)
+        XCTAssertNil(agents.first?.windowID)
+    }
+
+    func testFocusAgentWindowPersistsReopenedBuiltInSpacesWindowBinding() throws {
+        let store = try makeTemporaryStore()
+        let focusCapture = TerminalFocusCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowFocuser: { sessionID, requestID in
+                focusCapture.sessionIDs.append(sessionID)
+                focusCapture.requestIDs.append(requestID)
+            })
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        let sessionID = "spaces-agent-session-reopen"
+        let agent = AgentWindowRecord(
+            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID,
+            terminalNativeID: sessionID, codexThreadID: nil, windowID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
+        try store.upsertAgentWindow(agent)
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUSED_ID", value: "889") {
+                try withEnv(name: "YABAI_FOCUSED_APP", value: TerminalHost.spaces.appName) {
+                    try orchestrator.focusAgentWindow(agent)
+                    XCTAssertEqual(try orchestrator.workspaceIDForFocusedWindow(), workspace.id)
+                }
+            }
+        }
+
+        XCTAssertEqual(focusCapture.sessionIDs, [sessionID])
+        XCTAssertEqual(focusCapture.requestIDs, [nil])
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.windowID, 889)
+        XCTAssertEqual(try store.windows(workspaceID: workspace.id).first?.windowID, 889)
+    }
+
     func testFocusWorkspaceProcessUsesBuiltInFocusIPCForLiveBuiltInSpacesWindow() throws {
         let store = try makeTemporaryStore()
         let focusCapture = TerminalFocusCapture()
@@ -4465,7 +4552,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
     }
 
-    func testUserClosedBuiltInTerminalSessionStopsOwningProcess() throws {
+    func testUserClosedBuiltInTerminalSessionLeavesOwningProcessRunning() throws {
         let store = try makeTemporaryStore()
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
@@ -4491,15 +4578,15 @@ final class OrchestratorTests: XCTestCase {
                 windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil,
                 tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
-        XCTAssertTrue(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
+        XCTAssertFalse(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
 
-        XCTAssertEqual(closeCapture.sessionIDs, [sessionID])
-        XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
-        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
-        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
+        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
+        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.id), ["process-1"])
+        XCTAssertEqual(try store.windows(workspaceID: workspace.id).map(\.terminalTrackingID), [sessionID])
     }
 
-    func testUserClosedBuiltInTerminalSessionStopsOwningAgent() throws {
+    func testUserClosedBuiltInTerminalSessionLeavesOwningAgentRunning() throws {
         let store = try makeTemporaryStore()
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
@@ -4524,12 +4611,12 @@ final class OrchestratorTests: XCTestCase {
                 windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil,
                 tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
-        XCTAssertTrue(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
+        XCTAssertFalse(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
 
-        XCTAssertEqual(closeCapture.sessionIDs, [sessionID])
-        XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
-        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
-        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
+        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), ["agent-1"])
+        XCTAssertEqual(try store.windows(workspaceID: workspace.id).map(\.terminalTrackingID), [sessionID])
     }
 
     func testStopAdHocBuiltInTerminalSessionUsesLiveSessionDirectoryWithoutTrackedWindow() throws {

@@ -257,7 +257,6 @@ struct ContentView: View {
                     RowDivider()
                 }
                 workspaceRuntimeRow(row)
-                    .accessibilityIdentifier(row.sessionID.map { "terminal.row.\($0)" } ?? "workspace.row.\(row.id)")
             }
             if group.rows.isEmpty {
                 RowDivider(inset: 0)
@@ -334,7 +333,8 @@ struct ContentView: View {
     }
 
     private func workspaceRuntimeRow(_ row: SpacesMobileWorkspaceRuntimeRow) -> some View {
-        HStack(spacing: 10) {
+        let rowIdentifier = row.sessionID.map { "terminal.row.\($0)" } ?? "workspace.row.\(row.id)"
+        return HStack(spacing: 10) {
             Button {
                 activateRuntimeRow(row)
             } label: {
@@ -356,6 +356,7 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .disabled(model.isMutating || (row.sessionID == nil && !row.canRun))
+            .accessibilityIdentifier(rowIdentifier)
             Spacer(minLength: 0)
             if showsStateChip(for: row) {
                 MetaChip(text: row.runState.mobileLabel)
@@ -377,6 +378,7 @@ struct ContentView: View {
             .buttonStyle(.borderless)
             .disabled(model.isMutating)
             .accessibilityLabel("Run")
+            .accessibilityIdentifier("runtime.action.run.\(row.id)")
         }
         if row.canStop {
             Button {
@@ -387,6 +389,7 @@ struct ContentView: View {
             .buttonStyle(.borderless)
             .disabled(model.isMutating)
             .accessibilityLabel("Stop")
+            .accessibilityIdentifier("runtime.action.stop.\(row.id)")
         }
         if row.canRestart {
             Button {
@@ -397,6 +400,7 @@ struct ContentView: View {
             .buttonStyle(.borderless)
             .disabled(model.isMutating)
             .accessibilityLabel("Restart")
+            .accessibilityIdentifier("runtime.action.restart.\(row.id)")
         }
         if row.sessionID != nil {
             Image(systemName: "chevron.right")
