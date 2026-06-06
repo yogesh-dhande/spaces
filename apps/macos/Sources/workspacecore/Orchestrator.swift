@@ -103,6 +103,12 @@ public final class WorkspaceOrchestrator {
         let session: BrowserSession
     }
 
+    private struct WorkspaceConfigurationSnapshot {
+        let workspace: WorkspaceRecord
+        let settings: WorkspaceSettings?
+        let assignedPorts: [(definitionID: String, port: Int, name: String)]
+    }
+
     private struct BrowserWindowScanResult {
         let windows: [WindowRecord]
         let tabIndexByWindowAndURL: [String: Int]
@@ -637,9 +643,23 @@ public final class WorkspaceOrchestrator {
     @discardableResult public func applySpacesYAMLDocument(_ document: SpacesYAMLDocument, projectID: String, updateAllWorkspaces: Bool = false)
         throws -> ProjectRecord
     {
-        try updateProjectConfig(projectID: projectID) { record in document.applying(to: &record) }
-        guard let updatedProject = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
-        if updateAllWorkspaces { try applyProjectTemplateToAllWorkspaces(project: updatedProject) }
+        guard let originalProject = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        let updatedProject = try configuredProjectRecord(baseRecord: originalProject) { record in document.applying(to: &record) }
+        guard updateAllWorkspaces else {
+            try updateProjectConfig(projectID: projectID) { record in document.applying(to: &record) }
+            guard let updatedProject = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+            return updatedProject
+        }
+
+        try ensureDefaultWorkspace(for: originalProject)
+        let workspaceSnapshots = try workspaceConfigurationSnapshots(projectID: projectID)
+        do {
+            try store.upsert(project: updatedProject)
+            try applyProjectTemplateToAllWorkspaces(project: updatedProject)
+        } catch {
+            try restoreSpacesYAMLImportSnapshot(project: originalProject, workspaces: workspaceSnapshots)
+            throw error
+        }
         return updatedProject
     }
 
@@ -4155,6 +4175,51 @@ public final class WorkspaceOrchestrator {
         for workspace in workspaces { try applyProjectTemplate(project, to: workspace, syncPorts: !workspace.isArchived) }
     }
 
+    private func workspaceConfigurationSnapshots(projectID: String) throws -> [WorkspaceConfigurationSnapshot] {
+        let workspaces = try store.workspaces(projectID: projectID, includeArchived: true)
+        return try workspaces.map { workspace in
+            let settings: WorkspaceSettings?
+            if try store.workspaceSettingsExists(workspaceID: workspace.id) {
+                settings = WorkspaceSettings(
+                    stopScript: try store.workspaceStopScript(workspaceID: workspace.id),
+                    ports: try store.workspacePortDefinitions(workspaceID: workspace.id),
+                    processes: try store.workspaceProcesses(workspaceID: workspace.id),
+                    browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id),
+                    agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: workspace.id))
+            } else {
+                settings = nil
+            }
+            return WorkspaceConfigurationSnapshot(
+                workspace: workspace, settings: settings, assignedPorts: try store.workspacePortsAssigned(workspaceID: workspace.id))
+        }
+    }
+
+    private func restoreSpacesYAMLImportSnapshot(project: ProjectRecord, workspaces: [WorkspaceConfigurationSnapshot]) throws {
+        try store.upsert(project: project)
+        for snapshot in workspaces { try restoreWorkspaceConfiguration(snapshot) }
+    }
+
+    private func restoreWorkspaceConfiguration(_ snapshot: WorkspaceConfigurationSnapshot) throws {
+        try PortAllocator(store: store).releasePorts(workspaceID: snapshot.workspace.id)
+        guard let settings = snapshot.settings else {
+            try store.deleteWorkspaceConfiguration(workspaceID: snapshot.workspace.id)
+            return
+        }
+
+        try store.setWorkspaceStopScript(workspaceID: snapshot.workspace.id, stopScript: settings.stopScript)
+        try store.setWorkspacePortDefinitions(workspaceID: snapshot.workspace.id, definitions: settings.ports)
+        try store.setWorkspaceProcesses(workspaceID: snapshot.workspace.id, processes: settings.processes)
+        try store.setWorkspaceBrowserSessions(workspaceID: snapshot.workspace.id, sessions: settings.browserSessions)
+        try store.setWorkspaceAgentLaunchers(workspaceID: snapshot.workspace.id, launchers: settings.agentLaunchers)
+        try store.touchWorkspaceSettings(workspaceID: snapshot.workspace.id, updatedAt: nowISO8601())
+        try store.setWorkspacePorts(
+            workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port }, names: snapshot.assignedPorts.map { $0.name },
+            definitionIDs: snapshot.assignedPorts.map { $0.definitionID })
+        if !snapshot.workspace.isArchived, !snapshot.assignedPorts.isEmpty {
+            PortReserver.shared.reservePorts(workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port })
+        }
+    }
+
     private func applyProjectTemplate(_ project: ProjectRecord, to workspace: WorkspaceRecord, syncPorts: Bool) throws {
         guard var settings = try loadWorkspaceSettings(project: project, workspace: workspace) else {
             throw WorkspaceError.missingProject(dir: project.dir)
@@ -5307,6 +5372,9 @@ public final class WorkspaceOrchestrator {
     }
 
     func rollbackFailedImportedProjectCreation(project: ProjectRecord, workspaceDirectory: String) throws {
+        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+        let portAllocator = PortAllocator(store: store)
+        for workspace in workspaces { try portAllocator.releasePorts(workspaceID: workspace.id) }
         try store.deleteProject(id: project.id)
         try removeManagedWorkspaceDirectoryIfNeeded(path: workspaceDirectory)
         try removeManagedProjectDirectoryIfNeeded(project: project)

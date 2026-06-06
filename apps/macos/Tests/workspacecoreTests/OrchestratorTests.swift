@@ -4227,13 +4227,20 @@ final class OrchestratorTests: XCTestCase {
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let reservedBefore = PortReserver.shared.reservedWorkspaceIDs()
+        defer {
+            for workspaceID in PortReserver.shared.reservedWorkspaceIDs().subtracting(reservedBefore) {
+                PortReserver.shared.releasePorts(workspaceID: workspaceID)
+            }
+        }
 
-        XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Unsupported spaces.yaml version 999"))
+        XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path) { config in config.ports = [PortDefinition(name: "API_PORT")] }) {
+            error in XCTAssertTrue(error.localizedDescription.contains("Unsupported spaces.yaml version 999"))
         }
 
         let managedDirname = managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "invalid-yaml-git-import")
         XCTAssertTrue(try store.projects().isEmpty)
+        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().subtracting(reservedBefore).isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path))
         XCTAssertFalse(
             FileManager.default.fileExists(
@@ -4293,6 +4300,61 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(archivedSettings?.stopScript, "echo synced-stop")
         XCTAssertEqual(archivedSettings?.browserSessions.first?.name, "app")
         XCTAssertTrue(try XCTUnwrap(store.workspace(id: archivedWorkspace.id)).isArchived)
+    }
+
+    func testImportSpacesYAMLWithWorkspaceSyncRollsBackProjectAndEarlierWorkspacesOnFailure() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path) { config in
+            config.stopScript = "echo old-stop"
+            config.ports = [PortDefinition(id: "old-port", name: "OLD_PORT")]
+            config.processes = [ProcessTemplate(id: "old-process", name: "old", command: "npm run old", executionMode: .shell)]
+            config.browserSessions = [BrowserSession(name: "old-app", url: "http://localhost:4000")]
+            config.agentLaunchers = [AgentLauncher(name: "Old Codex", command: "old-codex")]
+        }
+        let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        let conflictWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "conflict")
+        defer {
+            PortReserver.shared.releasePorts(workspaceID: defaultWorkspace.id)
+            PortReserver.shared.releasePorts(workspaceID: conflictWorkspace.id)
+        }
+        let defaultSettingsBefore = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id))
+        let conflictSettingsBefore = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: conflictWorkspace.id))
+        let defaultPortsBefore = try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id)
+        let conflictPortsBefore = try store.workspacePortsAssigned(workspaceID: conflictWorkspace.id)
+        _ = try orchestrator.registerAgentWindow(workspaceID: conflictWorkspace.id, provider: .spaces, label: "api")
+        try spacesYAMLFixture(stopScript: "echo imported-stop").write(
+            to: try orchestrator.spacesYAMLConfigURL(projectID: project.id), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try orchestrator.importSpacesYAML(projectID: project.id, updateAllWorkspaces: true)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Duplicates: api"))
+        }
+
+        let restoredProject = try XCTUnwrap(try store.project(id: project.id))
+        XCTAssertEqual(restoredProject.stopScript, "echo old-stop")
+        XCTAssertEqual(restoredProject.ports.map(\.name), ["OLD_PORT"])
+        XCTAssertEqual(restoredProject.processes.first?.command, "npm run old")
+
+        let defaultSettingsAfter = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id))
+        XCTAssertEqual(defaultSettingsAfter.stopScript, defaultSettingsBefore.stopScript)
+        XCTAssertEqual(defaultSettingsAfter.ports.map(\.name), defaultSettingsBefore.ports.map(\.name))
+        XCTAssertEqual(defaultSettingsAfter.processes.map(\.command), defaultSettingsBefore.processes.map(\.command))
+        XCTAssertEqual(defaultSettingsAfter.browserSessions.map(\.url), defaultSettingsBefore.browserSessions.map(\.url))
+        XCTAssertEqual(defaultSettingsAfter.agentLaunchers.map(\.command), defaultSettingsBefore.agentLaunchers.map(\.command))
+        XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id).map { $0.name }, defaultPortsBefore.map { $0.name })
+        XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id).map { $0.port }, defaultPortsBefore.map { $0.port })
+
+        let conflictSettingsAfter = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: conflictWorkspace.id))
+        XCTAssertEqual(conflictSettingsAfter.stopScript, conflictSettingsBefore.stopScript)
+        XCTAssertEqual(conflictSettingsAfter.ports.map(\.name), conflictSettingsBefore.ports.map(\.name))
+        XCTAssertEqual(conflictSettingsAfter.processes.map(\.command), conflictSettingsBefore.processes.map(\.command))
+        XCTAssertEqual(conflictSettingsAfter.browserSessions.map(\.url), conflictSettingsBefore.browserSessions.map(\.url))
+        XCTAssertEqual(conflictSettingsAfter.agentLaunchers.map(\.command), conflictSettingsBefore.agentLaunchers.map(\.command))
+        XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: conflictWorkspace.id).map { $0.name }, conflictPortsBefore.map { $0.name })
+        XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: conflictWorkspace.id).map { $0.port }, conflictPortsBefore.map { $0.port })
     }
 
     func testExportSpacesYAMLOverwritesExistingFile() throws {

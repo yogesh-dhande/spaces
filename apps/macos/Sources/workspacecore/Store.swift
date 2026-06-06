@@ -456,6 +456,17 @@ public final class SQLiteStore {
         return !rows.isEmpty
     }
 
+    public func deleteWorkspaceConfiguration(workspaceID: String) throws {
+        try withImmediateTransaction {
+            try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id = ?", bindings: [workspaceID])
+            try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [workspaceID])
+            try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [workspaceID])
+            try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [workspaceID])
+            try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [workspaceID])
+            try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [workspaceID])
+        }
+    }
+
     public func workspaceStopScript(workspaceID: String) throws -> String? {
         let rows = try queryRows(sql: "SELECT stop_script FROM workspace_settings WHERE workspace_id = ?", bindings: [workspaceID])
         guard let raw = rows.first?.first else { return nil }
