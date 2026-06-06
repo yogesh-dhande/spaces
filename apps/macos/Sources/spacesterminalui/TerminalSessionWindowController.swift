@@ -88,6 +88,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         case viewer
     }
 
+    private enum PendingGhosttyHostAttachment {
+        case owner(requestID: String?, reason: String, requestWindowFocus: Bool)
+        case finalRender(reason: String)
+    }
+
     private struct OutputViewportState {
         let wasPinnedToBottom: Bool
         let horizontalOffset: CGFloat
@@ -153,6 +158,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private let saveWindowFrameAction: (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void
     private let sessionHostProvider: @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
     private var clientGhosttySessionHost: (any TerminalGhosttySessionHosting)?
+    private var isResolvingGhosttySessionHost = false
+    private var pendingGhosttyHostAttachment: PendingGhosttyHostAttachment?
     private var activeGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var refreshTask: Task<Void, Never>?
     private var takeoverTask: Task<Void, Never>?
@@ -950,7 +957,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         do {
             window?.contentView?.layoutSubtreeIfNeeded()
             terminalContainer.layoutSubtreeIfNeeded()
-            let host = resolvedGhosttySessionHost(for: launchConfiguration)
+            guard let host = resolvedGhosttySessionHost(for: launchConfiguration) else {
+                pendingGhosttyHostAttachment = .owner(requestID: requestID, reason: reason, requestWindowFocus: requestWindowFocus)
+                return
+            }
             switchGhosttySessionHostIfNeeded(host)
             try host.attach(client: client, mode: preferredAttachmentMode, into: terminalContainer)
             if !usesCustomAttachClientAction { isClientAttached = true }
@@ -973,7 +983,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         do {
             window?.contentView?.layoutSubtreeIfNeeded()
             terminalContainer.layoutSubtreeIfNeeded()
-            let host = resolvedGhosttySessionHost(for: launchConfiguration)
+            guard let host = resolvedGhosttySessionHost(for: launchConfiguration) else {
+                pendingGhosttyHostAttachment = .finalRender(reason: reason)
+                return
+            }
             switchGhosttySessionHostIfNeeded(host)
             try host.attach(client: client, mode: .viewer, into: terminalContainer)
             ghosttyRendererHost?.requestSurfaceRefresh()
@@ -1810,15 +1823,31 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     private func updateGhosttySessionHostReference(for launchConfiguration: TerminalSessionLaunchConfiguration) {
         guard launchConfiguration.backend == .ghosttyEmbedded else { return }
-        let host = resolvedGhosttySessionHost(for: launchConfiguration)
+        guard let host = resolvedGhosttySessionHost(for: launchConfiguration) else { return }
         switchGhosttySessionHostIfNeeded(host)
     }
 
-    private func resolvedGhosttySessionHost(for launchConfiguration: TerminalSessionLaunchConfiguration) -> any TerminalGhosttySessionHosting {
+    private func resolvedGhosttySessionHost(for launchConfiguration: TerminalSessionLaunchConfiguration) -> (any TerminalGhosttySessionHosting)? {
         if let clientGhosttySessionHost { return clientGhosttySessionHost }
+        guard !isResolvingGhosttySessionHost else { return nil }
+        isResolvingGhosttySessionHost = true
+        defer {
+            isResolvingGhosttySessionHost = false
+            retryPendingGhosttyHostAttachmentIfNeeded()
+        }
         let created = sessionHostProvider(launchConfiguration, paths)
         clientGhosttySessionHost = created
         return created
+    }
+
+    private func retryPendingGhosttyHostAttachmentIfNeeded() {
+        guard let pendingGhosttyHostAttachment, clientGhosttySessionHost != nil else { return }
+        self.pendingGhosttyHostAttachment = nil
+        switch pendingGhosttyHostAttachment {
+        case .owner(let requestID, let reason, let requestWindowFocus):
+            ensureGhosttyHostAttached(requestID: requestID, reason: reason, requestWindowFocus: requestWindowFocus)
+        case .finalRender(let reason): ensureGhosttyFinalRenderSurfaceAttached(reason: reason)
+        }
     }
 
     private func switchGhosttySessionHostIfNeeded(_ host: any TerminalGhosttySessionHosting) {

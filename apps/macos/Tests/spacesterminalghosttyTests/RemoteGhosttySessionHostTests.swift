@@ -122,6 +122,39 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertTrue(mirrorView.debugRecordedMouseEvents.contains("button:release:\(GHOSTTY_MOUSE_LEFT.rawValue)"))
     }
 
+    @MainActor func testRemoteMirrorDoesNotReapplyIdenticalRevisionedRenderFrame() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-idempotent-frame", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-06T00:00:00Z")
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        mirrorView.debugRenderFrameApplyHandler = { _, _ in true }
+        let firstFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha"))
+        let nextFrame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 0, snapshot: snapshot(text: "beta"))
+
+        mirrorView.update(frame: firstFrame, renderStateKey: "runtime=5x1|frame=5x1|ownerEpoch=0")
+        mirrorView.update(frame: firstFrame, renderStateKey: "runtime=5x1|frame=5x1|ownerEpoch=0")
+        mirrorView.update(frame: nextFrame, renderStateKey: "runtime=5x1|frame=5x1|ownerEpoch=0")
+        mirrorView.update(frame: nextFrame, renderStateKey: "runtime=4x1|frame=4x1|ownerEpoch=0")
+
+        XCTAssertEqual(mirrorView.debugRenderFrameApplyCount, 3)
+    }
+
+    @MainActor func testRemoteMirrorReappliesSnapshotFrameWhenContentChangesWithoutRevision() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-idempotent-snapshot", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-06T00:00:00Z")
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        mirrorView.debugRenderFrameApplyHandler = { _, _ in true }
+        let firstFrame = GhosttyRenderFrame(sessionRevision: nil, ownerEpoch: 0, snapshot: snapshot(text: "alpha"))
+        let changedFrame = GhosttyRenderFrame(sessionRevision: nil, ownerEpoch: 0, snapshot: snapshot(text: "bravo"))
+
+        mirrorView.update(frame: firstFrame, renderStateKey: "snapshot=5x1")
+        mirrorView.update(frame: firstFrame, renderStateKey: "snapshot=5x1")
+        mirrorView.update(frame: changedFrame, renderStateKey: "snapshot=5x1")
+
+        XCTAssertEqual(mirrorView.debugRenderFrameApplyCount, 2)
+    }
+
     @MainActor func testRemoteMirrorSearchActionEventsUpdateOverlayState() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-search-actions", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,

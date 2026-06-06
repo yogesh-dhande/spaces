@@ -38,6 +38,16 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
         let height: CGFloat
     }
 
+    private struct AppliedRenderFrameIdentity: Equatable {
+        let renderStateKey: String
+        let version: Int
+        let sessionRevision: UInt64?
+        let ownerEpoch: UInt64
+        let columns: Int
+        let rows: Int
+        let snapshot: GhosttyTerminalSnapshot?
+    }
+
     private static let defaultFontSize: CGFloat = 12
     private static let searchUpBindingAction = "navigate_search:next"
     private static let searchDownBindingAction = "navigate_search:previous"
@@ -55,6 +65,7 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     private var latestFrame: GhosttyRenderFrame?
     private var renderStateKey = ""
     private var lastGeometry: SurfaceGeometry?
+    private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
     private var lastReportedViewportSize: (columns: Int, rows: Int)?
     private var renderedText = ""
     private var pendingFirstResponderRestoreTask: Task<Void, Never>?
@@ -68,6 +79,8 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     private(set) var debugRecordedBindingActions: [String] = []
     var debugMouseEventHandler: (@MainActor (String) -> Bool)?
     private(set) var debugRecordedMouseEvents: [String] = []
+    var debugRenderFrameApplyHandler: (@MainActor (GhosttyRenderFrame, String) -> Bool)?
+    private(set) var debugRenderFrameApplyCount = 0
 
     var acceptsTerminalInput = false { didSet { restoreFirstResponderIfWindowReady() } }
     var onSendText: SendTextHandler?
@@ -348,6 +361,7 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
         latestFrame = nil
         renderedText = ""
         lastGeometry = nil
+        lastAppliedRenderFrameIdentity = nil
         removeFromSuperview()
     }
 
@@ -496,6 +510,7 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
             mirror = ghostty_mirror_new(app, &host, &config)
             guard mirror != nil else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_mirror_new failed") }
             lastGeometry = nil
+            lastAppliedRenderFrameIdentity = nil
             updateSurfaceGeometry()
             updateSurfaceFocus()
             if let surface = mirrorSurface() {
@@ -594,7 +609,19 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     }
 
     private func applyLatestFrameIfPossible() {
-        guard let mirror, let frame = latestFrame else { return }
+        guard let frame = latestFrame else {
+            lastAppliedRenderFrameIdentity = nil
+            return
+        }
+        let identity = appliedRenderFrameIdentity(for: frame)
+        guard identity != lastAppliedRenderFrameIdentity else { return }
+        if let debugRenderFrameApplyHandler {
+            guard debugRenderFrameApplyHandler(frame, renderStateKey) else { return }
+            lastAppliedRenderFrameIdentity = identity
+            debugRenderFrameApplyCount += 1
+            return
+        }
+        guard let mirror else { return }
         updateSurfaceGeometry()
         let applyStartedAt = Date()
         let applied = withCFrame(frame) { cFrame in ghostty_mirror_apply_render_frame(mirror, cFrame) }
@@ -613,7 +640,14 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
             fputs("spaces: ghostty mirror frame apply failed for session \(launchConfiguration.sessionID)\n", stderr)
             return
         }
+        lastAppliedRenderFrameIdentity = identity
         if let surface = mirrorSurface() { ghostty_surface_refresh(surface) }
+    }
+
+    private func appliedRenderFrameIdentity(for frame: GhosttyRenderFrame) -> AppliedRenderFrameIdentity {
+        AppliedRenderFrameIdentity(
+            renderStateKey: renderStateKey, version: frame.version, sessionRevision: frame.sessionRevision, ownerEpoch: frame.ownerEpoch,
+            columns: frame.columns, rows: frame.rows, snapshot: frame.sessionRevision == nil ? frame.snapshot : nil)
     }
 
     private func withCFrame(_ frame: GhosttyRenderFrame, _ body: (UnsafePointer<ghostty_render_frame_s>) -> Bool) -> Bool {

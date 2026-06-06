@@ -345,6 +345,72 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(host.attachedModes.isEmpty)
     }
 
+    @MainActor func testRuntimeNotificationDuringHostCreationDoesNotReenterHostResolution() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-host-notification-reentry"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "reentry", workingDirectory: "/tmp/reentry", shell: "/bin/zsh", command: nil,
+                createdAt: "2026-06-06T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .exited, updatedAt: "2026-06-06T00:00:01Z"),
+            paths: paths)
+        let host = FakeGhosttySessionHost()
+        host.hasSurface = false
+        var providerCallCount = 0
+
+        _ = makeGhosttyController(
+            sessionID: sessionID, paths: paths, preferredAttachmentMode: .viewer,
+            sessionHostProvider: { _, _ in
+                providerCallCount += 1
+                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+                return host
+            })
+        await Task.yield()
+
+        XCTAssertEqual(providerCallCount, 1)
+    }
+
+    @MainActor func testRuntimeNotificationDuringOwnerHostCreationDoesNotReenterAttachResolution() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-owner-host-notification-reentry"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "owner-reentry", workingDirectory: "/tmp/reentry", shell: "/bin/zsh",
+                command: nil, createdAt: "2026-06-06T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-06T00:00:01Z"),
+            paths: paths)
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        var providerCallCount = 0
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, preferredAttachmentMode: .owner, performInitialRefresh: false,
+            sessionHostProvider: { _, _ in
+                providerCallCount += 1
+                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+                return host
+            })
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-06-06T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-06-06T00:00:00Z")
+
+        controller.debugForceRefresh()
+
+        XCTAssertEqual(providerCallCount, 1)
+        XCTAssertEqual(host.attachCount, 1)
+        XCTAssertEqual(host.attachedModes, [.owner])
+    }
+
     @MainActor func testShowRestoresPersistedWindowFrameForAttachmentMode() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
