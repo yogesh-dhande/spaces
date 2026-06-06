@@ -267,6 +267,53 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(try TerminalSessionPersistence.readWindowFrame(mode: .viewer, paths: paths), viewerFrame)
     }
 
+    func testRemoteSessionStatePersistsFinalPayload() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-final-state"
+        try writeLaunchConfiguration(sessionID: sessionID, paths: paths)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, servicePID: 123, childPID: 456, state: .exited, updatedAt: "2026-05-08T00:00:05Z", exitedAt: "2026-05-08T00:00:05Z",
+            title: "final-target", workingDirectory: root.path, columns: 80, rows: 24)
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-05-08T00:00:05Z", sessionStateRevision: 12,
+            sessionStateFlags: 3, screenStateRevision: 12, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            title: "final-target", workingDirectory: root.path, outputByteCount: nil, renderUpdate: Data([1, 2, 3]))
+
+        try TerminalSessionPersistence.writeRemoteSessionState(payload, paths: paths)
+
+        XCTAssertEqual(try TerminalSessionPersistence.readRemoteSessionState(paths: paths), payload)
+    }
+
+    func testDetachActiveClientsMarksClientsDisconnectedAndAttachmentsDetached() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-detach-all"
+        try writeLaunchConfiguration(sessionID: sessionID, paths: paths)
+        let owner = TerminalClient(
+            id: "owner", kind: .localWindow, identity: TerminalClientIdentity(label: "Owner"), connectedAt: "2026-05-08T00:00:00Z")
+        let viewer = TerminalClient(
+            id: "viewer", kind: .remoteViewer, identity: TerminalClientIdentity(label: "Viewer"), connectedAt: "2026-05-08T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-08T00:00:01Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-05-08T00:00:02Z")
+
+        try TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: "2026-05-08T00:00:03Z")
+
+        let snapshot = try TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+        XCTAssertTrue(try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty)
+        XCTAssertEqual(Set(snapshot.clients.compactMap(\.disconnectedAt)), ["2026-05-08T00:00:03Z"])
+        XCTAssertEqual(Set(snapshot.attachments.compactMap(\.detachedAt)), ["2026-05-08T00:00:03Z"])
+    }
+
     private func writeLaunchConfiguration(sessionID: String, paths: TerminalSessionPaths) throws {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(

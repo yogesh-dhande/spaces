@@ -11,7 +11,7 @@ GHOSTTY_SOURCE_ROOT="$REPO_ROOT/$SUBMODULE_PATH"
 DEFAULT_GHOSTTY_REPO="https://github.com/yogesh-dhande/ghostty.git"
 ARTIFACT_REPO="${SPACES_GHOSTTY_ARTIFACT_REPO:-${GITHUB_REPOSITORY:-yogesh-dhande/spaces}}"
 ARTIFACT_RELEASE_PREFIX="ghostty-artifacts-"
-BUILD_SCRIPT_VERSION="1"
+BUILD_SCRIPT_VERSION="2"
 MANIFEST_SCHEMA_VERSION="1"
 
 LOCAL_ROOT="$APP_ROOT/.local"
@@ -145,6 +145,21 @@ ghostty_dirty_state() {
     fi
 }
 
+current_xcode_version() {
+    command_exists xcodebuild || return 0
+    xcodebuild -version 2>/dev/null | awk 'NR == 1 { print $2; exit }'
+}
+
+current_xcode_build_version() {
+    command_exists xcodebuild || return 0
+    xcodebuild -version 2>/dev/null | awk '/^Build version / { print $3; exit }'
+}
+
+current_swift_version() {
+    command_exists xcrun || return 0
+    xcrun swift --version 2>/dev/null | head -n 1
+}
+
 artifact_release_tag() {
     printf "%s%s\n" "$ARTIFACT_RELEASE_PREFIX" "$GHOSTTY_SHA"
 }
@@ -153,11 +168,16 @@ manifest_matches_current_sha() {
     local manifest_path="$1"
     [[ -f "$manifest_path" ]] || return 1
 
-    python3 - "$manifest_path" "$GHOSTTY_SHA" "$MANIFEST_SCHEMA_VERSION" <<'PY'
+    python3 - "$manifest_path" \
+        "$GHOSTTY_SHA" \
+        "$MANIFEST_SCHEMA_VERSION" \
+        "$BUILD_SCRIPT_VERSION" \
+        "$ZIG_VERSION" \
+        "$(current_xcode_build_version)" <<'PY'
 import json
 import sys
 
-manifest_path, expected_sha, expected_schema = sys.argv[1:4]
+manifest_path, expected_sha, expected_schema, expected_script, expected_zig, expected_xcode_build = sys.argv[1:7]
 try:
     with open(manifest_path, "r", encoding="utf-8") as handle:
         manifest = json.load(handle)
@@ -167,6 +187,12 @@ except Exception:
 if manifest.get("schema_version") != int(expected_schema):
     sys.exit(1)
 if manifest.get("ghostty_sha") != expected_sha:
+    sys.exit(1)
+if manifest.get("build_script_version") != int(expected_script):
+    sys.exit(1)
+if manifest.get("zig_version") != expected_zig:
+    sys.exit(1)
+if expected_xcode_build and manifest.get("xcode_build_version") != expected_xcode_build:
     sys.exit(1)
 sys.exit(0)
 PY
@@ -227,7 +253,7 @@ reuse_local_artifacts_if_valid() {
     fi
 
     if [[ -f "$LOCAL_MANIFEST" ]]; then
-        echo "==> Local Ghostty artifact manifest does not match $GHOSTTY_SHA"
+        echo "==> Local Ghostty artifact manifest does not match current Ghostty setup inputs"
     else
         echo "==> Local Ghostty artifact manifest is missing"
     fi
@@ -329,6 +355,11 @@ write_manifest() {
         "$(ghostty_source_url)" \
         "$ZIG_VERSION" \
         "$BUILD_SCRIPT_VERSION" \
+        "$(current_xcode_version)" \
+        "$(current_xcode_build_version)" \
+        "$(current_swift_version)" \
+        "$(uname -m)" \
+        "$GHOSTTY_BUILD_OPTIMIZE" \
         "$dirty" \
         "$mode" \
         "$kit_checksum" \
@@ -344,12 +375,17 @@ import sys
     source_url,
     zig_version,
     build_script_version,
+    xcode_version,
+    xcode_build_version,
+    swift_version,
+    host_arch,
+    build_optimize,
     dirty,
     mode,
     kit_checksum,
     resources_checksum,
     vt_checksum,
-) = sys.argv[1:12]
+) = sys.argv[1:17]
 
 artifact_checksums = {}
 if kit_checksum:
@@ -365,6 +401,11 @@ manifest = {
     "source_url": source_url,
     "zig_version": zig_version,
     "build_script_version": int(build_script_version),
+    "xcode_version": xcode_version,
+    "xcode_build_version": xcode_build_version,
+    "swift_version": swift_version,
+    "host_arch": host_arch,
+    "build_optimize": build_optimize,
     "dirty": dirty == "true",
     "mode": mode,
     "artifact_checksums": artifact_checksums,
@@ -443,7 +484,14 @@ validate_download_manifest() {
     local manifest_path="$1"
     local download_dir="$2"
 
-    python3 - "$manifest_path" "$GHOSTTY_SHA" "$MANIFEST_SCHEMA_VERSION" "$STRICT" "$download_dir" <<'PY'
+    python3 - "$manifest_path" \
+        "$GHOSTTY_SHA" \
+        "$MANIFEST_SCHEMA_VERSION" \
+        "$STRICT" \
+        "$download_dir" \
+        "$BUILD_SCRIPT_VERSION" \
+        "$ZIG_VERSION" \
+        "$(current_xcode_build_version)" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -454,6 +502,9 @@ expected_sha = sys.argv[2]
 expected_schema = int(sys.argv[3])
 strict = sys.argv[4] == "1"
 download_dir = pathlib.Path(sys.argv[5])
+expected_script = int(sys.argv[6])
+expected_zig = sys.argv[7]
+expected_xcode_build = sys.argv[8]
 assets = [
     "GhosttyKit.xcframework.tar.gz",
     "GhosttyKit-resources.tar.gz",
@@ -476,6 +527,30 @@ if manifest.get("ghostty_sha") != expected_sha:
 if manifest.get("schema_version") != expected_schema:
     print(
         f"Ghostty artifact manifest schema {manifest.get('schema_version')} does not match expected schema {expected_schema}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if manifest.get("build_script_version") != expected_script:
+    print(
+        f"Ghostty artifact manifest build script version {manifest.get('build_script_version')} "
+        f"does not match expected version {expected_script}; rebuild or republish the artifacts.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if manifest.get("zig_version") != expected_zig:
+    print(
+        f"Ghostty artifact manifest Zig version {manifest.get('zig_version')} does not match expected version {expected_zig}; "
+        "rebuild or republish the artifacts.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if expected_xcode_build and manifest.get("xcode_build_version") != expected_xcode_build:
+    print(
+        f"Ghostty artifact manifest Xcode build version {manifest.get('xcode_build_version')} does not match current "
+        f"Xcode build version {expected_xcode_build}; rebuild locally with --build or publish artifacts built with the current Xcode.",
         file=sys.stderr,
     )
     sys.exit(1)

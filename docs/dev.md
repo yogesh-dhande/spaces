@@ -53,7 +53,7 @@ apps/macos/.build/debug/spaces update --notes "Ready for review"
 apps/macos/.build/debug/spaces restart
 ```
 
-Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only the running app instance for that same profile before it relaunches.
+Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only the running app instance and terminal service for that same profile before it relaunches.
 
 For manual worktree-local shell sessions, export the same derived profile before launching the app, CLI, or E2E helper:
 
@@ -78,7 +78,7 @@ That installs `GhosttyKit.xcframework`, Ghostty resources, `libghostty-vt` heade
 - `apps/macos/.local/ghosttyvt/lib`
 
 The Ghostty fork is tracked as the submodule at `apps/macos/vendor/ghostty`. The parent repo's submodule pointer is the single source of truth for the Ghostty commit used by both `GhosttyKit.xcframework` and `libghostty-vt`.
-By default, `setup_ghostty.sh` reuses local artifacts only when `apps/macos/.local/ghostty-artifacts/manifest.json` matches the submodule SHA. Otherwise it downloads the Spaces-owned GitHub release named `ghostty-artifacts-<full-ghostty-sha>`.
+By default, `setup_ghostty.sh` reuses local artifacts only when `apps/macos/.local/ghostty-artifacts/manifest.json` matches the submodule SHA, setup script version, Zig version, and Xcode build version. Otherwise it downloads the Spaces-owned GitHub release named `ghostty-artifacts-<full-ghostty-sha>` and validates the same manifest fields before install. When a release artifact was built with a different Xcode build, setup exits before installing it; build locally with `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty` or publish artifacts from the matching Xcode.
 The setup flow finishes by running `apps/macos/scripts/verify_ghosttykit.sh`, which checks that the artifact declares and exports the embedded terminal APIs that Spaces uses for raw I/O, host rebinding, session state callbacks, renderer attachment, headless session creation, render-frame export, and mirror renderer surfaces. Passive-viewer attachment exports are not part of the required contract.
 
 When a Spaces branch depends on Ghostty fork work, edit and commit the fork change inside the submodule, push it to the fork's `spaces` branch, and update the parent repo's submodule pointer:
@@ -89,7 +89,7 @@ git -C apps/macos/vendor/ghostty push origin HEAD:spaces
 git add apps/macos/vendor/ghostty
 ```
 
-PR checks run `apps/macos/scripts/ensure_ghostty_artifacts.sh`, so existing `ghostty-artifacts-<sha>` releases are downloaded and validated before Swift verification starts. Same-repo PRs, manual PR-check runs, and pushes to `main` first run a non-cancelable trusted artifact publisher that builds from the pinned submodule and publishes a reusable release when the release is missing or incomplete; verification waits for that publisher and then downloads the artifact. Fork PRs build missing artifacts locally without publishing, and the main-push publisher creates the reusable release after merge. Trusted publish runs repair incomplete artifact releases by rebuilding and uploading the full asset set. After the release is present, refresh local artifacts and run the normal verification pass:
+PR checks run `apps/macos/scripts/ensure_ghostty_artifacts.sh`, so existing `ghostty-artifacts-<sha>` releases are downloaded and validated before Swift verification starts. Same-repo PRs, manual PR-check runs, and pushes to `main` first run a non-cancelable trusted artifact publisher that builds from the pinned submodule and publishes a reusable release when the release is missing or incomplete for that build environment; verification waits for that publisher and then downloads the artifact. Fork PRs build missing artifacts locally without publishing, and the main-push publisher creates the reusable release after merge. Trusted publish runs repair incomplete artifact releases by rebuilding and uploading the full asset set. After the release is present, refresh local artifacts and run the normal verification pass:
 
 ```bash
 git -C apps/macos/vendor/ghostty rev-parse HEAD
@@ -243,9 +243,22 @@ For the iOS simulator, a pairing link with `127.0.0.1` still works because the d
 For manual real-device verification of the iOS client:
 
 1. Connect the iPhone or iPad to the Mac, unlock it, trust the Mac if prompted, and enable Developer Mode on the device if iOS asks.
-2. Open `apps/ios/SpacesMobile.xcodeproj` in Xcode, select the `SpacesMobile` target, enable Automatically manage signing, and choose the Apple Developer team that should sign the app.
-3. If Xcode reports that `com.yogeshdhande.spacesmobile` cannot be signed by that team, stop there and widen the first-party bundle policy before changing the bundle identifier. The current bridge accepts only that bundle identifier for pairing and reconnect.
-4. Keep the Mac app and mobile bridge on the same `SPACES_DB_PATH`; the daemon bridge binds all IPv4 interfaces on port `47847` by default and persists a profile-specific fallback port if that port is already occupied.
+2. Create a local `.env` from the tracked sample and set `SPACES_IOS_DEVICE_UDID` to the physical-device UDID printed by `xcrun xctrace list devices`. The `.env` file is ignored by git.
+
+```bash
+cp .env.sample .env
+xcrun xctrace list devices
+$EDITOR .env
+```
+
+3. Run the device installer. It builds `SpacesMobile`, installs it on the configured device, and attempts to launch it; if the device is locked, unlock it and tap SpacesMobile or rerun the script.
+
+```bash
+scripts/install-ios-device.sh
+```
+
+4. If Xcode reports that `com.yogeshdhande.spacesmobile` cannot be signed by the selected team, stop there and widen the first-party bundle policy before changing the bundle identifier. The current bridge accepts only that bundle identifier for pairing and reconnect. Set `SPACES_IOS_DEVELOPMENT_TEAM` in `.env` when the command-line build should override the project signing team.
+5. Keep the Mac app and mobile bridge on the same `SPACES_DB_PATH`; the daemon bridge binds all IPv4 interfaces on port `47847` by default and persists a profile-specific fallback port if that port is already occupied.
 
 ```bash
 export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
@@ -255,8 +268,8 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal com
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces mobile status
 ```
 
-5. On the Mac, allow the incoming-network prompt if macOS shows one. In the Mac app, open Mobile Connection, open a pairing window, and scan the QR code or send the full pairing link to the device.
-6. Run the app from Xcode with the physical device selected as the destination. The first connection attempt should trigger the iOS local-network permission prompt; accept it so the app can reach the Mac bridge.
+6. On the Mac, allow the incoming-network prompt if macOS shows one. In the Mac app, open Mobile Connection, open a pairing window, and scan the QR code or send the full pairing link to the device.
+7. The first connection attempt should trigger the iOS local-network permission prompt; accept it so the app can reach the Mac bridge.
 
 For a disposable one-command demo stack that launches the macOS app, uses the daemon-hosted mobile bridge, pairs both the iPad and iPhone simulators, and opens the mobile app on each:
 
@@ -285,10 +298,12 @@ apps/macos/Tests/e2e_mobile.sh --scenario codex-resume-reopen
 apps/macos/Tests/e2e_mobile.sh --scenario roundtrip
 apps/macos/Tests/e2e_mobile.sh --scenario scrollback
 apps/macos/Tests/e2e_mobile.sh --scenario two-session
+apps/macos/Tests/e2e_mobile.sh --scenario ctrl-c-final-frame
+apps/macos/Tests/e2e_mobile.sh --scenario ctrl-c-final-frame-codex-survivor
 apps/macos/Tests/e2e_mobile.sh --scenario ownership-guard
 ```
 
-`codex` starts real Codex in a fresh Mac-owned terminal session and verifies iPhone takeover against the already-running simulator app. Codex scenarios build a generated Codex home inside the demo root by copying the current user's config, linking signed-in auth files, and marking the demo project trusted so the test exercises the TUI instead of the directory-trust prompt. If Codex shows its startup update prompt, the harness selects `Skip` and continues waiting for the TUI. `codex-resume-reopen` runs `codex resume 019e380a-9def-7852-9834-74c67b2da894`, takes over on iPhone, returns to the terminal list, and repeatedly reopens the same session. `roundtrip` drives the Mac/iPhone/Mac/iPhone/Mac ownership path with rendered-content assertions at each handoff. `scrollback` fills the Mac-owned terminal with long output, transfers ownership to iPhone, scrolls away from bottom, runs an owner command while still scrolled up, and checks the owner epoch and prompt rendering. `two-session` takes over two fresh terminal sessions through list navigation. `ownership-guard` exercises the mobile bridge ownership rules without UI automation.
+`codex` starts real Codex in a fresh Mac-owned terminal session and verifies iPhone takeover against the already-running simulator app. Codex scenarios build a generated Codex home inside the demo root by copying the current user's config, linking signed-in auth files, and marking the demo project trusted so the test exercises the TUI instead of the directory-trust prompt. If Codex shows its startup update prompt, the harness selects `Skip` and continues waiting for the TUI. `codex-resume-reopen` runs `codex resume 019e380a-9def-7852-9834-74c67b2da894`, takes over on iPhone, returns to the terminal list, and repeatedly reopens the same session. `roundtrip` drives the Mac/iPhone/Mac/iPhone/Mac ownership path with rendered-content assertions at each handoff. `scrollback` fills the Mac-owned terminal with long output, transfers ownership to iPhone, scrolls away from bottom, runs an owner command while still scrolled up, and checks the owner epoch and prompt rendering. `two-session` takes over two fresh terminal sessions through list navigation. `ctrl-c-final-frame` creates `interrupt-target` and `survivor-peer` process-style sessions, sends `ctrl+c` to `interrupt-target` from the iOS owner path, checks the persisted final Ghostty frame on iOS and Mac, and verifies the `survivor-peer` session remains running. `ctrl-c-final-frame-codex-survivor` uses the same interrupt path with a real Codex TUI as the survivor session. `ownership-guard` exercises the mobile bridge ownership rules without UI automation.
 
 Useful overrides:
 - `SPACES_MOBILE_CODEX_COMMAND='codex resume <thread-id>'` replaces the default `codex` startup command for the `codex` scenario.
@@ -392,7 +407,7 @@ That profiler waits for the built-in session summon metric instead of sleeping a
 
 ## Pre-commit Hook
 
-Git commits can use the repo hook in `.githooks/pre-commit`, which auto-formats staged Swift files under `apps/macos/Sources` and `apps/macos/Tests` before running lint and coverage.
+Git commits can use the repo hook in `.githooks/pre-commit`, which runs the canonical local verification path.
 
 Enable the repo-managed hooks once per clone:
 
@@ -412,11 +427,9 @@ Expected output:
 .githooks
 ```
 
-The pre-commit hook does two things:
-- runs `scripts/lint.sh`, which formats staged macOS Swift source and test files and then runs any additional lint checks
-- runs `scripts/coverage.sh`
+The pre-commit hook runs `scripts/verify.sh`, which formats staged macOS Swift source and test files, lints, builds, runs coverage, and runs iOS unit tests.
 
-Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](../.github/workflows/pr-checks.yml), which runs the same Swift lint/build/coverage flow plus the static website build.
+Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](../.github/workflows/pr-checks.yml), which runs the same Swift verification flow plus the static website build.
 
 ## Manual E2E
 

@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../../.. && pwd)"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/terminal_harness_lock.sh"
+source "$repo_root/scripts/spaces-profile-helpers.sh"
 spaces_app="${SPACES_APP:-$repo_root/apps/macos/.build/debug/SpacesApp}"
 spaces_cli="${SPACES_CLI:-$repo_root/apps/macos/.build/debug/spaces}"
 spacese2e="${SPACES_E2E:-$repo_root/apps/macos/.build/debug/spacese2e}"
@@ -230,6 +231,20 @@ prepare_demo_profile() {
   fi
 
   prepare_ghostty_demo_config
+}
+
+stop_existing_demo_profile_services() {
+  if [[ "$profile_mode" == "isolated" ]]; then
+    stop_terminal_service_for_runtime_dir "$spaces_runtime_dir" 5
+    return
+  fi
+
+  (
+    export HOME="$demo_home"
+    export SPACES_DB_PATH="$spaces_db_path"
+    export SPACES_RUNTIME_DIR="$spaces_runtime_dir"
+    spaces_profile_stop_terminal_service "$spaces_cli"
+  )
 }
 
 fail_if_existing_spaces_app() {
@@ -862,7 +877,6 @@ require_path "$ghostty_xcframework" "GhosttyKit.xcframework"
 require_path "$ghostty_resources" "Ghostty resources"
 validate_profile_mode
 fail_if_existing_spaces_app
-fail_if_bridge_port_in_use
 build_macos_debug_products
 require_executable "$spaces_app" "SpacesApp"
 require_executable "$spaces_cli" "spaces CLI"
@@ -881,6 +895,8 @@ ipad_app_stderr_log="$temp_root/ipad-app.stderr.log"
 iphone_app_stdout_log="$temp_root/iphone-app.stdout.log"
 iphone_app_stderr_log="$temp_root/iphone-app.stderr.log"
 prepare_demo_profile
+stop_existing_demo_profile_services
+fail_if_bridge_port_in_use
 
 ipad_udid="$(resolve_device_udid "$ipad_name")"
 iphone_udid="$(resolve_device_udid "$iphone_name")"

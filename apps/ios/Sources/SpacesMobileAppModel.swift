@@ -58,21 +58,24 @@ struct SpacesMobileE2EConfig {
     static var shared: Self { Self(environment: ProcessInfo.processInfo.environment) }
 
     let targetSessionID: String?
+    let secondarySessionID: String?
     let renderDumpPath: String?
     let eventLogPath: String?
 
     init(environment: [String: String]) {
         let fileConfig = Self.loadFileConfig(environment: environment)
         targetSessionID = Self.trimmed(environment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"]) ?? fileConfig?.sessionID
+        secondarySessionID = Self.trimmed(environment["SPACES_MOBILE_E2E_SECONDARY_SESSION_ID"]) ?? fileConfig?.secondarySessionID
         renderDumpPath = Self.trimmed(environment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"]) ?? fileConfig?.renderDumpPath
         eventLogPath = Self.trimmed(environment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"]) ?? fileConfig?.eventLogPath
     }
 
-    var isEnabled: Bool { targetSessionID != nil || renderDumpPath != nil || eventLogPath != nil }
+    var isEnabled: Bool { targetSessionID != nil || secondarySessionID != nil || renderDumpPath != nil || eventLogPath != nil }
 
     func matches(sessionID: String) -> Bool {
-        guard let targetSessionID else { return true }
-        return targetSessionID == sessionID
+        if let targetSessionID, targetSessionID == sessionID { return true }
+        if let secondarySessionID, secondarySessionID == sessionID { return true }
+        return targetSessionID == nil && secondarySessionID == nil
     }
 
     private static func trimmed(_ value: String?) -> String? {
@@ -97,6 +100,7 @@ struct SpacesMobileE2EConfig {
 
     private struct FileConfig: Decodable {
         let sessionID: String?
+        let secondarySessionID: String?
         let renderDumpPath: String?
         let eventLogPath: String?
     }

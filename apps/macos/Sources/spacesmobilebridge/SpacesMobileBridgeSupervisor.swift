@@ -57,8 +57,7 @@ import spacesmobilecore
     private func startRestartTimer() {
         restartTimer?.invalidate()
         let timer = Timer.scheduledTimer(withTimeInterval: restartInterval, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            MainActor.assumeIsolated { self.startBridgeIfNeeded() }
+            Task { @MainActor [weak self] in self?.startBridgeIfNeeded() }
         }
         RunLoop.main.add(timer, forMode: .common)
         restartTimer = timer
@@ -131,13 +130,9 @@ import spacesmobilecore
             let socketPath = try SpacesMobileBridgeControlClient.socketPath()
             let queue = DispatchQueue(label: "spaces.mobile.bridge.control")
             let createdServer = SpacesMobileBridgeControlServer(socketPath: socketPath, queue: queue) { [weak self] request in
-                DispatchQueue.main.sync {
-                    MainActor.assumeIsolated {
-                        guard let self else {
-                            return SpacesMobileBridgeControlResponse(ok: false, message: "Mobile bridge supervisor is unavailable.")
-                        }
-                        return self.handleControlRequest(request)
-                    }
+                Self.runOnMainActorSynchronously {
+                    guard let self else { return SpacesMobileBridgeControlResponse(ok: false, message: "Mobile bridge supervisor is unavailable.") }
+                    return self.handleControlRequest(request)
                 }
             }
             try createdServer.start()
@@ -204,7 +199,17 @@ import spacesmobilecore
         fputs("spaces-terminal-service: \(message)\n", stderr)
         fflush(stderr)
     }
+
+    private nonisolated static func runOnMainActorSynchronously<T: Sendable>(_ work: @escaping @MainActor () -> T) -> T {
+        if Thread.isMainThread { return MainActor.assumeIsolated { work() } }
+        let box = SpacesMobileBridgeMainActorSyncBox<T>()
+        DispatchQueue.main.sync { box.value = MainActor.assumeIsolated { work() } }
+        guard let value = box.value else { preconditionFailure("Mobile bridge main-actor work did not return a value.") }
+        return value
+    }
 }
+
+private final class SpacesMobileBridgeMainActorSyncBox<T>: @unchecked Sendable { var value: T? }
 
 @MainActor private final class SpacesMobileBridgeBonjourAdvertiser {
     private let serviceName: String
