@@ -3,6 +3,7 @@ import Foundation
 public struct RunningProcessRecord: Codable, Sendable {
     public let id: String
     public let workspaceID: String
+    public let templateID: String?
     public let templateName: String
     public let command: String
     public let runtimeTargetID: String?
@@ -16,12 +17,13 @@ public struct RunningProcessRecord: Codable, Sendable {
     public let exitedAt: String?
 
     public init(
-        id: String, workspaceID: String, templateName: String, command: String, runtimeTargetID: String? = nil, terminalApp: String? = nil,
-        terminalTarget: TerminalTargetRecord? = nil, pid: Int?, status: RunningProcessState, logPath: String?, lastOutputAt: String?,
-        startedAt: String?, exitedAt: String?
+        id: String, workspaceID: String, templateID: String? = nil, templateName: String, command: String, runtimeTargetID: String? = nil,
+        terminalApp: String? = nil, terminalTarget: TerminalTargetRecord? = nil, pid: Int?, status: RunningProcessState, logPath: String?,
+        lastOutputAt: String?, startedAt: String?, exitedAt: String?
     ) {
         self.id = id
         self.workspaceID = workspaceID
+        self.templateID = templateID
         self.templateName = templateName
         self.command = command
         self.runtimeTargetID = runtimeTargetID
@@ -36,10 +38,10 @@ public struct RunningProcessRecord: Codable, Sendable {
     }
 
     public init(
-        id: String, workspaceID: String, templateName: String, command: String, runtimeTargetID: String? = nil, terminalApp: String?, windowID: Int?,
-        terminalTrackingID: String? = nil, terminalNativeID: String? = nil, terminalContainerID: String? = nil, itermTabIndex: Int? = nil,
-        tmuxWindowID: String? = nil, pid: Int?, status: RunningProcessState, logPath: String?, lastOutputAt: String?, startedAt: String?,
-        exitedAt: String?
+        id: String, workspaceID: String, templateID: String? = nil, templateName: String, command: String, runtimeTargetID: String? = nil,
+        terminalApp: String?, windowID: Int?, terminalTrackingID: String? = nil, terminalNativeID: String? = nil, terminalContainerID: String? = nil,
+        itermTabIndex: Int? = nil, tmuxWindowID: String? = nil, pid: Int?, status: RunningProcessState, logPath: String?, lastOutputAt: String?,
+        startedAt: String?, exitedAt: String?
     ) {
         let resolvedTrackingID = terminalTrackingID ?? terminalNativeID ?? terminalContainerID ?? tmuxWindowID
         let terminalTarget: TerminalTargetRecord? =
@@ -47,22 +49,22 @@ public struct RunningProcessRecord: Codable, Sendable {
                 TerminalTargetRecord(runtimeTargetID: runtimeTargetID, windowID: windowID, trackingID: resolvedTrackingID)
             } else { nil }
         self.init(
-            id: id, workspaceID: workspaceID, templateName: templateName, command: command, runtimeTargetID: runtimeTargetID,
+            id: id, workspaceID: workspaceID, templateID: templateID, templateName: templateName, command: command, runtimeTargetID: runtimeTargetID,
             terminalApp: terminalApp, terminalTarget: terminalTarget, pid: pid, status: status, logPath: logPath, lastOutputAt: lastOutputAt,
             startedAt: startedAt, exitedAt: exitedAt)
     }
 
     public init(
-        id: String, workspaceID: String, templateName: String, command: String, terminalApp: String?, windowID: Int?,
+        id: String, workspaceID: String, templateID: String? = nil, templateName: String, command: String, terminalApp: String?, windowID: Int?,
         terminalTrackingID: String? = nil, terminalNativeID: String? = nil, terminalContainerID: String? = nil, itermTabIndex: Int? = nil,
         tmuxWindowID: String? = nil, pid: Int?, status: RunningProcessState, logPath: String?, lastOutputAt: String?, startedAt: String?,
         exitedAt: String?
     ) {
         self.init(
-            id: id, workspaceID: workspaceID, templateName: templateName, command: command, runtimeTargetID: nil, terminalApp: terminalApp,
-            windowID: windowID, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID, terminalContainerID: terminalContainerID,
-            itermTabIndex: itermTabIndex, tmuxWindowID: tmuxWindowID, pid: pid, status: status, logPath: logPath, lastOutputAt: lastOutputAt,
-            startedAt: startedAt, exitedAt: exitedAt)
+            id: id, workspaceID: workspaceID, templateID: templateID, templateName: templateName, command: command, runtimeTargetID: nil,
+            terminalApp: terminalApp, windowID: windowID, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID,
+            terminalContainerID: terminalContainerID, itermTabIndex: itermTabIndex, tmuxWindowID: tmuxWindowID, pid: pid, status: status,
+            logPath: logPath, lastOutputAt: lastOutputAt, startedAt: startedAt, exitedAt: exitedAt)
     }
 
     public var windowID: Int? { terminalTarget?.windowID }

@@ -105,26 +105,21 @@ extension SpacesYAMLDocument {
         public var name: String?
         public var command: String
         public var onExit: ProcessExitAction
-        public var executionMode: ProcessExecutionMode
 
-        public init(name: String? = nil, command: String, onExit: ProcessExitAction = .none, executionMode: ProcessExecutionMode = .direct) {
+        public init(name: String? = nil, command: String, onExit: ProcessExitAction = .none) {
             self.name = SpacesYAMLDocument.normalizedOptionalString(name)
             self.command = command
             self.onExit = onExit
-            self.executionMode = executionMode
         }
 
-        public init(_ template: ProcessTemplate) {
-            self.init(name: template.name, command: template.command, onExit: template.onExit, executionMode: template.executionMode)
-        }
+        public init(_ template: ProcessTemplate) { self.init(name: template.name, command: template.command, onExit: template.onExit) }
 
-        public var processTemplate: ProcessTemplate { ProcessTemplate(name: name, command: command, onExit: onExit, executionMode: executionMode) }
+        public var processTemplate: ProcessTemplate { ProcessTemplate(name: name, command: command, onExit: onExit) }
 
         private enum CodingKeys: String, CodingKey {
             case name
             case command
             case onExit = "on_exit"
-            case executionMode = "execution_mode"
         }
 
         public init(from decoder: any Decoder) throws {
@@ -132,7 +127,6 @@ extension SpacesYAMLDocument {
             name = SpacesYAMLDocument.normalizedOptionalString(try container.decodeIfPresent(String.self, forKey: .name))
             command = try container.decode(String.self, forKey: .command)
             onExit = try container.decodeIfPresent(ProcessExitAction.self, forKey: .onExit) ?? .none
-            executionMode = try container.decodeIfPresent(ProcessExecutionMode.self, forKey: .executionMode) ?? .direct
         }
 
         public func encode(to encoder: any Encoder) throws {
@@ -140,7 +134,6 @@ extension SpacesYAMLDocument {
             try container.encodeIfPresent(name, forKey: .name)
             try container.encode(command, forKey: .command)
             try container.encode(onExit, forKey: .onExit)
-            try container.encode(executionMode, forKey: .executionMode)
         }
     }
 

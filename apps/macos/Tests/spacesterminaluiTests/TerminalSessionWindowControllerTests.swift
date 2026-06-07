@@ -43,6 +43,10 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         var prepareRenderStateExportCount = 0
         var attachCount = 0
         var attachedModes: [TerminalAttachmentMode] = []
+        var recordedBindingActions: [String] = []
+        var handledKeySpecifiers: [String] = []
+        var handleKeyEventCallCount = 0
+        var searchDebugState = GhosttyTerminalSearchDebugState(isVisible: false, query: "", total: nil, selected: nil)
         var activeOwnerClientIDValue: String?
         var debugSurfaceRefreshRequestCount = 0
         func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
@@ -54,9 +58,11 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         func setFocused(_ focused: Bool, for clientID: String) { focusedStates.append((clientID, focused)) }
         func focusWindow(_ window: NSWindow?) { focusWindowCount += 1 }
         @discardableResult func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool {
-            _ = event
             _ = clientID
-            return false
+            handleKeyEventCallCount += 1
+            guard let keySpec = GhosttyMirrorTerminalView.remoteKeySpecifier(for: event) else { return false }
+            handledKeySpecifiers.append(keySpec)
+            return true
         }
         @discardableResult func synchronizeSurfaceGeometry() -> Bool {
             synchronizeSurfaceGeometryCount += 1
@@ -78,6 +84,19 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             pastedClipboard = true
             return true
         }
+        @discardableResult func performBindingAction(_ action: String) -> Bool {
+            recordedBindingActions.append(action)
+            switch action {
+            case "start_search": searchDebugState = .init(isVisible: true, query: searchDebugState.query, total: nil, selected: nil)
+            case "end_search": searchDebugState = .init(isVisible: false, query: "", total: nil, selected: nil)
+            case let queryAction where queryAction.hasPrefix("search:"):
+                searchDebugState = .init(
+                    isVisible: true, query: String(queryAction.dropFirst("search:".count)), total: searchDebugState.total,
+                    selected: searchDebugState.selected)
+            default: break
+            }
+            return true
+        }
         @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
             _ = scrollMods
             debugSurfaceRefreshRequestCount += 1
@@ -87,6 +106,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             debugSurfaceRefreshRequestCount += 1
             return true
         }
+        var debugSearchState: GhosttyTerminalSearchDebugState { searchDebugState }
         func debugVisibleSurfaceText() -> String? { debugVisibleSurfaceTextValue ?? snapshotTextValue }
     }
 
@@ -121,13 +141,24 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         return lines.joined(separator: "\n")
     }
 
+    @MainActor private func keyEvent(
+        keyCode: Int, characters: String, modifiers: NSEvent.ModifierFlags = .command, window: NSWindow? = nil,
+        charactersIgnoringModifiers: String? = nil
+    ) throws -> NSEvent {
+        try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: window?.windowNumber ?? 0, context: nil,
+                characters: characters, charactersIgnoringModifiers: charactersIgnoringModifiers ?? characters.lowercased(), isARepeat: false,
+                keyCode: UInt16(keyCode)))
+    }
+
     @MainActor private func makeGhosttyController(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, host: FakeGhosttySessionHost? = nil,
         performInitialRefresh: Bool = true, attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil, detachClientAction: (@Sendable (String) throws -> Void)? = nil,
         copySelectionAction: (@MainActor () -> Bool)? = nil, detachClientSynchronouslyOnClose: Bool = true,
         pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
-        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
         sessionHostProvider: (@MainActor @Sendable (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? =
             nil
     ) -> TerminalSessionWindowController {
@@ -157,6 +188,42 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertNotNil(controller.window)
         XCTAssertEqual(controller.window?.title, "Terminal session-1")
         XCTAssertEqual(controller.window?.tabbingMode, .disallowed)
+    }
+
+    @MainActor func testRuntimeToolbarShowsRightAlignedLifecycleControlsWithoutDuplicatedTitle() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var didRun = false
+        var didStop = false
+        var didRestart = false
+        let controller = TerminalSessionWindowController(sessionID: "session-controls", paths: .init(rootDirectory: root.path))
+
+        controller.setRuntimeControls(
+            TerminalSessionRuntimeControls(
+                title: "frontend", canRun: true, canStop: true, canRestart: true, onRun: { didRun = true }, onStop: { didStop = true },
+                onRestart: { didRestart = true }))
+
+        XCTAssertTrue(controller.debugShowsHeader)
+        XCTAssertTrue(controller.debugShowsRuntimeToolbar)
+        XCTAssertEqual(controller.debugRuntimeToolbarTitle, "frontend")
+        XCTAssertFalse(controller.debugShowsRuntimeToolbarTitle)
+        XCTAssertTrue(controller.debugShowsRuntimeRunButton)
+        XCTAssertTrue(controller.debugShowsRuntimeStopButton)
+        XCTAssertTrue(controller.debugShowsRuntimeRestartButton)
+        XCTAssertFalse(controller.debugShowsSummaryLabel)
+        XCTAssertFalse(controller.debugShowsStateLabel)
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertEqual(controller.debugRuntimeToolbarTrailingGap, 0, accuracy: 1)
+
+        controller.debugRunRuntimeToolbarAction()
+        controller.debugStopRuntimeToolbarAction()
+        controller.debugRestartRuntimeToolbarAction()
+
+        XCTAssertTrue(didRun)
+        XCTAssertTrue(didStop)
+        XCTAssertTrue(didRestart)
     }
 
     @MainActor func testShowAttachesClientAndCloseDetachesClient() throws {
@@ -312,6 +379,72 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(providerCallCount, 1)
         XCTAssertEqual(host.attachCount, 0)
         XCTAssertTrue(host.attachedModes.isEmpty)
+    }
+
+    @MainActor func testRuntimeNotificationDuringHostCreationDoesNotReenterHostResolution() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-host-notification-reentry"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "reentry", workingDirectory: "/tmp/reentry", shell: "/bin/zsh", command: nil,
+                createdAt: "2026-06-06T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .exited, updatedAt: "2026-06-06T00:00:01Z"),
+            paths: paths)
+        let host = FakeGhosttySessionHost()
+        host.hasSurface = false
+        var providerCallCount = 0
+
+        _ = makeGhosttyController(
+            sessionID: sessionID, paths: paths, preferredAttachmentMode: .viewer,
+            sessionHostProvider: { _, _ in
+                providerCallCount += 1
+                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+                return host
+            })
+        await Task.yield()
+
+        XCTAssertEqual(providerCallCount, 1)
+    }
+
+    @MainActor func testRuntimeNotificationDuringOwnerHostCreationDoesNotReenterAttachResolution() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-owner-host-notification-reentry"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "owner-reentry", workingDirectory: "/tmp/reentry", shell: "/bin/zsh",
+                command: nil, createdAt: "2026-06-06T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-06T00:00:01Z"),
+            paths: paths)
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        var providerCallCount = 0
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, preferredAttachmentMode: .owner, performInitialRefresh: false,
+            sessionHostProvider: { _, _ in
+                providerCallCount += 1
+                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+                return host
+            })
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-06-06T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-06-06T00:00:00Z")
+
+        controller.debugForceRefresh()
+
+        XCTAssertEqual(providerCallCount, 1)
+        XCTAssertEqual(host.attachCount, 1)
+        XCTAssertEqual(host.attachedModes, [.owner])
     }
 
     @MainActor func testShowRestoresPersistedWindowFrameForAttachmentMode() throws {
@@ -1186,7 +1319,245 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(pasteCalls, 1)
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.copy(_:)))))
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
-        XCTAssertFalse(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
+        XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
+    }
+
+    @MainActor func testGhosttyOwnerCommandKeyEquivalentsDispatchEditAndFindActions() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-command-edit", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-command-edit", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        let controller = makeGhosttyController(sessionID: "session-command-edit", paths: paths, host: host)
+        controller.show()
+
+        XCTAssertTrue(
+            controller.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_V, characters: "v", window: controller.window)) == true)
+        XCTAssertTrue(
+            controller.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_C, characters: "c", window: controller.window)) == true)
+        XCTAssertTrue(
+            controller.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_A, characters: "a", window: controller.window)) == true)
+        XCTAssertTrue(
+            controller.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_F, characters: "f", window: controller.window)) == true)
+        XCTAssertTrue(
+            controller.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_E, characters: "e", window: controller.window)) == true)
+        XCTAssertTrue(
+            controller.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_G, characters: "g", window: controller.window)) == true)
+        XCTAssertTrue(
+            controller.window?.performKeyEquivalent(
+                with: try keyEvent(keyCode: kVK_ANSI_G, characters: "G", modifiers: [.command, .shift], window: controller.window)) == true)
+
+        XCTAssertEqual(
+            host.recordedBindingActions,
+            ["copy_to_clipboard", "select_all", "start_search", "search_selection", "navigate_search:next", "navigate_search:previous"])
+        XCTAssertTrue(host.pastedClipboard)
+    }
+
+    @MainActor func testGhosttyOwnerControlCRemainsTerminalInput() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-control-c", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-control-c", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        let controller = makeGhosttyController(sessionID: "session-control-c", paths: paths, host: host)
+        controller.show()
+        controller.window?.makeKeyAndOrderFront(nil)
+        let event = try keyEvent(
+            keyCode: kVK_ANSI_C, characters: "\u{3}", modifiers: .control, window: controller.window, charactersIgnoringModifiers: "c")
+
+        XCTAssertFalse(controller.window?.performKeyEquivalent(with: event) == true)
+        controller.window?.sendEvent(event)
+
+        XCTAssertTrue(host.recordedBindingActions.isEmpty)
+        XCTAssertEqual(host.handledKeySpecifiers, ["ctrl+c"])
+    }
+
+    @MainActor func testGhosttyOwnerEscDismissesSearchWithoutSendingTerminalKey() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-search-esc", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-search-esc", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        host.searchDebugState = .init(isVisible: true, query: "needle", total: nil, selected: nil)
+        let controller = makeGhosttyController(sessionID: "session-search-esc", paths: paths, host: host)
+        controller.show()
+        controller.window?.makeKeyAndOrderFront(nil)
+        let event = try keyEvent(keyCode: kVK_Escape, characters: "\u{1b}", modifiers: [], window: controller.window)
+
+        controller.window?.sendEvent(event)
+
+        XCTAssertEqual(host.recordedBindingActions, ["end_search"])
+        XCTAssertEqual(host.debugSearchState.isVisible, false)
+    }
+
+    @MainActor func testGhosttyOwnerDoesNotForwardSearchFieldTypingToTerminal() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-search-field-typing", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-search-field-typing", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        host.searchDebugState = .init(isVisible: true, query: "", total: nil, selected: nil)
+        let controller = makeGhosttyController(sessionID: "session-search-field-typing", paths: paths, host: host)
+        controller.show()
+        controller.window?.makeKeyAndOrderFront(nil)
+        let fieldEditor = NSTextView(frame: NSRect(x: 0, y: 0, width: 80, height: 20))
+        fieldEditor.isFieldEditor = true
+        controller.window?.contentView?.addSubview(fieldEditor)
+        XCTAssertTrue(controller.window?.makeFirstResponder(fieldEditor) == true)
+
+        let typeEvent = try keyEvent(keyCode: kVK_ANSI_Z, characters: "z", modifiers: [], window: controller.window)
+        controller.window?.sendEvent(typeEvent)
+
+        XCTAssertEqual(host.handleKeyEventCallCount, 0)
+        XCTAssertTrue(host.recordedBindingActions.isEmpty)
+        XCTAssertTrue(host.debugSearchState.isVisible)
+
+        let escapeEvent = try keyEvent(keyCode: kVK_Escape, characters: "\u{1b}", modifiers: [], window: controller.window)
+        controller.window?.sendEvent(escapeEvent)
+
+        XCTAssertEqual(host.handleKeyEventCallCount, 0)
+        XCTAssertEqual(host.recordedBindingActions, ["end_search"])
+        XCTAssertEqual(host.debugSearchState.isVisible, false)
+    }
+
+    @MainActor func testGhosttyOwnerEscAndHideFindDismissSearchAfterExit() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-search-esc-exited", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-search-esc-exited", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        host.searchDebugState = .init(isVisible: true, query: "needle", total: nil, selected: nil)
+        let controller = makeGhosttyController(sessionID: "session-search-esc-exited", paths: paths, host: host)
+        controller.show()
+        controller.window?.makeKeyAndOrderFront(nil)
+
+        XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(TerminalSessionWindowController.hideFind(_:)))))
+        XCTAssertFalse(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(TerminalSessionWindowController.find(_:)))))
+
+        let event = try keyEvent(keyCode: kVK_Escape, characters: "\u{1b}", modifiers: [], window: controller.window)
+        controller.window?.sendEvent(event)
+
+        XCTAssertEqual(host.recordedBindingActions, ["end_search"])
+        XCTAssertEqual(host.debugSearchState.isVisible, false)
+
+        host.searchDebugState = .init(isVisible: true, query: "needle", total: nil, selected: nil)
+        host.recordedBindingActions.removeAll()
+
+        controller.hideFind(nil)
+
+        XCTAssertEqual(host.recordedBindingActions, ["end_search"])
+        XCTAssertEqual(host.debugSearchState.isVisible, false)
+    }
+
+    @MainActor func testGhosttyViewerDisablesActionsAndExitedOwnerKeepsReadOnlyShortcuts() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let viewerPaths = TerminalSessionPaths(rootDirectory: root.appendingPathComponent("viewer").path)
+        try FileManager.default.createDirectory(atPath: viewerPaths.rootDirectory, withIntermediateDirectories: true)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-viewer-disabled", backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: viewerPaths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-viewer-disabled", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: viewerPaths)
+        let owner = TerminalClient(id: "owner-client", kind: .localWindow, identity: .init(label: "Owner"), connectedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-viewer-disabled", client: owner, mode: .owner, paths: viewerPaths, attachedAt: "2026-05-09T00:00:00Z")
+        let viewerHost = FakeGhosttySessionHost()
+        viewerHost.hasSurface = false
+        let viewer = makeGhosttyController(
+            sessionID: "session-viewer-disabled", paths: viewerPaths, preferredAttachmentMode: .viewer, host: viewerHost,
+            attachClientAction: { _, _ in }, detachClientAction: { _ in })
+
+        XCTAssertFalse(viewer.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
+        XCTAssertFalse(viewer.validateUserInterfaceItem(ValidatedItem(action: #selector(TerminalSessionWindowController.find(_:)))))
+        XCTAssertFalse(viewer.validateUserInterfaceItem(ValidatedItem(action: #selector(TerminalSessionWindowController.useSelectionForFind(_:)))))
+
+        let exitedPaths = TerminalSessionPaths(rootDirectory: root.appendingPathComponent("exited").path)
+        try FileManager.default.createDirectory(atPath: exitedPaths.rootDirectory, withIntermediateDirectories: true)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-exited-disabled", backend: .ghosttyEmbedded, title: "exited", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: exitedPaths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-exited-disabled", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: exitedPaths)
+        let exitedHost = FakeGhosttySessionHost()
+        exitedHost.snapshotValue = ghosttySnapshot(text: "owner")
+        let exited = makeGhosttyController(sessionID: "session-exited-disabled", paths: exitedPaths, host: exitedHost)
+        exited.show()
+
+        XCTAssertTrue(exited.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.copy(_:)))))
+        XCTAssertTrue(exited.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
+        XCTAssertFalse(exited.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
+        XCTAssertFalse(exited.validateUserInterfaceItem(ValidatedItem(action: #selector(TerminalSessionWindowController.find(_:)))))
+        XCTAssertFalse(exited.validateUserInterfaceItem(ValidatedItem(action: #selector(TerminalSessionWindowController.findNext(_:)))))
+
+        XCTAssertTrue(exited.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_C, characters: "c", window: exited.window)) == true)
+        XCTAssertTrue(exited.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_A, characters: "a", window: exited.window)) == true)
+        XCTAssertFalse(exited.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_V, characters: "v", window: exited.window)) == true)
+        XCTAssertFalse(exited.window?.performKeyEquivalent(with: try keyEvent(keyCode: kVK_ANSI_F, characters: "f", window: exited.window)) == true)
+        XCTAssertEqual(exitedHost.recordedBindingActions, ["copy_to_clipboard", "select_all"])
     }
 
     @MainActor func testGhosttyOwnerPasteIsDisabledWhenSessionIsNotRunning() throws {
@@ -1440,6 +1811,35 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
     }
 
+    @MainActor func testFallbackTranscriptCopyStaysEnabledAfterExit() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-fallback-exited", backend: .ghosttyEmbedded, title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-fallback-exited", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.hasSurface = false
+        host.snapshotValue = ghosttySnapshot(text: "final transcript")
+        host.snapshotTextValue = "final transcript"
+        let controller = makeGhosttyController(sessionID: "session-fallback-exited", paths: paths, host: host)
+        controller.show()
+
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: final Ghostty render")
+        XCTAssertEqual(normalizedRenderedOutput(controller.debugRenderedOutput), "final transcript")
+        XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.copy(_:)))))
+        XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
+        XCTAssertFalse(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
+    }
+
     @MainActor func testFallbackTranscriptDisablesSmartTextEditingFeatures() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1497,11 +1897,13 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         let cleanup = expectation(description: "cleanup callback")
         var closedSessionID: String?
         var closedClientID: String?
+        var closedForTermination: Bool?
         let controller = TerminalSessionWindowController(
             sessionID: "session-5", paths: .init(rootDirectory: root.path),
-            onWindowClose: { sessionID, clientID in
+            onWindowClose: { sessionID, clientID, isTerminating in
                 closedSessionID = sessionID
                 closedClientID = clientID
+                closedForTermination = isTerminating
                 cleanup.fulfill()
             })
 
@@ -1511,6 +1913,23 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         wait(for: [cleanup], timeout: 1)
         XCTAssertEqual(closedSessionID, "session-5")
         XCTAssertEqual(closedClientID, expectedClientID)
+        XCTAssertEqual(closedForTermination, false)
+    }
+
+    @MainActor func testWindowCloseCallbackMarksSessionTerminationClose() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var closedForTermination: Bool?
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-termination-close", paths: .init(rootDirectory: root.path),
+            onWindowClose: { _, _, isTerminating in closedForTermination = isTerminating })
+
+        controller.closeForSessionTermination()
+        if closedForTermination == nil { controller.windowWillClose(Notification(name: NSWindow.willCloseNotification)) }
+
+        XCTAssertEqual(closedForTermination, true)
     }
 
     @MainActor func testGhosttyControllersRefreshOwnershipAfterTakeover() throws {

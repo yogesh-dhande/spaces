@@ -145,6 +145,12 @@ import spacesterminalcore
 
     public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
 
+    @discardableResult public func performBindingAction(_ action: String) -> Bool {
+        let permitsFinalRenderReadOnlyAction = !isInteractiveRuntimeStateForControl() && Self.isReadOnlyBindingAction(action)
+        guard attachedMode == .owner || permitsFinalRenderReadOnlyAction else { return false }
+        return terminalView.performBindingAction(action)
+    }
+
     @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
         guard isInteractiveRuntimeStateForControl() else { return false }
         return terminalView.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
@@ -157,11 +163,15 @@ import spacesterminalcore
     }
 
     public var debugSurfaceRefreshRequestCount: Int { 0 }
+    public var debugSearchState: GhosttyTerminalSearchDebugState { terminalView.debugSearchState }
     public func debugVisibleSurfaceText() -> String? {
         if let renderedSnapshotText = terminalView.renderedSnapshotText(), !renderedSnapshotText.isEmpty { return renderedSnapshotText }
         if let snapshot = currentSnapshot() { return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot) }
         return terminalView.snapshotText()
     }
+
+    func debugSetBindingActionHandler(_ handler: (@MainActor (String) -> Bool)?) { terminalView.debugBindingActionHandler = handler }
+    var debugRecordedBindingActions: [String] { terminalView.debugRecordedBindingActions }
 
     public var effectiveTitle: String {
         ensureStateStreamStartedIfNeeded()
@@ -205,7 +215,7 @@ import spacesterminalcore
         persistedFinalStateLoadInProgress = true
         persistedFinalStateLoaded = true
         defer { persistedFinalStateLoadInProgress = false }
-        applyRemoteState(payload)
+        applyRemoteState(payload, postNotifications: false)
         return true
     }
 
@@ -215,7 +225,14 @@ import spacesterminalcore
         return true
     }
 
-    private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
+    private static func isReadOnlyBindingAction(_ action: String) -> Bool {
+        switch action {
+        case "copy_to_clipboard", "select_all", "end_search": return true
+        default: return false
+        }
+    }
+
+    private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload, postNotifications: Bool = true) {
         if incomingPayload.runtimeState?.state.isInteractive == true { persistedFinalStateLoaded = false }
         let decodeStartedAt = Date()
         let incomingPayloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(incomingPayload).count) ?? 0
@@ -262,7 +279,7 @@ import spacesterminalcore
             "terminal_render_frame_payload_receive", target: "session=\(payload.sessionID)",
             elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
             detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
-        postLocalNotifications(for: payload)
+        if postNotifications { postLocalNotifications(for: payload) }
     }
 
     private func renderUpdateDropReason(for payload: GhosttyRemoteSessionStatePayload, decodedFrame: GhosttyRenderFrame?) -> String? {

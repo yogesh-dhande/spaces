@@ -78,6 +78,7 @@ private enum TerminalViewerRenderMode: String {
         }
     }
     private var isStopping = false
+    private var hasSentStopDetach = false
     private var hasAttachedToSession = false
     private var hasAttemptedAutomaticTakeover = false
     private var hasConfirmedOwnerInputReadiness = false
@@ -106,6 +107,7 @@ private enum TerminalViewerRenderMode: String {
     private static let ownershipSyncDebounce: Duration = .milliseconds(120)
     private static let postResizeStateSettleStep: Duration = .milliseconds(50)
     private static let postResizeStateSettleIterations = 6
+    private static let dismissalDetachTimeout: Duration = .seconds(3)
 
     init(
         session: SpacesMobileTerminalSessionSummary,
@@ -204,7 +206,25 @@ private enum TerminalViewerRenderMode: String {
     }
 
     func stop() {
+        guard let stopContext = beginStop() else { return }
         trace("stop")
+        Task {
+            await detachForStop(
+                using: stopContext.channel, shouldDetach: stopContext.shouldDetach, timeout: Self.dismissalDetachTimeout)
+        }
+    }
+
+    func prepareForBackNavigation() async {
+        guard let stopContext = beginStop() else { return }
+        trace("back_detach_begin")
+        await detachForStop(
+            using: stopContext.channel, shouldDetach: stopContext.shouldDetach, timeout: Self.dismissalDetachTimeout)
+        trace("back_detach_end")
+    }
+
+    private func beginStop() -> (channel: SpacesMobileBridgeCommandChannel, shouldDetach: Bool)? {
+        guard !hasSentStopDetach else { return nil }
+        hasSentStopDetach = true
         let shouldDetach = hasAttachedToSession && !isEndedState
         isStopping = true
         isAwaitingTakeoverConfirmation = false
@@ -235,13 +255,19 @@ private enum TerminalViewerRenderMode: String {
         isSynchronizingOwnership = false
         streamHandle?.cancel()
         streamHandle = nil
-        let currentChannel = commandChannel
-        Task {
-            if shouldDetach {
-                try? await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id)
+        return (commandChannel, shouldDetach)
+    }
+
+    private func detachForStop(using currentChannel: SpacesMobileBridgeCommandChannel, shouldDetach: Bool, timeout: Duration) async {
+        if shouldDetach {
+            do {
+                try await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id, timeout: timeout, commandChannel: currentChannel)
+                trace("detach_success")
+            } catch {
+                trace("detach_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
             }
-            await currentChannel.close()
         }
+        await currentChannel.close()
     }
 
     private func loadEndedState() async {
@@ -755,7 +781,7 @@ private enum TerminalViewerRenderMode: String {
         )
         isConnecting = false
         guard let refreshedState else { return false }
-        if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || refreshedState.runtimeState?.state.isInteractive == false {
+        if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
             isSessionUnavailable = false
             isAwaitingTakeoverConfirmation = false
             errorMessage = nil
@@ -771,6 +797,11 @@ private enum TerminalViewerRenderMode: String {
 
     private var isEndedState: Bool {
         let state = latestState?.runtimeState?.state ?? session.state
+        return Self.isEndedRuntimeState(state)
+    }
+
+    private static func isEndedRuntimeState(_ state: TerminalSessionState?) -> Bool {
+        guard let state else { return false }
         return state != .running && state != .starting
     }
 

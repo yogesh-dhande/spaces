@@ -480,6 +480,16 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             return SpacesMobileBridgeResponse(ok: true, message: "Paired iOS client.", issuedAuthToken: issuedToken)
         case "ping": return SpacesMobileBridgeResponse(ok: true, message: "pong")
         case "overview": return SpacesMobileBridgeResponse(ok: true, message: "Loaded mobile overview.", overview: try loadOverview())
+        case "workspaceCreateOptions": return try handleWorkspaceCreateOptionsRequest(request)
+        case "createWorkspace": return try handleCreateWorkspaceRequest(request)
+        case "openWorkspaceTerminal": return try handleOpenWorkspaceTerminalRequest(request)
+        case "stopWorkspaceTerminal": return try handleStopWorkspaceTerminalRequest(request)
+        case "runWorkspaceProcess": return try handleRunWorkspaceProcessRequest(request)
+        case "stopWorkspaceProcess": return try handleStopWorkspaceProcessRequest(request)
+        case "restartWorkspaceProcess": return try handleRestartWorkspaceProcessRequest(request)
+        case "runCodingAgent": return try handleRunCodingAgentRequest(request)
+        case "stopCodingAgent": return try handleStopCodingAgentRequest(request)
+        case "restartCodingAgent": return try handleRestartCodingAgentRequest(request)
         case "state": return try handleStateRequest(request)
         case "attach": return try handleTerminalControlRequest(request, command: "attach")
         case "detach": return try handleTerminalControlRequest(request, command: "detach")
@@ -540,15 +550,19 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
 
     private func loadOverview() throws -> SpacesMobileOverviewPayload {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let orchestrator = mobileOrchestrator(store: store)
         let projects = try store.projects()
         let workspaces = try projects.flatMap { project in
-            try store.workspaces(projectID: project.id).map { workspace in
-                SpacesMobileOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
+            try store.workspaces(projectID: project.id, includeArchived: false).map { workspace in
+                SpacesMobileOverviewBuilder.WorkspaceDescriptor(
+                    project: project, workspace: workspace, settings: try? orchestrator.workspaceSettings(workspaceID: workspace.id),
+                    runningProcesses: try store.runningProcesses(workspaceID: workspace.id),
+                    agentWindows: try store.agentWindows(workspaceID: workspace.id), windows: try store.windows(workspaceID: workspace.id))
             }
         }
         let sessions = try TerminalSessionCatalog.listLiveSessions()
         let workspaceRows = try loadWorkspaceTerminalRows(store: store, workspaces: workspaces)
-        return SpacesMobileOverviewBuilder.build(workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions)
+        return SpacesMobileOverviewBuilder.build(projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions)
     }
 
     private func loadWorkspaceTerminalRows(store: SQLiteStore, workspaces: [SpacesMobileOverviewBuilder.WorkspaceDescriptor]) throws
@@ -630,9 +644,17 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         }
     }
 
-    private func processSlotKey(_ record: RunningProcessRecord) -> String { "process:\(normalizedSlotName(record.templateName))" }
+    private func processSlotKey(_ record: RunningProcessRecord) -> String {
+        if let templateID = record.templateID?.trimmingCharacters(in: .whitespacesAndNewlines), !templateID.isEmpty {
+            return "process-id:\(templateID)"
+        }
+        return "process:\(normalizedSlotName(record.templateName))"
+    }
 
     private func agentSlotKey(_ record: AgentWindowRecord) -> String {
+        if let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
+            return "agent-id:\(claimedLauncherID)"
+        }
         let slotName = record.claimedLauncherName ?? record.label ?? record.id
         return "agent:\(normalizedSlotName(slotName))"
     }
@@ -661,6 +683,193 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
         return value
     }
+
+    private func mobileOrchestrator(store: SQLiteStore) -> WorkspaceOrchestrator {
+        WorkspaceOrchestrator(store: store, builtInTerminalWindowOpener: { _, _ in })
+    }
+
+    private func handleWorkspaceCreateOptionsRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let orchestrator = mobileOrchestrator(store: store)
+        let projects = try store.projects().map {
+            SpacesMobileProjectSummary(
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isCollapsed: $0.isCollapsed)
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        let selectedProjectID = normalizedString(request.projectID) ?? projects.first?.id
+        let branchOptions: [String]
+        if let selectedProjectID, let project = try store.project(id: selectedProjectID), project.isGitRepo {
+            branchOptions = try orchestrator.gitBranchOptions(projectID: selectedProjectID)
+        } else {
+            branchOptions = []
+        }
+        return SpacesMobileBridgeResponse(
+            ok: true, message: "Loaded workspace create options.",
+            workspaceCreateOptions: SpacesMobileWorkspaceCreateOptions(
+                projects: projects, selectedProjectID: selectedProjectID, branchOptions: branchOptions))
+    }
+
+    private func handleCreateWorkspaceRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let projectID = normalizedString(request.projectID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing project ID.")
+        }
+        guard let title = normalizedString(request.workspaceTitle) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing workspace title.")
+        }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let orchestrator = mobileOrchestrator(store: store)
+        let project = try store.project(id: projectID)
+        let workspace = try orchestrator.createWorkspace(
+            projectID: projectID, name: title, branch: normalizedString(request.branch), targetBranch: normalizedString(request.targetBranch),
+            directoryName: normalizedString(request.directoryName), runSetupScript: true, allowRemoteBranchLookup: true,
+            allowExistingBranchReuse: request.allowExistingBranchReuse)
+        let message = "Created workspace '\(workspace.title)'\(project.map { " in \($0.name)" } ?? "")."
+        return try refreshedMutationResponse(message: message, workspaceID: workspace.id)
+    }
+
+    private func handleOpenWorkspaceTerminalRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let workspaceID = normalizedString(request.workspaceID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing workspace ID.")
+        }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let sessionID = try mobileOrchestrator(store: store).openWorkspaceTerminal(workspaceID: workspaceID)
+        return try refreshedMutationResponse(message: "Opened workspace terminal.", workspaceID: workspaceID, sessionID: sessionID)
+    }
+
+    private func handleStopWorkspaceTerminalRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let workspaceID = normalizedString(request.workspaceID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing workspace ID.")
+        }
+        guard let sessionID = normalizedString(request.sessionID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing terminal session ID.")
+        }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard try mobileOrchestrator(store: store).stopAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID) else {
+            return try refreshedMutationResponse(message: "Workspace terminal was already stopped.", workspaceID: workspaceID)
+        }
+        return try refreshedMutationResponse(message: "Stopped workspace terminal.", workspaceID: workspaceID)
+    }
+
+    private func handleRunWorkspaceProcessRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let workspaceID = normalizedString(request.workspaceID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing workspace ID.")
+        }
+        guard let processKey = normalizedString(request.processKey) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing process key.")
+        }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        if let processTemplateID = normalizedString(request.processTemplateID) {
+            try mobileOrchestrator(store: store).runConfiguredProcess(
+                workspaceID: workspaceID, processTemplateID: processTemplateID, processKey: processKey)
+        } else {
+            try mobileOrchestrator(store: store).runConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
+        }
+        return try refreshedMutationResponse(message: "Ran process '\(processKey)'.", workspaceID: workspaceID)
+    }
+
+    private func handleStopWorkspaceProcessRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let workspaceID = normalizedString(request.workspaceID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing workspace ID.")
+        }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let processID = try resolvedRunningProcessID(request: request, store: store)
+        try mobileOrchestrator(store: store).stopWorkspaceProcess(workspaceID: workspaceID, processID: processID)
+        return try refreshedMutationResponse(message: "Stopped process.", workspaceID: workspaceID)
+    }
+
+    private func handleRestartWorkspaceProcessRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let workspaceID = normalizedString(request.workspaceID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing workspace ID.")
+        }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let processID = try resolvedRunningProcessID(request: request, store: store)
+        try mobileOrchestrator(store: store).restartWorkspaceProcess(workspaceID: workspaceID, processID: processID)
+        return try refreshedMutationResponse(message: "Restarted process.", workspaceID: workspaceID)
+    }
+
+    private func handleRunCodingAgentRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let workspaceID = normalizedString(request.workspaceID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing workspace ID.")
+        }
+        guard let agentName = normalizedString(request.agentName) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing coding agent name.")
+        }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let record =
+            if let agentLauncherID = normalizedString(request.agentLauncherID) {
+                try mobileOrchestrator(store: store).launchAgentLauncher(workspaceID: workspaceID, launcherID: agentLauncherID)
+            } else { try mobileOrchestrator(store: store).launchAgentLauncher(workspaceID: workspaceID, name: agentName) }
+        return try refreshedMutationResponse(
+            message: "Ran coding agent '\(agentName)'.", workspaceID: workspaceID,
+            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
+    }
+
+    private func handleStopCodingAgentRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let workspaceID = normalizedString(request.workspaceID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing workspace ID.")
+        }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard let agentID = try resolvedAgentID(request: request, store: store) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing coding agent ID.")
+        }
+        try mobileOrchestrator(store: store).stopCodingAgent(workspaceID: workspaceID, agentID: agentID)
+        return try refreshedMutationResponse(message: "Stopped coding agent.", workspaceID: workspaceID)
+    }
+
+    private func handleRestartCodingAgentRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let workspaceID = normalizedString(request.workspaceID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing workspace ID.")
+        }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard let agentID = try resolvedAgentID(request: request, store: store) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing coding agent ID.")
+        }
+        let record = try mobileOrchestrator(store: store).restartCodingAgent(workspaceID: workspaceID, agentID: agentID)
+        return try refreshedMutationResponse(
+            message: "Restarted coding agent.", workspaceID: workspaceID,
+            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
+    }
+
+    private func refreshedMutationResponse(message: String, workspaceID: String? = nil, sessionID: String? = nil) throws -> SpacesMobileBridgeResponse
+    { SpacesMobileBridgeResponse(ok: true, message: message, overview: try loadOverview(), workspaceID: workspaceID, sessionID: sessionID) }
+
+    private func resolvedRunningProcessID(request: SpacesMobileBridgeRequest, store: SQLiteStore) throws -> String {
+        if let processID = normalizedString(request.processID) { return processID }
+        if let workspaceID = normalizedString(request.workspaceID), let processTemplateID = normalizedString(request.processTemplateID),
+            let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.templateID == processTemplateID })
+        {
+            return process.id
+        }
+        guard let workspaceID = normalizedString(request.workspaceID), let processKey = normalizedString(request.processKey) else {
+            throw NSError(domain: "SpacesMobileBridgeServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Missing process ID."])
+        }
+        let normalizedProcessKey = normalizedRowKey(processKey)
+        guard
+            let process = try store.runningProcesses(workspaceID: workspaceID).first(where: {
+                normalizedRowKey($0.templateName) == normalizedProcessKey
+            })
+        else { throw NSError(domain: "SpacesMobileBridgeServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Running process not found."]) }
+        return process.id
+    }
+
+    private func resolvedAgentID(request: SpacesMobileBridgeRequest, store: SQLiteStore) throws -> String? {
+        if let agentID = normalizedString(request.agentID) { return agentID }
+        if let workspaceID = normalizedString(request.workspaceID), let agentLauncherID = normalizedString(request.agentLauncherID),
+            let agentID = try store.agentWindows(workspaceID: workspaceID).first(where: { $0.claimedLauncherID == agentLauncherID })?.id
+        {
+            return agentID
+        }
+        guard let workspaceID = normalizedString(request.workspaceID), let agentName = normalizedString(request.agentName) else { return nil }
+        let normalizedAgentName = normalizedRowKey(agentName)
+        return try store.agentWindows(workspaceID: workspaceID).first { normalizedRowKey($0.label ?? $0.claimedLauncherName) == normalizedAgentName }?
+            .id
+    }
+
+    private func normalizedString(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    private func normalizedRowKey(_ value: String?) -> String { normalizedString(value)?.lowercased() ?? "" }
 
     private func handleStateRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
         guard let sessionID = request.sessionID else { return SpacesMobileBridgeResponse(ok: false, message: "Missing session ID.") }

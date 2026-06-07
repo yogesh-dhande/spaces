@@ -11,6 +11,7 @@ import workspacecore
     // MARK: State
 
     private var launchers: [AgentLauncher]
+    private let showsRuntimeControls: Bool
     private let rowsStack = NSStackView()
     private let countLabel = NSTextField(labelWithString: "")
     private var rows: [AgentLauncherRowView] = []
@@ -43,11 +44,15 @@ import workspacecore
 
     /// Called when a live runtime agent row is clicked.
     var onFocusAgentWindow: ((AgentWindowRecord) -> Void)?
+    var onRunLauncher: ((AgentLauncher) -> Void)?
+    var onStopAgentWindow: ((AgentWindowRecord) -> Void)?
+    var onRestartAgentWindow: ((AgentWindowRecord) -> Void)?
 
     // MARK: Init
 
-    init(launchers: [AgentLauncher] = [], subtitle: String? = nil) {
+    init(launchers: [AgentLauncher] = [], subtitle: String? = nil, showsRuntimeControls: Bool = true) {
         self.launchers = launchers
+        self.showsRuntimeControls = showsRuntimeControls
 
         let container = NSStackView()
         container.orientation = .vertical
@@ -127,23 +132,38 @@ import workspacecore
 
         var status: AgentWindowStatus? { agentWindow?.status }
         var isEditable: Bool { launcher != nil }
+        var isRunning: Bool { agentWindow != nil }
+        var canRestart: Bool {
+            guard let agentWindow else { return false }
+            if launcher != nil { return true }
+            if agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false { return false }
+            return agentWindow.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
     }
 
     private func displayEntries() -> [DisplayEntry] {
         let configuredAgentNames = Set(launchers.map(\.name).map(AppKitController.normalizedRunRowName).filter { !$0.isEmpty })
+        let configuredAgentIDs = Set(launchers.map(\.id).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
         var entries: [DisplayEntry] = []
 
         for launcher in launchers {
             let normalizedName = AppKitController.normalizedRunRowName(launcher.name)
-            let matchedAgent =
-                normalizedName.isEmpty ? nil : agentWindows.first(where: { AppKitController.normalizedRunRowName($0.label ?? "") == normalizedName })
+            let matchedAgent = agentWindows.first(where: { agentWindow in
+                if agentWindow.claimedLauncherID == launcher.id { return true }
+                guard agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else { return false }
+                return !normalizedName.isEmpty && AppKitController.normalizedRunRowName(agentWindow.label ?? "") == normalizedName
+            })
             entries.append(
                 DisplayEntry(
                     launcher: launcher, agentWindow: matchedAgent, runtimeWindowTitle: matchedAgent.flatMap { runtimeWindowTitleByAgentID[$0.id] }))
         }
 
         for agentWindow in agentWindows {
-            guard !configuredAgentNames.contains(AppKitController.normalizedRunRowName(agentWindow.label ?? "")) else { continue }
+            if let claimedLauncherID = agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
+                if configuredAgentIDs.contains(claimedLauncherID) { continue }
+            } else {
+                guard !configuredAgentNames.contains(AppKitController.normalizedRunRowName(agentWindow.label ?? "")) else { continue }
+            }
             entries.append(DisplayEntry(launcher: nil, agentWindow: agentWindow, runtimeWindowTitle: runtimeWindowTitleByAgentID[agentWindow.id]))
         }
 
@@ -240,11 +260,24 @@ import workspacecore
                 focusAction = onFocusLauncher.map { handler in { handler(launcher) } }
             }
             let row = AgentLauncherRowView(
-                launcher: launcher, shortcut: shortcut, status: entry.status, isEditable: entry.isEditable, onFocus: focusAction)
+                launcher: launcher, shortcut: shortcut, status: entry.status, isEditable: entry.isEditable,
+                showsRuntimeControls: showsRuntimeControls, isRunning: entry.isRunning, canRestart: entry.canRestart, onFocus: focusAction)
             row.onBeginEdit = { [weak self] in self?.handleBeginEdit(row: row) }
             row.onCancel = { [weak self] in self?.handleCancel(row: row) }
             row.onSave = { [weak self] edited in self?.handleSave(row: row, edited: edited) }
             row.onRemove = { [weak self] in self?.handleRemove(row: row) }
+            row.onRun = { [weak self, launcher = entry.launcher] in
+                guard let launcher else { return }
+                self?.onRunLauncher?(launcher)
+            }
+            row.onStop = { [weak self, agentWindow = entry.agentWindow] in
+                guard let agentWindow else { return }
+                self?.onStopAgentWindow?(agentWindow)
+            }
+            row.onRestart = { [weak self, agentWindow = entry.agentWindow] in
+                guard let agentWindow else { return }
+                self?.onRestartAgentWindow?(agentWindow)
+            }
             rows.append(row)
             rowsStack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
@@ -332,24 +365,41 @@ import workspacecore
     var onCancel: (() -> Void)?
     var onSave: ((AgentLauncher) -> Void)?
     var onRemove: (() -> Void)?
+    var onRun: (() -> Void)?
+    var onStop: (() -> Void)?
+    var onRestart: (() -> Void)?
 
     private let body = NSStackView()
     private var collapsedContainer: NSStackView = NSStackView()
     private var editingContainer: NSStackView?
     private(set) var isEditing: Bool = false
     private let isEditable: Bool
+    private let showsRuntimeControls: Bool
+    private var isRunning: Bool
+    private let canRestart: Bool
 
     private let nameLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
+    private var runButton: NSButton?
+    private var stopButton: NSButton?
+    private var restartButton: NSButton?
+    private var editButton: NSButton?
+    private var removeButton: NSButton?
     private var currentLauncher: AgentLauncher
     private var onFocus: (() -> Void)?
 
     private var nameField: NSTextField?
     private var commandField: NSTextField?
 
-    init(launcher: AgentLauncher, shortcut: String? = nil, status: AgentWindowStatus? = nil, isEditable: Bool = true, onFocus: (() -> Void)? = nil) {
+    init(
+        launcher: AgentLauncher, shortcut: String? = nil, status: AgentWindowStatus? = nil, isEditable: Bool = true,
+        showsRuntimeControls: Bool = true, isRunning: Bool = false, canRestart: Bool = false, onFocus: (() -> Void)? = nil
+    ) {
         self.currentLauncher = launcher
         self.isEditable = isEditable
+        self.showsRuntimeControls = showsRuntimeControls
+        self.isRunning = isRunning
+        self.canRestart = canRestart
         self.onFocus = onFocus
         super.init(frame: .zero)
 
@@ -366,11 +416,17 @@ import workspacecore
         let shortcutView = shortcut.map { RowPrimitives.shortcutChip($0) }
         let collapsedLine = Self.makeCollapsedLine(
             shortcut: shortcutView, status: status, isEditable: isEditable, nameLabel: nameLabel, detailLabel: detailLabel,
+            onRun: { [weak self] in self?.onRun?() }, onStop: { [weak self] in self?.onStop?() }, onRestart: { [weak self] in self?.onRestart?() },
             onEdit: { [weak self] in self?.onBeginEdit?() }, onRemove: { [weak self] in self?.onRemove?() }, onFocus: onFocus)
         collapsedContainer = collapsedLine.row
         body.addArrangedSubview(collapsedContainer)
         collapsedContainer.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
         configureActionButtonsForHover(collapsedLine.actionButtons)
+        runButton = collapsedLine.runButton
+        stopButton = collapsedLine.stopButton
+        restartButton = collapsedLine.restartButton
+        editButton = collapsedLine.editButton
+        removeButton = collapsedLine.removeButton
         rebindCollapsedContent(from: launcher)
     }
 
@@ -385,6 +441,7 @@ import workspacecore
         detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
         detailLabel.textColor = Theme.muted
         detailLabel.lineBreakMode = .byTruncatingTail
+        updateRuntimeActionVisibility()
     }
 
     func enterEditing(prefill: AgentLauncher?, animated: Bool) {
@@ -444,12 +501,18 @@ import workspacecore
         return fromState.isEmpty ? (launcher?.name ?? "") : fromState
     }
 
-    func formSnapshot() -> AgentLauncher { AgentLauncher(name: nameField?.stringValue ?? "", command: commandField?.stringValue ?? "") }
+    func formSnapshot() -> AgentLauncher {
+        AgentLauncher(id: currentLauncher.id, name: nameField?.stringValue ?? "", command: commandField?.stringValue ?? "")
+    }
 
     private static func makeCollapsedLine(
         shortcut: NSView? = nil, status: AgentWindowStatus?, isEditable: Bool, nameLabel: NSTextField, detailLabel: NSTextField,
-        onEdit: @escaping () -> Void, onRemove: @escaping () -> Void, onFocus: (() -> Void)?
-    ) -> (row: NSStackView, actionButtons: [NSButton]) {
+        onRun: @escaping () -> Void, onStop: @escaping () -> Void, onRestart: @escaping () -> Void, onEdit: @escaping () -> Void,
+        onRemove: @escaping () -> Void, onFocus: (() -> Void)?
+    ) -> (
+        row: NSStackView, actionButtons: [NSButton], runButton: NSButton, stopButton: NSButton, restartButton: NSButton, editButton: NSButton?,
+        removeButton: NSButton?
+    ) {
         var contentViews: [NSView] = []
         contentViews.append(RowPrimitives.statusSlot(status.flatMap(makeStatusIndicator)))
         if let shortcut { contentViews.append(shortcut) }
@@ -475,28 +538,47 @@ import workspacecore
         contentArea.translatesAutoresizingMaskIntoConstraints = false
         if let onFocus { attachRowClickAction(to: contentArea, action: onFocus) }
 
-        if !isEditable {
-            let row = NSStackView(views: [contentArea])
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 10
-            row.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 14)
-            row.translatesAutoresizingMaskIntoConstraints = false
-            return (row, [])
+        let runButton = buildActionButton(symbol: "play.fill", tooltip: "Run") { _ in onRun() }
+        runButton.setAccessibilityIdentifier("agent-launcher-row-run")
+        let stopButton = buildActionButton(symbol: "stop.fill", tooltip: "Stop") { _ in onStop() }
+        stopButton.setAccessibilityIdentifier("agent-launcher-row-stop")
+        let restartButton = buildActionButton(symbol: "arrow.clockwise", tooltip: "Restart") { _ in onRestart() }
+        restartButton.setAccessibilityIdentifier("agent-launcher-row-restart")
+
+        var rowViews: [NSView] = [contentArea, runButton, stopButton, restartButton]
+        var actionButtons = [runButton, stopButton, restartButton]
+
+        let editButton: NSButton?
+        let removeButton: NSButton?
+        if isEditable {
+            let builtEditButton = buildActionButton(symbol: "pencil", tooltip: "Edit") { _ in onEdit() }
+            builtEditButton.setAccessibilityIdentifier("agent-launcher-row-edit")
+            let builtRemoveButton = buildActionButton(symbol: "trash", tooltip: "Remove") { _ in onRemove() }
+            builtRemoveButton.setAccessibilityIdentifier("agent-launcher-row-remove")
+            editButton = builtEditButton
+            removeButton = builtRemoveButton
+            rowViews.append(contentsOf: [builtEditButton, builtRemoveButton])
+            actionButtons.append(contentsOf: [builtEditButton, builtRemoveButton])
+        } else {
+            editButton = nil
+            removeButton = nil
         }
 
-        let editButton = buildActionButton(symbol: "pencil", tooltip: "Edit") { _ in onEdit() }
-        editButton.setAccessibilityIdentifier("agent-launcher-row-edit")
-        let removeButton = buildActionButton(symbol: "trash", tooltip: "Remove") { _ in onRemove() }
-        removeButton.setAccessibilityIdentifier("agent-launcher-row-remove")
-
-        let row = NSStackView(views: [contentArea, editButton, removeButton])
+        let row = NSStackView(views: rowViews)
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 10
         row.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 14)
         row.translatesAutoresizingMaskIntoConstraints = false
-        return (row, [editButton, removeButton])
+        return (row, actionButtons, runButton, stopButton, restartButton, editButton, removeButton)
+    }
+
+    private func updateRuntimeActionVisibility() {
+        runButton?.isHidden = !showsRuntimeControls || isRunning
+        stopButton?.isHidden = !showsRuntimeControls || !isRunning
+        restartButton?.isHidden = !showsRuntimeControls || !isRunning || !canRestart
+        editButton?.isHidden = !isEditable
+        removeButton?.isHidden = !isEditable
     }
 
     private static func makeStatusIndicator(_ status: AgentWindowStatus) -> NSView {
@@ -567,8 +649,8 @@ import workspacecore
 
         let target = AgentLauncherFormTarget()
         target.onCancel = onCancel
-        target.onSave = { [weak nameField, weak commandField] in
-            onSave(AgentLauncher(name: nameField?.stringValue ?? "", command: commandField?.stringValue ?? ""))
+        target.onSave = { [weak nameField, weak commandField, launcherID = launcher.id] in
+            onSave(AgentLauncher(id: launcherID, name: nameField?.stringValue ?? "", command: commandField?.stringValue ?? ""))
         }
         target.onTextChange = refreshSaveEnabled
         nameField.delegate = target

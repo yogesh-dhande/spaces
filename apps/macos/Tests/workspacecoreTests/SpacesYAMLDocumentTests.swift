@@ -17,9 +17,19 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         XCTAssertEqual(document.processes.first?.command, "npm run api")
         XCTAssertNil(document.processes.first?.name)
         XCTAssertEqual(document.processes.first?.onExit, ProcessExitAction.none)
-        XCTAssertEqual(document.processes.first?.executionMode, .direct)
         XCTAssertTrue(document.browserSessions.isEmpty)
         XCTAssertTrue(document.agentLaunchers.isEmpty)
+    }
+
+    func testDecodeIgnoresLegacyProcessExecutionMode() throws {
+        let document = try SpacesYAMLService.decode(
+            """
+            processes:
+              - command: npm run api
+                execution_mode: shell
+            """)
+
+        XCTAssertEqual(document.processes.first?.command, "npm run api")
     }
 
     func testDecodeTreatsMissingVersionAsVersionOne() throws {
@@ -43,7 +53,7 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         let project = ProjectRecord(
             id: "project-id", name: "Project", dir: "/tmp/project", isGitRepo: false, defaultBranch: nil, setupScript: "npm install",
             stopScript: "npm stop", ports: [PortDefinition(id: "port-id", name: "API_PORT")],
-            processes: [ProcessTemplate(id: "process-id", name: "api", command: "npm run api", onExit: .notify, executionMode: .shell)],
+            processes: [ProcessTemplate(id: "process-id", name: "api", command: "npm run api", onExit: .notify)],
             browserSessions: [BrowserSession(name: "app", url: "http://localhost:3000")],
             agentLaunchers: [AgentLauncher(name: "Codex", command: "codex")])
 
@@ -55,7 +65,7 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         XCTAssertTrue(yaml.contains("name: API_PORT"))
         XCTAssertTrue(yaml.contains("command: npm run api"))
         XCTAssertTrue(yaml.contains("on_exit: notify"))
-        XCTAssertTrue(yaml.contains("execution_mode: shell"))
+        XCTAssertFalse(yaml.contains("execution_mode"))
         XCTAssertTrue(yaml.contains("browser_sessions:"))
         XCTAssertTrue(yaml.contains("agent_launchers:"))
         XCTAssertFalse(yaml.contains("project-id"))
@@ -66,7 +76,7 @@ final class SpacesYAMLDocumentTests: XCTestCase {
     func testRoundTripPreservesSupportedFields() throws {
         let original = SpacesYAMLDocument(
             setupScript: "npm install", stopScript: "npm stop", ports: [.init(name: "API_PORT")],
-            processes: [.init(name: "api", command: "npm run api", onExit: .restart, executionMode: .shell)],
+            processes: [.init(name: "api", command: "npm run api", onExit: .restart)],
             browserSessions: [.init(name: "app", url: "http://localhost:3000")], agentLaunchers: [.init(name: "Codex", command: "codex")])
 
         let decoded = try SpacesYAMLService.decode(try SpacesYAMLService.encode(original))

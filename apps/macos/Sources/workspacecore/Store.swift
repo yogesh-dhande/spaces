@@ -71,12 +71,8 @@ public final class SQLiteStore {
             try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [project.id])
             for (index, process) in project.processes.enumerated() {
                 try execute(
-                    sql:
-                        "INSERT INTO project_processes(id, project_id, name, command, on_exit, execution_mode, order_index) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    bindings: [
-                        process.id, project.id, process.name ?? "", process.command, process.onExit.rawValue, process.executionMode.rawValue,
-                        String(index),
-                    ])
+                    sql: "INSERT INTO project_processes(id, project_id, name, command, on_exit, order_index) VALUES (?, ?, ?, ?, ?, ?)",
+                    bindings: [process.id, project.id, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
             }
             try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [project.id])
             for (index, session) in project.browserSessions.enumerated() {
@@ -87,8 +83,8 @@ public final class SQLiteStore {
             try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [project.id])
             for (index, launcher) in project.agentLaunchers.enumerated() {
                 try execute(
-                    sql: "INSERT INTO project_agent_launchers(project_id, name, command, order_index) VALUES (?, ?, ?, ?)",
-                    bindings: [project.id, launcher.name, launcher.command, String(index)])
+                    sql: "INSERT INTO project_agent_launchers(project_id, id, name, command, order_index) VALUES (?, ?, ?, ?, ?)",
+                    bindings: [project.id, launcher.id, launcher.name, launcher.command, String(index)])
             }
         }
     }
@@ -391,13 +387,9 @@ public final class SQLiteStore {
             for (index, process) in processes.enumerated() {
                 try execute(
                     sql: """
-                        INSERT INTO workspace_processes(id, workspace_id, name, command, on_exit, execution_mode, order_index)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                    bindings: [
-                        process.id, workspaceID, process.name ?? "", process.command, process.onExit.rawValue, process.executionMode.rawValue,
-                        String(index),
-                    ])
+                        INSERT INTO workspace_processes(id, workspace_id, name, command, on_exit, order_index)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """, bindings: [process.id, workspaceID, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
             }
         }
     }
@@ -405,7 +397,7 @@ public final class SQLiteStore {
     public func workspaceProcesses(workspaceID: String) throws -> [ProcessTemplate] {
         let rows = try queryRows(
             sql: """
-                SELECT id, name, command, on_exit, execution_mode
+                SELECT id, name, command, on_exit
                 FROM workspace_processes
                 WHERE workspace_id = ?
                 ORDER BY order_index
@@ -413,8 +405,7 @@ public final class SQLiteStore {
         return rows.map { row in
             let id = row[0].isEmpty ? UUID().uuidString : row[0]
             let name = row[1].isEmpty ? nil : row[1]
-            let mode = row.count > 4 ? (ProcessExecutionMode(rawValue: row[4]) ?? .direct) : .direct
-            return ProcessTemplate(id: id, name: name, command: row[2], onExit: ProcessExitAction(rawValue: row[3]) ?? .none, executionMode: mode)
+            return ProcessTemplate(id: id, name: name, command: row[2], onExit: ProcessExitAction(rawValue: row[3]) ?? .none)
         }
     }
 
@@ -444,9 +435,9 @@ public final class SQLiteStore {
             for (index, launcher) in launchers.enumerated() {
                 try execute(
                     sql: """
-                        INSERT INTO workspace_agent_launchers(workspace_id, name, command, order_index)
-                        VALUES (?, ?, ?, ?)
-                        """, bindings: [workspaceID, launcher.name, launcher.command, String(index)])
+                        INSERT INTO workspace_agent_launchers(workspace_id, id, name, command, order_index)
+                        VALUES (?, ?, ?, ?, ?)
+                        """, bindings: [workspaceID, launcher.id, launcher.name, launcher.command, String(index)])
             }
         }
     }
@@ -547,12 +538,12 @@ public final class SQLiteStore {
     public func workspaceAgentLaunchers(workspaceID: String) throws -> [AgentLauncher] {
         let rows = try queryRows(
             sql: """
-                SELECT name, command
+                SELECT id, name, command
                 FROM workspace_agent_launchers
                 WHERE workspace_id = ?
                 ORDER BY order_index
                 """, bindings: [workspaceID])
-        return rows.map { AgentLauncher(name: $0[0], command: $0[1]) }
+        return rows.map { AgentLauncher(id: $0[0].isEmpty ? UUID().uuidString : $0[0], name: $0[1], command: $0[2]) }
     }
 
     public func releaseWorkspacePorts(workspaceID: String) throws {
@@ -570,10 +561,11 @@ public final class SQLiteStore {
         try execute(
             sql: """
                     INSERT INTO running_processes(
-                      id, workspace_id, template_name, command, runtime_target_id, terminal_session_id, pid, status, log_path, last_output_at, started_at, exited_at
+                      id, workspace_id, template_id, template_name, command, runtime_target_id, terminal_session_id, pid, status, log_path, last_output_at, started_at, exited_at
                     )
-                    VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
+                      template_id = COALESCE(excluded.template_id, running_processes.template_id),
                       template_name = excluded.template_name,
                       command = excluded.command,
                       runtime_target_id = excluded.runtime_target_id,
@@ -586,9 +578,9 @@ public final class SQLiteStore {
                       exited_at = excluded.exited_at
                 """,
             bindings: [
-                runningProcess.id, runningProcess.workspaceID, runningProcess.templateName, runningProcess.command, resolvedRuntimeTargetID ?? "",
-                terminalSessionID ?? "", runningProcess.pid.map(String.init) ?? "", runningProcess.status.rawValue, runningProcess.logPath ?? "",
-                runningProcess.lastOutputAt ?? "", runningProcess.startedAt ?? "", runningProcess.exitedAt ?? "",
+                runningProcess.id, runningProcess.workspaceID, runningProcess.templateID ?? "", runningProcess.templateName, runningProcess.command,
+                resolvedRuntimeTargetID ?? "", terminalSessionID ?? "", runningProcess.pid.map(String.init) ?? "", runningProcess.status.rawValue,
+                runningProcess.logPath ?? "", runningProcess.lastOutputAt ?? "", runningProcess.startedAt ?? "", runningProcess.exitedAt ?? "",
             ])
     }
 
@@ -598,6 +590,7 @@ public final class SQLiteStore {
                 SELECT
                   rp.id,
                   rp.workspace_id,
+                  COALESCE(rp.template_id, ''),
                   rp.template_name,
                   rp.command,
                   COALESCE(rp.runtime_target_id, ''),
@@ -801,16 +794,14 @@ public final class SQLiteStore {
 
     public func appConfig() throws -> AppConfig {
         let editor = try setting(key: SettingsKey.appEditor).flatMap { EditorPreference(rawValue: $0) }
-        let processShell = try setting(key: SettingsKey.appProcessShell).flatMap(ProcessShell.init(rawValue:)) ?? .zsh
         let start = try setting(key: SettingsKey.appPortRangeStart).flatMap(Int.init) ?? 20000
         let end = try setting(key: SettingsKey.appPortRangeEnd).flatMap(Int.init) ?? 30000
         let portRange = (start <= 0 || end <= 0 || end <= start) ? PortRange(start: 20000, end: 30000) : PortRange(start: start, end: end)
-        return AppConfig(editor: editor, portRange: portRange, processShell: processShell)
+        return AppConfig(editor: editor, portRange: portRange)
     }
 
     public func setAppConfig(_ config: AppConfig) throws {
         try setSetting(key: SettingsKey.appEditor, value: config.editor?.rawValue)
-        try setSetting(key: SettingsKey.appProcessShell, value: config.processShell.rawValue)
         try setSetting(key: SettingsKey.appPortRangeStart, value: String(config.portRange.start))
         try setSetting(key: SettingsKey.appPortRangeEnd, value: String(config.portRange.end))
     }
@@ -824,9 +815,9 @@ public final class SQLiteStore {
             try execute(
                 sql: """
                         INSERT INTO agent_sessions(
-                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, claimed_launcher_name, created_at, updated_at
+                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, claimed_launcher_id, claimed_launcher_name, created_at, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
                         ON CONFLICT(id) DO UPDATE SET
                           workspace_id = excluded.workspace_id,
                           provider = excluded.provider,
@@ -835,12 +826,14 @@ public final class SQLiteStore {
                           runtime_target_id = excluded.runtime_target_id,
                           terminal_session_id = COALESCE(excluded.terminal_session_id, agent_sessions.terminal_session_id),
                           session_key = excluded.session_key,
+                          claimed_launcher_id = COALESCE(excluded.claimed_launcher_id, agent_sessions.claimed_launcher_id),
                           claimed_launcher_name = excluded.claimed_launcher_name,
                           updated_at = excluded.updated_at
                     """,
                 bindings: [
                     record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.status.rawValue, runtimeTargetID ?? "",
-                    terminalSessionID ?? "", record.sessionKey ?? "", record.claimedLauncherName ?? "", record.createdAt, record.updatedAt,
+                    terminalSessionID ?? "", record.sessionKey ?? "", record.claimedLauncherID ?? "", record.claimedLauncherName ?? "",
+                    record.createdAt, record.updatedAt,
                 ])
         }
     }
@@ -861,6 +854,7 @@ public final class SQLiteStore {
                   COALESCE(runtime_targets.tracking_id, ''),
                   COALESCE(agent_sessions.terminal_session_id, ''),
                   COALESCE(agent_sessions.session_key, ''),
+                  COALESCE(agent_sessions.claimed_launcher_id, ''),
                   COALESCE(agent_sessions.claimed_launcher_name, ''),
                   agent_sessions.status,
                   agent_sessions.created_at,
@@ -890,6 +884,7 @@ public final class SQLiteStore {
                       COALESCE(runtime_targets.tracking_id, ''),
                       COALESCE(agent_sessions.terminal_session_id, ''),
                       COALESCE(agent_sessions.session_key, ''),
+                      COALESCE(agent_sessions.claimed_launcher_id, ''),
                       COALESCE(agent_sessions.claimed_launcher_name, ''),
                       agent_sessions.status,
                       agent_sessions.created_at,
@@ -919,6 +914,7 @@ public final class SQLiteStore {
                   COALESCE(runtime_targets.tracking_id, ''),
                   COALESCE(agent_sessions.terminal_session_id, ''),
                   COALESCE(agent_sessions.session_key, ''),
+                  COALESCE(agent_sessions.claimed_launcher_id, ''),
                   COALESCE(agent_sessions.claimed_launcher_name, ''),
                   agent_sessions.status,
                   agent_sessions.created_at,
@@ -963,17 +959,17 @@ public final class SQLiteStore {
     }
 
     private func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
-        guard row.count >= 16 else { return nil }
+        guard row.count >= 17 else { return nil }
         guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
         let terminalSessionID = row[10].isEmpty ? nil : row[10]
-        let status = AgentWindowStatus(rawValue: row[13]) ?? .idle
+        let status = AgentWindowStatus(rawValue: row[14]) ?? .idle
         let terminalTarget = decodeTerminalTarget(
             runtimeTargetID: row[4], app: row[5].isEmpty && terminalSessionID != nil ? TerminalHost.spaces.appName : row[5], name: row[6],
             detail: row[7], windowID: row[8], trackingID: row[9].isEmpty ? row[10] : row[9])
         return AgentWindowRecord(
             id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], runtimeTargetID: row[4].isEmpty ? nil : row[4],
-            terminalTarget: terminalTarget, sessionKey: row[11].isEmpty ? nil : row[11], claimedLauncherName: row[12].isEmpty ? nil : row[12],
-            status: status, createdAt: row[14], updatedAt: row[15])
+            terminalTarget: terminalTarget, sessionKey: row[11].isEmpty ? nil : row[11], claimedLauncherID: row[12].isEmpty ? nil : row[12],
+            claimedLauncherName: row[13].isEmpty ? nil : row[13], status: status, createdAt: row[15], updatedAt: row[16])
     }
 
     private func spacesAgentTerminalSessionID(_ record: AgentWindowRecord) -> String? {
@@ -1030,19 +1026,18 @@ public final class SQLiteStore {
         let portRows = try queryRows(sql: "SELECT id, name FROM project_port_definitions WHERE project_id = ? ORDER BY order_index", bindings: [id])
         let ports = portRows.map { row in PortDefinition(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1]) }
         let processes = try queryRows(
-            sql: "SELECT id, name, command, on_exit, execution_mode FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
+            sql: "SELECT id, name, command, on_exit FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in
             ProcessTemplate(
                 id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1].isEmpty ? nil : row[1], command: row[2],
-                onExit: ProcessExitAction(rawValue: row[3]) ?? .none,
-                executionMode: row.count > 4 ? (ProcessExecutionMode(rawValue: row[4]) ?? .direct) : .direct)
+                onExit: ProcessExitAction(rawValue: row[3]) ?? .none)
         }
         let browserSessions = try queryRows(
             sql: "SELECT name, url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in BrowserSession(name: row[0].isEmpty ? nil : row[0], url: row[1].isEmpty ? nil : row[1]) }
         let agentLaunchers = try queryRows(
-            sql: "SELECT name, command FROM project_agent_launchers WHERE project_id = ? ORDER BY order_index", bindings: [id]
-        ).map { row in AgentLauncher(name: row[0], command: row[1]) }
+            sql: "SELECT id, name, command FROM project_agent_launchers WHERE project_id = ? ORDER BY order_index", bindings: [id]
+        ).map { row in AgentLauncher(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1], command: row[2]) }
         return ProjectRecord(
             id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4], isCollapsed: row[5] == "1",
             setupScript: row[6].isEmpty ? nil : row[6], stopScript: row[7].isEmpty ? nil : row[7], ports: ports, processes: processes,
@@ -1058,16 +1053,17 @@ public final class SQLiteStore {
     }
 
     private func decodeRunningProcess(row: [String]) -> RunningProcessRecord? {
-        guard row.count >= 17 else { return nil }
-        let terminalSessionID = row[10].isEmpty ? nil : row[10]
-        let terminalApp = row[5].isEmpty && terminalSessionID != nil ? TerminalHost.spaces.appName : row[5]
+        guard row.count >= 18 else { return nil }
+        let terminalSessionID = row[11].isEmpty ? nil : row[11]
+        let terminalApp = row[6].isEmpty && terminalSessionID != nil ? TerminalHost.spaces.appName : row[6]
         let terminalTarget = decodeTerminalTarget(
-            runtimeTargetID: row[4], app: terminalApp, name: row[6], detail: row[7], windowID: row[8], trackingID: row[9].isEmpty ? row[10] : row[9])
+            runtimeTargetID: row[5], app: terminalApp, name: row[7], detail: row[8], windowID: row[9], trackingID: row[10].isEmpty ? row[11] : row[10]
+        )
         return RunningProcessRecord(
-            id: row[0], workspaceID: row[1], templateName: row[2], command: row[3], runtimeTargetID: row[4].isEmpty ? nil : row[4],
-            terminalApp: terminalApp.isEmpty ? nil : terminalApp, terminalTarget: terminalTarget, pid: Int(row[11]),
-            status: RunningProcessState(rawValue: row[12]) ?? .running, logPath: row[13].isEmpty ? nil : row[13],
-            lastOutputAt: row[14].isEmpty ? nil : row[14], startedAt: row[15].isEmpty ? nil : row[15], exitedAt: row[16].isEmpty ? nil : row[16])
+            id: row[0], workspaceID: row[1], templateID: row[2].isEmpty ? nil : row[2], templateName: row[3], command: row[4],
+            runtimeTargetID: row[5].isEmpty ? nil : row[5], terminalApp: terminalApp.isEmpty ? nil : terminalApp, terminalTarget: terminalTarget,
+            pid: Int(row[12]), status: RunningProcessState(rawValue: row[13]) ?? .running, logPath: row[14].isEmpty ? nil : row[14],
+            lastOutputAt: row[15].isEmpty ? nil : row[15], startedAt: row[16].isEmpty ? nil : row[16], exitedAt: row[17].isEmpty ? nil : row[17])
     }
 
     private func spacesTerminalSessionID(terminalApp: String?, terminalTrackingID: String?) -> String? {

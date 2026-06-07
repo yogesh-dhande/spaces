@@ -44,7 +44,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/processes",
     title: "Processes",
     summary:
-      "Run servers, workers, and coding agents alongside each workspace with explicit Direct or Shell execution modes, including direct-mode Spaces variable interpolation.",
+      "Run servers, workers, and coding agents alongside each workspace as terminal-style shell commands with named-port and Spaces directory variables.",
   },
   {
     href: "/docs/browser-sessions",

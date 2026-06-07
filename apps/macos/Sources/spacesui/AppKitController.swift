@@ -342,6 +342,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let surfaceRows: Int?
         let windowIsKey: Bool?
         let firstResponderTypeName: String?
+        let searchVisible: Bool?
+        let searchQuery: String?
+        let searchTotal: Int?
+        let searchSelected: Int?
+    }
+
+    struct TerminalRuntimeControlDescriptor: Equatable {
+        enum Kind: Equatable {
+            case process
+            case codingAgent
+            case workspaceTerminal
+        }
+
+        let kind: Kind
+        let workspaceID: String
+        let sessionID: String
+        let title: String
+        let processID: String?
+        let processTemplateID: String?
+        let processKey: String?
+        let agentID: String?
+        let agentLauncherID: String?
+        let agentLauncherName: String?
+        let canRun: Bool
+        let canStop: Bool
+        let canRestart: Bool
     }
 
     enum WindowFocusRequest: Sendable {
@@ -487,7 +513,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 Self.dispatchBuiltInTerminalWindowActionOnMainThread { self?.focusTerminalSessionWindow(sessionID: sessionID, requestID: requestID) }
             },
             builtInTerminalWindowCloser: { [weak self] sessionID in
-                Self.dispatchBuiltInTerminalWindowActionOnMainThread { self?.closeTerminalSessionWindows(sessionID: sessionID) }
+                Self.dispatchBuiltInTerminalWindowActionOnMainThread {
+                    self?.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: true)
+                }
             }, builtInTerminalSessionTerminator: Self.terminateBuiltInTerminalSession,
             builtInTerminalSessionLauncher: Self.launchServiceBuiltInTerminalSession)
     }
@@ -815,16 +843,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             forName: IPCNotification.closeTerminalSessionWindow, object: ipcNotificationObject, queue: .main
         ) { [weak self] notification in
             guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
-            Task { @MainActor [weak self, sessionID] in
+            let sessionIsTerminating =
+                (notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? Bool)
+                ?? ((notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? String) == "true")
+            Task { @MainActor [weak self, sessionID, sessionIsTerminating] in
                 guard let self else { return }
-                self.closeTerminalSessionWindows(sessionID: sessionID)
+                self.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: sessionIsTerminating)
             }
         }
     }
 
     private func setupDumpTerminalSessionWindowStateIPCObserver() {
         dumpTerminalSessionWindowStateIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.dumpTerminalSessionWindowState, object: nil, queue: .main
+            forName: IPCNotification.dumpTerminalSessionWindowState, object: ipcNotificationObject, queue: .main
         ) { [weak self] notification in
             guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
             guard let outputPath = notification.userInfo?[IPCNotification.outputPathUserInfoKey] as? String else { return }
@@ -861,7 +892,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput, summary: debugState?.summary,
             state: debugState?.state, showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
             didClose: debugState?.didCloseWindow, surfaceColumns: debugState?.surfaceColumns, surfaceRows: debugState?.surfaceRows,
-            windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName)
+            windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
+            searchVisible: debugState?.searchVisible, searchQuery: debugState?.searchQuery, searchTotal: debugState?.searchTotal,
+            searchSelected: debugState?.searchSelected)
         writeTerminalSessionWindowStateDump(payload, to: outputPath)
     }
 
@@ -904,10 +937,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false,
                     attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
                     onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
-                    onWindowClose: { [weak self] sessionID, clientID in
+                    onWindowClose: { [weak self] sessionID, clientID, sessionIsTerminating in
                         if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
-                        self?.removeTerminalSessionWindowController(sessionID: sessionID, clientID: clientID)
-                    },
+                        self?.removeTerminalSessionWindowController(
+                            sessionID: sessionID, clientID: clientID, sessionIsTerminating: sessionIsTerminating)
+                    }, runtimeControlsProvider: { [weak self] sessionID in self?.terminalRuntimeControls(forSessionID: sessionID) },
                     sessionHostProvider: { launchConfiguration, paths in
                         Self.terminalSessionHost(launchConfiguration: launchConfiguration, paths: paths)
                     })
@@ -915,6 +949,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 controller = created
                 reusedExistingWindow = false
             }
+            controller.setRuntimeControls(terminalRuntimeControls(forSessionID: sessionID))
             controller.show(requestID: requestID, route: reusedExistingWindow ? "reuse_existing_window" : "create_window")
             if mode == .owner { controller.requestOwnershipIfNeeded() }
             logPerfMetric(
@@ -990,6 +1025,205 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return (controller, "existing_window")
     }
 
+    private func terminalRuntimeControls(forSessionID sessionID: String) -> TerminalSessionRuntimeControls? {
+        guard let descriptor = terminalRuntimeControlDescriptor(forSessionID: sessionID),
+            descriptor.canRun || descriptor.canStop || descriptor.canRestart
+        else { return nil }
+        let runAction: (@MainActor @Sendable () -> Void)?
+        if descriptor.canRun {
+            runAction = { @MainActor @Sendable [weak self, descriptor] in
+                guard let self else { return }
+                self.runTerminalRuntime(descriptor)
+            }
+        } else {
+            runAction = nil
+        }
+        let stopAction: (@MainActor @Sendable () -> Void)?
+        if descriptor.canStop {
+            stopAction = { @MainActor @Sendable [weak self, descriptor] in
+                guard let self else { return }
+                self.stopTerminalRuntime(descriptor)
+            }
+        } else {
+            stopAction = nil
+        }
+        let restartAction: (@MainActor @Sendable () -> Void)?
+        if descriptor.canRestart {
+            restartAction = { @MainActor @Sendable [weak self, descriptor] in
+                guard let self else { return }
+                self.restartTerminalRuntime(descriptor)
+            }
+        } else {
+            restartAction = nil
+        }
+        return TerminalSessionRuntimeControls(
+            title: descriptor.title, canRun: descriptor.canRun, canStop: descriptor.canStop, canRestart: descriptor.canRestart, onRun: runAction,
+            onStop: stopAction, onRestart: restartAction)
+    }
+
+    private func terminalRuntimeControlDescriptor(forSessionID sessionID: String) -> TerminalRuntimeControlDescriptor? {
+        guard let workspaceID = try? orchestrator.workspaceIDForTerminalSession(sessionID) else { return nil }
+        return Self.terminalRuntimeControlDescriptor(
+            sessionID: sessionID, workspaceID: workspaceID, settings: try? orchestrator.workspaceSettings(workspaceID: workspaceID),
+            runningProcesses: (try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? [],
+            agentWindows: (try? orchestrator.agentWindows(workspaceID: workspaceID)) ?? [],
+            trackedWindows: (try? orchestrator.windows(workspaceID: workspaceID)) ?? [],
+            isSessionRunning: Self.terminalSessionIsRunning(sessionID: sessionID))
+    }
+
+    static func terminalRuntimeControlDescriptor(
+        sessionID: String, workspaceID: String, settings: WorkspaceSettings?, runningProcesses: [RunningProcessRecord],
+        agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord], isSessionRunning: Bool
+    ) -> TerminalRuntimeControlDescriptor? {
+        guard let normalizedSessionID = normalizedTerminalSessionID(sessionID) else { return nil }
+        if let process = runningProcesses.first(where: { terminalSessionID(for: $0) == normalizedSessionID }) {
+            let template = configuredProcessTemplate(for: process, settings: settings)
+            let title = trimmedNonEmpty(template?.name) ?? trimmedNonEmpty(process.templateName) ?? "Process"
+            let processKey = trimmedNonEmpty(template?.name) ?? trimmedNonEmpty(process.templateName)
+            let isRunning = process.status != .exited && isSessionRunning
+            return TerminalRuntimeControlDescriptor(
+                kind: .process, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: process.id,
+                processTemplateID: template?.id, processKey: processKey, agentID: nil, agentLauncherID: nil, agentLauncherName: nil,
+                canRun: template != nil && !isRunning, canStop: true, canRestart: template != nil)
+        }
+
+        if let agent = agentWindows.first(where: { terminalSessionID(for: $0) == normalizedSessionID }) {
+            let launcher = configuredAgentLauncher(for: agent, settings: settings)
+            let windowTitle = terminalWindowTitle(for: agent, trackedWindows: trackedWindows)
+            let title = trimmedNonEmpty(launcher?.name) ?? codingAgentDisplayName(label: agent.label, runtimeWindowTitle: windowTitle)
+            let isRunning = agent.status != .done && isSessionRunning
+            return TerminalRuntimeControlDescriptor(
+                kind: .codingAgent, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil, processTemplateID: nil,
+                processKey: nil, agentID: agent.id, agentLauncherID: launcher?.id, agentLauncherName: launcher?.name,
+                canRun: launcher != nil && !isRunning, canStop: true, canRestart: launcher != nil)
+        }
+
+        let title =
+            trackedWindows.first(where: { terminalSessionID(for: $0) == normalizedSessionID }).flatMap {
+                trimmedNonEmpty($0.name) ?? trimmedNonEmpty($0.detail)
+            } ?? "Terminal"
+        return TerminalRuntimeControlDescriptor(
+            kind: .workspaceTerminal, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil, processTemplateID: nil,
+            processKey: nil, agentID: nil, agentLauncherID: nil, agentLauncherName: nil, canRun: false, canStop: true, canRestart: false)
+    }
+
+    private static func configuredProcessTemplate(for process: RunningProcessRecord, settings: WorkspaceSettings?) -> ProcessTemplate? {
+        guard let settings else { return nil }
+        if let templateID = trimmedNonEmpty(process.templateID) { return settings.processes.first(where: { $0.id == templateID }) }
+        guard let processKey = trimmedNonEmpty(process.templateName).map(normalizedRunRowName) else { return nil }
+        return settings.processes.first { normalizedRunRowName($0.name ?? "") == processKey }
+    }
+
+    private static func configuredAgentLauncher(for agent: AgentWindowRecord, settings: WorkspaceSettings?) -> AgentLauncher? {
+        guard let settings else { return nil }
+        if let launcherID = trimmedNonEmpty(agent.claimedLauncherID) { return settings.agentLaunchers.first(where: { $0.id == launcherID }) }
+        let candidateNames = [agent.claimedLauncherName, agent.label].compactMap(trimmedNonEmpty)
+        guard let launcherName = candidateNames.first.map(normalizedRunRowName) else { return nil }
+        return settings.agentLaunchers.first { normalizedRunRowName($0.name) == launcherName }
+    }
+
+    private static func terminalWindowTitle(for agent: AgentWindowRecord, trackedWindows: [WindowRecord]) -> String? {
+        guard let key = terminalSessionID(for: agent) else { return nil }
+        return trackedWindows.first(where: { terminalSessionID(for: $0) == key }).flatMap { trimmedNonEmpty($0.name) ?? trimmedNonEmpty($0.detail) }
+    }
+
+    private static func terminalSessionID(for process: RunningProcessRecord) -> String? {
+        normalizedTerminalSessionID(process.terminalNativeID ?? process.terminalTrackingID)
+    }
+
+    private static func terminalSessionID(for agent: AgentWindowRecord) -> String? {
+        normalizedTerminalSessionID(agent.terminalNativeID ?? agent.terminalTrackingID)
+    }
+
+    private static func terminalSessionID(for window: WindowRecord) -> String? {
+        normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID)
+    }
+
+    private static func normalizedTerminalSessionID(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    private static func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    private static func terminalSessionIsRunning(sessionID: String) -> Bool {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+            let state = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        else { return true }
+        return state.state.isInteractive
+    }
+
+    private func runTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
+        performTerminalRuntimeMutation(metric: "terminal_runtime_run", descriptor: descriptor) {
+            switch descriptor.kind {
+            case .process:
+                guard let processKey = descriptor.processKey else { throw WorkspaceError.invalidArgument(message: "Configured process not found.") }
+                if let templateID = descriptor.processTemplateID {
+                    try orchestrator.runConfiguredProcess(workspaceID: descriptor.workspaceID, processTemplateID: templateID, processKey: processKey)
+                } else {
+                    try orchestrator.runConfiguredProcess(workspaceID: descriptor.workspaceID, processKey: processKey)
+                }
+            case .codingAgent:
+                if let launcherID = descriptor.agentLauncherID {
+                    _ = try orchestrator.launchAgentLauncher(workspaceID: descriptor.workspaceID, launcherID: launcherID)
+                } else if let launcherName = descriptor.agentLauncherName {
+                    _ = try orchestrator.launchAgentLauncher(workspaceID: descriptor.workspaceID, name: launcherName)
+                } else {
+                    throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
+                }
+            case .workspaceTerminal: throw WorkspaceError.invalidArgument(message: "Workspace terminals do not support Run.")
+            }
+        }
+    }
+
+    private func stopTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
+        performTerminalRuntimeMutation(metric: "terminal_runtime_stop", descriptor: descriptor) {
+            switch descriptor.kind {
+            case .process:
+                guard let processID = descriptor.processID else { return }
+                try orchestrator.stopWorkspaceProcess(workspaceID: descriptor.workspaceID, processID: processID)
+            case .codingAgent:
+                guard let agentID = descriptor.agentID else { return }
+                try orchestrator.stopCodingAgent(workspaceID: descriptor.workspaceID, agentID: agentID)
+            case .workspaceTerminal:
+                _ = try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: descriptor.workspaceID, sessionID: descriptor.sessionID)
+            }
+        }
+    }
+
+    private func restartTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
+        performTerminalRuntimeMutation(metric: "terminal_runtime_restart", descriptor: descriptor) {
+            switch descriptor.kind {
+            case .process:
+                guard let processID = descriptor.processID else { return }
+                try orchestrator.restartWorkspaceProcess(workspaceID: descriptor.workspaceID, processID: processID)
+            case .codingAgent:
+                guard let agentID = descriptor.agentID else { return }
+                _ = try orchestrator.restartCodingAgent(workspaceID: descriptor.workspaceID, agentID: agentID)
+            case .workspaceTerminal: throw WorkspaceError.invalidArgument(message: "Workspace terminals do not support Restart.")
+            }
+        }
+    }
+
+    private func performTerminalRuntimeMutation(metric: String, descriptor: TerminalRuntimeControlDescriptor, _ operation: () throws -> Void) {
+        let startedAt = Date()
+        do {
+            try operation()
+            logPerfMetric(
+                metric, target: "workspace=\(descriptor.workspaceID) session=\(descriptor.sessionID)",
+                elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true, detail: "kind=\(descriptor.kind)")
+            reloadData()
+        } catch {
+            logPerfMetric(
+                metric, target: "workspace=\(descriptor.workspaceID) session=\(descriptor.sessionID)",
+                elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false, detail: "kind=\(descriptor.kind)")
+            showError(error)
+        }
+    }
+
     static func activeOwnerClientID(paths: TerminalSessionPaths) -> String? {
         guard let ownerAttachment = try? TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner }) else {
             return nil
@@ -1006,27 +1240,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return activeAttachments.isEmpty
     }
 
-    private func removeTerminalSessionWindowController(sessionID: String, clientID: String) {
+    private func removeTerminalSessionWindowController(sessionID: String, clientID: String, sessionIsTerminating: Bool) {
         guard let controller = terminalSessionWindowControllers[sessionID] else { return }
         guard controller.clientID == clientID else { return }
         terminalSessionWindowControllers.removeValue(forKey: sessionID)
-        terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
+        guard !sessionIsTerminating else { return }
+        stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID)
     }
 
-    private func terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: String, now: Date = Date()) {
+    private func stopBuiltInTerminalSessionClosedByUser(sessionID: String) {
+        guard !keepsTerminalSessionsRunningDuringTermination else { return }
+        do { if try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID) { requestSidebarReload() } } catch { showError(error) }
+    }
+
+    private func terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: String, now: Date = Date()) {
         let workspaceID = try? orchestrator.workspaceIDForTerminalSession(sessionID)
-        guard let workspaceID else { return }
-        let isConfiguredProcessSession = ((try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? []).contains {
-            ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
-        }
+        let sessionOwnsTrackedRuntime =
+            workspaceID.map { workspaceID in
+                let processOwnsSession = ((try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? []).contains {
+                    ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
+                }
+                let agentOwnsSession = ((try? orchestrator.agentWindows(workspaceID: workspaceID)) ?? []).contains {
+                    ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
+                }
+                return processOwnsSession || agentOwnsSession
+            } ?? false
         let paths = try? TerminalSessionPaths.forSession(id: sessionID)
         guard
             Self.shouldTerminateAdHocBuiltInTerminalSession(
-                paths: paths, isConfiguredProcessSession: isConfiguredProcessSession,
+                paths: paths, isConfiguredProcessSession: sessionOwnsTrackedRuntime,
                 isAppTerminatingAndKeepingSessions: keepsTerminalSessionsRunningDuringTermination, now: now)
         else { return }
-        try? TerminalService.terminateSession(id: sessionID)
-        if (try? orchestrator.removeAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
+        if (try? orchestrator.stopAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
     }
 
     private func logWorkspaceDetailIPC(_ message: String) {
@@ -1102,7 +1347,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func handleTerminalAttachmentStateDidChange(sessionID: String) {
         guard terminalSessionWindowControllers[sessionID] == nil else { return }
-        terminateAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
+        terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
     }
 
     private func startPeriodicWorkspaceWindowRefresh() {
@@ -2177,9 +2422,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
         let changedProcessNames = updated.compactMap { updatedTemplate -> String? in
             guard let previousTemplate = previousByID[updatedTemplate.id] else { return nil }
-            guard previousTemplate.command != updatedTemplate.command || previousTemplate.executionMode != updatedTemplate.executionMode else {
-                return nil
-            }
+            guard previousTemplate.command != updatedTemplate.command else { return nil }
             let trimmedUpdatedName = updatedTemplate.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !trimmedUpdatedName.isEmpty { return trimmedUpdatedName }
             let trimmedPreviousName = previousTemplate.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -2207,6 +2450,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         -> [ResolvedCodingAgentRunEntry]
     {
         let configuredAgentNames = Set(configuredAgentLaunchers.map(\.name).map(normalizedRunRowName).filter { !$0.isEmpty })
+        let configuredAgentIDs = Set(configuredAgentLaunchers.map(\.id).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
         var entries: [ResolvedCodingAgentRunEntry] = []
 
         // Configured coding agents always own the first slots in the Coding Agents
@@ -2215,12 +2459,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for launcher in configuredAgentLaunchers {
             let normalizedName = normalizedRunRowName(launcher.name)
             guard !normalizedName.isEmpty else { continue }
-            let matchedAgent = agentWindows.first(where: { normalizedRunRowName($0.label ?? "") == normalizedName })
+            let matchedAgent = agentWindows.first(where: { agentWindow in
+                if agentWindow.claimedLauncherID == launcher.id { return true }
+                guard agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else { return false }
+                return normalizedRunRowName(agentWindow.label ?? "") == normalizedName
+            })
             entries.append(ResolvedCodingAgentRunEntry(launcher: launcher, agentWindow: matchedAgent))
         }
 
         for agentWindow in agentWindows {
-            guard !configuredAgentNames.contains(normalizedRunRowName(agentWindow.label ?? "")) else { continue }
+            if let claimedLauncherID = agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
+                if configuredAgentIDs.contains(claimedLauncherID) { continue }
+            } else {
+                guard !configuredAgentNames.contains(normalizedRunRowName(agentWindow.label ?? "")) else { continue }
+            }
             entries.append(ResolvedCodingAgentRunEntry(launcher: nil, agentWindow: agentWindow))
         }
 
@@ -2530,7 +2782,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let editMenuItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(.separator())
+        let findItem = editMenu.addItem(withTitle: "Find", action: #selector(TerminalSessionWindowController.find(_:)), keyEquivalent: "f")
+        findItem.tag = NSTextFinder.Action.showFindInterface.rawValue
+        let findNextItem = editMenu.addItem(
+            withTitle: "Find Next", action: #selector(TerminalSessionWindowController.findNext(_:)), keyEquivalent: "g")
+        findNextItem.tag = NSTextFinder.Action.nextMatch.rawValue
+        let findPreviousItem = editMenu.addItem(
+            withTitle: "Find Previous", action: #selector(TerminalSessionWindowController.findPrevious(_:)), keyEquivalent: "g")
+        findPreviousItem.keyEquivalentModifierMask = [.command, .shift]
+        findPreviousItem.tag = NSTextFinder.Action.previousMatch.rawValue
+        let useSelectionForFindItem = editMenu.addItem(
+            withTitle: "Use Selection for Find", action: #selector(TerminalSessionWindowController.useSelectionForFind(_:)), keyEquivalent: "e")
+        useSelectionForFindItem.tag = NSTextFinder.Action.setSearchString.rawValue
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
@@ -3691,33 +3957,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         editorPopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
         editorPopUp.setAccessibilityIdentifier("settings-editor")
 
-        let processShellPopUp = NSPopUpButton()
-        processShellPopUp.translatesAutoresizingMaskIntoConstraints = false
-        for shell in ProcessShell.allCases {
-            processShellPopUp.addItem(withTitle: shell.displayName)
-            processShellPopUp.itemArray.last?.representedObject = shell
-        }
-        if let currentShell = configCache?.processShell,
-            let item = processShellPopUp.itemArray.first(where: { ($0.representedObject as? ProcessShell) == currentShell })
-        {
-            processShellPopUp.select(item)
-        }
-        processShellPopUp.setAccessibilityIdentifier("settings-process-shell")
-        processShellPopUp.target = self
-        processShellPopUp.action = #selector(processShellChanged(_:))
-        processShellPopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
         var editorContentViews: [NSView] = [
             settingsLabeledField(
-                name: "Preferred editor", hint: "Opened when you use the editor shortcut from inside a workspace", control: editorPopUp),
-            settingsLabeledField(
-                name: "Shell for shell-mode processes", hint: "Applies only when a process row uses Shell execution mode", control: processShellPopUp),
+                name: "Preferred editor", hint: "Opened when you use the editor shortcut from inside a workspace", control: editorPopUp)
         ]
         if let current = currentEditor, !options.contains(where: { $0.preference == current }) {
             let note = helpTextLabel("Saved editor \"\(editorDisplayName(current))\" is not installed.")
             editorContentViews.append(note)
         }
-        let editorCard = formSectionCard(icon: "square.and.pencil", title: "Editor & shell", contentViews: editorContentViews)
+        let editorCard = formSectionCard(icon: "square.and.pencil", title: "Editor", contentViews: editorContentViews)
         stack.addArrangedSubview(editorCard)
         constrainFormFieldToFillWidth(editorCard, in: stack)
 
@@ -3990,7 +4238,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let browserSessionsSection = BrowserSessionsSection(
             sessions: fullProject?.browserSessions ?? [], subtitle: "Optional names with URL prefixes to open automatically.")
         let agentLaunchersSection = AgentLaunchersSection(
-            launchers: fullProject?.agentLaunchers ?? [], subtitle: "Named interactive coding agents that open in the built-in Spaces terminal.")
+            launchers: fullProject?.agentLaunchers ?? [], subtitle: "Named interactive coding agents that open in the built-in Spaces terminal.",
+            showsRuntimeControls: false)
 
         setupScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
         stopScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
@@ -3999,10 +4248,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             self?.presentProjectPortRemoveConfirmation(port: port, confirm: confirm)
         }
         processesSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
-        processesSection.validateProcess = { [weak self, portsSection] process in
-            try self?.orchestrator.validateProcessTemplate(
-                process, allowedVariableNames: self?.orchestrator.directProcessVariableNamesForValidation(portDefinitions: portsSection.currentPorts))
-        }
+        processesSection.validateProcess = { [weak self] process in try self?.orchestrator.validateProcessTemplate(process) }
         processesSection.presentValidationError = { [weak self] error in self?.showError(error) }
         processesSection.presentRemoveConfirmation = { [weak self] process, confirm in
             self?.presentProjectProcessRemoveConfirmation(process: process, confirm: confirm)
@@ -4304,7 +4550,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let portsSection = PortsSection(subtitle: "Named ports allocated per workspace, available as env vars.")
         let processesSection = ProcessesSection(subtitle: "Commands that run inside each workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(subtitle: "Browser windows opened automatically on launch.")
-        let agentLaunchersSection = AgentLaunchersSection(subtitle: "Interactive coding agents that open in the built-in Spaces terminal.")
+        let agentLaunchersSection = AgentLaunchersSection(
+            subtitle: "Interactive coding agents that open in the built-in Spaces terminal.", showsRuntimeControls: false)
 
         // --- Source section: segmented control on top, input below ---
         let localSourceSection = NSStackView()
@@ -4889,10 +5136,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let runningProcesses = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
         let runningProcessIDByName = Dictionary(uniqueKeysWithValues: runningProcesses.map { (Self.processRuntimeKey(name: $0.templateName), $0.id) })
         let section = ProcessesSection(processes: config.processes)
-        section.validateProcess = { [weak self] process in
-            try self?.orchestrator.validateProcessTemplate(
-                process, allowedVariableNames: self?.orchestrator.directProcessVariableNamesForValidation(portDefinitions: config.ports))
-        }
+        section.validateProcess = { [weak self] process in try self?.orchestrator.validateProcessTemplate(process) }
         section.presentValidationError = { [weak self] error in self?.showError(error) }
         section.onCommit = { [weak self] updated in
             guard let self else { return }
@@ -4980,7 +5224,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let fallback = Self.terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
             let shortcut = windowShortcutByListIndex[windowListIndex].map(windowShortcutBadgeText(index:))
             return ProcessesSection.SupplementalRuntimeRow(
-                id: window.id, label: fallback.label, detail: fallback.detail, shortcut: shortcut, status: .idle,
+                id: window.id, label: fallback.label, detail: fallback.detail, shortcut: shortcut, status: .running,
                 onFocus: { [weak self] in
                     guard let self else { return }
                     Task { @MainActor [weak self] in
@@ -4998,7 +5242,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let names = processNames.joined(separator: ", ")
         alert.messageText = processNames.count == 1 ? "Restart running process?" : "Restart running processes?"
         alert.informativeText =
-            "Changing the command or execution mode for \(names) requires an immediate restart. Choose Restart to apply the new launch behavior now, or Cancel Changes to keep the existing configuration."
+            "Changing the command for \(names) requires an immediate restart. Choose Restart to apply the new command now, or Cancel Changes to keep the existing configuration."
         alert.alertStyle = .warning
         alert.addButton(withTitle: processNames.count == 1 ? "Restart Process" : "Restart Processes")
         alert.addButton(withTitle: "Cancel Changes")
@@ -5059,6 +5303,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { $0.agentLaunchers = updated }
                 reloadData()
             } catch { showError(error) }
+        }
+        section.onRunLauncher = { [weak self] launcher in
+            guard let self else { return }
+            do {
+                _ = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: launcher.name)
+                reloadData()
+            } catch {
+                reloadData()
+                showError(error)
+            }
+        }
+        section.onStopAgentWindow = { [weak self] agentWindow in
+            guard let self else { return }
+            do {
+                try orchestrator.stopCodingAgent(workspaceID: workspace.id, agentID: agentWindow.id)
+                reloadData()
+            } catch {
+                reloadData()
+                showError(error)
+            }
+        }
+        section.onRestartAgentWindow = { [weak self] agentWindow in
+            guard let self else { return }
+            do {
+                try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: agentWindow.id)
+                reloadData()
+            } catch {
+                reloadData()
+                showError(error)
+            }
         }
         var identityToIndex: [String: Int] = [:]
         var shortcutMap: [String: String] = [:]
@@ -6776,12 +7050,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let preference = sender.selectedItem?.representedObject as? EditorPreference else { return }
         if configCache?.editor == preference { return }
         do { configCache = try orchestrator.updateEditorPreference(preference) } catch { showError(error) }
-    }
-
-    @objc private func processShellChanged(_ sender: NSPopUpButton) {
-        guard let processShell = sender.selectedItem?.representedObject as? ProcessShell else { return }
-        if configCache?.processShell == processShell { return }
-        do { configCache = try orchestrator.updateProcessShell(processShell) } catch { showError(error) }
     }
 
     @objc private func windowPulseEnabledChanged(_ sender: NSButton) {
