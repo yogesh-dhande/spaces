@@ -81,6 +81,7 @@ stop_current_profile_runtime_for_tests() {
 
 cd "$root"
 
+"$root/Tests/setup_ghostty_xcode_mismatch_autobuild.sh"
 "$root/scripts/lint.sh"
 "$root/scripts/swiftpm.sh" build
 stop_current_profile_runtime_for_tests

@@ -13,6 +13,7 @@ ARTIFACT_REPO="${SPACES_GHOSTTY_ARTIFACT_REPO:-${GITHUB_REPOSITORY:-yogesh-dhand
 ARTIFACT_RELEASE_PREFIX="ghostty-artifacts-"
 BUILD_SCRIPT_VERSION="2"
 MANIFEST_SCHEMA_VERSION="1"
+VALIDATION_XCODE_BUILD_MISMATCH=42
 
 LOCAL_ROOT="$APP_ROOT/.local"
 ARTIFACT_STATE_ROOT="$LOCAL_ROOT/ghostty-artifacts"
@@ -42,12 +43,13 @@ Usage: apps/macos/scripts/setup_ghostty.sh [--download-only | --build] [--strict
 
 Modes:
   default          Reuse matching local artifacts, otherwise download this repo's ghostty-artifacts-<sha> release.
+                   If the download only mismatches the local Xcode build, build from source.
   --download-only Download and install this repo's ghostty-artifacts-<sha> release.
   --build         Build GhosttyKit and libghostty-vt from apps/macos/vendor/ghostty.
 
 Options:
-  --strict        Fail on dirty source builds and require complete release manifests.
-  --allow-dirty   Allow local dirty source builds and mark the generated manifest dirty.
+  --strict        Require complete release manifests and reject dirty artifact manifests.
+  --allow-dirty   Allow --build to use local dirty Ghostty sources and mark the generated manifest dirty.
   --package DIR   After --build, package installed artifacts for the ghostty-artifacts-<sha> release.
 EOF
 }
@@ -193,6 +195,8 @@ if manifest.get("build_script_version") != int(expected_script):
 if manifest.get("zig_version") != expected_zig:
     sys.exit(1)
 if expected_xcode_build and manifest.get("xcode_build_version") != expected_xcode_build:
+    sys.exit(1)
+if manifest.get("dirty") is not False:
     sys.exit(1)
 sys.exit(0)
 PY
@@ -453,8 +457,8 @@ build_from_source() {
 
     local dirty
     dirty="$(ghostty_dirty_state)"
-    if [[ "$STRICT" -eq 1 && "$dirty" == "true" ]]; then
-        die "Ghostty submodule has local modifications; commit them or use --allow-dirty for local experiments"
+    if [[ "$dirty" == "true" && "$ALLOW_DIRTY" -ne 1 ]]; then
+        die "Ghostty submodule has local modifications; commit them before building artifacts or use --build --allow-dirty for local experiments"
     fi
 
     local zig_bin
@@ -491,7 +495,8 @@ validate_download_manifest() {
         "$download_dir" \
         "$BUILD_SCRIPT_VERSION" \
         "$ZIG_VERSION" \
-        "$(current_xcode_build_version)" <<'PY'
+        "$(current_xcode_build_version)" \
+        "$VALIDATION_XCODE_BUILD_MISMATCH" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -505,6 +510,7 @@ download_dir = pathlib.Path(sys.argv[5])
 expected_script = int(sys.argv[6])
 expected_zig = sys.argv[7]
 expected_xcode_build = sys.argv[8]
+xcode_build_mismatch_status = int(sys.argv[9])
 assets = [
     "GhosttyKit.xcframework.tar.gz",
     "GhosttyKit-resources.tar.gz",
@@ -547,13 +553,14 @@ if manifest.get("zig_version") != expected_zig:
     )
     sys.exit(1)
 
+xcode_build_mismatch = False
 if expected_xcode_build and manifest.get("xcode_build_version") != expected_xcode_build:
     print(
         f"Ghostty artifact manifest Xcode build version {manifest.get('xcode_build_version')} does not match current "
         f"Xcode build version {expected_xcode_build}; rebuild locally with --build or publish artifacts built with the current Xcode.",
         file=sys.stderr,
     )
-    sys.exit(1)
+    xcode_build_mismatch = True
 
 if strict and manifest.get("dirty") is not False:
     print("strict Ghostty artifact setup refuses dirty artifact manifests", file=sys.stderr)
@@ -580,6 +587,9 @@ for asset in assets:
             file=sys.stderr,
         )
         sys.exit(1)
+
+if xcode_build_mismatch:
+    sys.exit(xcode_build_mismatch_status)
 PY
 }
 
@@ -610,7 +620,26 @@ download_release_artifacts() {
         die "Ghostty artifact release $release_tag is missing SHA256SUMS"
     fi
 
-    validate_download_manifest "$tmp_dir/manifest.json" "$tmp_dir"
+    local validation_status
+    if validate_download_manifest "$tmp_dir/manifest.json" "$tmp_dir"; then
+        validation_status=0
+    else
+        validation_status=$?
+    fi
+
+    if [[ "$validation_status" -eq "$VALIDATION_XCODE_BUILD_MISMATCH" && "$MODE" == "default" ]]; then
+        rm -rf "$tmp_dir"
+        trap - EXIT
+        echo "==> Downloaded Ghostty artifacts were built with a different Xcode build; building locally instead"
+        build_from_source
+        return
+    fi
+
+    if [[ "$validation_status" -ne 0 ]]; then
+        rm -rf "$tmp_dir"
+        trap - EXIT
+        return "$validation_status"
+    fi
 
     echo "==> Installing downloaded Ghostty artifacts"
     rm -rf "$XCFRAMEWORK_ROOT" "$RESOURCES_ROOT" "$GHOSTTYVT_INCLUDE_ROOT" "$GHOSTTYVT_LIB_ROOT"
