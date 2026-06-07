@@ -3937,34 +3937,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         dirField.isBordered = false
         dirField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let importButton = actionButton(
-            title: "Import", symbol: "square.and.arrow.down", tooltip: "Preview and import spaces.yaml",
-            action: #selector(importProjectSpacesYAML(_:)), primary: false)
-        importButton.setAccessibilityIdentifier("project-settings-import-spaces-yaml")
-        Theme.applySecondaryStyle(to: importButton)
-
-        let exportButton = actionButton(
-            title: "Export", symbol: "square.and.arrow.up", tooltip: "Export this project to spaces.yaml",
-            action: #selector(exportProjectSpacesYAML(_:)), primary: false)
-        exportButton.setAccessibilityIdentifier("project-settings-export-spaces-yaml")
-        Theme.applySecondaryStyle(to: exportButton)
-
-        let yamlButtonRow = NSStackView()
-        yamlButtonRow.orientation = .horizontal
-        yamlButtonRow.alignment = .centerY
-        yamlButtonRow.spacing = 10
-        yamlButtonRow.addArrangedSubview(importButton)
-        yamlButtonRow.addArrangedSubview(exportButton)
-
         let headerAndActionsRow = NSStackView()
         headerAndActionsRow.orientation = .vertical
         headerAndActionsRow.alignment = .leading
         headerAndActionsRow.spacing = 4
         headerAndActionsRow.addArrangedSubview(headerRow)
         headerAndActionsRow.addArrangedSubview(dirField)
-        headerAndActionsRow.addArrangedSubview(yamlButtonRow)
         headerAndActionsRow.setCustomSpacing(2, after: headerRow)
-        headerAndActionsRow.setCustomSpacing(8, after: dirField)
 
         stack.addArrangedSubview(headerAndActionsRow)
         constrainFormFieldToFillWidth(headerRow, in: headerAndActionsRow)
@@ -4023,8 +4002,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         saveButton.setAccessibilityIdentifier("project-settings-save")
         saveButton.keyEquivalent = "\r"
 
+        let importButton = actionButton(
+            title: "Import spaces.yaml", symbol: nil, tooltip: "Load spaces.yaml into project settings",
+            action: #selector(importProjectSpacesYAML(_:)), primary: false)
+        importButton.setAccessibilityIdentifier("project-settings-import-spaces-yaml")
+        Theme.applySecondaryStyle(to: importButton)
+
+        let exportButton = actionButton(
+            title: "Export spaces.yaml", symbol: nil, tooltip: "Export this project to spaces.yaml", action: #selector(exportProjectSpacesYAML(_:)),
+            primary: false)
+        exportButton.setAccessibilityIdentifier("project-settings-export-spaces-yaml")
+        Theme.applySecondaryStyle(to: exportButton)
+
         let discardImportButton = actionButton(
-            title: "Discard Import", symbol: "arrow.uturn.backward", tooltip: "Discard imported config changes and reload the saved project settings",
+            title: "Discard Import", symbol: nil, tooltip: "Discard imported config changes and reload the saved project settings",
             action: #selector(discardProjectConfigChanges(_:)), primary: false)
         discardImportButton.setAccessibilityIdentifier("project-settings-discard-import")
         discardImportButton.isHidden = true
@@ -4040,6 +4031,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         buttonRow.spacing = 8
         buttonRow.addArrangedSubview(deleteButton)
         buttonRow.addArrangedSubview(NSView())
+        buttonRow.addArrangedSubview(importButton)
+        buttonRow.addArrangedSubview(exportButton)
         buttonRow.addArrangedSubview(discardImportButton)
         buttonRow.addArrangedSubview(saveButton)
         stack.addArrangedSubview(buttonRow)
@@ -4050,7 +4043,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let fieldsTag = storeProjectFields(
             projectID: project.id, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
-            discardImportedConfigButton: discardImportButton)
+            importButton: importButton, exportButton: exportButton, discardImportedConfigButton: discardImportButton)
         saveButton.tag = fieldsTag
         discardImportButton.tag = fieldsTag
         importButton.tag = fieldsTag
@@ -6257,13 +6250,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func storeProjectFields(
         projectID: String, setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection,
         processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
-        discardImportedConfigButton: NSButton
+        importButton: NSButton, exportButton: NSButton, discardImportedConfigButton: NSButton
     ) -> Int {
         let id = projectID.hashValue
         ProjectFieldCache.shared.cache[id] = ProjectFieldRefs(
             projectID: projectID, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
-            discardImportedConfigButton: discardImportedConfigButton)
+            importButton: importButton, exportButton: exportButton, discardImportedConfigButton: discardImportedConfigButton)
         return id
     }
 
@@ -6839,28 +6832,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
             let document = try orchestrator.loadSpacesYAML(projectID: refs.projectID)
-            presentProjectSpacesYAMLImportPreview(refs: refs, document: document)
-        } catch { showError(error) }
-    }
-
-    private func presentProjectSpacesYAMLImportPreview(refs: ProjectFieldRefs, document: SpacesYAMLDocument) {
-        let updateAllWorkspacesCheckbox = NSButton(checkboxWithTitle: "Update all workspaces", target: nil, action: nil)
-        updateAllWorkspacesCheckbox.state = .off
-        updateAllWorkspacesCheckbox.setAccessibilityIdentifier("project-settings-import-update-all-workspaces")
-
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "Import spaces.yaml?"
-        alert.informativeText = "Load this configuration into project settings. Save to persist it."
-        alert.accessoryView = projectSpacesYAMLImportPreviewView(document: document, updateAllWorkspacesCheckbox: updateAllWorkspacesCheckbox)
-        alert.addButton(withTitle: "Load")
-        alert.addButton(withTitle: "Dismiss")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        do {
             let preview = try orchestrator.previewProjectConfig(projectID: refs.projectID) { record in document.applying(to: &record) }
             hydrateProjectSettings(refs, from: preview)
-            refs.pendingImportUpdateAllWorkspaces = updateAllWorkspacesCheckbox.state == .on
+            refs.importButton.isHidden = true
+            refs.exportButton.isHidden = true
             refs.discardImportedConfigButton.isHidden = false
             projectHasUnsavedChanges = true
         } catch { showError(error) }
@@ -6873,6 +6848,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let project = try orchestrator.project(id: refs.projectID) else { throw WorkspaceError.missingProject(dir: refs.projectID) }
             hydrateProjectSettings(refs, from: project)
             refs.pendingImportUpdateAllWorkspaces = false
+            refs.importButton.isHidden = false
+            refs.exportButton.isHidden = false
             refs.discardImportedConfigButton.isHidden = true
             projectHasUnsavedChanges = false
         } catch { showError(error) }
@@ -6885,41 +6862,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.processesSection.replace(processes: project.processes)
         refs.browserSessionsSection.replace(sessions: project.browserSessions)
         refs.agentLaunchersSection.replace(launchers: project.agentLaunchers)
-    }
-
-    private func projectSpacesYAMLImportPreviewView(document: SpacesYAMLDocument, updateAllWorkspacesCheckbox: NSButton) -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let summary = NSTextField(wrappingLabelWithString: projectSpacesYAMLImportSummary(document))
-        summary.font = .systemFont(ofSize: 12)
-        summary.textColor = .secondaryLabelColor
-        summary.maximumNumberOfLines = 0
-        summary.setAccessibilityIdentifier("project-settings-import-summary")
-
-        stack.addArrangedSubview(summary)
-        stack.addArrangedSubview(updateAllWorkspacesCheckbox)
-
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 84))
-        container.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor), stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: container.topAnchor), stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            container.widthAnchor.constraint(equalToConstant: 360),
-        ])
-        return container
-    }
-
-    private func projectSpacesYAMLImportSummary(_ document: SpacesYAMLDocument) -> String {
-        [
-            "Setup script: \(document.setupScript == nil ? "none" : "configured")",
-            "Stop script: \(document.stopScript == nil ? "none" : "configured")", "Ports: \(document.ports.count)",
-            "Processes: \(document.processes.count)", "Browser sessions: \(document.browserSessions.count)",
-            "Coding agents: \(document.agentLaunchers.count)",
-        ].joined(separator: "\n")
     }
 
     @objc private func deleteProject(_ sender: NSButton) {

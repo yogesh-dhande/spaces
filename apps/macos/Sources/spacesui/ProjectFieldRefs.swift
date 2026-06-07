@@ -8,13 +8,15 @@ import AppKit
     let processesSection: ProcessesSection
     let browserSessionsSection: BrowserSessionsSection
     let agentLaunchersSection: AgentLaunchersSection
+    let importButton: NSButton
+    let exportButton: NSButton
     let discardImportedConfigButton: NSButton
     var pendingImportUpdateAllWorkspaces = false
 
     init(
         projectID: String, setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection,
         processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
-        discardImportedConfigButton: NSButton
+        importButton: NSButton, exportButton: NSButton, discardImportedConfigButton: NSButton
     ) {
         self.projectID = projectID
         self.setupScriptSection = setupScriptSection
@@ -23,6 +25,8 @@ import AppKit
         self.processesSection = processesSection
         self.browserSessionsSection = browserSessionsSection
         self.agentLaunchersSection = agentLaunchersSection
+        self.importButton = importButton
+        self.exportButton = exportButton
         self.discardImportedConfigButton = discardImportedConfigButton
     }
 }
