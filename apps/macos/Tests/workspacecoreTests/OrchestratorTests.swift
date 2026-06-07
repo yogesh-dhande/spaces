@@ -6994,12 +6994,281 @@ final class OrchestratorTests: XCTestCase {
         let existingDir = reposRoot.appendingPathComponent(
             managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "my-repo"), isDirectory: true)
         try FileManager.default.createDirectory(at: existingDir, withIntermediateDirectories: true)
+        let orphanMarker = existingDir.appendingPathComponent("orphan.txt")
+        try "orphan".write(to: orphanMarker, atomically: true, encoding: .utf8)
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
 
         XCTAssertEqual(project.dir, existingDir.path)
         XCTAssertTrue(FileManager.default.fileExists(atPath: project.dir))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanMarker.path))
         XCTAssertEqual(try store.projects().map(\.id), [project.id])
+    }
+
+    func testManagedGitProjectImportReplacementCandidatesIncludeOrphanedManagedFolders() throws {
+        let fixture = try makeTempGitRepo(name: "candidate-repo")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let managedDirname = managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "candidate-repo")
+        let projectDir = reposRoot.appendingPathComponent(managedDirname, isDirectory: true)
+        let workspaceRoot = workspacesRoot.appendingPathComponent(managedDirname, isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: workspaceRoot, withIntermediateDirectories: true)
+
+        let candidates = try orchestrator.managedGitProjectImportReplacementCandidates(gitURL: fixture.path)
+
+        XCTAssertEqual(Set(candidates.map(\.path)), Set([projectDir.path, workspaceRoot.path]))
+        XCTAssertEqual(Set(candidates.map(\.kind)), Set([.projectRepository, .workspaceDirectory]))
+    }
+
+    func testPreparedGitProjectImportSavesWithSymlinkedManagedReposRoot() throws {
+        let fixture = try makeTempGitRepo(name: "symlinked-root-repo")
+        let root = try makeTempDirectory()
+        let actualReposRoot = root.appendingPathComponent("actual-repos", isDirectory: true)
+        let reposRoot = root.appendingPathComponent("repos-link", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        try FileManager.default.createDirectory(at: actualReposRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: reposRoot, withDestinationURL: actualReposRoot)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let managedDirname = managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "symlinked-root-repo")
+        let entryProjectDir = reposRoot.appendingPathComponent(managedDirname, isDirectory: true)
+        let normalizedProjectDir = actualReposRoot.appendingPathComponent(managedDirname, isDirectory: true).path
+
+        let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path)
+        let project = try orchestrator.addPreparedGitProject(prepared) { _ in }
+
+        XCTAssertEqual(prepared.project.dir, normalizedProjectDir)
+        XCTAssertEqual(project.dir, normalizedProjectDir)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entryProjectDir.appendingPathComponent("HEAD").path))
+        XCTAssertEqual(try store.projects().map(\.dir), [normalizedProjectDir])
+    }
+
+    func testManagedGitProjectImportRejectsDatabaseOwnedMissingProjectDirectory() throws {
+        let fixture = try makeTempGitRepo(name: "missing-owned-repo")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let projectDir = reposRoot.appendingPathComponent(
+            managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "missing-owned-repo"), isDirectory: true)
+        try store.upsert(project: ProjectRecord(id: UUID().uuidString, name: "Owned", dir: projectDir.path, isGitRepo: true, defaultBranch: "main"))
+
+        XCTAssertThrowsError(try orchestrator.managedGitProjectImportReplacementCandidates(gitURL: fixture.path)) { error in
+            guard case WorkspaceError.projectAlreadyExists = error else { return XCTFail("Expected projectAlreadyExists, got \(error)") }
+        }
+        XCTAssertThrowsError(try orchestrator.prepareGitProject(gitURL: fixture.path, replaceExistingManagedDirectories: true)) { error in
+            guard case WorkspaceError.projectAlreadyExists = error else { return XCTFail("Expected projectAlreadyExists, got \(error)") }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: projectDir.path))
+    }
+
+    func testManagedGitProjectImportReplacementRemovesManagedSymlinkNotManagedTarget() throws {
+        let fixture = try makeTempGitRepo(name: "symlink-managed-target-repo")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let projectDir = reposRoot.appendingPathComponent(
+            managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "symlink-managed-target-repo"), isDirectory: true)
+        let targetDir = reposRoot.appendingPathComponent("other-managed-folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        let targetMarker = targetDir.appendingPathComponent("target.txt")
+        try "target".write(to: targetMarker, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: projectDir, withDestinationURL: targetDir)
+
+        let candidate = try XCTUnwrap(try orchestrator.managedGitProjectImportReplacementCandidates(gitURL: fixture.path).first)
+        XCTAssertEqual(candidate.path, projectDir.path)
+
+        let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path, replaceExistingManagedDirectories: true)
+
+        XCTAssertEqual(prepared.project.dir, projectDir.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: targetMarker.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: projectDir.appendingPathComponent("HEAD").path))
+        let attributes = try FileManager.default.attributesOfItem(atPath: projectDir.path)
+        XCTAssertNotEqual(attributes[.type] as? FileAttributeType, .typeSymbolicLink)
+    }
+
+    func testManagedGitProjectImportReplacementUnlinksSymlinkToOutsideManagedRoot() throws {
+        let fixture = try makeTempGitRepo(name: "symlink-outside-target-repo")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let outsideDir = root.appendingPathComponent("outside-target", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let projectDir = reposRoot.appendingPathComponent(
+            managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "symlink-outside-target-repo"), isDirectory: true)
+        try FileManager.default.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: reposRoot, withIntermediateDirectories: true)
+        let outsideMarker = outsideDir.appendingPathComponent("outside.txt")
+        try "outside".write(to: outsideMarker, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: projectDir, withDestinationURL: outsideDir)
+
+        let candidate = try XCTUnwrap(try orchestrator.managedGitProjectImportReplacementCandidates(gitURL: fixture.path).first)
+        XCTAssertEqual(candidate.path, projectDir.path)
+
+        let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path, replaceExistingManagedDirectories: true)
+
+        XCTAssertEqual(prepared.project.dir, projectDir.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outsideMarker.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outsideDir.appendingPathComponent("HEAD").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: projectDir.appendingPathComponent("HEAD").path))
+        let attributes = try FileManager.default.attributesOfItem(atPath: projectDir.path)
+        XCTAssertNotEqual(attributes[.type] as? FileAttributeType, .typeSymbolicLink)
+    }
+
+    func testCreateWorkspaceReplacesConfirmedOrphanedManagedWorkspaceDirectory() throws {
+        let fixture = try makeTempGitRepo(name: "replace-workspace")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
+        let workspaceRoot = URL(fileURLWithPath: defaultWorkspace.dir, isDirectory: true).deletingLastPathComponent()
+        let orphanDir = workspaceRoot.appendingPathComponent("feature", isDirectory: true)
+        try FileManager.default.createDirectory(at: orphanDir, withIntermediateDirectories: true)
+        let orphanMarker = orphanDir.appendingPathComponent("orphan.txt")
+        try "orphan".write(to: orphanMarker, atomically: true, encoding: .utf8)
+
+        let candidate = try XCTUnwrap(try orchestrator.managedWorkspaceReplacementCandidate(projectID: project.id, directoryName: "feature"))
+        XCTAssertEqual(candidate.path, orphanDir.path)
+
+        let workspace = try orchestrator.createWorkspace(
+            projectID: project.id, name: "Feature", branch: "feature", targetBranch: "main", directoryName: "feature", runSetupScript: false,
+            replaceExistingManagedDirectory: true)
+
+        XCTAssertEqual(workspace.dir, orphanDir.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanMarker.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: workspace.dir))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(workspace.dir)/README.md"))
+    }
+
+    func testManagedWorkspaceReplacementRejectsDirectoryUnderSymlinkedManagedAncestor() throws {
+        let fixture = try makeTempGitRepo(name: "symlinked-worktree-root")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let outsideWorktreeRoot = root.appendingPathComponent("outside-worktree-root", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
+        let managedWorktreeRoot = URL(fileURLWithPath: defaultWorkspace.dir, isDirectory: true).deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: outsideWorktreeRoot, withIntermediateDirectories: true)
+        try FileManager.default.removeItem(at: managedWorktreeRoot)
+        try FileManager.default.createSymbolicLink(at: managedWorktreeRoot, withDestinationURL: outsideWorktreeRoot)
+        let outsideFeature = outsideWorktreeRoot.appendingPathComponent("feature", isDirectory: true)
+        try FileManager.default.createDirectory(at: outsideFeature, withIntermediateDirectories: true)
+        let outsideMarker = outsideFeature.appendingPathComponent("outside.txt")
+        try "outside".write(to: outsideMarker, atomically: true, encoding: .utf8)
+
+        XCTAssertNil(try orchestrator.managedWorkspaceReplacementCandidate(projectID: project.id, directoryName: "feature"))
+        XCTAssertThrowsError(
+            try orchestrator.createWorkspace(
+                projectID: project.id, name: "Feature", branch: "feature", targetBranch: "main", directoryName: "feature", runSetupScript: false,
+                replaceExistingManagedDirectory: true))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outsideMarker.path))
+    }
+
+    func testCreateWorkspaceReplacementClearsOrphanedGitWorktreeRegistration() throws {
+        let fixture = try makeTempGitRepo(name: "replace-stale-worktree")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
+        let workspaceRoot = URL(fileURLWithPath: defaultWorkspace.dir, isDirectory: true).deletingLastPathComponent()
+        let orphanDir = workspaceRoot.appendingPathComponent("stale-feature", isDirectory: true)
+        try runGit(["worktree", "add", "-b", "stale-feature", orphanDir.path, "main"], cwd: project.dir)
+        let orphanMarker = orphanDir.appendingPathComponent("orphan.txt")
+        try "orphan".write(to: orphanMarker, atomically: true, encoding: .utf8)
+        let listedOrphanDir = normalizeTestPath(orphanDir.path)
+        let beforeWorktrees = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: project.dir)
+        XCTAssertTrue(parseWorktreePaths(beforeWorktrees).contains(listedOrphanDir), beforeWorktrees)
+
+        let candidate = try XCTUnwrap(try orchestrator.managedWorkspaceReplacementCandidate(projectID: project.id, directoryName: "stale-feature"))
+        XCTAssertEqual(candidate.path, orphanDir.path)
+        let workspace = try orchestrator.createWorkspace(
+            projectID: project.id, name: "Stale Feature", branch: "stale-feature", targetBranch: "main", directoryName: "stale-feature",
+            runSetupScript: false, allowExistingBranchReuse: true, replaceExistingManagedDirectory: true)
+
+        XCTAssertEqual(workspace.dir, orphanDir.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanMarker.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(workspace.dir)/README.md"))
+        let afterWorktrees = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: project.dir)
+        XCTAssertEqual(parseWorktreePaths(afterWorktrees).filter { $0 == listedOrphanDir }.count, 1, afterWorktrees)
+    }
+
+    func testManagedProjectImportReplacementRevalidatesProjectOwnershipBeforeDeleting() throws {
+        let fixture = try makeTempGitRepo(name: "owned-repo")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let projectDir = reposRoot.appendingPathComponent(
+            managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "owned-repo"), isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let ownerMarker = projectDir.appendingPathComponent("owner.txt")
+        try "owner".write(to: ownerMarker, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try orchestrator.managedGitProjectImportReplacementCandidates(gitURL: fixture.path).map(\.path), [projectDir.path])
+
+        try store.upsert(project: ProjectRecord(id: UUID().uuidString, name: "Owned", dir: projectDir.path, isGitRepo: true, defaultBranch: "main"))
+
+        XCTAssertThrowsError(try orchestrator.prepareGitProject(gitURL: fixture.path, replaceExistingManagedDirectories: true)) { error in
+            guard case WorkspaceError.projectAlreadyExists = error else { return XCTFail("Expected projectAlreadyExists, got \(error)") }
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ownerMarker.path))
+    }
+
+    func testManagedWorkspaceReplacementDoesNotDeleteDatabaseOwnedWorkspaceDirectory() throws {
+        let fixture = try makeTempGitRepo(name: "owned-workspace")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
+        let workspaceRoot = URL(fileURLWithPath: defaultWorkspace.dir, isDirectory: true).deletingLastPathComponent()
+        let ownedDir = workspaceRoot.appendingPathComponent("owned", isDirectory: true)
+        try FileManager.default.createDirectory(at: ownedDir, withIntermediateDirectories: true)
+        let ownerMarker = ownedDir.appendingPathComponent("owner.txt")
+        try "owner".write(to: ownerMarker, atomically: true, encoding: .utf8)
+        try store.upsert(
+            workspace: WorkspaceRecord(
+                id: UUID().uuidString, projectID: project.id, title: "Owned", dir: ownedDir.path, dirname: "owned", branch: "owned",
+                targetBranch: "main", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil))
+
+        XCTAssertThrowsError(
+            try orchestrator.createWorkspace(
+                projectID: project.id, name: "Feature", branch: "feature", targetBranch: "main", directoryName: "owned", runSetupScript: false,
+                replaceExistingManagedDirectory: true))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ownerMarker.path))
+    }
+
+    func testNonManagedDirectoryIsNotReplacementCandidate() throws {
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let outsideDir = root.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        XCTAssertNil(try orchestrator.managedDirectoryReplacementCandidate(path: outsideDir.path, kind: .projectRepository))
+        XCTAssertNil(try orchestrator.managedDirectoryReplacementCandidate(path: outsideDir.path, kind: .workspaceDirectory))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outsideDir.path))
     }
 
     // Tests checkAndUpdateProcessStatuses keeps live iTerm2 agent sessions by arranging representative inputs and asserting the expected result.
@@ -7075,6 +7344,36 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(revived.id, archived.id)
         XCTAssertNotEqual(revived.dirname, "docs")
         XCTAssertNotEqual(revived.dirname, replacement.dirname)
+    }
+
+    func testCreateWorkspaceRevivesArchivedGitWorkspaceReplacingConfirmedOrphanedDirectory() throws {
+        let repo = try makeTempGitRepo(name: "revive-replace-orphan-dir")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let archived = try orchestrator.createWorkspace(
+            projectID: project.id, name: "old title", branch: "feature-revive-replace", directoryName: "old-feature-dir")
+        _ = try orchestrator.archiveWorkspace(workspaceID: archived.id)
+        let workspaceRoot = URL(fileURLWithPath: archived.dir, isDirectory: true).deletingLastPathComponent()
+        let orphanDir = workspaceRoot.appendingPathComponent("revived-feature-dir", isDirectory: true)
+        try FileManager.default.createDirectory(at: orphanDir, withIntermediateDirectories: true)
+        let orphanMarker = orphanDir.appendingPathComponent("orphan.txt")
+        try "orphan".write(to: orphanMarker, atomically: true, encoding: .utf8)
+        let candidate = try XCTUnwrap(
+            try orchestrator.managedWorkspaceReplacementCandidate(projectID: project.id, directoryName: "revived-feature-dir"))
+        XCTAssertEqual(candidate.path, orphanDir.path)
+
+        let revived = try orchestrator.createWorkspace(
+            projectID: project.id, name: "new title", branch: "feature-revive-replace", directoryName: "revived-feature-dir",
+            allowExistingBranchReuse: true, replaceExistingManagedDirectory: true)
+
+        XCTAssertEqual(revived.id, archived.id)
+        XCTAssertEqual(revived.dir, orphanDir.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanMarker.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(revived.dir)/README.md"))
     }
 
     func testCreateWorkspaceRejectsExistingBranchInCreateMode() throws {

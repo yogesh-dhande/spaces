@@ -118,6 +118,18 @@ import Testing
         #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .abort) == .cancel)
     }
 
+    @MainActor @Test func managedDirectoryReplacementDecisionMapsAlertResponses() {
+        #expect(AppKitController.managedDirectoryReplacementDecision(for: .alertFirstButtonReturn) == .replace)
+        #expect(AppKitController.managedDirectoryReplacementDecision(for: .alertSecondButtonReturn) == .cancel)
+        #expect(AppKitController.managedDirectoryReplacementDecision(for: .abort) == .cancel)
+    }
+
+    @MainActor @Test func managedDirectoryReplacementCancelStopsFlow() {
+        #expect(AppKitController.shouldStartManagedDirectoryReplacementFlow(candidateCount: 0, decision: .cancel))
+        #expect(AppKitController.shouldStartManagedDirectoryReplacementFlow(candidateCount: 1, decision: .replace))
+        #expect(!AppKitController.shouldStartManagedDirectoryReplacementFlow(candidateCount: 1, decision: .cancel))
+    }
+
     @MainActor @Test func importedProjectSaveDecisionUpdatesWorkspaceSyncFlag() {
         let refs = makeProjectFieldRefs()
 

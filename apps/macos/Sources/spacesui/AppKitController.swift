@@ -1470,6 +1470,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let notes: String?
         let allowRemoteBranchLookup: Bool
         let allowExistingBranchReuse: Bool
+        let replaceExistingManagedDirectory: Bool
     }
 
     private struct ProjectCreateInput: Sendable {
@@ -1777,7 +1778,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 var workspace = try orchestrator.createWorkspace(
                     projectID: input.projectID, name: input.name, branch: input.branch, targetBranch: input.targetBranch,
                     directoryName: input.directoryName, runSetupScript: false, allowRemoteBranchLookup: input.allowRemoteBranchLookup,
-                    allowExistingBranchReuse: input.allowExistingBranchReuse)
+                    allowExistingBranchReuse: input.allowExistingBranchReuse, replaceExistingManagedDirectory: input.replaceExistingManagedDirectory)
                 if let notes = input.notes {
                     try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes)
                     if let updated = try orchestrator.store.workspace(id: workspace.id) { workspace = updated }
@@ -1798,7 +1799,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated private static func prepareGitProjectSourceSnapshot(gitURL: String) async -> Result<
+    nonisolated private static func prepareGitProjectSourceSnapshot(gitURL: String, replaceExistingManagedDirectories: Bool) async -> Result<
         WorkspaceOrchestrator.PreparedGitProjectImport, Error
     > {
         await Task.detached(priority: .userInitiated) {
@@ -1806,7 +1807,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let db = try DatabaseLocator.defaultPath()
                 let store = try SQLiteStore(path: db)
                 let orchestrator = WorkspaceOrchestrator(store: store)
-                return .success(try orchestrator.prepareGitProject(gitURL: gitURL))
+                return .success(
+                    try orchestrator.prepareGitProject(gitURL: gitURL, replaceExistingManagedDirectories: replaceExistingManagedDirectories))
             } catch { return .failure(error) }
         }.value
     }
@@ -2390,12 +2392,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case cancel
     }
 
+    enum ManagedDirectoryReplacementDecision: Equatable, Sendable {
+        case replace
+        case cancel
+    }
+
     static func projectImportWorkspaceSyncDecision(for response: NSApplication.ModalResponse) -> ProjectImportWorkspaceSyncDecision {
         switch response {
         case .alertFirstButtonReturn: return .updateAllWorkspaces
         case .alertSecondButtonReturn: return .projectOnly
         default: return .cancel
         }
+    }
+
+    static func managedDirectoryReplacementDecision(for response: NSApplication.ModalResponse) -> ManagedDirectoryReplacementDecision {
+        response == .alertFirstButtonReturn ? .replace : .cancel
+    }
+
+    static func shouldStartManagedDirectoryReplacementFlow(candidateCount: Int, decision: ManagedDirectoryReplacementDecision) -> Bool {
+        candidateCount == 0 || decision == .replace
     }
 
     @discardableResult static func applyProjectImportWorkspaceSyncDecision(_ decision: ProjectImportWorkspaceSyncDecision, to refs: ProjectFieldRefs)
@@ -4902,6 +4917,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
         requestVisibleWorkspaceDetailRefreshIfNeeded(reason: "workspace_detail_shown")
         clearInlineWorkspaceFieldRefs()
+        discardActiveAddProjectPreparedSourceIfNeeded()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = workspace.id
@@ -7180,6 +7196,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return Self.projectImportWorkspaceSyncDecision(for: alert.runModal())
     }
 
+    private func presentManagedDirectoryReplacementPrompt(candidates: [WorkspaceOrchestrator.ManagedDirectoryReplacementCandidate]) -> Bool {
+        let paths = candidates.map(\.path).joined(separator: "\n")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = candidates.count == 1 ? "Replace existing managed folder?" : "Replace existing managed folders?"
+        alert.informativeText = """
+            Spaces found existing managed folders that are not registered to any project or workspace:
+
+            \(paths)
+
+            Replace them before continuing?
+            """
+        alert.addButton(withTitle: "Replace")
+        alert.addButton(withTitle: "Cancel")
+        let decision = Self.managedDirectoryReplacementDecision(for: alert.runModal())
+        return Self.shouldStartManagedDirectoryReplacementFlow(candidateCount: candidates.count, decision: decision)
+    }
+
     @objc private func deleteProject(_ sender: NSButton) {
         guard let projectID = sender.identifier?.rawValue, let project = projects.first(where: { $0.id == projectID }) else { return }
 
@@ -7441,7 +7475,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 showError(error)
                 return
             }
-            let result = await Self.prepareGitProjectSourceSnapshot(gitURL: repoURL)
+            let replacementCandidates: [WorkspaceOrchestrator.ManagedDirectoryReplacementCandidate]
+            do { replacementCandidates = try orchestrator.managedGitProjectImportReplacementCandidates(gitURL: repoURL) } catch {
+                showError(error)
+                return
+            }
+            let replaceExistingManagedDirectories = !replacementCandidates.isEmpty
+            if replaceExistingManagedDirectories, !presentManagedDirectoryReplacementPrompt(candidates: replacementCandidates) { return }
+            let result = await Self.prepareGitProjectSourceSnapshot(
+                gitURL: repoURL, replaceExistingManagedDirectories: replaceExistingManagedDirectories)
             guard
                 Self.preparedGitProjectResultMatchesActiveRequest(
                     isActiveForm: isActiveAddProjectForm(refs), selectedSegment: refs.sourceSegmented.selectedSegment,
@@ -7671,9 +7713,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 throw WorkspaceError.invalidArgument(
                     message: "Branch '\(branch)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
+            let replacementCandidates: [WorkspaceOrchestrator.ManagedDirectoryReplacementCandidate]
+            if refs.isGitRepo, let resolvedDirectoryName {
+                if let replacementCandidate = try orchestrator.managedWorkspaceReplacementCandidate(
+                    projectID: refs.projectID, directoryName: resolvedDirectoryName)
+                {
+                    replacementCandidates = [replacementCandidate]
+                } else {
+                    replacementCandidates = []
+                }
+            } else {
+                replacementCandidates = []
+            }
+            if !replacementCandidates.isEmpty, !presentManagedDirectoryReplacementPrompt(candidates: replacementCandidates) { return }
             let input = WorkspaceCreateInput(
                 projectID: refs.projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: resolvedDirectoryName,
-                notes: resolvedNotes, allowRemoteBranchLookup: true, allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing)
+                notes: resolvedNotes, allowRemoteBranchLookup: true, allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing,
+                replaceExistingManagedDirectory: !replacementCandidates.isEmpty)
             let originalTitle = sender.title
             sender.isEnabled = false
             sender.title = "Creating..."
