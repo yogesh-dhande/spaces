@@ -455,30 +455,42 @@ public final class SQLiteStore {
 
     public func workspaceSetupState(workspaceID: String) throws -> WorkspaceSetupState? {
         let rows = try queryRows(
-            sql: "SELECT setup_status, setup_error, setup_started_at, setup_finished_at FROM workspace_settings WHERE workspace_id = ?",
-            bindings: [workspaceID])
-        guard let row = rows.first, row.count >= 4 else { return nil }
+            sql: """
+                SELECT setup_status, setup_error, setup_started_at, setup_finished_at, setup_exit_code, setup_log_path
+                FROM workspace_settings
+                WHERE workspace_id = ?
+                """, bindings: [workspaceID])
+        guard let row = rows.first, row.count >= 6 else { return nil }
         let rawStatus = row[0].isEmpty ? WorkspaceSetupStatus.succeeded.rawValue : row[0]
         let status = WorkspaceSetupStatus(rawValue: rawStatus) ?? .succeeded
         let errorMessage = row[1].isEmpty ? nil : row[1]
         let startedAt = row[2].isEmpty ? nil : row[2]
         let finishedAt = row[3].isEmpty ? nil : row[3]
-        return WorkspaceSetupState(status: status, errorMessage: errorMessage, startedAt: startedAt, finishedAt: finishedAt)
+        let exitCode = row[4].isEmpty ? nil : Int(row[4])
+        let logPath = row[5].isEmpty ? nil : row[5]
+        return WorkspaceSetupState(
+            status: status, errorMessage: errorMessage, startedAt: startedAt, finishedAt: finishedAt, exitCode: exitCode, logPath: logPath)
     }
 
     public func setWorkspaceSetupState(
-        workspaceID: String, status: WorkspaceSetupStatus, errorMessage: String? = nil, startedAt: String? = nil, finishedAt: String? = nil
+        workspaceID: String, status: WorkspaceSetupStatus, errorMessage: String? = nil, startedAt: String? = nil, finishedAt: String? = nil,
+        exitCode: Int? = nil, logPath: String? = nil
     ) throws {
         try execute(
             sql: """
-                INSERT INTO workspace_settings(workspace_id, setup_status, setup_error, setup_started_at, setup_finished_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO workspace_settings(workspace_id, setup_status, setup_error, setup_started_at, setup_finished_at, setup_exit_code, setup_log_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id) DO UPDATE SET
                   setup_status = excluded.setup_status,
                   setup_error = excluded.setup_error,
                   setup_started_at = excluded.setup_started_at,
-                  setup_finished_at = excluded.setup_finished_at
-                """, bindings: [workspaceID, status.rawValue, errorMessage ?? "", startedAt ?? "", finishedAt ?? ""])
+                  setup_finished_at = excluded.setup_finished_at,
+                  setup_exit_code = excluded.setup_exit_code,
+                  setup_log_path = excluded.setup_log_path
+                """,
+            bindings: [
+                workspaceID, status.rawValue, errorMessage ?? "", startedAt ?? "", finishedAt ?? "", exitCode.map(String.init) ?? "", logPath ?? "",
+            ])
     }
 
     public func setWorkspaceStopScript(workspaceID: String, stopScript: String?) throws {

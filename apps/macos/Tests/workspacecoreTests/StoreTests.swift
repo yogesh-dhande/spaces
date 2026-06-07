@@ -59,6 +59,8 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(runningProcessColumns.contains("template_id"))
         XCTAssertTrue(runningProcessColumns.contains("terminal_session_id"))
         XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
+        XCTAssertTrue(workspaceSettingsColumns.contains("setup_exit_code"))
+        XCTAssertTrue(workspaceSettingsColumns.contains("setup_log_path"))
         XCTAssertTrue(workspacePortColumns.contains("definition_id"))
         XCTAssertTrue(workspacePortDefinitionColumns.contains("id"))
         XCTAssertTrue(projectPortDefinitionColumns.contains("id"))
@@ -302,6 +304,43 @@ final class StoreTests: XCTestCase {
                 ["agent-session", "workspace-agent", "agent"], ["process-session", "workspace-process", "process"],
                 ["runtime-session", "workspace-runtime", "shell"], ["unowned-session", "", "shell"],
             ])
+    }
+
+    func testVersionSixDatabaseMigratesWorkspaceSetupResultMetadata() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("v6-setup-result-migration.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE workspace_settings (
+                  workspace_id TEXT PRIMARY KEY,
+                  stop_script TEXT,
+                  setup_status TEXT NOT NULL DEFAULT 'succeeded',
+                  setup_error TEXT,
+                  setup_started_at TEXT,
+                  setup_finished_at TEXT
+                );
+                INSERT INTO workspace_settings(workspace_id, setup_status, setup_error, setup_started_at, setup_finished_at)
+                VALUES ('workspace-1', 'failed', 'old failure', '2026-01-01T00:00:00Z', '2026-01-01T00:00:05Z');
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (6);
+                """)
+
+        _ = try SQLiteStore(path: dbURL.path)
+
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+        let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
+        XCTAssertTrue(workspaceSettingsColumns.contains("setup_exit_code"))
+        XCTAssertTrue(workspaceSettingsColumns.contains("setup_log_path"))
+        XCTAssertEqual(
+            try readRows(
+                dbURL: dbURL,
+                sql: """
+                    SELECT setup_status, setup_error, setup_started_at, setup_finished_at,
+                           COALESCE(setup_exit_code, ''), COALESCE(setup_log_path, '')
+                    FROM workspace_settings
+                    WHERE workspace_id = 'workspace-1'
+                    """), [["failed", "old failure", "2026-01-01T00:00:00Z", "2026-01-01T00:00:05Z", "", ""]])
     }
 
     func testCurrentSchemaRejectsBlankPortNamesAtDatabaseLevel() throws {
@@ -1210,18 +1249,23 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(try store.workspaceSetupState(workspaceID: workspace.id))
 
         try store.setWorkspaceSetupState(
-            workspaceID: workspace.id, status: .running, errorMessage: nil, startedAt: "2026-01-01T00:00:00Z", finishedAt: nil)
+            workspaceID: workspace.id, status: .running, errorMessage: nil, startedAt: "2026-01-01T00:00:00Z", finishedAt: nil, exitCode: nil,
+            logPath: "/tmp/setup.log")
         let running = try store.workspaceSetupState(workspaceID: workspace.id)
         XCTAssertEqual(running?.status, .running)
         XCTAssertNil(running?.errorMessage)
+        XCTAssertNil(running?.exitCode)
+        XCTAssertEqual(running?.logPath, "/tmp/setup.log")
 
         try store.setWorkspaceSetupState(
             workspaceID: workspace.id, status: .failed, errorMessage: "setup failed", startedAt: "2026-01-01T00:00:00Z",
-            finishedAt: "2026-01-01T00:00:05Z")
+            finishedAt: "2026-01-01T00:00:05Z", exitCode: 42, logPath: "/tmp/setup-failed.log")
         let failed = try store.workspaceSetupState(workspaceID: workspace.id)
         XCTAssertEqual(failed?.status, .failed)
         XCTAssertEqual(failed?.errorMessage, "setup failed")
         XCTAssertEqual(failed?.finishedAt, "2026-01-01T00:00:05Z")
+        XCTAssertEqual(failed?.exitCode, 42)
+        XCTAssertEqual(failed?.logPath, "/tmp/setup-failed.log")
     }
 
     // Tests workspace lookup by directory by arranging representative inputs and asserting the expected result.

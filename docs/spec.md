@@ -192,6 +192,9 @@ Spaces focuses those windows; it does not decide their geometry.
 - `restart` forces a full restart
 - `update` should own post-creation workspace metadata edits such as title and notes.
 - Launch should wait for setup to finish and should surface setup failures clearly.
+- Workspaces with setup `pending`, `running`, or `failed` show a setup recovery screen instead of normal workspace detail controls.
+- The setup recovery screen shows setup status, timestamps, exit code, error text, and the setup log tail. It allows setup retry, Finder reveal, ad-hoc terminal access, and setup log copy/open actions. Failed setup also exposes inline setup script editing before retry.
+- Configured processes, coding-agent launchers, and browser sessions must not launch or recover until workspace setup has succeeded. Ad-hoc workspace terminals remain available for setup repair.
 - If a configured process exits during startup, launch should surface the recent process output itself and should not open a secondary recovery window that only reports a follow-on attach failure.
 - Named ports must be available to setup scripts, stop scripts, and process commands.
 - Adding a named port from the workspace detail view should reserve its port number immediately instead of waiting for the next workspace launch.

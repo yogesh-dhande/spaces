@@ -1046,6 +1046,164 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
     }
 
+    func testWorkspaceSetupFailureStoresExitCodeLogAndBlocksLaunch() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.setupScript = "echo setup stdout; echo setup stderr >&2; exit 7"
+        }
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+
+        try withEnv(name: SpacesProfile.runtimeDirectoryEnvironmentVariable, value: runtimeDir.path) {
+            XCTAssertThrowsError(try orchestrator.runWorkspaceSetup(workspaceID: workspace.id)) { error in
+                XCTAssertTrue(error.localizedDescription.contains("Setup script exited with code 7"))
+            }
+
+            let state = try orchestrator.workspaceSetupState(workspaceID: workspace.id)
+            XCTAssertEqual(state.status, .failed)
+            XCTAssertEqual(state.exitCode, 7)
+            let logPath = try XCTUnwrap(state.logPath)
+            XCTAssertEqual(
+                logPath,
+                runtimeDir.appendingPathComponent("workspace-setup", isDirectory: true).appendingPathComponent(workspace.id, isDirectory: true)
+                    .appendingPathComponent("setup.log", isDirectory: false).path)
+            let log = try String(contentsOfFile: logPath, encoding: .utf8)
+            XCTAssertTrue(log.contains("setup stdout"))
+            XCTAssertTrue(log.contains("setup stderr"))
+
+            XCTAssertThrowsError(
+                try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+            ) { error in
+                XCTAssertTrue(error.localizedDescription.contains("Workspace setup failed"))
+                XCTAssertTrue(error.localizedDescription.contains("exit code 7"))
+            }
+            XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+        }
+    }
+
+    func testWorkspaceSetupUsesShellCommandEnvironmentPath() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        let commandDir = root.appendingPathComponent("commands", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: commandDir, withIntermediateDirectories: true)
+
+        let commandFile = commandDir.appendingPathComponent("setupcmd")
+        try """
+        #!/bin/sh
+        echo setup command ran
+        printf path-ok > setup-path-marker
+        """.write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        try """
+        #!/bin/sh
+        if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+          printf '\\n__SPACES_PATH__%s' "\(commandDir.path):/usr/bin:/bin"
+          exit 0
+        fi
+        exec /bin/sh "$@"
+        """.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        sharedPathMutationLock.lock()
+        defer {
+            sharedPathMutationLock.unlock()
+            sharedEnvironmentMutationLock.unlock()
+        }
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("HOME", root.path, 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
+        }
+
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "setupcmd" }
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+
+        try orchestrator.runWorkspaceSetup(workspaceID: workspace.id)
+
+        let state = try orchestrator.workspaceSetupState(workspaceID: workspace.id)
+        XCTAssertEqual(state.status, .succeeded)
+        XCTAssertEqual(state.exitCode, 0)
+        XCTAssertEqual(
+            try String(contentsOfFile: URL(fileURLWithPath: workspace.dir).appendingPathComponent("setup-path-marker").path, encoding: .utf8),
+            "path-ok")
+    }
+
+    func testWorkspaceSetupDoesNotWaitForBackgroundChildHoldingOutputOpen() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.setupScript = "echo setup start; (sleep 2; echo background finished) & echo setup end"
+        }
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+
+        let startedAt = Date()
+        try orchestrator.runWorkspaceSetup(workspaceID: workspace.id)
+        let elapsed = Date().timeIntervalSince(startedAt)
+
+        let state = try orchestrator.workspaceSetupState(workspaceID: workspace.id)
+        XCTAssertEqual(state.status, .succeeded)
+        XCTAssertLessThan(elapsed, 1.5)
+        let logPath = try XCTUnwrap(state.logPath)
+        let log = try String(contentsOfFile: logPath, encoding: .utf8)
+        XCTAssertTrue(log.contains("setup start"))
+        XCTAssertTrue(log.contains("setup end"))
+    }
+
+    func testPendingSetupBlocksManagedRuntimeLaunchesButAllowsWorkspaceTerminalReservation() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.setupScript = "echo setup"
+            config.processes = [ProcessTemplate(name: "web", command: "echo web")]
+            config.agentLaunchers = [AgentLauncher(name: "Codex", command: "echo codex")]
+            config.browserSessions = [BrowserSession(name: "App", url: "http://localhost:3000")]
+        }
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+        XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
+
+        func assertSetupBlocked(_ operation: () throws -> Void, file: StaticString = #filePath, line: UInt = #line) {
+            XCTAssertThrowsError(try operation(), file: file, line: line) { error in
+                XCTAssertTrue(error.localizedDescription.contains("Workspace setup has not run"), file: file, line: line)
+            }
+        }
+
+        assertSetupBlocked { try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web") }
+        assertSetupBlocked { _ = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex") }
+        assertSetupBlocked { try orchestrator.recoverMissingBrowserSession(workspaceID: workspace.id, targetURL: "http://localhost:3000") }
+
+        let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspace.id)
+        XCTAssertFalse(reservation.sessionID.isEmpty)
+        XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
+    }
+
     // Tests list workspaces includes branch metadata by arranging representative inputs and asserting the expected result.
     func testListWorkspacesIncludesBranchMetadata() throws {
         let repo = try makeTempGitRepo(name: "workspace-branch-list")
