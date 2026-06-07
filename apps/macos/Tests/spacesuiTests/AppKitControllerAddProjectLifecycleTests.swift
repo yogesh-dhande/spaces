@@ -111,6 +111,20 @@ import Testing
         #expect(section.currentValue == "hydrated")
     }
 
+    @MainActor @Test func projectExportPendingStateIncludesOpenSectionEditors() {
+        let refs = makeProjectFieldRefs()
+        #expect(!refs.hasOpenSectionEditor)
+
+        refs.setupScriptSection.editButtonForLifecycleTests?.performClick(nil)
+        #expect(refs.hasOpenSectionEditor)
+
+        refs.setupScriptSection.replace(value: "saved")
+        #expect(!refs.hasOpenSectionEditor)
+
+        refs.portsSection.handleAdd(NSButton())
+        #expect(refs.hasOpenSectionEditor)
+    }
+
     @MainActor @Test func importedProjectSaveDecisionMapsAlertResponses() {
         #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .alertFirstButtonReturn) == .updateAllWorkspaces)
         #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .alertSecondButtonReturn) == .projectOnly)

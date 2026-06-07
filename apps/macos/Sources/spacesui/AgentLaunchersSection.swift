@@ -108,6 +108,7 @@ import workspacecore
     }
 
     var rowCount: Int { rows.count }
+    var hasOpenEditor: Bool { rows.contains { $0.isEditing } }
     func isEditing(at index: Int) -> Bool { index >= 0 && index < rows.count ? rows[index].isEditing : false }
 
     private struct DisplayEntry {

@@ -107,6 +107,8 @@ import AppKit
         showCollapsed()
     }
 
+    var hasOpenEditor: Bool { isEditing }
+
     // MARK: Collapsed
 
     private func showCollapsed() {

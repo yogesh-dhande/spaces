@@ -125,6 +125,8 @@ import workspacecore
     /// Exposed for tests — current in-memory process list.
     var currentProcesses: [ProcessTemplate] { processes }
 
+    var hasOpenEditor: Bool { rows.contains { $0.isEditing } }
+
     /// Exposed for tests — current row count.
     var rowCount: Int { rows.count }
 

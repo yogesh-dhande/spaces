@@ -440,10 +440,12 @@ public final class WorkspaceOrchestrator {
         }
         let previousPorts = existing.ports
         let previousProcesses = existing.processes
+        let previousAgentLaunchers = existing.agentLaunchers
         update(&existing)
         existing.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: existing.ports)
         existing.ports = try normalizedPortDefinitions(existing.ports)
         existing.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: existing.processes)
+        existing.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: existing.agentLaunchers)
         try validateProcessTemplates(existing.processes)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: existing.processes, browserSessions: existing.browserSessions,
@@ -721,8 +723,8 @@ public final class WorkspaceOrchestrator {
     }
 
     public func discardPreparedGitProject(_ prepared: PreparedGitProjectImport) throws {
-        try removeManagedGitWorkspaceDirectoriesIfNeeded(project: prepared.project)
-        try removeManagedProjectDirectoryIfNeeded(project: prepared.project)
+        try removePreparedManagedGitWorkspaceRootIfUnowned(project: prepared.project)
+        try removePreparedManagedProjectDirectoryIfUnowned(project: prepared.project)
     }
 
     @discardableResult public func previewProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
@@ -4057,12 +4059,14 @@ public final class WorkspaceOrchestrator {
         update(&record)
         let previousPorts = baseRecord.ports
         let previousProcesses = baseRecord.processes
+        let previousAgentLaunchers = baseRecord.agentLaunchers
         record = ProjectRecord(
             id: baseRecord.id, name: baseRecord.name, dir: baseRecord.dir, isGitRepo: baseRecord.isGitRepo, defaultBranch: baseRecord.defaultBranch,
             isCollapsed: baseRecord.isCollapsed, setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports,
             processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
         record.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: record.ports)
         record.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: record.processes)
+        record.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: record.agentLaunchers)
         record.ports = try normalizedPortDefinitions(record.ports)
         try validateProcessTemplates(record.processes)
         try validateUniqueConfiguredFocusNames(
@@ -4209,6 +4213,7 @@ public final class WorkspaceOrchestrator {
         }
         let previousPorts = settings.ports
         let previousProcesses = settings.processes
+        let previousAgentLaunchers = settings.agentLaunchers
         settings.stopScript = project.stopScript
         settings.ports = project.ports
         settings.processes = seededWorkspaceProcesses(from: project.processes)
@@ -4217,6 +4222,7 @@ public final class WorkspaceOrchestrator {
         settings.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: settings.ports)
         settings.ports = try normalizedPortDefinitions(settings.ports)
         settings.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: settings.processes)
+        settings.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: settings.agentLaunchers)
         try validateProcessTemplates(settings.processes)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: settings.processes, browserSessions: settings.browserSessions,
@@ -4297,6 +4303,42 @@ public final class WorkspaceOrchestrator {
             }
 
             return template
+        }
+    }
+
+    private func normalizeAgentLauncherIDs(previous: [AgentLauncher], updated: [AgentLauncher]) -> [AgentLauncher] {
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        let previousNames = previous.map { normalizedFocusName($0.name) }
+        let previousCommands = previous.map { $0.command.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let nameCounts = Dictionary(previousNames.map { ($0, 1) }, uniquingKeysWith: +)
+        let commandCounts = Dictionary(previousCommands.map { ($0, 1) }, uniquingKeysWith: +)
+        var usedIDs = Set<String>()
+
+        return updated.map { launcher in
+            if previousByID[launcher.id] != nil {
+                usedIDs.insert(launcher.id)
+                return launcher
+            }
+
+            let normalizedName = normalizedFocusName(launcher.name)
+            if nameCounts[normalizedName] == 1,
+                let match = previous.first(where: { normalizedFocusName($0.name) == normalizedName && !usedIDs.contains($0.id) })
+            {
+                usedIDs.insert(match.id)
+                return AgentLauncher(id: match.id, name: launcher.name, command: launcher.command)
+            }
+
+            let trimmedCommand = launcher.command.trimmingCharacters(in: .whitespacesAndNewlines)
+            if commandCounts[trimmedCommand] == 1,
+                let match = previous.first(where: {
+                    $0.command.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedCommand && !usedIDs.contains($0.id)
+                })
+            {
+                usedIDs.insert(match.id)
+                return AgentLauncher(id: match.id, name: launcher.name, command: launcher.command)
+            }
+
+            return launcher
         }
     }
 
@@ -5329,20 +5371,39 @@ public final class WorkspaceOrchestrator {
         try FileManager.default.removeItem(atPath: revalidated.path)
     }
 
+    private enum ManagedDirectoryOwnershipConflict {
+        case project(String)
+        case workspace(WorkspaceRecord)
+        case descendant(String)
+    }
+
     private func validateManagedDirectoryIsUnowned(path: String) throws {
+        guard let conflict = try managedDirectoryOwnershipConflict(path: path) else { return }
+        switch conflict {
+        case .project(let path):
+            throw WorkspaceError.projectAlreadyExists(dir: path)
+        case .workspace(let workspace):
+            throw WorkspaceError.invalidArgument(message: "Workspace already exists: \(workspace.title)")
+        case .descendant(let path):
+            throw WorkspaceError.invalidArgument(message: "Managed folder contains a project or workspace owned by Spaces: \(path)")
+        }
+    }
+
+    private func managedDirectoryOwnershipConflict(path: String) throws -> ManagedDirectoryOwnershipConflict? {
         let entryPath = standardizePathPreservingSymlinks(path)
         let resolvedPath = normalizePath(entryPath)
         var ownershipPaths = [entryPath]
         if resolvedPath != entryPath { ownershipPaths.append(resolvedPath) }
         for ownershipPath in ownershipPaths {
-            if try store.project(dir: ownershipPath) != nil { throw WorkspaceError.projectAlreadyExists(dir: ownershipPath) }
+            if try store.project(dir: ownershipPath) != nil { return .project(ownershipPath) }
             if let workspace = try store.workspace(dir: ownershipPath) {
-                throw WorkspaceError.invalidArgument(message: "Workspace already exists: \(workspace.title)")
+                return .workspace(workspace)
             }
         }
         for ownershipPath in ownershipPaths where try managedDirectoryContainsOwnedDescendant(path: ownershipPath) {
-            throw WorkspaceError.invalidArgument(message: "Managed folder contains a project or workspace owned by Spaces: \(ownershipPath)")
+            return .descendant(ownershipPath)
         }
+        return nil
     }
 
     private func removeRegisteredGitWorktreeForReplacementIfNeeded(path: String) throws {
@@ -5529,6 +5590,25 @@ public final class WorkspaceOrchestrator {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: project.dir, isDirectory: &isDirectory), isDirectory.boolValue else { return }
         try FileManager.default.removeItem(atPath: project.dir)
+    }
+
+    private func removePreparedManagedGitWorkspaceRootIfUnowned(project: ProjectRecord) throws {
+        guard project.isGitRepo else { return }
+        let root = try worktreeRoot(project: project)
+        guard isManagedWorkspaceEntryPath(root.path) else { return }
+        try removePreparedManagedDirectoryIfUnowned(path: root.path)
+    }
+
+    private func removePreparedManagedProjectDirectoryIfUnowned(project: ProjectRecord) throws {
+        guard project.isGitRepo, isManagedRepositoryDirectory(path: project.dir) else { return }
+        try removePreparedManagedDirectoryIfUnowned(path: project.dir)
+    }
+
+    private func removePreparedManagedDirectoryIfUnowned(path: String) throws {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { return }
+        if case .some = try managedDirectoryOwnershipConflict(path: path) { return }
+        try FileManager.default.removeItem(atPath: path)
     }
 
     func rollbackFailedImportedProjectCreation(project: ProjectRecord, workspaceDirectory: String) throws {

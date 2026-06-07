@@ -7130,7 +7130,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func exportProjectSpacesYAML(_ sender: NSButton) {
         commitEditing()
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
-        guard !projectHasUnsavedChanges else {
+        guard !projectHasUnsavedChanges, !refs.hasOpenSectionEditor else {
             showInfoMessage(title: "Save project settings first", message: "Save or discard pending changes before exporting spaces.yaml.")
             return
         }

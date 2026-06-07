@@ -4474,6 +4474,29 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try store.projects().isEmpty)
     }
 
+    func testDiscardPreparedGitProjectPreservesCloneWhenRegisteredBeforeCleanup() throws {
+        let fixture = try makeTempGitRepo(name: "registered-before-prepared-discard")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let actualWorkspacesRoot = root.appendingPathComponent("actual-workspaces", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces-link", isDirectory: true)
+        try FileManager.default.createDirectory(at: actualWorkspacesRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: workspacesRoot, withDestinationURL: actualWorkspacesRoot)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path)
+
+        try store.upsert(project: prepared.project)
+        try store.upsert(workspace: prepared.defaultWorkspace)
+
+        try orchestrator.discardPreparedGitProject(prepared)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.project.dir))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.defaultWorkspace.dir))
+        XCTAssertEqual(try store.project(id: prepared.project.id)?.dir, prepared.project.dir)
+        XCTAssertEqual(try store.workspace(id: prepared.defaultWorkspace.id)?.dir, prepared.defaultWorkspace.dir)
+    }
+
     func testPrepareGitProjectOverwritesAbandonedPreparedCloneOnRetry() throws {
         let fixture = try makeTempGitRepo(name: "retry-prepared-git-import")
         let root = try makeTempDirectory()
@@ -4670,6 +4693,48 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(archivedSettings?.stopScript, "echo synced-stop")
         XCTAssertEqual(archivedSettings?.browserSessions.first?.name, "app")
         XCTAssertTrue(try XCTUnwrap(store.workspace(id: archivedWorkspace.id)).isArchived)
+    }
+
+    func testImportSpacesYAMLWithWorkspaceSyncPreservesAgentLauncherIDsForLiveAgents() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let launches = TerminalLaunchConfigurationCapture()
+        let terminated = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
+            builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) },
+            builtInTerminalSessionLauncher: { configuration in
+                launches.append(configuration)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
+                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)")
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.agentLaunchers = [AgentLauncher(id: "project-launcher-codex", name: "Codex", command: "codex")]
+        }
+        try orchestrator.updateWorkspaceSettings(workspaceID: defaultWorkspace.id) { settings in
+            settings.agentLaunchers = [AgentLauncher(id: "workspace-launcher-codex", name: "Codex", command: "codex")]
+        }
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-codex", workspaceID: defaultWorkspace.id, provider: .spaces, label: "Codex",
+                terminalTarget: TerminalTargetRecord(trackingID: "old-session"), claimedLauncherID: "workspace-launcher-codex",
+                claimedLauncherName: "Codex", status: .idle, createdAt: "now", updatedAt: "now"))
+        try spacesYAMLFixture(stopScript: "echo synced-stop").write(
+            to: try orchestrator.spacesYAMLConfigURL(projectID: project.id), atomically: true, encoding: .utf8)
+
+        _ = try orchestrator.importSpacesYAML(projectID: project.id, updateAllWorkspaces: true)
+        _ = try orchestrator.restartCodingAgent(workspaceID: defaultWorkspace.id, agentID: "agent-codex")
+
+        XCTAssertEqual(try store.project(id: project.id)?.agentLaunchers.first?.id, "project-launcher-codex")
+        XCTAssertEqual(try store.workspaceAgentLaunchers(workspaceID: defaultWorkspace.id).first?.id, "workspace-launcher-codex")
+        XCTAssertEqual(terminated.sessionIDs, ["old-session"])
+        XCTAssertEqual(launches.snapshot().map(\.title), ["Codex"])
     }
 
     func testImportSpacesYAMLWithWorkspaceSyncRollsBackProjectAndEarlierWorkspacesOnFailure() throws {

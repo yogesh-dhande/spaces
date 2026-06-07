@@ -87,6 +87,7 @@ import workspacecore
         refreshRows(animated: true, preservingEditing: preservingEditing)
     }
     var rowCount: Int { rows.count }
+    var hasOpenEditor: Bool { rows.contains { $0.isEditing } }
     func isEditing(at index: Int) -> Bool { index >= 0 && index < rows.count ? rows[index].isEditing : false }
 
     // MARK: Header

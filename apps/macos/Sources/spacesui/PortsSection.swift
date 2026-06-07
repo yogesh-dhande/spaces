@@ -80,6 +80,7 @@ import workspacecore
     }
     var rowCount: Int { rows.count }
     var currentPorts: [PortDefinition] { ports }
+    var hasOpenEditor: Bool { rows.contains { $0.isEditing } }
     func row(at index: Int) -> PortRowView? { index >= 0 && index < rows.count ? rows[index] : nil }
     func isEditing(at index: Int) -> Bool { index >= 0 && index < rows.count ? rows[index].isEditing : false }
 

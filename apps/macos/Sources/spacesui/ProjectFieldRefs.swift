@@ -30,4 +30,9 @@ import AppKit
         self.exportButton = exportButton
         self.discardImportedConfigButton = discardImportedConfigButton
     }
+
+    var hasOpenSectionEditor: Bool {
+        setupScriptSection.hasOpenEditor || stopScriptSection.hasOpenEditor || portsSection.hasOpenEditor || processesSection.hasOpenEditor
+            || browserSessionsSection.hasOpenEditor || agentLaunchersSection.hasOpenEditor
+    }
 }
