@@ -110,8 +110,26 @@ final class TerminalSessionModelTests: XCTestCase {
 
         XCTAssertEqual(decoded.backend, .ghosttyEmbedded)
         XCTAssertEqual(decoded.childPID, 456)
+        XCTAssertNil(decoded.foregroundDetectedAgentKind)
+        XCTAssertNil(decoded.foregroundDisplayCommand)
         XCTAssertNil(decoded.title)
         XCTAssertNil(decoded.workingDirectory)
+    }
+
+    func testRuntimeStatePersistenceRoundTripsForegroundMetadata() throws {
+        let sessionID = "session-foreground-runtime"
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try writeLaunchConfiguration(sessionID: sessionID, paths: paths)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 123, childPID: 456, state: .running, updatedAt: "2026-05-08T00:00:00Z",
+            title: "shell", workingDirectory: "/tmp/work", columns: 80, rows: 24, foregroundPID: 789,
+            foregroundExecutablePath: "/opt/homebrew/bin/node", foregroundExecutableName: "node",
+            foregroundArgv: ["node", "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js", "--model", "gpt-5"],
+            foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex --model gpt-5")
+
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths), runtimeState)
     }
 
     func testAttachAndDetachClientPersistsActiveOwner() throws {

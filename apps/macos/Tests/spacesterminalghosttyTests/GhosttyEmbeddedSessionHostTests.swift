@@ -97,6 +97,39 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(command.arguments, ["zsh", "-l", "-c", "echo 'hello'"])
     }
 
+    @MainActor func testHostManagedPTYForegroundPIDTracksInteractiveForegroundJob() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let pidPath = root.appendingPathComponent("foreground.pid")
+        let scriptPath = root.appendingPathComponent("foreground-job.sh")
+        try """
+        #!/bin/sh
+        printf '%s\n' "$$" > "\(pidPath.path)"
+        sleep 5
+        """.write(to: scriptPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
+
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "foreground-job-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "foreground-job", workingDirectory: root.path,
+                shell: "/bin/zsh", command: nil, createdAt: "2026-06-06T00:00:00Z"))
+        defer { driver.terminate() }
+
+        try driver.startIfNeeded()
+        let shellPID = try XCTUnwrap(driver.childPID())
+        driver.sendRawBytes(Data("\(scriptPath.path)\n".utf8))
+
+        try waitUntil { FileManager.default.fileExists(atPath: pidPath.path) }
+        let foregroundPIDText = try String(contentsOf: pidPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        let foregroundPID = try XCTUnwrap(Int32(foregroundPIDText))
+        try waitUntil { driver.foregroundPID() == foregroundPID }
+
+        XCTAssertNotEqual(foregroundPID, shellPID)
+        XCTAssertEqual(driver.foregroundPID(), foregroundPID)
+    }
+
     func testHostManagedPTYStripsGhosttyCommandPrefixesBeforeShellExecution() {
         let direct = HostManagedPTYTerminalSessionDriver.execCommand(
             for: TerminalSessionLaunchConfiguration(
@@ -793,6 +826,69 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(runtimeState.state, .running)
         XCTAssertEqual(runtimeState.childPID, childPID)
         XCTAssertNil(runtimeState.exitedAt)
+    }
+
+    @MainActor func testRuntimeStatePersistsKnownForegroundAgentClassification() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-foreground-agent-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+            shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        let childPID: Int32 = 900
+        let foregroundPID: Int32 = 42
+        host.debugSetLastKnownChildPID(childPID)
+        host.debugSetForegroundPIDForTesting(foregroundPID)
+        host.debugSetForegroundAgentResolverForTesting { pid in
+            let process = TerminalForegroundProcessSnapshot(
+                pid: pid, executablePath: "/opt/homebrew/bin/codex", executableName: "codex", argv: ["codex", "--model", "gpt-5"])
+            return TerminalForegroundAgentSnapshot(
+                process: process, detectedAgentKind: .codex, displayLabel: "Codex", displayCommand: "codex --model gpt-5")
+        }
+
+        host.debugPersistRuntimeState()
+
+        let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+        XCTAssertEqual(runtimeState.childPID, childPID)
+        XCTAssertEqual(runtimeState.foregroundPID, foregroundPID)
+        XCTAssertEqual(runtimeState.foregroundDetectedAgentKind, .codex)
+        XCTAssertEqual(runtimeState.foregroundDisplayLabel, "Codex")
+        XCTAssertEqual(runtimeState.foregroundDisplayCommand, "codex --model gpt-5")
+    }
+
+    @MainActor func testRuntimeStateClearsForegroundAgentClassificationForUnknownForegroundProcess() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-foreground-clear-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+            shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        let childPID: Int32 = 900
+        host.debugSetLastKnownChildPID(childPID)
+        host.debugSetForegroundPIDForTesting(42)
+        host.debugSetForegroundAgentResolverForTesting { pid in
+            let process = TerminalForegroundProcessSnapshot(pid: pid, executablePath: "/opt/homebrew/bin/codex", argv: ["codex"])
+            return TerminalForegroundAgentSnapshot(process: process, detectedAgentKind: .codex, displayLabel: "Codex", displayCommand: "codex")
+        }
+        host.debugPersistRuntimeState()
+
+        host.debugSetForegroundPIDForTesting(43)
+        host.debugSetForegroundAgentResolverForTesting { _ in nil }
+        host.debugPersistRuntimeState()
+
+        let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+        XCTAssertEqual(runtimeState.childPID, childPID)
+        XCTAssertNil(runtimeState.foregroundPID)
+        XCTAssertNil(runtimeState.foregroundDetectedAgentKind)
+        XCTAssertNil(runtimeState.foregroundDisplayCommand)
     }
 
     @MainActor func testStartedRuntimeMarksExitedWhenKnownChildPIDHasDied() throws {

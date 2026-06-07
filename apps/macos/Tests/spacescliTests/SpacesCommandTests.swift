@@ -470,7 +470,7 @@ final class MXCommandTests: XCTestCase {
         }
     }
 
-    func testResolveAgentInvocationContextDropsNonSpacesEventWithoutTrackingIdentity() throws {
+    func testResolveAgentInvocationContextDropsEventWithoutTrackingIdentity() throws {
         let store = try makeTemporaryStore()
         let workspace = try makeWorkspace(store: store)
         let orchestrator = WorkspaceOrchestrator(store: store)
@@ -478,8 +478,7 @@ final class MXCommandTests: XCTestCase {
         try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
             let context = CLIContext()
             let agentContext = try resolveAgentInvocationContext(
-                workspaceID: workspace.id, environment: ["TERM_PROGRAM": "iTerm.app", "CLAUDE_CODE_ENTRYPOINT": "1"], orchestrator: orchestrator,
-                context: context)
+                workspaceID: workspace.id, environment: ["CLAUDE_CODE_ENTRYPOINT": "1"], orchestrator: orchestrator, context: context)
 
             XCTAssertNil(agentContext)
         }

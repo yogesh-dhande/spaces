@@ -16,7 +16,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowCreatesDedicatedWindowRecord() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let record = try orchestrator.registerAgentWindow(
@@ -26,7 +26,6 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(record.provider, .spaces)
         XCTAssertEqual(record.label, "Codex CLI")
         XCTAssertEqual(record.terminalTrackingID, "workspace-session")
-        XCTAssertNil(record.tmuxWindowID)
         XCTAssertEqual(record.windowID, 101)
         XCTAssertEqual(record.yabaiWindowID, 101)
         XCTAssertEqual(record.status, .idle)
@@ -34,7 +33,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowUpdatesExistingWindowRecord() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let first = try orchestrator.registerAgentWindow(
@@ -51,7 +50,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowKeepsSeparateDedicatedWindowsDistinct() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let first = try orchestrator.registerAgentWindow(
@@ -65,7 +64,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowAutoRenamesDuplicateAdHocAgentLabels() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let first = try orchestrator.registerAgentWindow(
@@ -82,7 +81,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowReservesConfiguredLauncherNamesForLauncherOwnedAgent() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (project, workspace) = try makeProjectAndWorkspace(store: store)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex")]
@@ -102,7 +101,7 @@ final class AgentHookTests: XCTestCase {
 
     func testUpdateAgentWindowStatusMatchesExistingWindowID() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         try orchestrator.registerAgentWindow(
@@ -120,7 +119,7 @@ final class AgentHookTests: XCTestCase {
 
     func testUpdateAgentWindowStatusKeepsExistingLabelStable() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let existing = try orchestrator.registerAgentWindow(
@@ -137,9 +136,9 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
     }
 
-    func testUpdateAgentWindowStatusPrefersItermSessionMatchOverWindowID() throws {
+    func testUpdateAgentWindowStatusPrefersTerminalSessionMatchOverWindowID() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let existing = try orchestrator.registerAgentWindow(
@@ -158,7 +157,7 @@ final class AgentHookTests: XCTestCase {
 
     func testUpdateAgentWindowStatusIgnoresYabaiWindowIDForBuiltInSpacesSessionIdentity() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let sessionID = UUID().uuidString
 
@@ -178,7 +177,7 @@ final class AgentHookTests: XCTestCase {
 
     func testUpdateAgentWindowStatusFallsBackToCodexThreadMatch() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         try orchestrator.registerAgentWindow(
@@ -196,7 +195,7 @@ final class AgentHookTests: XCTestCase {
 
     func testAgentWindowsReturnsOnlyWorkspaceRecords() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let (_, workspace2) = try makeProjectAndWorkspace(store: store, projectName: "proj2", workspaceName: "ws2")
 
@@ -212,13 +211,13 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(Set(records.compactMap(\.yabaiWindowID)), Set([101, 202]))
     }
 
-    func testRegisterAgentWindowPreservesGhosttyProvider() throws {
+    func testRegisterAgentWindowPreservesSpacesProvider() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let record = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "ghostty-terminal-1", codexThreadID: "thread-1",
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "spaces-terminal-1", codexThreadID: "thread-1",
             yabaiWindowID: 303, status: .waiting)
 
         XCTAssertEqual(record.provider, .spaces)
@@ -227,7 +226,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowCreatesTrackedTerminalRowForAdHocAgent() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         _ = try orchestrator.registerAgentWindow(
@@ -243,7 +242,7 @@ final class AgentHookTests: XCTestCase {
 
     func testHandleAgentExitDeletesClosedAdHocAgentRow() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         _ = try orchestrator.registerAgentWindow(
@@ -264,8 +263,7 @@ final class AgentHookTests: XCTestCase {
         let closeCapture = AgentHookTerminalCloseCapture()
         let terminateCapture = AgentHookTerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalWindowCloser: { closeCapture.sessionIDs.append($0) },
+            store: store, builtInTerminalWindowCloser: { closeCapture.sessionIDs.append($0) },
             builtInTerminalSessionTerminator: { terminateCapture.sessionIDs.append($0) })
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try store.setWorkspaceAgentLaunchers(
@@ -291,13 +289,13 @@ final class AgentHookTests: XCTestCase {
         XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
     }
 
-    func testRefreshWorkspaceWindowsDeletesClosedGhosttyAdHocAgentRow() throws {
+    func testRefreshWorkspaceWindowsDeletesClosedSpacesAdHocAgentRow() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         _ = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "ghostty-terminal-202",
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "spaces-terminal-202",
             codexThreadID: "thread-1", yabaiWindowID: 202, status: .idle)
 
         let didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
@@ -309,7 +307,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRefreshWorkspaceWindowsKeepsClosedConfiguredSpacesAgentRow() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try store.setWorkspaceAgentLaunchers(
             workspaceID: workspace.id, launchers: [AgentLauncher(name: "Configured Agent", command: "configured-agent")])
@@ -369,7 +367,7 @@ final class AgentHookTests: XCTestCase {
           if [[ -n "${YABAI_FOCUSED_JSON:-}" ]]; then
             echo "$YABAI_FOCUSED_JSON"
           else
-            echo '{"id":101,"pid":11,"app":"iTerm2","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}'
+            echo '{"id":101,"pid":11,"app":"Spaces","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}'
           fi
           exit 0
         fi
@@ -378,7 +376,7 @@ final class AgentHookTests: XCTestCase {
           if [[ -n "${YABAI_WINDOWS_JSON:-}" ]]; then
             echo "$YABAI_WINDOWS_JSON"
           else
-            echo '[{"id":101,"pid":11,"app":"iTerm2","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]'
+            echo '[{"id":101,"pid":11,"app":"Spaces","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]'
           fi
           exit 0
         fi

@@ -45,6 +45,7 @@ final class StoreTests: XCTestCase {
         let browserTargetColumns = try readTableColumns(dbURL: dbURL, table: "browser_targets")
         let agentSessionColumns = try readTableColumns(dbURL: dbURL, table: "agent_sessions")
         let terminalSessionColumns = try readTableColumns(dbURL: dbURL, table: "terminal_sessions")
+        let terminalRuntimeStateColumns = try readTableColumns(dbURL: dbURL, table: "terminal_runtime_states")
         let terminalClientColumns = try readTableColumns(dbURL: dbURL, table: "terminal_clients")
         let terminalAttachmentColumns = try readTableColumns(dbURL: dbURL, table: "terminal_attachments")
         let terminalRemoteStateColumns = try readTableColumns(dbURL: dbURL, table: "terminal_remote_session_states")
@@ -72,8 +73,6 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(runtimeTargetColumns.contains("native_id"))
         XCTAssertFalse(runtimeTargetColumns.contains("provider"))
         XCTAssertFalse(runtimeTargetColumns.contains("container_id"))
-        XCTAssertFalse(runtimeTargetColumns.contains("iterm_tab_index"))
-        XCTAssertFalse(runtimeTargetColumns.contains("tmux_window_id"))
         XCTAssertTrue(browserTargetColumns.contains("resolved_url"))
         XCTAssertTrue(agentSessionColumns.contains("runtime_target_id"))
         XCTAssertTrue(agentSessionColumns.contains("terminal_session_id"))
@@ -83,13 +82,19 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(terminalSessionColumns.contains("root_directory"))
         XCTAssertTrue(terminalSessionColumns.contains("workspace_id"))
         XCTAssertTrue(terminalSessionColumns.contains("kind"))
+        XCTAssertTrue(terminalRuntimeStateColumns.contains("foreground_pid"))
+        XCTAssertTrue(terminalRuntimeStateColumns.contains("foreground_executable_path"))
+        XCTAssertTrue(terminalRuntimeStateColumns.contains("foreground_executable_name"))
+        XCTAssertTrue(terminalRuntimeStateColumns.contains("foreground_argv_json"))
+        XCTAssertTrue(terminalRuntimeStateColumns.contains("foreground_detected_agent_kind"))
+        XCTAssertTrue(terminalRuntimeStateColumns.contains("foreground_display_label"))
+        XCTAssertTrue(terminalRuntimeStateColumns.contains("foreground_display_command"))
         XCTAssertTrue(terminalClientColumns.contains("lease_refreshed_at"))
         XCTAssertTrue(terminalAttachmentColumns.contains("detached_at"))
         XCTAssertTrue(terminalRemoteStateColumns.contains("payload_json"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_target_id"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_tracking_id"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_native_id"))
-        XCTAssertFalse(agentSessionColumns.contains("tmux_window_id"))
         XCTAssertFalse(agentSessionColumns.contains("yabai_window_id"))
         XCTAssertEqual(workspaceForeignKeys, 1)
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "windows"))
@@ -662,16 +667,15 @@ final class StoreTests: XCTestCase {
         let processID = UUID().uuidString
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 9001,
-                terminalTrackingID: "session-abc", itermTabIndex: 2, pid: 1234, status: .running, logPath: "/tmp/api.log",
-                lastOutputAt: "2026-01-01T00:00:00Z", startedAt: "2026-01-01T00:00:00Z", exitedAt: nil))
+                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 9001,
+                terminalTrackingID: "session-abc", pid: 1234, status: .running, logPath: "/tmp/api.log", lastOutputAt: "2026-01-01T00:00:00Z",
+                startedAt: "2026-01-01T00:00:00Z", exitedAt: nil))
 
         var processes = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(processes.count, 1)
         XCTAssertEqual(processes[0].status, .running)
         XCTAssertEqual(processes[0].windowID, 9001)
         XCTAssertEqual(processes[0].terminalTrackingID, "session-abc")
-        XCTAssertNil(processes[0].itermTabIndex)
 
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -685,8 +689,8 @@ final class StoreTests: XCTestCase {
             id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Browser", windowID: 42, role: "browser", orderIndex: 0,
             lastSeenAt: "now")
         let secondWindow = WindowRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "Terminal", windowID: 43, role: "terminal", orderIndex: 1,
-            lastSeenAt: "now")
+            id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, title: "Terminal", windowID: 43, role: "terminal",
+            orderIndex: 1, lastSeenAt: "now")
         try store.upsert(window: firstWindow)
         try store.upsert(window: secondWindow)
 
@@ -785,7 +789,7 @@ final class StoreTests: XCTestCase {
                 status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "term", windowID: 77, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "term", windowID: 77, role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
 
         try store.deleteWorkspace(id: workspace.id)
@@ -1015,11 +1019,11 @@ final class StoreTests: XCTestCase {
         let windowID = 9999
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspaceA.id, app: "iTerm2", title: "shell-a", windowID: windowID, role: "terminal",
+                id: UUID().uuidString, workspaceID: workspaceA.id, app: "Spaces", title: "shell-a", windowID: windowID, role: "terminal",
                 orderIndex: 0, lastSeenAt: "2026-01-01T00:00:01Z"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspaceB.id, app: "iTerm2", title: "shell-b", windowID: windowID, role: "terminal",
+                id: UUID().uuidString, workspaceID: workspaceB.id, app: "Spaces", title: "shell-b", windowID: windowID, role: "terminal",
                 orderIndex: 0, lastSeenAt: "2026-01-01T00:00:02Z"))
 
         let found = try store.windows(windowID: windowID)
@@ -1059,8 +1063,8 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(loaded[1].extractedWindow)
     }
 
-    // Tests agent window lookup by iTerm session ID returns the matching record by arranging representative inputs and asserting the expected result.
-    func testAgentWindowLookupByItermSessionID() throws {
+    // Tests agent window lookup by terminal session ID returns the matching record by arranging representative inputs and asserting the expected result.
+    func testAgentWindowLookupByTerminalSessionID() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
         let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
@@ -1126,10 +1130,10 @@ final class StoreTests: XCTestCase {
                 codexThreadID: nil, windowID: nil, yabaiWindowID: nil, status: .spinning, createdAt: "2026-01-01T00:00:02Z",
                 updatedAt: "2026-01-01T00:00:02Z"))
 
-        let itermWindows = try store.agentWindowsByProvider(workspaceID: workspace.id, provider: .spaces)
-        XCTAssertEqual(itermWindows.count, 1)
-        XCTAssertEqual(itermWindows[0].provider, .spaces)
-        XCTAssertEqual(itermWindows[0].terminalTrackingID, "session-a")
+        let agentWindows = try store.agentWindowsByProvider(workspaceID: workspace.id, provider: .spaces)
+        XCTAssertEqual(agentWindows.count, 1)
+        XCTAssertEqual(agentWindows[0].provider, .spaces)
+        XCTAssertEqual(agentWindows[0].terminalTrackingID, "session-a")
     }
 
     // Tests deleteAgentWindow removes a single record by arranging representative inputs and asserting the expected result.

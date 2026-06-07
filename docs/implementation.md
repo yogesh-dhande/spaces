@@ -328,7 +328,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Named port definitions are allocated per workspace and exposed as environment variables. Workspace-settings saves preserve existing allocations where possible, allocate newly added definitions immediately, and release removed definitions without waiting for the next launch.
 - Workspace processes also receive stable environment variables such as project and workspace directories.
 - Setup scripts, stop scripts, and process commands all execute against the workspace-specific environment.
-- Built-in `Spaces` terminal sessions own their process lifetime directly through the session backend, so launch, stop, recovery, and reopen do not depend on tmux.
+- Built-in `Spaces` terminal sessions own their process lifetime directly through the session backend for launch, stop, recovery, and reopen.
 - Configured process restart closes the old native Spaces terminal window and terminates the old service session before the replacement session is recorded as current. The process row remains the configured slot; the terminal session identity changes only through that explicit replacement path.
 - Immediate process-start failures should be surfaced from the recent built-in session output itself so launch errors report the real command failure instead of a follow-on recovery error.
 - Core external dependencies that the GUI invokes directly, such as `yabai` and `git`, are resolved through a shared executable-locator path instead of relying on the Finder app environment to provide a complete `PATH`.
@@ -373,6 +373,8 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.
 - `spaces signal` only resolves direct built-in terminal environments.
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata, but `init` also reconciles them against tracked terminal windows so ad-hoc agent terminals become focusable tracked rows.
+- Built-in terminal runtime state records nullable foreground process metadata for known coding agents. The Ghostty host classifies only the current live foreground PID; cached child PID state is used for process liveness and is not used for agent classification.
+- The process-monitor cadence reconciles live Spaces terminal sessions against foreground classifications. Configured process sessions are skipped, configured launcher-backed agent rows are preserved, and unclaimed ad-hoc agent rows are created while a known agent is foreground and removed when the foreground command is a shell or unknown process.
 - Configured agent-launcher names are treated as reserved focus labels. The launcher-owned agent instance may keep that exact label, while unrelated ad-hoc agents that report the same label are suffixed during registration so GUI rows and CLI focus targets stay unambiguous.
 - Workspace launch opens configured coding agents through the same direct-terminal path as manual agent launch. That creates the tracked agent rows eagerly, while later `spaces signal` calls still supply the actual lifecycle status.
 - Alerts and numbered window shortcuts keep configured and ad-hoc agent rows in one `Coding Agents` section. Configured rows occupy their stable slots first, then unmatched ad-hoc agent rows append after them so shortcut ordering remains deterministic.

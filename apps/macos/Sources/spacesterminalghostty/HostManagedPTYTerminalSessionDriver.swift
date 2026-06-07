@@ -128,7 +128,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         return ioctl(fd, TIOCSWINSZ, &windowSize) == 0
     }
 
-    func foregroundPID() -> Int32? {
+    func childPID() -> Int32? {
         lock.lock()
         let pid = childPIDValue
         lock.unlock()
@@ -136,6 +136,18 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         let status = kill(pid, 0)
         guard status == 0 || errno == EPERM else { return nil }
         return pid
+    }
+
+    func foregroundPID() -> Int32? {
+        lock.lock()
+        let fd = masterFD
+        lock.unlock()
+        guard fd >= 0 else { return nil }
+        var foregroundProcessGroup: Int32 = 0
+        guard ioctl(fd, TIOCGPGRP, &foregroundProcessGroup) == 0, foregroundProcessGroup > 0 else { return nil }
+        let status = kill(foregroundProcessGroup, 0)
+        guard status == 0 || errno == EPERM else { return nil }
+        return foregroundProcessGroup
     }
 
     func surfaceCellSize() -> (columns: Int, rows: Int) {

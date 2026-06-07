@@ -1,6 +1,7 @@
 import Foundation
 import SQLite3
 import spacesdatabase
+import spacesterminalcore
 import systembridge
 
 public final class SQLiteStore {
@@ -1115,14 +1116,28 @@ public final class SQLiteStore {
         let existingWindows = try windows(workspaceID: record.workspaceID)
         let existingWindow = existingWindows.first(where: { $0.id == targetID })
         let now = ISO8601DateFormatter().string(from: Date())
+        let preservesExistingMetadata = try preservesExistingTerminalMetadata(for: record)
         try upsert(
             window: WindowRecord(
-                id: targetID, workspaceID: record.workspaceID, app: TerminalHost.spaces.appName, name: record.label ?? "Coding Agent CLI",
-                detail: nil, targetURL: nil, windowID: terminalTarget.windowID, terminalTrackingID: terminalTarget.trackingID,
-                terminalNativeID: terminalTarget.trackingID, role: "terminal",
+                id: targetID, workspaceID: record.workspaceID, app: TerminalHost.spaces.appName,
+                name: preservesExistingMetadata ? (existingWindow?.name ?? record.label ?? "Coding Agent CLI") : (record.label ?? "Coding Agent CLI"),
+                detail: preservesExistingMetadata ? existingWindow?.detail : nil, targetURL: nil, windowID: terminalTarget.windowID,
+                terminalTrackingID: terminalTarget.trackingID, terminalNativeID: terminalTarget.trackingID, role: "terminal",
                 orderIndex: existingWindow?.orderIndex ?? nextRuntimeTargetOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200),
                 lastSeenAt: now))
         return targetID
+    }
+
+    private func preservesExistingTerminalMetadata(for record: AgentWindowRecord) throws -> Bool {
+        if let sessionID = spacesAgentTerminalSessionID(record), let kind = try terminalSessionKind(sessionID: sessionID) { return kind == .shell }
+        return record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+            && record.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+    }
+
+    private func terminalSessionKind(sessionID: String) throws -> TerminalSessionKind? {
+        let row = try queryRow(sql: "SELECT kind FROM terminal_sessions WHERE session_id = ? LIMIT 1", bindings: [sessionID])
+        guard let rawKind = row?.first, !rawKind.isEmpty else { return nil }
+        return TerminalSessionKind(rawValue: rawKind)
     }
 
     private func nextRuntimeTargetOrderIndex(existing: [WindowRecord], role: String, orderOffset: Int) -> Int {

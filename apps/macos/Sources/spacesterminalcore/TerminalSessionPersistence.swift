@@ -71,6 +71,13 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
     public let backend: TerminalSessionBackendKind
     public let servicePID: Int32
     public let childPID: Int32?
+    public let foregroundPID: Int32?
+    public let foregroundExecutablePath: String?
+    public let foregroundExecutableName: String?
+    public let foregroundArgv: [String]?
+    public let foregroundDetectedAgentKind: TerminalDetectedAgentKind?
+    public let foregroundDisplayLabel: String?
+    public let foregroundDisplayCommand: String?
     public let title: String?
     public let workingDirectory: String?
     public let columns: Int?
@@ -81,12 +88,22 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
 
     public init(
         sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, servicePID: Int32, childPID: Int32?, state: TerminalSessionState,
-        updatedAt: String, exitedAt: String? = nil, title: String? = nil, workingDirectory: String? = nil, columns: Int? = nil, rows: Int? = nil
+        updatedAt: String, exitedAt: String? = nil, title: String? = nil, workingDirectory: String? = nil, columns: Int? = nil, rows: Int? = nil,
+        foregroundPID: Int32? = nil, foregroundExecutablePath: String? = nil, foregroundExecutableName: String? = nil,
+        foregroundArgv: [String]? = nil, foregroundDetectedAgentKind: TerminalDetectedAgentKind? = nil, foregroundDisplayLabel: String? = nil,
+        foregroundDisplayCommand: String? = nil
     ) {
         self.sessionID = sessionID
         self.backend = backend
         self.servicePID = servicePID
         self.childPID = childPID
+        self.foregroundPID = foregroundPID
+        self.foregroundExecutablePath = foregroundExecutablePath
+        self.foregroundExecutableName = foregroundExecutableName
+        self.foregroundArgv = foregroundArgv
+        self.foregroundDetectedAgentKind = foregroundDetectedAgentKind
+        self.foregroundDisplayLabel = foregroundDisplayLabel
+        self.foregroundDisplayCommand = foregroundDisplayCommand
         self.title = title
         self.workingDirectory = workingDirectory
         self.columns = columns
@@ -101,6 +118,13 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
         case backend
         case servicePID
         case childPID
+        case foregroundPID
+        case foregroundExecutablePath
+        case foregroundExecutableName
+        case foregroundArgv
+        case foregroundDetectedAgentKind
+        case foregroundDisplayLabel
+        case foregroundDisplayCommand
         case title
         case workingDirectory
         case columns
@@ -116,6 +140,13 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
         backend = try container.decodeIfPresent(TerminalSessionBackendKind.self, forKey: .backend) ?? .ghosttyEmbedded
         servicePID = try container.decode(Int32.self, forKey: .servicePID)
         childPID = try container.decodeIfPresent(Int32.self, forKey: .childPID)
+        foregroundPID = try container.decodeIfPresent(Int32.self, forKey: .foregroundPID)
+        foregroundExecutablePath = try container.decodeIfPresent(String.self, forKey: .foregroundExecutablePath)
+        foregroundExecutableName = try container.decodeIfPresent(String.self, forKey: .foregroundExecutableName)
+        foregroundArgv = try container.decodeIfPresent([String].self, forKey: .foregroundArgv)
+        foregroundDetectedAgentKind = try container.decodeIfPresent(TerminalDetectedAgentKind.self, forKey: .foregroundDetectedAgentKind)
+        foregroundDisplayLabel = try container.decodeIfPresent(String.self, forKey: .foregroundDisplayLabel)
+        foregroundDisplayCommand = try container.decodeIfPresent(String.self, forKey: .foregroundDisplayCommand)
         title = try container.decodeIfPresent(String.self, forKey: .title)
         workingDirectory = try container.decodeIfPresent(String.self, forKey: .workingDirectory)
         columns = try container.decodeIfPresent(Int.self, forKey: .columns)
@@ -176,6 +207,7 @@ public enum TerminalSessionPersistence {
     public static func writeRuntimeState(_ state: TerminalSessionRuntimeState, paths: TerminalSessionPaths) throws {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
+        let foregroundArgvJSON = try encodeForegroundArgv(state.foregroundArgv)
         try withDatabase(paths: paths) { database in
             try database.withImmediateTransaction {
                 try database.execute(
@@ -183,9 +215,12 @@ public enum TerminalSessionPersistence {
                 try database.execute(
                     sql: """
                         INSERT INTO terminal_runtime_states(
-                          session_id, root_directory, backend, service_pid, child_pid, title, working_directory, columns, rows, state, updated_at, exited_at
+                          session_id, root_directory, backend, service_pid, child_pid, title, working_directory, columns, rows, state, updated_at, exited_at,
+                          foreground_pid, foreground_executable_path, foreground_executable_name, foreground_argv_json,
+                          foreground_detected_agent_kind, foreground_display_label, foreground_display_command
                         )
-                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''))
+                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''),
+                                NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))
                         ON CONFLICT(session_id) DO UPDATE SET
                           root_directory = excluded.root_directory,
                           backend = excluded.backend,
@@ -197,12 +232,21 @@ public enum TerminalSessionPersistence {
                           rows = excluded.rows,
                           state = excluded.state,
                           updated_at = excluded.updated_at,
-                          exited_at = excluded.exited_at
+                          exited_at = excluded.exited_at,
+                          foreground_pid = excluded.foreground_pid,
+                          foreground_executable_path = excluded.foreground_executable_path,
+                          foreground_executable_name = excluded.foreground_executable_name,
+                          foreground_argv_json = excluded.foreground_argv_json,
+                          foreground_detected_agent_kind = excluded.foreground_detected_agent_kind,
+                          foreground_display_label = excluded.foreground_display_label,
+                          foreground_display_command = excluded.foreground_display_command
                         """,
                     bindings: [
                         state.sessionID, root, state.backend.rawValue, state.servicePID, state.childPID.map { Int($0) } as Any? ?? NSNull(),
                         state.title ?? "", state.workingDirectory ?? "", state.columns as Any? ?? NSNull(), state.rows as Any? ?? NSNull(),
-                        state.state.rawValue, state.updatedAt, state.exitedAt ?? "",
+                        state.state.rawValue, state.updatedAt, state.exitedAt ?? "", state.foregroundPID.map { Int($0) } as Any? ?? NSNull(),
+                        state.foregroundExecutablePath ?? "", state.foregroundExecutableName ?? "", foregroundArgvJSON ?? "",
+                        state.foregroundDetectedAgentKind?.rawValue ?? "", state.foregroundDisplayLabel ?? "", state.foregroundDisplayCommand ?? "",
                     ])
             }
         }
@@ -262,7 +306,11 @@ public enum TerminalSessionPersistence {
             let row = try database.queryRow(
                 sql: """
                     SELECT session_id, backend, service_pid, COALESCE(child_pid, ''), COALESCE(title, ''), COALESCE(working_directory, ''),
-                           COALESCE(columns, ''), COALESCE(rows, ''), state, updated_at, COALESCE(exited_at, '')
+                           COALESCE(columns, ''), COALESCE(rows, ''), state, updated_at, COALESCE(exited_at, ''),
+                           COALESCE(foreground_pid, ''), COALESCE(foreground_executable_path, ''),
+                           COALESCE(foreground_executable_name, ''), COALESCE(foreground_argv_json, ''),
+                           COALESCE(foreground_detected_agent_kind, ''), COALESCE(foreground_display_label, ''),
+                           COALESCE(foreground_display_command, '')
                     FROM terminal_runtime_states
                     WHERE root_directory = ?
                     """, bindings: [root])
@@ -648,6 +696,21 @@ public enum TerminalSessionPersistence {
             command: row[8].isEmpty ? nil : row[8], createdAt: row[9], workspaceID: row[3].isEmpty ? nil : row[3], kind: kind)
     }
 
+    private static func encodeForegroundArgv(_ argv: [String]?) throws -> String? {
+        guard let argv else { return nil }
+        let data = try JSONEncoder().encode(TerminalForegroundProcessInspector.boundedArguments(argv))
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw TerminalSessionPersistenceError.invalidValue("foreground_argv_json", "<non-utf8>")
+        }
+        return json
+    }
+
+    private static func decodeForegroundArgv(_ json: String) throws -> [String]? {
+        guard !json.isEmpty else { return nil }
+        guard let data = json.data(using: .utf8) else { throw TerminalSessionPersistenceError.invalidValue("foreground_argv_json", "<non-utf8>") }
+        return try JSONDecoder().decode([String].self, from: data)
+    }
+
     private static func decodeRuntimeState(row: [String]) throws -> TerminalSessionRuntimeState {
         guard row.count >= 11 else { throw TerminalSessionPersistenceError.invalidRow("terminal_runtime_states") }
         guard let backend = TerminalSessionBackendKind(rawValue: row[1]) else {
@@ -655,10 +718,24 @@ public enum TerminalSessionPersistence {
         }
         guard let servicePID = Int32(row[2]) else { throw TerminalSessionPersistenceError.invalidValue("service_pid", row[2]) }
         guard let state = TerminalSessionState(rawValue: row[8]) else { throw TerminalSessionPersistenceError.invalidValue("state", row[8]) }
+        let foregroundDetectedAgentKind: TerminalDetectedAgentKind?
+        if row.count > 15, !row[15].isEmpty {
+            guard let kind = TerminalDetectedAgentKind(rawValue: row[15]) else {
+                throw TerminalSessionPersistenceError.invalidValue("foreground_detected_agent_kind", row[15])
+            }
+            foregroundDetectedAgentKind = kind
+        } else {
+            foregroundDetectedAgentKind = nil
+        }
         return TerminalSessionRuntimeState(
             sessionID: row[0], backend: backend, servicePID: servicePID, childPID: Int32(row[3]), state: state, updatedAt: row[9],
             exitedAt: row[10].isEmpty ? nil : row[10], title: row[4].isEmpty ? nil : row[4], workingDirectory: row[5].isEmpty ? nil : row[5],
-            columns: Int(row[6]), rows: Int(row[7]))
+            columns: Int(row[6]), rows: Int(row[7]), foregroundPID: row.count > 11 ? Int32(row[11]) : nil,
+            foregroundExecutablePath: row.count > 12 && !row[12].isEmpty ? row[12] : nil,
+            foregroundExecutableName: row.count > 13 && !row[13].isEmpty ? row[13] : nil,
+            foregroundArgv: row.count > 14 ? try decodeForegroundArgv(row[14]) : nil, foregroundDetectedAgentKind: foregroundDetectedAgentKind,
+            foregroundDisplayLabel: row.count > 16 && !row[16].isEmpty ? row[16] : nil,
+            foregroundDisplayCommand: row.count > 17 && !row[17].isEmpty ? row[17] : nil)
     }
 
     private static func decodeClient(row: [String]) throws -> TerminalClient {

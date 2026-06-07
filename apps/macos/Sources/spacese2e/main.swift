@@ -463,8 +463,8 @@ private struct SeedFixtureCommand: ParsableCommand {
     }
 
     /// Resolves the executable up front because the seeded process command is
-    /// launched by the GUI app through tmux, not by an interactive shell that
-    /// necessarily inherits the user's PATH customizations.
+    /// launched by the GUI app, not by an interactive shell that necessarily
+    /// inherits the user's PATH customizations.
     private func resolveExecutablePath(named name: String) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
@@ -626,13 +626,12 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             runningProcesses: try orchestrator.runningProcesses(workspaceID: workspace.id).map {
                 RunningProcessPayload(
                     id: $0.id, name: $0.templateName, pid: try resolvedPID(for: $0), status: $0.status.rawValue, terminalApp: $0.terminalApp,
-                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID, tmuxWindowID: $0.tmuxWindowID,
-                    windowID: $0.windowID)
+                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID, windowID: $0.windowID)
             },
             windows: try orchestrator.windows(workspaceID: workspace.id).map {
                 WindowPayload(
                     name: $0.name, app: $0.app, role: $0.role, detail: $0.detail, targetURL: $0.targetURL, windowID: $0.windowID,
-                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID, itermTabIndex: $0.itermTabIndex)
+                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID)
             },
             agentWindows: try orchestrator.agentWindows(workspaceID: workspace.id).map {
                 AgentWindowPayload(
@@ -1106,7 +1105,6 @@ private struct RunningProcessPayload: Codable {
     let terminalApp: String?
     let terminalTrackingID: String?
     let terminalNativeID: String?
-    let tmuxWindowID: String?
     let windowID: Int?
 }
 
@@ -1119,7 +1117,6 @@ private struct WindowPayload: Codable {
     let windowID: Int?
     let terminalTrackingID: String?
     let terminalNativeID: String?
-    let itermTabIndex: Int?
 }
 
 private struct AgentWindowPayload: Codable {

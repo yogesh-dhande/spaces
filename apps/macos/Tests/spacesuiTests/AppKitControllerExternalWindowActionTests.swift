@@ -53,12 +53,6 @@ import Testing
         #expect(AppKitController.hideDelayAfterSuccessfulExternalWindowAction(true, action: .open(hidesApp: false)) == nil)
     }
 
-    @Test func builtInConfiguredAgentLaunchesDoNotHideSpaces() {
-        #expect(!AppKitController.shouldHideAfterConfiguredAgentLauncherOpen(terminalHost: .spaces))
-    }
-
-    @Test func builtInAgentFocusDoesNotHideSpaces() { #expect(!AppKitController.shouldHideAfterAgentWindowFocus(provider: .spaces)) }
-
     @Test func failedActionsDoNotHideSpaces() {
         #expect(!AppKitController.shouldHideAfterSuccessfulExternalWindowAction(false, action: .focus(hidesApp: true)))
         #expect(!AppKitController.shouldHideAfterSuccessfulExternalWindowAction(false, action: .open(hidesApp: true)))

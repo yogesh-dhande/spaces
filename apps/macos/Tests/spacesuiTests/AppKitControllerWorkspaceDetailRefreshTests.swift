@@ -6,19 +6,19 @@ import workspacecore
 
 @Suite struct AppKitControllerWorkspaceDetailRefreshTests {
     @Test func terminalFallbackRowTextUsesNameAndLiveTitle() {
-        let row = AppKitController.terminalFallbackRowText(name: "shell-1", detail: "* zsh", app: "iTerm2")
+        let row = AppKitController.terminalFallbackRowText(name: "shell-1", detail: "* zsh", app: "Spaces")
         #expect(row.label == "shell-1")
         #expect(row.detail == "zsh")
     }
 
     @Test func terminalFallbackRowTextFallsBackToTerminalLabelWhenNameMissing() {
-        let row = AppKitController.terminalFallbackRowText(name: nil, detail: "* zsh", app: "iTerm2")
+        let row = AppKitController.terminalFallbackRowText(name: nil, detail: "* zsh", app: "Spaces")
         #expect(row.label == "Terminal")
         #expect(row.detail == "zsh")
     }
 
     @Test func terminalFallbackRowTextOmitsDetailWhenTitleMissing() {
-        let row = AppKitController.terminalFallbackRowText(name: nil, detail: nil, app: "iTerm2")
+        let row = AppKitController.terminalFallbackRowText(name: nil, detail: nil, app: "Spaces")
         #expect(row.label == "Terminal")
         #expect(row.detail == nil)
     }
@@ -133,13 +133,11 @@ import workspacecore
     @Test func workspaceProcessStatusByNameReflectsRuntimeState() {
         let statuses = AppKitController.workspaceProcessStatusByName([
             RunningProcessRecord(
-                id: "running", workspaceID: "workspace", templateName: "web", command: "npm run dev", terminalApp: "iTerm2", windowID: 101,
-                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
-                startedAt: nil, exitedAt: nil),
+                id: "running", workspaceID: "workspace", templateName: "web", command: "npm run dev", terminalApp: "Spaces", windowID: 101,
+                terminalTrackingID: "session-web", pid: 1, status: .running, logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: nil),
             RunningProcessRecord(
-                id: "exited", workspaceID: "workspace", templateName: "worker", command: "npm run worker", terminalApp: "iTerm2", windowID: 102,
-                terminalTrackingID: "session-worker", itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .exited, logPath: nil,
-                lastOutputAt: nil, startedAt: nil, exitedAt: nil),
+                id: "exited", workspaceID: "workspace", templateName: "worker", command: "npm run worker", terminalApp: "Spaces", windowID: 102,
+                terminalTrackingID: "session-worker", pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: nil),
         ])
 
         #expect(statuses["web"] == RowPrimitives.StatusKind.running)

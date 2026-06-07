@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public enum DatabaseSchema {
-    public static let currentVersion = 6
+    public static let currentVersion = 7
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "terminal metadata tables", requiresBackup: false) { database in
@@ -54,6 +54,9 @@ public enum DatabaseSchema {
             if try tableExists("terminal_sessions", database: database), try tableExists("runtime_targets", database: database) {
                 try executeBatch(sql: terminalSessionRuntimeTargetOwnershipBackfillSQL, database: database)
             }
+        },
+        DatabaseMigrationStep(fromVersion: 6, toVersion: 7, description: "terminal foreground process metadata", requiresBackup: false) { database in
+            try addTerminalForegroundRuntimeColumns(database: database)
         },
     ]
 
@@ -120,7 +123,14 @@ public enum DatabaseSchema {
               rows INTEGER,
               state TEXT NOT NULL,
               updated_at TEXT NOT NULL,
-              exited_at TEXT
+              exited_at TEXT,
+              foreground_pid INTEGER,
+              foreground_executable_path TEXT,
+              foreground_executable_name TEXT,
+              foreground_argv_json TEXT,
+              foreground_detected_agent_kind TEXT,
+              foreground_display_label TEXT,
+              foreground_display_command TEXT
             );
 
             CREATE TABLE IF NOT EXISTS terminal_clients (
@@ -525,6 +535,16 @@ public enum DatabaseSchema {
     private static func addColumnIfNeeded(table: String, column: String, definition: String, database: OpaquePointer) throws {
         guard try tableExists(table, database: database), try !columnExists(table: table, column: column, database: database) else { return }
         try executeBatch(sql: "ALTER TABLE \(table) ADD COLUMN \(column) \(definition);", database: database)
+    }
+
+    private static func addTerminalForegroundRuntimeColumns(database: OpaquePointer) throws {
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_pid", definition: "INTEGER", database: database)
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_executable_path", definition: "TEXT", database: database)
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_executable_name", definition: "TEXT", database: database)
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_argv_json", definition: "TEXT", database: database)
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_detected_agent_kind", definition: "TEXT", database: database)
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_display_label", definition: "TEXT", database: database)
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_display_command", definition: "TEXT", database: database)
     }
 
     private static func tableExists(_ table: String, database: OpaquePointer) throws -> Bool {
