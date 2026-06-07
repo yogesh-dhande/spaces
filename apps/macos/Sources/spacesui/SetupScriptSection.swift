@@ -101,6 +101,12 @@ import AppKit
         showCollapsed()
     }
 
+    func replace(value: String) {
+        isEditing = false
+        currentValue = value
+        showCollapsed()
+    }
+
     // MARK: Collapsed
 
     private func showCollapsed() {

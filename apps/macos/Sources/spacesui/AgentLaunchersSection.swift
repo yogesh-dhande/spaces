@@ -90,9 +90,16 @@ import workspacecore
 
     // MARK: Public API
 
-    func reload(launchers: [AgentLauncher]) {
+    func reload(launchers: [AgentLauncher]) { update(launchers: launchers, preservingEditing: true) }
+
+    func replace(launchers: [AgentLauncher]) {
+        pendingDraftIndex = nil
+        update(launchers: launchers, preservingEditing: false)
+    }
+
+    private func update(launchers: [AgentLauncher], preservingEditing: Bool) {
         self.launchers = launchers
-        refreshRows(animated: true)
+        refreshRows(animated: true, preservingEditing: preservingEditing)
     }
 
     var rowCount: Int { rows.count }
@@ -210,12 +217,14 @@ import workspacecore
 
     // MARK: Row lifecycle
 
-    private func refreshRows(animated: Bool) {
-        let existingEditing: [String: AgentLauncher] = Dictionary(
-            uniqueKeysWithValues: rows.enumerated().compactMap { index, row -> (String, AgentLauncher)? in
-                guard row.isEditing else { return nil }
-                return (row.identity(from: launchers[safe: index]), row.formSnapshot())
-            })
+    private func refreshRows(animated: Bool, preservingEditing: Bool = true) {
+        let existingEditing: [String: AgentLauncher] =
+            preservingEditing
+            ? Dictionary(
+                uniqueKeysWithValues: rows.enumerated().compactMap { index, row -> (String, AgentLauncher)? in
+                    guard row.isEditing else { return nil }
+                    return (row.identity(from: launchers[safe: index]), row.formSnapshot())
+                }) : [:]
 
         clearRowsStack()
         rows.removeAll()

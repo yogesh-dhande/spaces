@@ -4216,6 +4216,149 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(settings?.agentLaunchers.first?.name, "Codex")
     }
 
+    func testPreviewProjectDirImportsSpacesYAMLWithoutPersistingProject() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("preview-project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        try spacesYAMLFixture(stopScript: "echo preview-stop").write(
+            to: projectDir.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        let preview = try orchestrator.previewProject(dir: projectDir.path)
+
+        XCTAssertEqual(preview.stopScript, "echo preview-stop")
+        XCTAssertEqual(preview.processes.first?.command, "npm run api")
+        XCTAssertTrue(try store.projects().isEmpty)
+        XCTAssertTrue(try store.workspaces(projectID: preview.id).isEmpty)
+    }
+
+    func testAddReviewedProjectUsesEditedSettingsFromHydratedPreview() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("reviewed-project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        try spacesYAMLFixture(stopScript: "echo yaml-stop").write(
+            to: projectDir.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        let project = try orchestrator.addReviewedProject(dir: projectDir.path) { config in
+            config.stopScript = "echo edited-stop"
+            config.processes = [ProcessTemplate(name: "edited", command: "npm run edited", executionMode: .shell)]
+        }
+
+        XCTAssertEqual(project.stopScript, "echo edited-stop")
+        XCTAssertEqual(project.processes.first?.name, "edited")
+        let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
+        XCTAssertEqual(settings?.stopScript, "echo edited-stop")
+        XCTAssertEqual(settings?.processes.first?.command, "npm run edited")
+    }
+
+    func testPrepareGitProjectImportsSpacesYAMLWithoutPersistingUntilCommit() throws {
+        let fixture = try makeTempGitRepo(name: "prepared-yaml-git-import")
+        try spacesYAMLFixture(stopScript: "echo prepared-yaml-stop").write(
+            to: fixture.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        try runGit(["add", "spaces.yaml"], cwd: fixture.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add spaces yaml"], cwd: fixture.path)
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        var didCommit = false
+
+        let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path)
+        defer { if !didCommit { try? orchestrator.discardPreparedGitProject(prepared) } }
+
+        XCTAssertEqual(prepared.project.stopScript, "echo prepared-yaml-stop")
+        XCTAssertNotNil(prepared.importedDocument)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.project.dir))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.defaultWorkspace.dir))
+        XCTAssertTrue(try store.projects().isEmpty)
+        XCTAssertTrue(try store.workspaces(projectID: prepared.project.id).isEmpty)
+
+        let project = try orchestrator.addPreparedGitProject(prepared) { config in
+            config.stopScript = "echo edited-prepared-stop"
+            config.agentLaunchers = [AgentLauncher(name: "Edited", command: "codex --model gpt-5")]
+        }
+        didCommit = true
+
+        XCTAssertEqual(project.stopScript, "echo edited-prepared-stop")
+        let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        XCTAssertEqual(defaultWorkspace.dir, prepared.defaultWorkspace.dir)
+        let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
+        XCTAssertEqual(settings?.stopScript, "echo edited-prepared-stop")
+        XCTAssertEqual(settings?.agentLaunchers.first?.name, "Edited")
+    }
+
+    func testDiscardPreparedGitProjectRemovesManagedCloneAndDefaultWorktree() throws {
+        let fixture = try makeTempGitRepo(name: "discard-prepared-git-import")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.project.dir))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.defaultWorkspace.dir))
+
+        try orchestrator.discardPreparedGitProject(prepared)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.project.dir))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.defaultWorkspace.dir))
+        XCTAssertTrue(try store.projects().isEmpty)
+    }
+
+    func testPrepareGitProjectOverwritesAbandonedPreparedCloneOnRetry() throws {
+        let fixture = try makeTempGitRepo(name: "retry-prepared-git-import")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        let firstPrepared = try orchestrator.prepareGitProject(gitURL: fixture.path)
+        XCTAssertNil(firstPrepared.importedDocument)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstPrepared.project.dir))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstPrepared.defaultWorkspace.dir))
+
+        try spacesYAMLFixture(stopScript: "echo retry-prepared-stop").write(
+            to: fixture.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        try runGit(["add", "spaces.yaml"], cwd: fixture.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add spaces yaml"], cwd: fixture.path)
+
+        let secondPrepared = try orchestrator.prepareGitProject(gitURL: fixture.path)
+        defer { try? orchestrator.discardPreparedGitProject(secondPrepared) }
+
+        XCTAssertEqual(secondPrepared.project.dir, firstPrepared.project.dir)
+        XCTAssertEqual(secondPrepared.defaultWorkspace.dir, firstPrepared.defaultWorkspace.dir)
+        XCTAssertEqual(secondPrepared.project.stopScript, "echo retry-prepared-stop")
+        XCTAssertNotNil(secondPrepared.importedDocument)
+        XCTAssertTrue(try store.projects().isEmpty)
+    }
+
+    func testAddPreparedGitProjectKeepsPreparedCloneWhenReviewedConfigIsInvalid() throws {
+        let fixture = try makeTempGitRepo(name: "invalid-prepared-reviewed-git-import")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path)
+        defer { try? orchestrator.discardPreparedGitProject(prepared) }
+
+        XCTAssertThrowsError(try orchestrator.addPreparedGitProject(prepared) { config in config.ports = [PortDefinition(name: "   ")] }) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Port name is required"))
+        }
+
+        XCTAssertTrue(try store.projects().isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.project.dir))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.defaultWorkspace.dir))
+    }
+
     func testAddProjectByGitURLRollsBackManagedCloneWhenSpacesYAMLIsInvalid() throws {
         let fixture = try makeTempGitRepo(name: "invalid-yaml-git-import")
         try "version: 999\n".write(to: fixture.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
@@ -4241,6 +4384,27 @@ final class OrchestratorTests: XCTestCase {
         let managedDirname = managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "invalid-yaml-git-import")
         XCTAssertTrue(try store.projects().isEmpty)
         XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().subtracting(reservedBefore).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: workspacesRoot.appendingPathComponent(managedDirname, isDirectory: true).appendingPathComponent("main", isDirectory: true)
+                    .path))
+    }
+
+    func testAddProjectByGitURLRollsBackPreparedCloneWhenReviewedConfigIsInvalid() throws {
+        let fixture = try makeTempGitRepo(name: "invalid-reviewed-git-import")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path) { config in config.ports = [PortDefinition(name: "   ")] }) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Port name is required"))
+        }
+
+        let managedDirname = managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "invalid-reviewed-git-import")
+        XCTAssertTrue(try store.projects().isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path))
         XCTAssertFalse(
             FileManager.default.fileExists(
@@ -4275,6 +4439,49 @@ final class OrchestratorTests: XCTestCase {
         let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
         XCTAssertEqual(settings?.stopScript, "echo workspace-stop")
         XCTAssertEqual(settings?.processes.first?.name, "workspace")
+    }
+
+    func testPreviewProjectConfigDoesNotPersistImportedConfig() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path) { config in
+            config.stopScript = "echo saved-stop"
+            config.ports = [PortDefinition(id: "saved-port", name: "SAVED_PORT")]
+        }
+        let document = SpacesYAMLDocument(stopScript: "echo imported-stop", ports: [SpacesYAMLDocument.Port(name: "API_PORT")])
+
+        let preview = try orchestrator.previewProjectConfig(projectID: project.id) { config in document.applying(to: &config) }
+
+        XCTAssertEqual(preview.stopScript, "echo imported-stop")
+        XCTAssertEqual(preview.ports.map(\.name), ["API_PORT"])
+        let savedProject = try XCTUnwrap(try store.project(id: project.id))
+        XCTAssertEqual(savedProject.stopScript, "echo saved-stop")
+        XCTAssertEqual(savedProject.ports.map(\.name), ["SAVED_PORT"])
+    }
+
+    func testUpdateProjectConfigWithWorkspaceSyncAppliesReviewedSettingsToWorkspaces() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        let updatedProject = try orchestrator.updateProjectConfig(projectID: project.id, updateAllWorkspaces: true) { config in
+            config.stopScript = "echo reviewed-stop"
+            config.ports = [PortDefinition(name: "API_PORT")]
+            config.processes = [ProcessTemplate(name: "api", command: "npm run api")]
+        }
+
+        XCTAssertEqual(updatedProject.stopScript, "echo reviewed-stop")
+        let settings = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: workspace.id))
+        XCTAssertEqual(settings.stopScript, "echo reviewed-stop")
+        XCTAssertEqual(settings.ports.map(\.name), ["API_PORT"])
+        XCTAssertEqual(settings.processes.first?.name, "api")
     }
 
     func testImportSpacesYAMLUpdatesActiveAndArchivedWorkspacesWhenWorkspaceSyncIsOn() throws {
@@ -6428,23 +6635,24 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: ws1.id)?.title, "beta")
     }
 
-    // Tests addProject by gitURL throws when destination directory already exists on disk by arranging representative inputs and asserting the expected result.
-    func testAddProjectByGitURLThrowsWhenDestinationExists() throws {
+    // Tests addProject by gitURL overwrites abandoned managed destination state by arranging representative inputs and asserting the expected result.
+    func testAddProjectByGitURLOverwritesAbandonedDestination() throws {
+        let fixture = try makeTempGitRepo(name: "my-repo")
         let root = try makeTempDirectory()
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
 
-        // Pre-create the destination directory so it already exists on disk.
         let existingDir = reposRoot.appendingPathComponent(
-            managedProjectStorageDirname(namespace: "git", source: "https://example.com/my-repo.git", preferredName: "my-repo"), isDirectory: true)
+            managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "my-repo"), isDirectory: true)
         try FileManager.default.createDirectory(at: existingDir, withIntermediateDirectories: true)
 
-        // addProject(gitURL:) should throw because the destination directory is already present.
-        XCTAssertThrowsError(try orchestrator.addProject(gitURL: "https://example.com/my-repo.git")) { error in
-            guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
-        }
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+
+        XCTAssertEqual(project.dir, existingDir.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: project.dir))
+        XCTAssertEqual(try store.projects().map(\.id), [project.id])
     }
 
     // Tests checkAndUpdateProcessStatuses keeps live iTerm2 agent sessions by arranging representative inputs and asserting the expected result.

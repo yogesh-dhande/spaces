@@ -117,8 +117,8 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - Use icon-only buttons for obvious actions such as edit, remove, copy, reveal, launch, stop, and overflow.
 - Use text buttons where clarity matters more than compactness.
 - Put infrequent or contextual actions behind an overflow menu instead of overcrowding the main UI.
-- Project settings import/export controls belong in the footer action row near Save. Use compact secondary icon-plus-text buttons for `Import` and `Export`, because the file operation is uncommon but needs a clear label.
-- Import previews should use a compact modal with a short configuration summary, `Apply` and `Dismiss` actions, and an unchecked `Update all workspaces` checkbox. Keep the checkbox close to the preview summary so the project-only default is visible before Apply.
+- Project settings import/export controls belong directly below the project path in the detail header. Use compact secondary icon-plus-text buttons for `Import` and `Export`, because the file operation is uncommon but needs a clear label near the config file location.
+- Import previews should use a compact modal with a short configuration summary, `Load` and `Dismiss` actions, and an unchecked `Update all workspaces` checkbox. Keep the checkbox close to the preview summary so the project-only default is visible before Load. Loading an import should expose a compact secondary discard action near the project settings footer until the imported values are saved or discarded.
 
 ## Forms
 - Keep forms compact and aligned.

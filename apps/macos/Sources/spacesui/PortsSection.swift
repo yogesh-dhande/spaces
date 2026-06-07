@@ -65,9 +65,18 @@ import workspacecore
     // MARK: Public API
 
     func reload(ports: [PortDefinition], collapsedDisplayPorts: [Int?]? = nil) {
+        update(ports: ports, collapsedDisplayPorts: collapsedDisplayPorts, preservingEditing: true)
+    }
+
+    func replace(ports: [PortDefinition], collapsedDisplayPorts: [Int?]? = nil) {
+        pendingDraftIndex = nil
+        update(ports: ports, collapsedDisplayPorts: collapsedDisplayPorts, preservingEditing: false)
+    }
+
+    private func update(ports: [PortDefinition], collapsedDisplayPorts: [Int?]?, preservingEditing: Bool) {
         self.ports = ports
         if let collapsedDisplayPorts { self.collapsedDisplayPorts = collapsedDisplayPorts }
-        refreshRows(animated: true)
+        refreshRows(animated: true, preservingEditing: preservingEditing)
     }
     var rowCount: Int { rows.count }
     var currentPorts: [PortDefinition] { ports }
@@ -137,12 +146,14 @@ import workspacecore
 
     // MARK: Row lifecycle
 
-    private func refreshRows(animated: Bool) {
-        let existingEditing: [String: PortDefinition] = Dictionary(
-            uniqueKeysWithValues: rows.enumerated().compactMap { index, row -> (String, PortDefinition)? in
-                guard row.isEditing else { return nil }
-                return (row.identity(from: ports[safe: index]), row.formSnapshot())
-            })
+    private func refreshRows(animated: Bool, preservingEditing: Bool = true) {
+        let existingEditing: [String: PortDefinition] =
+            preservingEditing
+            ? Dictionary(
+                uniqueKeysWithValues: rows.enumerated().compactMap { index, row -> (String, PortDefinition)? in
+                    guard row.isEditing else { return nil }
+                    return (row.identity(from: ports[safe: index]), row.formSnapshot())
+                }) : [:]
         clearRowsStack()
         rows.removeAll()
         for (index, port) in ports.enumerated() {

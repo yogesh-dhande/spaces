@@ -75,6 +75,26 @@ import workspacecore
         #expect(cancelButton?.title == "Cancel")
         #expect(saveButton?.title == "Save")
     }
+
+    @Test func replaceClearsDraftStateBeforeLoadingImportedLaunchers() {
+        let section = AgentLaunchersSection(launchers: [AgentLauncher(name: "claude", command: "claude")])
+        section.performAdd()
+        #expect(section.isEditing(at: 1))
+
+        section.replace(launchers: [AgentLauncher(name: "imported", command: "codex")])
+
+        var presentedFor: AgentLauncher?
+        section.presentRemoveConfirmation = { launcher, decide in
+            presentedFor = launcher
+            decide(false)
+        }
+        section.row(at: 0)?.onRemove?()
+
+        #expect(section.rowCount == 1)
+        #expect(section.currentLaunchers.map(\.name) == ["imported"])
+        #expect(presentedFor?.name == "imported")
+        #expect(!section.isEditing(at: 0))
+    }
 }
 
 extension AgentLaunchersSection {

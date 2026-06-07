@@ -20,4 +20,24 @@ import workspacecore
         #expect(section.row(at: 0)?.collapsedDetailTextForTesting == "3000")
         #expect(section.row(at: 1)?.collapsedDetailTextForTesting == "3001")
     }
+
+    @Test func replaceClearsDraftStateBeforeLoadingImportedPorts() {
+        let section = PortsSection(ports: [PortDefinition(name: "WEB_PORT")])
+        section.handleAdd(NSButton())
+        #expect(section.isEditing(at: 1))
+
+        section.replace(ports: [PortDefinition(name: "IMPORTED_PORT")])
+
+        var presentedFor: PortDefinition?
+        section.presentRemoveConfirmation = { port, decide in
+            presentedFor = port
+            decide(false)
+        }
+        section.row(at: 0)?.onRemove?()
+
+        #expect(section.rowCount == 1)
+        #expect(section.currentPorts.map(\.name) == ["IMPORTED_PORT"])
+        #expect(presentedFor?.name == "IMPORTED_PORT")
+        #expect(!section.isEditing(at: 0))
+    }
 }

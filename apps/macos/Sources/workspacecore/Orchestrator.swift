@@ -83,6 +83,18 @@ public final class WorkspaceOrchestrator {
         public init(notice: String?) { self.notice = notice }
     }
 
+    public struct PreparedGitProjectImport: Sendable {
+        public let project: ProjectRecord
+        public let defaultWorkspace: WorkspaceRecord
+        public let importedDocument: SpacesYAMLDocument?
+
+        public init(project: ProjectRecord, defaultWorkspace: WorkspaceRecord, importedDocument: SpacesYAMLDocument?) {
+            self.project = project
+            self.defaultWorkspace = defaultWorkspace
+            self.importedDocument = importedDocument
+        }
+    }
+
     public static func setProcessWideBuiltInTerminalSessionLauncher(_ launcher: BuiltInTerminalSessionLauncher?) {
         builtInTerminalSessionLauncherOverrideStore.set(launcher)
     }
@@ -537,6 +549,19 @@ public final class WorkspaceOrchestrator {
 
     public func addProject(dir: String) throws -> ProjectRecord { try addProject(dir: dir) { _ in } }
 
+    public func previewProject(dir: String) throws -> ProjectRecord {
+        let normalizedDir = normalizePath(dir)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
+            throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
+        }
+        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
+        let importedDocument = try spacesYAMLDocumentIfPresent(in: URL(fileURLWithPath: normalizedDir, isDirectory: true))
+        return try configuredProjectRecord(baseRecord: normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir)) {
+            project in importedDocument?.applying(to: &project)
+        }
+    }
+
     public func addProject(dir: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
         let normalizedDir = normalizePath(dir)
         var isDir: ObjCBool = false
@@ -561,9 +586,33 @@ public final class WorkspaceOrchestrator {
         return record
     }
 
+    public func addReviewedProject(dir: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
+        let baseRecord = try previewProject(dir: dir)
+        let record = try configuredProjectRecord(baseRecord: baseRecord, update: configure)
+        try store.upsert(project: record)
+        do { try ensureDefaultWorkspace(for: record) } catch {
+            try? store.deleteProject(id: record.id)
+            throw error
+        }
+        return record
+    }
+
     public func addProject(gitURL: String) throws -> ProjectRecord { try addProject(gitURL: gitURL) { _ in } }
 
     public func addProject(gitURL: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
+        let prepared = try prepareGitProject(gitURL: gitURL)
+        do {
+            return try addPreparedGitProject(prepared) { project in
+                guard prepared.importedDocument == nil else { return }
+                configure(&project)
+            }
+        } catch {
+            try? discardPreparedGitProject(prepared)
+            throw error
+        }
+    }
+
+    public func prepareGitProject(gitURL: String) throws -> PreparedGitProjectImport {
         let trimmedURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedURL.isEmpty else { throw WorkspaceError.invalidArgument(message: "Git repository URL is required.") }
         let inferredName = inferredProjectName(from: trimmedURL)
@@ -572,10 +621,15 @@ public final class WorkspaceOrchestrator {
         let projectDirname = managedProjectStorageDirectoryName(projectID: projectID, preferredName: projectName)
         let destination = repositoriesRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
         let normalizedDestination = normalizePath(destination.path)
+        let unmanagedPreparedProject = ProjectRecord(
+            id: projectID, name: projectName, dir: normalizedDestination, isGitRepo: true, defaultBranch: nil)
 
         if try store.project(dir: normalizedDestination) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDestination) }
         if FileManager.default.fileExists(atPath: destination.path) {
-            throw WorkspaceError.invalidArgument(message: "Project directory already exists: \(normalizedDestination)")
+            try removeManagedGitWorkspaceDirectoriesIfNeeded(project: unmanagedPreparedProject)
+            try FileManager.default.removeItem(at: destination)
+        } else {
+            try removeManagedGitWorkspaceDirectoriesIfNeeded(project: unmanagedPreparedProject)
         }
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         try git.clone(url: trimmedURL, destination: destination.path, bare: true)
@@ -585,35 +639,97 @@ public final class WorkspaceOrchestrator {
             let defaultBranch = try preferredImportedDefaultBranch(path: destination.path)
             let baseRecord = ProjectRecord(
                 id: projectID, name: projectName, dir: normalizedDestination, isGitRepo: true, defaultBranch: defaultBranch)
-            let record = try configuredProjectRecord(baseRecord: baseRecord, update: configure)
-            let defaultWorkspaceDirectory = try importedDefaultWorkspaceDirectory(project: record, branch: defaultBranch)
-            try store.upsert(project: record)
-            do {
-                try ensureImportedGitDefaultWorkspace(for: record, branch: defaultBranch)
-                let worktreeURL = URL(fileURLWithPath: defaultWorkspaceDirectory, isDirectory: true)
-                let importedRecord: ProjectRecord
-                if let importedDocument = try spacesYAMLDocumentIfPresent(in: worktreeURL) {
-                    importedRecord = try applySpacesYAMLDocument(importedDocument, projectID: record.id, updateAllWorkspaces: true)
-                } else {
-                    importedRecord = record
-                }
-                shouldCleanupDestination = false
-                return importedRecord
-            } catch {
-                try? rollbackFailedImportedProjectCreation(project: record, workspaceDirectory: defaultWorkspaceDirectory)
-                throw error
+            var record = try configuredProjectRecord(baseRecord: baseRecord) { _ in }
+            let defaultWorkspace = try createImportedGitDefaultWorkspaceOnDisk(project: record, branch: defaultBranch)
+            let worktreeURL = URL(fileURLWithPath: defaultWorkspace.dir, isDirectory: true)
+            let importedDocument = try spacesYAMLDocumentIfPresent(in: worktreeURL)
+            if let importedDocument {
+                record = try configuredProjectRecord(baseRecord: record) { project in importedDocument.applying(to: &project) }
             }
+            shouldCleanupDestination = false
+            return PreparedGitProjectImport(project: record, defaultWorkspace: defaultWorkspace, importedDocument: importedDocument)
         } catch {
-            if shouldCleanupDestination { try? FileManager.default.removeItem(at: destination) }
+            if shouldCleanupDestination {
+                try? removeManagedGitWorkspaceDirectoriesIfNeeded(project: unmanagedPreparedProject)
+                try? FileManager.default.removeItem(at: destination)
+            }
             throw error
         }
     }
 
-    public func updateProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws {
-        guard var record = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
-        record = try configuredProjectRecord(baseRecord: record, update: update)
+    @discardableResult public func addPreparedGitProject(_ prepared: PreparedGitProjectImport, configure: (inout ProjectRecord) -> Void) throws
+        -> ProjectRecord
+    {
+        guard prepared.project.isGitRepo else { throw WorkspaceError.invalidArgument(message: "Prepared project must be a git project.") }
+        let normalizedDir = normalizePath(prepared.project.dir)
+        guard normalizedDir == prepared.project.dir else {
+            throw WorkspaceError.invalidArgument(message: "Prepared project directory is not normalized: \(prepared.project.dir)")
+        }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
+            throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
+        }
+        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
+        var workspaceIsDir = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: prepared.defaultWorkspace.dir, isDirectory: &workspaceIsDir), workspaceIsDir.boolValue else {
+            throw WorkspaceError.invalidArgument(message: "Default workspace directory not found: \(prepared.defaultWorkspace.dir)")
+        }
+        let record = try configuredProjectRecord(baseRecord: prepared.project, update: configure)
+        let defaultWorkspace = WorkspaceRecord(
+            id: prepared.defaultWorkspace.id, projectID: record.id, title: prepared.defaultWorkspace.title, dir: prepared.defaultWorkspace.dir,
+            dirname: prepared.defaultWorkspace.dirname, branch: prepared.defaultWorkspace.branch,
+            targetBranch: prepared.defaultWorkspace.targetBranch, isDefault: true, isArchived: false, isHidden: prepared.defaultWorkspace.isHidden,
+            isRunning: false, lastLaunchedAt: nil, notes: prepared.defaultWorkspace.notes)
         try store.upsert(project: record)
-        try ensureDefaultWorkspace(for: record)
+        do {
+            try store.upsert(workspace: defaultWorkspace)
+            try seedWorkspaceSettings(project: record, workspace: defaultWorkspace)
+            let appConfig = try store.appConfig()
+            let portDefinitions = try store.workspacePortDefinitions(workspaceID: defaultWorkspace.id)
+            _ = try PortAllocator(store: store).allocatePorts(
+                workspaceID: defaultWorkspace.id, definitions: portDefinitions, range: appConfig.portRange)
+            return record
+        } catch {
+            try? rollbackFailedImportedProjectCreation(project: record, workspaceDirectory: defaultWorkspace.dir)
+            throw error
+        }
+    }
+
+    public func discardPreparedGitProject(_ prepared: PreparedGitProjectImport) throws {
+        try removeManagedGitWorkspaceDirectoriesIfNeeded(project: prepared.project)
+        try removeManagedProjectDirectoryIfNeeded(project: prepared.project)
+    }
+
+    @discardableResult public func previewProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
+        guard let record = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        return try configuredProjectRecord(baseRecord: record, update: update)
+    }
+
+    public func updateProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws {
+        _ = try updateProjectConfig(projectID: projectID, updateAllWorkspaces: false, update: update)
+    }
+
+    @discardableResult public func updateProjectConfig(projectID: String, updateAllWorkspaces: Bool, update: (inout ProjectRecord) -> Void) throws
+        -> ProjectRecord
+    {
+        guard let originalProject = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        let updatedProject = try configuredProjectRecord(baseRecord: originalProject, update: update)
+        guard updateAllWorkspaces else {
+            try store.upsert(project: updatedProject)
+            try ensureDefaultWorkspace(for: updatedProject)
+            return updatedProject
+        }
+
+        try ensureDefaultWorkspace(for: originalProject)
+        let workspaceSnapshots = try workspaceConfigurationSnapshots(projectID: projectID)
+        do {
+            try store.upsert(project: updatedProject)
+            try applyProjectTemplateToAllWorkspaces(project: updatedProject)
+        } catch {
+            try restoreSpacesYAMLImportSnapshot(project: originalProject, workspaces: workspaceSnapshots)
+            throw error
+        }
+        return updatedProject
     }
 
     public func spacesYAMLConfigURL(projectID: String) throws -> URL {
@@ -624,7 +740,7 @@ public final class WorkspaceOrchestrator {
     public func loadSpacesYAML(projectID: String) throws -> SpacesYAMLDocument {
         guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
         let document = try SpacesYAMLService.load(from: spacesYAMLConfigURL(project: project))
-        _ = try configuredProjectRecord(baseRecord: project) { record in document.applying(to: &record) }
+        _ = try previewProjectConfig(projectID: projectID) { record in document.applying(to: &record) }
         return document
     }
 
@@ -642,26 +758,7 @@ public final class WorkspaceOrchestrator {
 
     @discardableResult public func applySpacesYAMLDocument(_ document: SpacesYAMLDocument, projectID: String, updateAllWorkspaces: Bool = false)
         throws -> ProjectRecord
-    {
-        guard let originalProject = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
-        let updatedProject = try configuredProjectRecord(baseRecord: originalProject) { record in document.applying(to: &record) }
-        guard updateAllWorkspaces else {
-            try updateProjectConfig(projectID: projectID) { record in document.applying(to: &record) }
-            guard let updatedProject = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
-            return updatedProject
-        }
-
-        try ensureDefaultWorkspace(for: originalProject)
-        let workspaceSnapshots = try workspaceConfigurationSnapshots(projectID: projectID)
-        do {
-            try store.upsert(project: updatedProject)
-            try applyProjectTemplateToAllWorkspaces(project: updatedProject)
-        } catch {
-            try restoreSpacesYAMLImportSnapshot(project: originalProject, workspaces: workspaceSnapshots)
-            throw error
-        }
-        return updatedProject
-    }
+    { try updateProjectConfig(projectID: projectID, updateAllWorkspaces: updateAllWorkspaces) { record in document.applying(to: &record) } }
 
     public func removeProject(dir: String) throws {
         let normalizedDir = normalizePath(dir)
@@ -4123,14 +4220,7 @@ public final class WorkspaceOrchestrator {
             return
         }
 
-        let worktreeRoot = try worktreeRoot(project: project)
-        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
-        let workspaceDir = worktreeRoot.appendingPathComponent(branch, isDirectory: true).path
-        try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branch, targetBranch: branch)
-
-        let workspace = WorkspaceRecord(
-            id: UUID().uuidString, projectID: project.id, title: branch, dir: workspaceDir, dirname: branch, branch: branch, targetBranch: branch,
-            isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        let workspace = try createImportedGitDefaultWorkspaceOnDisk(project: project, branch: branch)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         let appConfig = try store.appConfig()
@@ -4150,6 +4240,16 @@ public final class WorkspaceOrchestrator {
             let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
             if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace) }
         }
+    }
+
+    private func createImportedGitDefaultWorkspaceOnDisk(project: ProjectRecord, branch: String) throws -> WorkspaceRecord {
+        let worktreeRoot = try worktreeRoot(project: project)
+        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
+        let workspaceDir = worktreeRoot.appendingPathComponent(branch, isDirectory: true).path
+        try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branch, targetBranch: branch)
+        return WorkspaceRecord(
+            id: UUID().uuidString, projectID: project.id, title: branch, dir: workspaceDir, dirname: branch, branch: branch, targetBranch: branch,
+            isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
     }
 
     private func spacesYAMLConfigURL(project: ProjectRecord) throws -> URL {
