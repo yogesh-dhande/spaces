@@ -11,6 +11,7 @@ import AppKit
     let importButton: NSButton
     let exportButton: NSButton
     let discardImportedConfigButton: NSButton
+    var hasPendingImportedConfig = false
     var pendingImportUpdateAllWorkspaces = false
 
     init(

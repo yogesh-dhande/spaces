@@ -2139,6 +2139,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case confirmRestart(processNames: [String])
     }
 
+    enum ProjectImportWorkspaceSyncDecision: Equatable, Sendable {
+        case updateAllWorkspaces
+        case projectOnly
+        case cancel
+    }
+
+    static func projectImportWorkspaceSyncDecision(for response: NSApplication.ModalResponse) -> ProjectImportWorkspaceSyncDecision {
+        switch response {
+        case .alertFirstButtonReturn: return .updateAllWorkspaces
+        case .alertSecondButtonReturn: return .projectOnly
+        default: return .cancel
+        }
+    }
+
+    @discardableResult static func applyProjectImportWorkspaceSyncDecision(_ decision: ProjectImportWorkspaceSyncDecision, to refs: ProjectFieldRefs)
+        -> Bool
+    {
+        switch decision {
+        case .updateAllWorkspaces:
+            refs.pendingImportUpdateAllWorkspaces = true
+            return true
+        case .projectOnly:
+            refs.pendingImportUpdateAllWorkspaces = false
+            return true
+        case .cancel: return false
+        }
+    }
+
     nonisolated static func processTemplateKey(for template: ProcessTemplate) -> String {
         template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
@@ -6807,6 +6835,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func saveProject(_ sender: NSButton) {
         commitEditing()
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard confirmProjectImportWorkspaceSyncIfNeeded(refs) else { return }
         do {
             try persistProjectFields(refs)
             projectHasUnsavedChanges = false
@@ -6834,6 +6863,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let document = try orchestrator.loadSpacesYAML(projectID: refs.projectID)
             let preview = try orchestrator.previewProjectConfig(projectID: refs.projectID) { record in document.applying(to: &record) }
             hydrateProjectSettings(refs, from: preview)
+            refs.hasPendingImportedConfig = true
+            refs.pendingImportUpdateAllWorkspaces = false
             refs.importButton.isHidden = true
             refs.exportButton.isHidden = true
             refs.discardImportedConfigButton.isHidden = false
@@ -6847,6 +6878,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             guard let project = try orchestrator.project(id: refs.projectID) else { throw WorkspaceError.missingProject(dir: refs.projectID) }
             hydrateProjectSettings(refs, from: project)
+            refs.hasPendingImportedConfig = false
             refs.pendingImportUpdateAllWorkspaces = false
             refs.importButton.isHidden = false
             refs.exportButton.isHidden = false
@@ -6862,6 +6894,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.processesSection.replace(processes: project.processes)
         refs.browserSessionsSection.replace(sessions: project.browserSessions)
         refs.agentLaunchersSection.replace(launchers: project.agentLaunchers)
+    }
+
+    private func confirmProjectImportWorkspaceSyncIfNeeded(_ refs: ProjectFieldRefs) -> Bool {
+        guard refs.hasPendingImportedConfig else { return true }
+        return Self.applyProjectImportWorkspaceSyncDecision(presentProjectImportWorkspaceSyncPrompt(), to: refs)
+    }
+
+    private func presentProjectImportWorkspaceSyncPrompt() -> ProjectImportWorkspaceSyncDecision {
+        let alert = NSAlert()
+        alert.messageText = "Update workspaces?"
+        alert.informativeText =
+            "Save the imported spaces.yaml settings to this project. Apply the same settings to every workspace in this project, including archived workspaces?"
+        alert.addButton(withTitle: "Update All Workspaces")
+        alert.addButton(withTitle: "Project Only")
+        alert.addButton(withTitle: "Cancel")
+        return Self.projectImportWorkspaceSyncDecision(for: alert.runModal())
     }
 
     @objc private func deleteProject(_ sender: NSButton) {
@@ -9709,6 +9757,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let selectedProjectID else { return true }
         let tag = selectedProjectID.hashValue
         guard let refs = ProjectFieldCache.shared.cache[tag] else { return true }
+        guard confirmProjectImportWorkspaceSyncIfNeeded(refs) else { return false }
         do {
             try persistProjectFields(refs)
             projectHasUnsavedChanges = false
@@ -9729,6 +9778,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             config.browserSessions = refs.browserSessionsSection.currentSessions
             config.agentLaunchers = refs.agentLaunchersSection.currentLaunchers
         }
+        refs.hasPendingImportedConfig = false
         refs.pendingImportUpdateAllWorkspaces = false
         refs.discardImportedConfigButton.isHidden = true
     }

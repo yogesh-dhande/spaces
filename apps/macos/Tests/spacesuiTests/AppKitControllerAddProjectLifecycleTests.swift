@@ -110,6 +110,35 @@ import Testing
         #expect(!section.isEditing)
         #expect(section.currentValue == "hydrated")
     }
+
+    @MainActor @Test func importedProjectSaveDecisionMapsAlertResponses() {
+        #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .alertFirstButtonReturn) == .updateAllWorkspaces)
+        #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .alertSecondButtonReturn) == .projectOnly)
+        #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .alertThirdButtonReturn) == .cancel)
+        #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .abort) == .cancel)
+    }
+
+    @MainActor @Test func importedProjectSaveDecisionUpdatesWorkspaceSyncFlag() {
+        let refs = makeProjectFieldRefs()
+
+        #expect(AppKitController.applyProjectImportWorkspaceSyncDecision(.updateAllWorkspaces, to: refs))
+        #expect(refs.pendingImportUpdateAllWorkspaces)
+
+        #expect(AppKitController.applyProjectImportWorkspaceSyncDecision(.projectOnly, to: refs))
+        #expect(!refs.pendingImportUpdateAllWorkspaces)
+
+        refs.pendingImportUpdateAllWorkspaces = true
+        #expect(!AppKitController.applyProjectImportWorkspaceSyncDecision(.cancel, to: refs))
+        #expect(refs.pendingImportUpdateAllWorkspaces)
+    }
+
+    @MainActor private func makeProjectFieldRefs() -> ProjectFieldRefs {
+        ProjectFieldRefs(
+            projectID: "project", setupScriptSection: SetupScriptSection(value: ""), stopScriptSection: StopScriptSection(value: ""),
+            portsSection: PortsSection(), processesSection: ProcessesSection(showsRuntimeControls: false),
+            browserSessionsSection: BrowserSessionsSection(), agentLaunchersSection: AgentLaunchersSection(), importButton: NSButton(),
+            exportButton: NSButton(), discardImportedConfigButton: NSButton())
+    }
 }
 
 extension SetupScriptSection {
