@@ -76,7 +76,7 @@ flowchart LR
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
 - SQLite stores projects, workspaces, runtime state, terminal metadata, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` records the canonical schema version. The active schema is version `6`.
+- `migration_state.current_version` records the canonical schema version. The active schema is version `7`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
 
 ### Profile Resolution
@@ -138,6 +138,8 @@ classDiagram
     +setup_error
     +setup_started_at
     +setup_finished_at
+    +setup_exit_code
+    +setup_log_path
   }
 
   class WorkspacePort {
@@ -297,15 +299,16 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 3. Create or import the workspace directory.
 4. Persist the workspace and seed per-workspace settings from project templates.
 5. Allocate named ports.
-6. Run setup logic.
+6. Run setup logic. Setup executes through `/bin/bash -lc`, writes merged stdout and stderr to `<profile-runtime>/workspace-setup/<workspace-id>/setup.log`, and records setup status, timestamps, exit code, and log path in `workspace_settings`.
 
 ### Workspace Launch
 1. Validate that the workspace is launchable.
-2. Build the workspace environment, including named port variables and workspace paths.
-3. Close and terminate any prior Spaces-backed configured process sessions that occupy the same workspace slots.
-4. Start tracked processes inside dedicated built-in terminal sessions, wait for the session boundary to become available, and then record the terminal row plus runtime state.
-5. Leave configured browser sessions unopened until the user focuses them.
-6. Capture new terminal windows through yabai and persist the mapping.
+2. Require workspace setup status to be `succeeded`; pending, running, or failed setup blocks managed runtime launch and recovery paths.
+3. Build the workspace environment, including named port variables and workspace paths.
+4. Close and terminate any prior Spaces-backed configured process sessions that occupy the same workspace slots.
+5. Start tracked processes inside dedicated built-in terminal sessions, wait for the session boundary to become available, and then record the terminal row plus runtime state.
+6. Leave configured browser sessions unopened until the user focuses them.
+7. Capture new terminal windows through yabai and persist the mapping.
 
 ### Workspace Stop or Archive
 1. Stop tracked processes.

@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public enum DatabaseSchema {
-    public static let currentVersion = 6
+    public static let currentVersion = 7
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "terminal metadata tables", requiresBackup: false) { database in
@@ -54,6 +54,10 @@ public enum DatabaseSchema {
             if try tableExists("terminal_sessions", database: database), try tableExists("runtime_targets", database: database) {
                 try executeBatch(sql: terminalSessionRuntimeTargetOwnershipBackfillSQL, database: database)
             }
+        },
+        DatabaseMigrationStep(fromVersion: 6, toVersion: 7, description: "workspace setup result metadata", requiresBackup: false) { database in
+            try addColumnIfNeeded(table: "workspace_settings", column: "setup_exit_code", definition: "INTEGER", database: database)
+            try addColumnIfNeeded(table: "workspace_settings", column: "setup_log_path", definition: "TEXT", database: database)
         },
     ]
 
@@ -380,6 +384,8 @@ public enum DatabaseSchema {
               setup_error TEXT,
               setup_started_at TEXT,
               setup_finished_at TEXT,
+              setup_exit_code INTEGER,
+              setup_log_path TEXT,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );
 

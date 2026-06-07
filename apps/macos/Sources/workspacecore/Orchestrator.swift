@@ -144,6 +144,11 @@ public final class WorkspaceOrchestrator {
         let outputPath: String
     }
 
+    private struct WorkspaceSetupRunResult {
+        let exitCode: Int
+        let logPath: String
+    }
+
     private struct BuiltInTerminalSessionOwnership {
         let process: RunningProcessRecord?
         let agent: AgentWindowRecord?
@@ -909,6 +914,7 @@ public final class WorkspaceOrchestrator {
         guard !initialWorkspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
         try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
         guard !(workspace.isRunning || hasTrackedRuntime) else {
@@ -1427,6 +1433,7 @@ public final class WorkspaceOrchestrator {
         workspaceID: String, process: RunningProcessRecord, templateOverride: ProcessTemplate? = nil, terminalHostOverride: TerminalHost? = nil,
         background: Bool = false
     ) throws {
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         let previousSessionID = process.terminalNativeID ?? process.terminalTrackingID
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
             fputs(
@@ -4105,6 +4112,41 @@ public final class WorkspaceOrchestrator {
 
     private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }
 
+    private func workspaceSetupLogPath(workspaceID: String) throws -> String {
+        let workspaceSetupDirectory = URL(fileURLWithPath: try runtimeDirectory(), isDirectory: true).appendingPathComponent(
+            "workspace-setup", isDirectory: true
+        ).appendingPathComponent(workspaceID, isDirectory: true)
+        try FileManager.default.createDirectory(at: workspaceSetupDirectory, withIntermediateDirectories: true)
+        return workspaceSetupDirectory.appendingPathComponent("setup.log", isDirectory: false).path
+    }
+
+    private func prepareWorkspaceSetupLog(workspaceID: String) throws -> String {
+        let path = try workspaceSetupLogPath(workspaceID: workspaceID)
+        _ = FileManager.default.createFile(atPath: path, contents: nil)
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try handle.truncate(atOffset: 0)
+        try handle.close()
+        return path
+    }
+
+    private func runWorkspaceSetupScript(_ script: String, cwd: String, logPath: String) throws -> WorkspaceSetupRunResult {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-lc", script]
+        process.currentDirectoryURL = URL(fileURLWithPath: cwd, isDirectory: true)
+        process.environment = Shell.currentProcessEnvironment()
+
+        let logHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: logPath))
+        defer { try? logHandle.close() }
+        process.standardOutput = logHandle
+        process.standardError = logHandle
+        try process.run()
+
+        process.waitUntilExit()
+        try? logHandle.synchronize()
+        return WorkspaceSetupRunResult(exitCode: Int(process.terminationStatus), logPath: logPath)
+    }
+
     private func initializeWorkspaceRuntime(project: ProjectRecord, workspace: WorkspaceRecord, runSetupScript: Bool) throws {
         let appConfig = try store.appConfig()
         let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
@@ -4119,24 +4161,37 @@ public final class WorkspaceOrchestrator {
     private func runWorkspaceSetup(project: ProjectRecord, workspace: WorkspaceRecord) throws {
         let setupScript = project.setupScript?.trimmingCharacters(in: .whitespacesAndNewlines)
         let startedAt = nowISO8601()
-        try store.setWorkspaceSetupState(workspaceID: workspace.id, status: .running, errorMessage: nil, startedAt: startedAt, finishedAt: nil)
+        let logPath = try prepareWorkspaceSetupLog(workspaceID: workspace.id)
+        try store.setWorkspaceSetupState(
+            workspaceID: workspace.id, status: .running, errorMessage: nil, startedAt: startedAt, finishedAt: nil, exitCode: nil, logPath: logPath)
         guard let setupScript, !setupScript.isEmpty else {
             try store.setWorkspaceSetupState(
-                workspaceID: workspace.id, status: .succeeded, errorMessage: nil, startedAt: startedAt, finishedAt: nowISO8601())
+                workspaceID: workspace.id, status: .succeeded, errorMessage: nil, startedAt: startedAt, finishedAt: nowISO8601(), exitCode: 0,
+                logPath: logPath)
             return
         }
+        let result: WorkspaceSetupRunResult
         do {
             let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
             let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-            try runScript(applyEnvVars(setupScript, env: env), cwd: workspace.dir)
-            try store.setWorkspaceSetupState(
-                workspaceID: workspace.id, status: .succeeded, errorMessage: nil, startedAt: startedAt, finishedAt: nowISO8601())
+            result = try runWorkspaceSetupScript(applyEnvVars(setupScript, env: env), cwd: workspace.dir, logPath: logPath)
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             try store.setWorkspaceSetupState(
-                workspaceID: workspace.id, status: .failed, errorMessage: message, startedAt: startedAt, finishedAt: nowISO8601())
+                workspaceID: workspace.id, status: .failed, errorMessage: message, startedAt: startedAt, finishedAt: nowISO8601(), exitCode: nil,
+                logPath: logPath)
             throw error
         }
+        guard result.exitCode == 0 else {
+            let message = "Setup script exited with code \(result.exitCode)."
+            try store.setWorkspaceSetupState(
+                workspaceID: workspace.id, status: .failed, errorMessage: message, startedAt: startedAt, finishedAt: nowISO8601(),
+                exitCode: result.exitCode, logPath: result.logPath)
+            throw WorkspaceError.invalidArgument(message: "\(message) See log: \(result.logPath)")
+        }
+        try store.setWorkspaceSetupState(
+            workspaceID: workspace.id, status: .succeeded, errorMessage: nil, startedAt: startedAt, finishedAt: nowISO8601(),
+            exitCode: result.exitCode, logPath: result.logPath)
     }
 
     private func waitForWorkspaceSetupToComplete(workspaceID: String) throws {
@@ -4146,7 +4201,7 @@ public final class WorkspaceOrchestrator {
             switch setupState.status {
             case .succeeded: return
             case .failed:
-                let detail = setupState.errorMessage?.isEmpty == false ? setupState.errorMessage! : "unknown setup error"
+                let detail = workspaceSetupFailureDetail(setupState)
                 throw WorkspaceError.invalidArgument(message: "Workspace setup failed: \(detail)")
             case .pending, .running:
                 if currentDate().timeIntervalSince(waitStartedAt) > 900 {
@@ -4156,6 +4211,28 @@ public final class WorkspaceOrchestrator {
                 Thread.sleep(forTimeInterval: 0.2)
             }
         }
+    }
+
+    private func requireWorkspaceSetupSucceeded(workspaceID: String) throws {
+        let setupState = try workspaceSetupState(workspaceID: workspaceID)
+        guard setupState.status == .succeeded else { throw WorkspaceError.invalidArgument(message: workspaceSetupBlockedMessage(setupState)) }
+    }
+
+    private func workspaceSetupBlockedMessage(_ state: WorkspaceSetupState) -> String {
+        switch state.status {
+        case .succeeded: return "Workspace setup has completed."
+        case .pending: return "Workspace setup has not run. Run setup before launching workspace runtime."
+        case .running: return "Workspace setup is still running. Wait for setup to finish before launching workspace runtime."
+        case .failed: return "Workspace setup failed: \(workspaceSetupFailureDetail(state))"
+        }
+    }
+
+    private func workspaceSetupFailureDetail(_ state: WorkspaceSetupState) -> String {
+        var parts: [String] = []
+        if let message = state.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty { parts.append(message) }
+        if let exitCode = state.exitCode { parts.append("exit code \(exitCode)") }
+        if let logPath = state.logPath?.trimmingCharacters(in: .whitespacesAndNewlines), !logPath.isEmpty { parts.append("log: \(logPath)") }
+        return parts.isEmpty ? "unknown setup error" : parts.joined(separator: ", ")
     }
 
     private func withWorkspaceSetupLock<T>(workspaceID: String, operation: () throws -> T) throws -> T {
@@ -4636,6 +4713,7 @@ public final class WorkspaceOrchestrator {
     private func launchProcesses(workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], background: Bool = false) throws
         -> [WindowRecord]
     {
+        try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         guard !templates.isEmpty else {
             try terminateBuiltInTerminalSessionsForConfiguredProcesses(workspaceID: workspace.id)
             try store.deleteRunningProcesses(workspaceID: workspace.id)
@@ -4711,6 +4789,7 @@ public final class WorkspaceOrchestrator {
     ) throws -> (windows: [WindowRecord], sessions: [BrowserSession]) {
         _ = project
         _ = extractOnAttach
+        try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         guard !sessions.isEmpty else { return ([], []) }
         guard chrome.isAvailable() else { throw WorkspaceError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
         let resolvedSessions = resolveBrowserSessions(sessions, env: env)
@@ -5604,6 +5683,7 @@ public final class WorkspaceOrchestrator {
 
     @discardableResult public func restartCodingAgent(workspaceID: String, agentID: String) throws -> AgentWindowRecord {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
             guard let record = try store.agentWindows(workspaceID: workspaceID).first(where: { $0.id == agentID }) else {
                 throw WorkspaceError.invalidArgument(message: "Coding agent is not running.")
             }
@@ -5765,6 +5845,7 @@ public final class WorkspaceOrchestrator {
     }
 
     public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String, processTemplateID: String? = nil) throws {
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         let recoverStartedAt = currentDate()
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
@@ -5834,6 +5915,7 @@ public final class WorkspaceOrchestrator {
         _ launcher: AgentLauncher, project: ProjectRecord, workspace: WorkspaceRecord, background: Bool
     ) throws -> AgentWindowRecord {
         let workspaceID = workspace.id
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         if let existing = try store.agentWindows(workspaceID: workspaceID).first(where: {
             if $0.claimedLauncherID == launcher.id { return true }
             guard $0.claimedLauncherID == nil else { return false }
@@ -5926,11 +6008,13 @@ public final class WorkspaceOrchestrator {
     }
 
     public func recoverRunningWorkspaceProcessIfPossible(workspaceID: String, processID: String) throws -> Bool {
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return false }
         return try recoverRunningProcessTerminalIfPossible(workspaceID: workspaceID, process: process)
     }
 
     public func recoverMissingBrowserSession(workspaceID: String, targetURL: String) throws {
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         guard !sessions.isEmpty else { throw WorkspaceError.invalidArgument(message: "No browser sessions are configured for this workspace.") }
@@ -6019,6 +6103,7 @@ public final class WorkspaceOrchestrator {
     }
 
     private func recoverRunningProcessTerminalIfPossible(workspaceID: String, process: RunningProcessRecord) throws -> Bool {
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         guard let terminalHost = terminalHost(for: process.terminalApp) else { return false }
         if terminalHost == .spaces {
             let sessionID = process.terminalNativeID ?? process.terminalTrackingID
@@ -6097,6 +6182,7 @@ public final class WorkspaceOrchestrator {
     @discardableResult private func launchConfiguredProcess(
         template: ProcessTemplate, workspace: WorkspaceRecord, env: [String: String], terminalHost: TerminalHost, background: Bool = false
     ) throws -> RunningProcessRecord {
+        try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         if terminalHost == .spaces {
             let name = processKey(for: template)
             let sessionCommand = try spacesTerminalCommand(template: template, env: env)

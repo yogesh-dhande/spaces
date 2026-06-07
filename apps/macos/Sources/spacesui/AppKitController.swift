@@ -220,6 +220,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var activeSpaceSummonCleanupTask: Task<Void, Never>?
     private var visibleWorkspaceDetailRefreshTask: Task<Void, Never>?
     private var visibleWorkspaceDetailRefreshWorkspaceID: String?
+    private var workspaceSetupDetailRefreshTimer: Timer?
+    private var workspaceSetupDetailRefreshWorkspaceID: String?
     private var commandPalettePanel: NSPanel?
     private var commandPaletteSearchField: NSSearchField?
     private var commandPaletteTableView: NSTableView?
@@ -2043,6 +2045,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     // remains a stable launch surface for configured browser sessions.
     nonisolated static func shouldShowConfiguredBrowserSessions(workspaceIsRunning _: Bool) -> Bool { true }
 
+    nonisolated static func shouldShowWorkspaceSetupPanel(status: WorkspaceSetupStatus) -> Bool { status != .succeeded }
+
+    nonisolated static func shouldShowWorkspaceSetupScriptEditor(status: WorkspaceSetupStatus) -> Bool { status == .failed }
+
+    nonisolated static func shouldRequestNormalWorkspaceDetailRefresh(setupStatus: WorkspaceSetupStatus) -> Bool { setupStatus == .succeeded }
+
     nonisolated private static func runWorkspaceSetupSnapshot(workspaceID: String) async -> Result<Void, Error> {
         await Task.detached(priority: .utility) {
             do {
@@ -3077,6 +3085,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showAlertsDetail() {
         clearInlineWorkspaceFieldRefs()
+        stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
@@ -3522,8 +3531,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func startWorkspaceSetupDetailRefreshTimerIfNeeded(workspaceID: String) {
+        if workspaceSetupDetailRefreshWorkspaceID == workspaceID, workspaceSetupDetailRefreshTimer != nil { return }
+        stopWorkspaceSetupDetailRefreshTimer()
+        workspaceSetupDetailRefreshWorkspaceID = workspaceID
+        workspaceSetupDetailRefreshTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.refreshWorkspaceSetupDetailIfVisible(workspaceID: workspaceID) }
+        }
+    }
+
+    private func stopWorkspaceSetupDetailRefreshTimer() {
+        workspaceSetupDetailRefreshTimer?.invalidate()
+        workspaceSetupDetailRefreshTimer = nil
+        workspaceSetupDetailRefreshWorkspaceID = nil
+    }
+
+    private func refreshWorkspaceSetupDetailIfVisible(workspaceID: String) {
+        guard selectedWorkspaceID == workspaceID, !showingAlerts, !showingSettings, let (project, workspace) = findWorkspace(id: workspaceID) else {
+            stopWorkspaceSetupDetailRefreshTimer()
+            return
+        }
+        guard let setupState = try? orchestrator.workspaceSetupState(workspaceID: workspaceID) else { return }
+        if Self.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: setupState.status) {
+            stopWorkspaceSetupDetailRefreshTimer()
+            showWorkspaceDetail(project: project, workspace: workspace)
+            return
+        }
+        if setupState.status != .running { stopWorkspaceSetupDetailRefreshTimer() }
+        prepareWorkspaceDetailContainer(workspaceID: workspace.id)
+        showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState)
+    }
+
     private func showPlaceholder(message: String = "Select a project or workspace.") {
         clearInlineWorkspaceFieldRefs()
+        stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
@@ -3545,6 +3586,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showLoadingPlaceholder(message: String, detail: String?) {
         clearInlineWorkspaceFieldRefs()
+        stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
@@ -3817,6 +3859,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showSettingsDetail() {
         clearInlineWorkspaceFieldRefs()
+        stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
@@ -4091,6 +4134,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showProjectDetail(project: ProjectSummary) {
         clearInlineWorkspaceFieldRefs()
+        stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
@@ -4218,21 +4262,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
     }
 
-    private func formSectionCard(icon: String, title: String, subtitle: String = "", trailingView: NSView? = nil, contentViews: [NSView]) -> NSView {
+    private func formSectionCard(
+        icon: String?, title: String, subtitle: String = "", iconColor: NSColor? = nil, trailingView: NSView? = nil, contentViews: [NSView]
+    ) -> NSView {
         let section = NSView()
         section.translatesAutoresizingMaskIntoConstraints = false
         section.setContentHuggingPriority(.required, for: .vertical)
 
-        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
-
-        // Header row: icon + title/subtitle + optional trailing view
-        let iconView = NSImageView()
-        if let img = NSImage(systemSymbolName: icon, accessibilityDescription: title) {
-            let config = NSImage.SymbolConfiguration(paletteColors: [accentColor])
-            iconView.image = img.withSymbolConfiguration(config)
-        }
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 20), iconView.heightAnchor.constraint(equalToConstant: 20)])
+        let accentColor = iconColor ?? sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
 
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
@@ -4257,7 +4294,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         headerRow.orientation = .horizontal
         headerRow.alignment = .top
         headerRow.spacing = 10
-        headerRow.addArrangedSubview(iconView)
+        if let icon {
+            let iconView = NSImageView()
+            if let img = NSImage(systemSymbolName: icon, accessibilityDescription: title) {
+                let config = NSImage.SymbolConfiguration(paletteColors: [accentColor])
+                iconView.image = img.withSymbolConfiguration(config)
+            }
+            iconView.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 20), iconView.heightAnchor.constraint(equalToConstant: 20)])
+            headerRow.addArrangedSubview(iconView)
+        }
         headerRow.addArrangedSubview(titleStack)
         if let trailing = trailingView {
             trailing.setContentHuggingPriority(.required, for: .horizontal)
@@ -4364,6 +4410,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showAddProjectForm() {
         clearInlineWorkspaceFieldRefs()
+        stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         showingSettings = false
@@ -4543,6 +4590,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showAddWorkspaceForm(project: ProjectSummary) {
         clearInlineWorkspaceFieldRefs()
+        stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         showingSettings = false
@@ -4782,12 +4830,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
-        requestVisibleWorkspaceDetailRefreshIfNeeded(reason: "workspace_detail_shown")
+    private func prepareWorkspaceDetailContainer(workspaceID: String) {
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
-        visibleDetailWorkspaceID = workspace.id
+        visibleDetailWorkspaceID = workspaceID
         showingSettings = false
         showingAlerts = false
         updateAlertsRowAppearance()
@@ -4795,6 +4842,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+    }
+
+    private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
+        let setupState =
+            (try? orchestrator.workspaceSetupState(workspaceID: workspace.id))
+            ?? WorkspaceSetupState(status: .succeeded, errorMessage: nil, startedAt: nil, finishedAt: nil)
+        prepareWorkspaceDetailContainer(workspaceID: workspace.id)
+        if !Self.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: setupState.status) {
+            showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState)
+            return
+        }
+        requestVisibleWorkspaceDetailRefreshIfNeeded(reason: "workspace_detail_shown")
+        stopWorkspaceSetupDetailRefreshTimer()
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -5009,6 +5069,240 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(headerAndActionsRow, in: stack)
         showScrollableDetailStack(stack)
         detailContainer.layoutSubtreeIfNeeded()
+    }
+
+    private func showWorkspaceSetupDetail(project: ProjectSummary, workspace: WorkspaceSummary, setupState: WorkspaceSetupState) {
+        if setupState.status == .running {
+            startWorkspaceSetupDetailRefreshTimerIfNeeded(workspaceID: workspace.id)
+        } else {
+            stopWorkspaceSetupDetailRefreshTimer()
+        }
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleLabel = NSTextField(labelWithString: inlineWorkspaceFieldDisplayValue(workspace.title, field: .title))
+        titleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
+        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setAccessibilityIdentifier("workspace-detail-title-label")
+
+        let statusIcon = NSImageView()
+        statusIcon.image = NSImage(
+            systemSymbolName: workspaceSetupStatusSymbol(setupState.status), accessibilityDescription: workspaceSetupStatusTitle(setupState.status))
+        statusIcon.contentTintColor = workspaceSetupStatusColor(setupState.status)
+        statusIcon.translatesAutoresizingMaskIntoConstraints = false
+        statusIcon.widthAnchor.constraint(equalToConstant: 14).isActive = true
+        statusIcon.heightAnchor.constraint(equalToConstant: 14).isActive = true
+
+        let statusLabel = NSTextField(labelWithString: workspaceSetupStatusTitle(setupState.status))
+        statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        statusLabel.textColor = workspaceSetupStatusColor(setupState.status)
+
+        let headerRow = NSStackView(views: [titleLabel, NSView(), statusIcon, statusLabel])
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 8
+
+        let dirField = NSTextField(string: workspace.dir)
+        dirField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        dirField.textColor = .tertiaryLabelColor
+        dirField.lineBreakMode = .byTruncatingMiddle
+        dirField.isEditable = false
+        dirField.isSelectable = true
+        dirField.drawsBackground = false
+        dirField.isBordered = false
+        dirField.setAccessibilityIdentifier("workspace-detail-dir")
+
+        let headerStack = NSStackView(views: [headerRow, dirField])
+        headerStack.orientation = .vertical
+        headerStack.alignment = .leading
+        headerStack.spacing = 4
+        stack.addArrangedSubview(headerStack)
+        constrainFormFieldToFillWidth(headerRow, in: headerStack)
+        constrainFormFieldToFillWidth(dirField, in: headerStack)
+        constrainFormFieldToFillWidth(headerStack, in: stack)
+
+        let runButton = actionButton(
+            title: setupState.status == .failed ? "Retry Setup" : "Run Setup", symbol: setupState.status == .failed ? "arrow.clockwise" : "play",
+            tooltip: "Run workspace setup", action: #selector(runWorkspaceSetupFromDetail(_:)), primary: setupState.status != .running)
+        runButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        runButton.isEnabled = setupState.status != .running
+        runButton.setAccessibilityIdentifier("workspace-setup-run")
+
+        let terminalButton = actionButton(
+            title: "Terminal", symbol: "terminal", tooltip: "Open a workspace terminal", action: #selector(openWorkspaceTerminal(_:)), primary: false)
+        terminalButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        terminalButton.setAccessibilityIdentifier("workspace-setup-terminal")
+
+        let revealButton = actionButton(
+            title: "Reveal", symbol: "folder", tooltip: "Reveal workspace in Finder", action: #selector(revealDirectoryInFinder(_:)), primary: false)
+        revealButton.identifier = NSUserInterfaceItemIdentifier(workspace.dir)
+        revealButton.setAccessibilityIdentifier("workspace-setup-reveal")
+
+        let copyLogButton = actionButton(
+            title: "Copy Log", symbol: "doc.on.doc", tooltip: "Copy setup log", action: #selector(copyWorkspaceSetupLog(_:)), primary: false)
+        copyLogButton.identifier = NSUserInterfaceItemIdentifier(setupState.logPath ?? "")
+        copyLogButton.isEnabled = setupState.logPath?.isEmpty == false
+        copyLogButton.setAccessibilityIdentifier("workspace-setup-copy-log")
+
+        let openLogButton = actionButton(
+            title: "Open Log", symbol: "doc.text.magnifyingglass", tooltip: "Open setup log", action: #selector(openWorkspaceSetupLog(_:)),
+            primary: false)
+        openLogButton.identifier = NSUserInterfaceItemIdentifier(setupState.logPath ?? "")
+        openLogButton.isEnabled = setupState.logPath?.isEmpty == false
+        openLogButton.setAccessibilityIdentifier("workspace-setup-open-log")
+
+        let actionRow = NSStackView(views: [runButton, terminalButton, revealButton, copyLogButton, openLogButton])
+        actionRow.orientation = .horizontal
+        actionRow.alignment = .centerY
+        actionRow.spacing = 8
+
+        let statusContent = NSStackView()
+        statusContent.orientation = .vertical
+        statusContent.alignment = .leading
+        statusContent.spacing = 8
+        statusContent.addArrangedSubview(workspaceSetupMetadataRows(setupState))
+        statusContent.addArrangedSubview(actionRow)
+        let logView = workspaceSetupLogTailView(path: setupState.logPath)
+        statusContent.addArrangedSubview(logView)
+        constrainFormFieldToFillWidth(logView, in: statusContent)
+
+        let statusCard = formSectionCard(
+            icon: nil, title: "Workspace Setup", subtitle: workspaceSetupPanelSubtitle(setupState.status),
+            iconColor: workspaceSetupStatusColor(setupState.status), contentViews: [statusContent])
+        stack.addArrangedSubview(statusCard)
+        constrainFormFieldToFillWidth(statusCard, in: stack)
+
+        if Self.shouldShowWorkspaceSetupScriptEditor(status: setupState.status) {
+            let fullProject = (try? orchestrator.project(id: project.id))
+            let setupScriptSection = SetupScriptSection(
+                value: fullProject?.setupScript ?? "", subtitle: "Edit the project setup script, then run setup again.")
+            setupScriptSection.onCommit = { [weak self] value in
+                guard let self else { return }
+                do {
+                    try orchestrator.updateProjectConfig(projectID: project.id) { config in
+                        config.setupScript = value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+                    }
+                    reloadData()
+                } catch { showError(error) }
+            }
+            stack.addArrangedSubview(setupScriptSection.view)
+            constrainFormFieldToFillWidth(setupScriptSection.view, in: stack)
+        }
+
+        showScrollableDetailStack(stack)
+        detailContainer.layoutSubtreeIfNeeded()
+    }
+
+    private func workspaceSetupMetadataRows(_ state: WorkspaceSetupState) -> NSView {
+        let rows = NSStackView()
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 4
+        rows.addArrangedSubview(workspaceSetupMetadataRow(label: "Status", value: workspaceSetupStatusTitle(state.status)))
+        if let startedAt = state.startedAt, !startedAt.isEmpty {
+            rows.addArrangedSubview(workspaceSetupMetadataRow(label: "Started", value: startedAt))
+        }
+        if let finishedAt = state.finishedAt, !finishedAt.isEmpty {
+            rows.addArrangedSubview(workspaceSetupMetadataRow(label: "Finished", value: finishedAt))
+        }
+        if let exitCode = state.exitCode { rows.addArrangedSubview(workspaceSetupMetadataRow(label: "Exit", value: String(exitCode))) }
+        if let message = state.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
+            rows.addArrangedSubview(workspaceSetupMetadataRow(label: "Error", value: message, valueColor: .systemRed))
+        }
+        if let logPath = state.logPath?.trimmingCharacters(in: .whitespacesAndNewlines), !logPath.isEmpty {
+            rows.addArrangedSubview(workspaceSetupMetadataRow(label: "Log", value: logPath))
+        }
+        return rows
+    }
+
+    private func workspaceSetupMetadataRow(label: String, value: String, valueColor: NSColor = .secondaryLabelColor) -> NSView {
+        let labelField = NSTextField(labelWithString: label)
+        labelField.font = .systemFont(ofSize: 11, weight: .semibold)
+        labelField.textColor = .tertiaryLabelColor
+        labelField.translatesAutoresizingMaskIntoConstraints = false
+        labelField.widthAnchor.constraint(equalToConstant: 62).isActive = true
+        labelField.setContentHuggingPriority(.required, for: .horizontal)
+
+        let valueField = NSTextField(labelWithString: value)
+        valueField.font = label == "Log" ? .monospacedSystemFont(ofSize: 11, weight: .regular) : .systemFont(ofSize: 11)
+        valueField.textColor = valueColor
+        valueField.lineBreakMode = .byTruncatingMiddle
+        valueField.maximumNumberOfLines = 2
+        valueField.translatesAutoresizingMaskIntoConstraints = false
+        valueField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let row = NSStackView(views: [labelField, valueField])
+        row.orientation = .horizontal
+        row.alignment = .firstBaseline
+        row.spacing = 8
+        return row
+    }
+
+    private func workspaceSetupLogTailView(path: String?) -> NSView {
+        let textView = NSTextView()
+        textView.isRichText = false
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        let text = path.flatMap { Self.workspaceSetupLogTail(path: $0, maxBytes: 16_384) } ?? ""
+        textView.string = text.isEmpty ? "No setup log output." : text
+        textView.setAccessibilityIdentifier("workspace-setup-log-tail")
+        let scrollView = scrollableTextView(textView, height: 160)
+        Task { @MainActor [weak textView] in textView?.scrollToEndOfDocument(nil) }
+        return scrollView
+    }
+
+    private func workspaceSetupPanelSubtitle(_ status: WorkspaceSetupStatus) -> String {
+        switch status {
+        case .pending: return "Run setup before using configured processes, coding agents, or browser sessions."
+        case .running: return "Setup is running. The log refreshes while output is written."
+        case .failed: return "Fix the setup script or workspace files, then retry setup."
+        case .succeeded: return "Setup completed."
+        }
+    }
+
+    private func workspaceSetupStatusTitle(_ status: WorkspaceSetupStatus) -> String {
+        switch status {
+        case .pending: return "Setup Pending"
+        case .running: return "Setup Running"
+        case .succeeded: return "Setup Complete"
+        case .failed: return "Setup Failed"
+        }
+    }
+
+    private func workspaceSetupStatusSymbol(_ status: WorkspaceSetupStatus) -> String {
+        switch status {
+        case .pending: return "hourglass"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .succeeded: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func workspaceSetupStatusColor(_ status: WorkspaceSetupStatus) -> NSColor {
+        switch status {
+        case .pending: return .secondaryLabelColor
+        case .running: return sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        case .succeeded: return .systemGreen
+        case .failed: return .systemRed
+        }
+    }
+
+    private static func workspaceSetupLogTail(path: String, maxBytes: UInt64) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return "" }
+        defer { try? handle.close() }
+        let endOffset = (try? handle.seekToEnd()) ?? 0
+        let startOffset = endOffset > maxBytes ? endOffset - maxBytes : 0
+        try? handle.seek(toOffset: startOffset)
+        guard let data = try? handle.readToEnd() else { return "" }
+        var text = String(decoding: data, as: UTF8.self)
+        if startOffset > 0, let firstNewline = text.firstIndex(of: "\n") { text = "...\n" + String(text[text.index(after: firstNewline)...]) }
+        return text
     }
 
     private func workspaceProcessesSection(
@@ -6303,6 +6597,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let symbol {
             button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
             button.imagePosition = .imageLeading
+            button.imageHugsTitle = true
         }
         button.toolTip = tooltip
         if primary { stylePrimaryActionButton(button, title: title) }
@@ -6919,6 +7214,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let workspaceID = sender.identifier?.rawValue else { return }
         sender.isEnabled = false
         openWorkspaceTerminal(workspaceID: workspaceID, route: .button) { sender.isEnabled = true }
+    }
+
+    @objc private func runWorkspaceSetupFromDetail(_ sender: NSButton) {
+        guard let workspaceID = sender.identifier?.rawValue else { return }
+        sender.isEnabled = false
+        startWorkspaceSetupDetailRefreshTimerIfNeeded(workspaceID: workspaceID)
+        Task { @MainActor [weak self, weak sender] in
+            guard let self else { return }
+            let result = await Self.runWorkspaceSetupSnapshot(workspaceID: workspaceID)
+            sender?.isEnabled = true
+            reloadData()
+            if case .failure(let error) = result, (try? orchestrator.workspaceSetupState(workspaceID: workspaceID).status) != .failed {
+                showError(error)
+            }
+        }
+    }
+
+    @objc private func copyWorkspaceSetupLog(_ sender: Any) {
+        guard let path = Self.senderIdentifier(sender), !path.isEmpty else { return }
+        let contents = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        copyToPasteboard(contents)
+    }
+
+    @objc private func openWorkspaceSetupLog(_ sender: Any) {
+        guard let path = Self.senderIdentifier(sender), !path.isEmpty else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: false))
     }
 
     @objc private func openWorkspaceFinder(_ sender: NSButton) {
