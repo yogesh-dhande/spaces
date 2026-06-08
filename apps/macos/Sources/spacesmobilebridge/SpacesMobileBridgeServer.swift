@@ -306,6 +306,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private let pairingCoordinator: SpacesMobilePairingCoordinator
     private let pairingStore: any SpacesMobilePairingStoreProtocol
     private let onPairingSucceeded: (@Sendable (SpacesMobileClientApp) -> Void)?
+    private let launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)?
     private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Void>()
     private let stateLock = NSLock()
@@ -328,6 +329,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         self.transportKey = transportKey
         self.pairingCoordinator = pairingCoordinator
         self.onPairingSucceeded = onPairingSucceeded
+        launchSpacesAppHandler = nil
         if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesMobilePairingStore() }
         networkShaper = NetworkShaper()
         queue = DispatchQueue(label: "spaces.mobile.bridge")
@@ -337,7 +339,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     init(
         host: String, port: Int, transportKey: String, pairingCoordinator: SpacesMobilePairingCoordinator = SpacesMobilePairingCoordinator(),
         pairingStoreProtocol: any SpacesMobilePairingStoreProtocol, onPairingSucceeded: (@Sendable (SpacesMobileClientApp) -> Void)? = nil,
-        networkEnvironment: [String: String] = ProcessInfo.processInfo.environment
+        networkEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)? = nil
     ) {
         self.host = host
         self.port = port
@@ -345,6 +348,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         self.pairingCoordinator = pairingCoordinator
         self.pairingStore = pairingStoreProtocol
         self.onPairingSucceeded = onPairingSucceeded
+        self.launchSpacesAppHandler = launchSpacesAppHandler
         networkShaper = NetworkShaper(environment: networkEnvironment)
         queue = DispatchQueue(label: "spaces.mobile.bridge")
         queue.setSpecific(key: queueKey, value: ())
@@ -480,6 +484,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             return SpacesMobileBridgeResponse(ok: true, message: "Paired iOS client.", issuedAuthToken: issuedToken)
         case "ping": return SpacesMobileBridgeResponse(ok: true, message: "pong")
         case "overview": return SpacesMobileBridgeResponse(ok: true, message: "Loaded mobile overview.", overview: try loadOverview())
+        case "launchSpacesApp": return try handleLaunchSpacesAppRequest()
         case "workspaceCreateOptions": return try handleWorkspaceCreateOptionsRequest(request)
         case "createWorkspace": return try handleCreateWorkspaceRequest(request)
         case "openWorkspaceTerminal": return try handleOpenWorkspaceTerminalRequest(request)
@@ -546,6 +551,14 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private static func normalizedClientID(from request: SpacesMobileBridgeRequest) -> String? {
         guard let clientID = request.clientID?.trimmingCharacters(in: .whitespacesAndNewlines), !clientID.isEmpty else { return nil }
         return clientID
+    }
+
+    private func handleLaunchSpacesAppRequest() throws -> SpacesMobileBridgeResponse {
+        guard let launchSpacesAppHandler else {
+            return SpacesMobileBridgeResponse(ok: false, message: "launchSpacesApp is only available from the daemon-hosted mobile bridge.")
+        }
+        let outcome = try launchSpacesAppHandler()
+        return SpacesMobileBridgeResponse(ok: true, message: outcome.message)
     }
 
     private func loadOverview() throws -> SpacesMobileOverviewPayload {

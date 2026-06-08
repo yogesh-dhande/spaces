@@ -11,6 +11,40 @@
         func snapshot() -> [SpacesMobileBridgeRequest] { requests }
     }
 
+    private actor AsyncGate {
+        private var didStart = false
+        private var didRelease = false
+        private var startContinuations: [CheckedContinuation<Void, Never>] = []
+        private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+        func markStarted() {
+            didStart = true
+            let continuations = startContinuations
+            startContinuations.removeAll()
+            continuations.forEach { $0.resume() }
+        }
+
+        func waitUntilStarted() async {
+            if didStart { return }
+            await withCheckedContinuation { continuation in
+                startContinuations.append(continuation)
+            }
+        }
+
+        func waitUntilReleased() async {
+            if didRelease { return }
+            await withCheckedContinuation { continuation in
+                releaseContinuation = continuation
+            }
+        }
+
+        func release() {
+            didRelease = true
+            releaseContinuation?.resume()
+            releaseContinuation = nil
+        }
+    }
+
     @MainActor
     final class SpacesMobileAppModelTests: XCTestCase {
         func testWorkspaceGroupsFilterByTypeStateAndSearch() {
@@ -234,6 +268,74 @@
             XCTAssertNil(session)
             XCTAssertNil(model.errorMessage)
             XCTAssertFalse(model.isMutating)
+        }
+
+        func testClientLaunchSpacesAppSendsAuthenticatedCommandAndClientIdentity() async throws {
+            let recorder = SpacesMobileRequestRecorder()
+            var settings = SpacesMobileConnectionSettings()
+            settings.authToken = "auth-token"
+            settings.transportKey = "transport-key"
+            settings.installationID = "INSTALLATION-LAUNCH"
+            let client = SpacesMobileBridgeClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesMobileBridgeResponse(ok: true, message: "Launched Spaces on Mac.")
+            }
+
+            try await client.launchSpacesApp()
+
+            let request = await recorder.snapshot().first
+            XCTAssertEqual(request?.command, "launchSpacesApp")
+            XCTAssertEqual(request?.authToken, "auth-token")
+            XCTAssertEqual(request?.clientApp?.installationID, "INSTALLATION-LAUNCH")
+            XCTAssertEqual(request?.clientApp?.platform, "ios")
+            XCTAssertFalse(request?.clientApp?.deviceName.isEmpty ?? true)
+        }
+
+        func testModelLaunchSpacesAppTogglesStateAndKeepsOverview() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let gate = AsyncGate()
+            var settings = SpacesMobileConnectionSettings()
+            settings.authToken = "auth-token"
+            settings.transportKey = "transport-key"
+            let client = SpacesMobileBridgeClient(settings: settings) { request in
+                await recorder.append(request)
+                await gate.markStarted()
+                await gate.waitUntilReleased()
+                return SpacesMobileBridgeResponse(ok: true, message: "Launched Spaces on Mac.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview(sessions: [makeSession(id: "session-api")])
+            model.overview = overview
+
+            let task = Task { await model.launchSpacesAppIfNeeded() }
+            await gate.waitUntilStarted()
+
+            XCTAssertTrue(model.isLaunchingSpacesApp)
+            XCTAssertEqual(model.overview, overview)
+
+            await gate.release()
+            await task.value
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.command), ["launchSpacesApp"])
+            XCTAssertFalse(model.isLaunchingSpacesApp)
+            XCTAssertEqual(model.overview, overview)
+            XCTAssertNil(model.errorMessage)
+        }
+
+        func testModelLaunchSpacesAppSurfacesErrors() async {
+            var settings = SpacesMobileConnectionSettings()
+            settings.authToken = "auth-token"
+            settings.transportKey = "transport-key"
+            let client = SpacesMobileBridgeClient(settings: settings) { _ in
+                SpacesMobileBridgeResponse(ok: false, message: "Unable to find SpacesApp.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.launchSpacesAppIfNeeded()
+
+            XCTAssertFalse(model.isLaunchingSpacesApp)
+            XCTAssertEqual(model.errorMessage, "Unable to find SpacesApp.")
         }
 
         private func makeOverview(
