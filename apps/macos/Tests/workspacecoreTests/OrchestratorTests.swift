@@ -5375,6 +5375,79 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    func testReconcileTerminalForegroundAgentClassificationsPreservesSignalAgentOnUnknownForeground() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "signal-custom-agent-unknown-foreground"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/usr/bin/python3", foregroundExecutableName: "python3", foregroundArgv: ["python3", "agent.py"]))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+            let signalAgent = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                status: .spinning, eventSource: "spaces_signal")
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+
+            let agents = try store.agentWindows(workspaceID: workspace.id)
+            XCTAssertEqual(agents.map(\.id), [signalAgent.id])
+            XCTAssertEqual(agents.first?.label, "Custom Hook Agent")
+            XCTAssertEqual(agents.first?.status, .spinning)
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsPreservesSignalLabelOnKnownForeground() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "signal-custom-agent-known-foreground"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
+                    foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
+                    foregroundDisplayCommand: "codex --model gpt-5"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+            let signalAgent = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                status: .waiting, eventSource: "spaces_signal")
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+
+            let agents = try store.agentWindows(workspaceID: workspace.id)
+            XCTAssertEqual(agents.map(\.id), [signalAgent.id])
+            XCTAssertEqual(agents.first?.label, "Custom Hook Agent")
+            XCTAssertEqual(agents.first?.status, .waiting)
+            XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail, "codex --model gpt-5")
+        }
+    }
+
     func testUpdateAgentWindowStatusPreservesAdHocDetectedTerminalNameAndDetail() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path

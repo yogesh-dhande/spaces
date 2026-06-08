@@ -294,6 +294,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - `spaces signal` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
 - Agent events that cannot be reliably attributed to a terminal must be dropped, not guessed onto the frontmost window.
 - `init` should identify the originating terminal and either attach to an already tracked terminal row or create a new tracked terminal row for that coding agent.
+- Non-`init` signal events should update the existing agent row for the originating terminal. If no agent row exists, the event may establish one only when the signal context or current terminal runtime identifies the terminal as a coding agent; otherwise the event should be ignored.
 - Coding-agent rows should render after browser and process rows so non-agent shortcut ordering stays stable when agents appear or disappear.
 - Configured and ad-hoc coding agents should share the same `Coding Agents` section rather than rendering as separate launcher and runtime sections.
 - A Spaces-owned ad-hoc built-in terminal should appear in `Coding Agents` while its live foreground process is a known coding agent such as Codex, Claude, Claude Code, or opencode. When the foreground process is a shell or an unknown command, that terminal should appear with the other terminal rows under `Processes`.

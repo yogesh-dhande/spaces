@@ -527,6 +527,140 @@ final class MXCommandTests: XCTestCase {
         }
     }
 
+    func testSignalStartIgnoresMissingAgentRow() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dbPath = directory.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let workspace = try makeWorkspace(store: store)
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+
+        var output = ""
+        try withAgentSignalEnvironment(dbPath: dbPath, sessionID: "signal-start-without-init") {
+            try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+                output = try captureStandardOutput {
+                    let command = try SignalCommand.parse(["start", workspace.dir])
+                    try command.run()
+                }
+            }
+        }
+
+        XCTAssertTrue(output.contains("Ignored agent start: no active agent row"))
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+    }
+
+    func testSignalStartUpdatesExistingAgentRow() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dbPath = directory.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let workspace = try makeWorkspace(store: store)
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+
+        try withAgentSignalEnvironment(dbPath: dbPath, sessionID: "signal-start-after-init", label: "Custom Hook Agent") {
+            try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+                _ = try captureStandardOutput {
+                    let command = try SignalCommand.parse(["init", workspace.dir])
+                    try command.run()
+                }
+                _ = try captureStandardOutput {
+                    let command = try SignalCommand.parse(["start", workspace.dir])
+                    try command.run()
+                }
+            }
+        }
+
+        let agent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(agent.label, "Custom Hook Agent")
+        XCTAssertEqual(agent.status, .spinning)
+        XCTAssertEqual(agent.terminalTrackingID, "signal-start-after-init")
+    }
+
+    func testSignalStartWithExplicitLabelCreatesAgentRowWithoutInit() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dbPath = directory.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let workspace = try makeWorkspace(store: store)
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+
+        try withAgentSignalEnvironment(dbPath: dbPath, sessionID: "signal-start-custom-agent", label: "Custom Hook Agent") {
+            try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+                _ = try captureStandardOutput {
+                    let command = try SignalCommand.parse(["start", workspace.dir])
+                    try command.run()
+                }
+            }
+        }
+
+        let agent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(agent.label, "Custom Hook Agent")
+        XCTAssertEqual(agent.status, .spinning)
+        XCTAssertEqual(agent.terminalTrackingID, "signal-start-custom-agent")
+    }
+
+    func testSignalInitDoesNotDowngradeExistingStartedAgentRow() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dbPath = directory.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let workspace = try makeWorkspace(store: store)
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+
+        try withAgentSignalEnvironment(dbPath: dbPath, sessionID: "signal-start-before-init", label: "Custom Hook Agent") {
+            try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+                _ = try captureStandardOutput {
+                    let command = try SignalCommand.parse(["start", workspace.dir])
+                    try command.run()
+                }
+                _ = try captureStandardOutput {
+                    let command = try SignalCommand.parse(["init", workspace.dir])
+                    try command.run()
+                }
+            }
+        }
+
+        let agent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(agent.label, "Custom Hook Agent")
+        XCTAssertEqual(agent.status, .spinning)
+        XCTAssertEqual(agent.terminalTrackingID, "signal-start-before-init")
+    }
+
+    func testSignalStartUsesForegroundRuntimeAgentBeforeMonitorPromotesRow() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dbPath = directory.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let workspace = try makeWorkspace(store: store)
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+        let sessionID = "signal-start-runtime-agent"
+
+        try withAgentSignalEnvironment(dbPath: dbPath, sessionID: sessionID) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "shell", workingDirectory: workspace.dir, shell: "/bin/zsh", command: nil,
+                    createdAt: "2026-06-06T00:00:00Z", workspaceID: workspace.id, kind: .shell), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:01Z", title: "shell", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex"), paths: paths)
+            try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+                _ = try captureStandardOutput {
+                    let command = try SignalCommand.parse(["start", workspace.dir])
+                    try command.run()
+                }
+            }
+        }
+
+        let agent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(agent.label, "Codex")
+        XCTAssertEqual(agent.status, .spinning)
+        XCTAssertEqual(agent.terminalTrackingID, sessionID)
+    }
+
     private func makeTemporaryStore() throws -> SQLiteStore {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -545,6 +679,22 @@ final class MXCommandTests: XCTestCase {
             dirname: nil, branch: nil, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         return workspace
+    }
+
+    private func withAgentSignalEnvironment<T>(dbPath: String, sessionID: String, label: String? = nil, run: () throws -> T) throws -> T {
+        let values: [String: String?] = [
+            "SPACES_DB_PATH": dbPath, "SPACES_TERMINAL_HOST": TerminalHost.spaces.rawValue, WorkspaceOrchestrator.terminalTrackingIDEnvVar: sessionID,
+            WorkspaceOrchestrator.agentLabelEnvVar: label, "CODEX_THREAD_ID": nil, "CODEX_MANAGED_BY_NPM": nil, "CLAUDE_CODE_ENTRYPOINT": nil,
+            "OPENCODE_EXPERIMENTAL_FILEWATCHER": nil,
+        ]
+        return try withEnv(values, run: run)
+    }
+
+    private func withEnv<T>(_ values: [String: String?], run: () throws -> T) throws -> T {
+        let previousValues = Dictionary(uniqueKeysWithValues: values.keys.map { name in (name, getenv(name).map { String(cString: $0) }) })
+        for (name, value) in values { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
+        defer { for (name, value) in previousValues { if let value { setenv(name, value, 1) } else { unsetenv(name) } } }
+        return try run()
     }
 
     private static let yabaiFocusedWindowMock = """

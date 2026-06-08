@@ -63,7 +63,7 @@ export default function CodingAgentsDocsPage() {
           <li>• <strong>exit</strong> &mdash; agent ended; row returns to idle, or is removed if the terminal is gone.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Events are accepted only from Spaces-managed terminal sessions. Start agents in a workspace terminal opened by Spaces so the session can be tracked and focused reliably.
+          Events are accepted only from Spaces-managed terminal sessions. Start agents in a workspace terminal opened by Spaces so the session can be tracked and focused reliably. Events after <code>init</code> update the row that <code>init</code> created or attached; explicit agent labels and known agent runtime metadata can also establish the row before the monitor tick runs.
         </p>
       </article>
 

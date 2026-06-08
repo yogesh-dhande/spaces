@@ -1438,8 +1438,10 @@ public final class WorkspaceOrchestrator {
             }
             guard let detectedAgent = adHocDetectedForegroundAgent(from: session.runtimeState) else {
                 if try updateAdHocAgentRuntimeTargetDetail(existingAgent, displayCommand: nil) { didMutate = true }
-                try store.deleteAgentWindow(id: existingAgent.id)
-                didMutate = true
+                if adHocAgentIsDetectorOwned(existingAgent, sessionID: sessionID) {
+                    try store.deleteAgentWindow(id: existingAgent.id)
+                    didMutate = true
+                }
                 continue
             }
             if try upsertAdHocDetectedAgent(
@@ -1469,8 +1471,8 @@ public final class WorkspaceOrchestrator {
             runtimeTargetID: existing?.runtimeTargetID ?? terminalWindow?.id, windowID: terminalWindow?.windowID ?? existing?.windowID,
             trackingID: sessionID)
         let now = nowISO8601()
-        let resolvedLabel = try uniqueAgentFocusLabel(
-            workspaceID: workspace.id, preferredLabel: detectedAgent.label, excludingAgentWindowID: existing?.id)
+        let resolvedLabel = try resolvedAdHocDetectedAgentLabel(
+            existing: existing, detectedLabel: detectedAgent.label, workspaceID: workspace.id, sessionID: sessionID)
         let record = AgentWindowRecord(
             id: existing?.id ?? adHocDetectedAgentID(sessionID: sessionID), workspaceID: workspace.id, provider: .spaces, label: resolvedLabel,
             runtimeTargetID: existing?.runtimeTargetID ?? terminalWindow?.id, terminalTarget: terminalTarget, sessionKey: existing?.sessionKey,
@@ -1497,6 +1499,20 @@ public final class WorkspaceOrchestrator {
     }
 
     private func adHocDetectedAgentID(sessionID: String) -> String { "terminal-agent-\(sessionID)" }
+
+    private func adHocAgentIsDetectorOwned(_ agent: AgentWindowRecord, sessionID: String) -> Bool {
+        agent.id == adHocDetectedAgentID(sessionID: sessionID)
+    }
+
+    private func resolvedAdHocDetectedAgentLabel(existing: AgentWindowRecord?, detectedLabel: String, workspaceID: String, sessionID: String) throws
+        -> String?
+    {
+        if let existing, !adHocAgentIsDetectorOwned(existing, sessionID: sessionID) {
+            let existingLabel = existing.label?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let existingLabel, !existingLabel.isEmpty { return existing.label }
+        }
+        return try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: detectedLabel, excludingAgentWindowID: existing?.id)
+    }
 
     private func adHocAgent(_ existing: AgentWindowRecord?, differsFrom expected: AgentWindowRecord) -> Bool {
         guard let existing else { return true }
