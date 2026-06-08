@@ -153,6 +153,9 @@ spaces signal exit`}</CodeBlock>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Spaces records agent lifecycle events only from Spaces-managed terminal sessions. If the current shell is not running inside a tracked Spaces terminal session, Spaces drops the event instead of recording it.
         </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Custom hook integrations can set <code>SPACES_AGENT_LABEL</code> before invoking <code>spaces signal</code>. Spaces also infers labels from known Codex, Claude Code, and opencode environments.
+        </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">

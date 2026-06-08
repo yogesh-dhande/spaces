@@ -28,7 +28,7 @@ other keys. After writing the file, show me the diff.
 
 export const metadata: Metadata = {
   title: "Coding Agents",
-  description: "Track Claude Code, Codex, and other coding agents per workspace.",
+  description: "Track Claude Code, Codex, opencode, and other coding agents per workspace.",
 };
 
 export default function CodingAgentsDocsPage() {
@@ -41,7 +41,7 @@ export default function CodingAgentsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">What Is a Coding Agent?</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          A coding agent is a tool like Claude Code or Codex that you run in a terminal to help you write code. Spaces tracks each agent as a row in the workspace so you can focus its terminal by shortcut and see at a glance whether it is working, blocked on you, or done.
+          A coding agent is a tool like Claude Code, Codex, or opencode that you run in a terminal to help you write code. Spaces tracks each agent as a row in the workspace so you can focus its terminal by shortcut and see at a glance whether it is working, blocked on you, or done.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Configure agents on the project as launchers — Spaces opens them for every workspace.</li>
@@ -70,10 +70,10 @@ export default function CodingAgentsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Global Hooks</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Claude Code and Codex both support global hooks that run a shell command at lifecycle points. Point those hooks at <code>spaces signal</code> once in your user config and every session of the agent, in any project, will report to Spaces automatically — no per-repo setup required.
+          Claude Code and Codex both support global hooks that run a shell command at lifecycle points. opencode exposes plugin events that can run shell commands. Point those integrations at <code>spaces signal</code> once in your user config and every session of the agent, in any project, will report to Spaces automatically — no per-repo setup required.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          The easiest way to install the recommended config is to paste one of the prompts below into the agent you want to configure. Both prompts preserve any existing hooks and only add the Spaces entries.
+          The easiest way to install the recommended Claude Code or Codex config is to paste one of the prompts below into the agent you want to configure. Both prompts preserve any existing hooks and only add the Spaces entries. Custom integrations can set <code>SPACES_AGENT_LABEL=opencode</code> when invoking <code>spaces signal</code>.
         </p>
       </article>
 

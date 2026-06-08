@@ -473,7 +473,10 @@ struct OpenCommand: ParsableCommand {
 
 struct SignalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "signal", abstract: "Record an explicit lifecycle event for the current coding-agent terminal.")
+        commandName: "signal", abstract: "Record an explicit lifecycle event for the current coding-agent terminal.",
+        discussion:
+            "Events are accepted from tracked Spaces terminal sessions. Set SPACES_AGENT_LABEL to override the agent row label for custom hook integrations."
+    )
 
     @Argument(
         help: ArgumentHelp("Lifecycle event to record.", discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."))
@@ -619,6 +622,7 @@ private func inferredAgentLabel(environment: [String: String]) -> String? {
     if environment["CODEX_THREAD_ID"] != nil { return "Codex CLI" }
     if environment["CODEX_MANAGED_BY_NPM"] != nil { return "Codex CLI" }
     if environment["CLAUDE_CODE_ENTRYPOINT"] != nil { return "Claude Code CLI" }
+    if environment.keys.contains(where: { $0.uppercased().hasPrefix("OPENCODE") }) { return "opencode CLI" }
 
     return nil
 }

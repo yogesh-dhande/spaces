@@ -449,6 +449,49 @@ final class MXCommandTests: XCTestCase {
         }
     }
 
+    func testResolveAgentInvocationContextInfersOpencodeLabelFromEnvironment() throws {
+        let store = try makeTemporaryStore()
+        let workspace = try makeWorkspace(store: store)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+            let context = CLIContext()
+            let agentContext = try resolveAgentInvocationContext(
+                workspaceID: workspace.id,
+                environment: [
+                    "SPACES_TERMINAL_HOST": TerminalHost.spaces.rawValue, "OPENCODE_EXPERIMENTAL_FILEWATCHER": "1",
+                    WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1",
+                ], orchestrator: orchestrator, context: context)
+
+            XCTAssertEqual(agentContext?.provider, .spaces)
+            XCTAssertEqual(agentContext?.label, "opencode CLI")
+            XCTAssertEqual(agentContext?.codexThreadID, nil)
+            XCTAssertEqual(
+                agentContext?.environmentKeys, ["OPENCODE_EXPERIMENTAL_FILEWATCHER", "SPACES_TERMINAL_HOST", "SPACES_TERMINAL_TRACKING_ID"])
+        }
+    }
+
+    func testResolveAgentInvocationContextUsesExplicitAgentLabelOverride() throws {
+        let store = try makeTemporaryStore()
+        let workspace = try makeWorkspace(store: store)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+            let context = CLIContext()
+            let agentContext = try resolveAgentInvocationContext(
+                workspaceID: workspace.id,
+                environment: [
+                    "SPACES_TERMINAL_HOST": TerminalHost.spaces.rawValue, WorkspaceOrchestrator.agentLabelEnvVar: "opencode",
+                    WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1",
+                ], orchestrator: orchestrator, context: context)
+
+            XCTAssertEqual(agentContext?.provider, .spaces)
+            XCTAssertEqual(agentContext?.label, "opencode")
+            XCTAssertEqual(agentContext?.terminalTrackingID, "spaces-session-token-1")
+            XCTAssertEqual(agentContext?.environmentKeys, ["SPACES_AGENT_LABEL", "SPACES_TERMINAL_HOST", "SPACES_TERMINAL_TRACKING_ID"])
+        }
+    }
+
     func testResolveAgentInvocationContextUsesSpacesTrackingTokenForBuiltInTerminal() throws {
         let store = try makeTemporaryStore()
         let workspace = try makeWorkspace(store: store)

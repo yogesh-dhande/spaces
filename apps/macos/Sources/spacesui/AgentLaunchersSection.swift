@@ -376,6 +376,7 @@ import workspacecore
     private var restartButton: NSButton?
     private var editButton: NSButton?
     private var removeButton: NSButton?
+    private var agentTileTextLabel: NSTextField?
     private var currentLauncher: AgentLauncher
     private var onFocus: (() -> Void)?
 
@@ -407,9 +408,11 @@ import workspacecore
         let shortcutView = shortcut.map { RowPrimitives.shortcutChip($0) }
         let collapsedLine = Self.makeCollapsedLine(
             shortcut: shortcutView, status: status, isEditable: isEditable, nameLabel: nameLabel, detailLabel: detailLabel,
-            onRun: { [weak self] in self?.onRun?() }, onStop: { [weak self] in self?.onStop?() }, onRestart: { [weak self] in self?.onRestart?() },
-            onEdit: { [weak self] in self?.onBeginEdit?() }, onRemove: { [weak self] in self?.onRemove?() }, onFocus: onFocus)
+            tileText: Self.agentTileText(for: launcher), onRun: { [weak self] in self?.onRun?() }, onStop: { [weak self] in self?.onStop?() },
+            onRestart: { [weak self] in self?.onRestart?() }, onEdit: { [weak self] in self?.onBeginEdit?() },
+            onRemove: { [weak self] in self?.onRemove?() }, onFocus: onFocus)
         collapsedContainer = collapsedLine.row
+        agentTileTextLabel = collapsedLine.agentTileTextLabel
         body.addArrangedSubview(collapsedContainer)
         collapsedContainer.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
         configureActionButtonsForHover(collapsedLine.actionButtons)
@@ -425,13 +428,16 @@ import workspacecore
 
     func rebindCollapsedContent(from launcher: AgentLauncher) {
         currentLauncher = launcher
+        agentTileTextLabel?.stringValue = Self.agentTileText(for: launcher)
         nameLabel.stringValue = launcher.name.isEmpty ? "(unnamed)" : launcher.name
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
         nameLabel.textColor = Theme.text
+        nameLabel.setAccessibilityIdentifier("agent-launcher-row-name")
         detailLabel.stringValue = launcher.command
         detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
         detailLabel.textColor = Theme.muted
         detailLabel.lineBreakMode = .byTruncatingTail
+        detailLabel.setAccessibilityIdentifier("agent-launcher-row-detail")
         updateRuntimeActionVisibility()
     }
 
@@ -497,17 +503,20 @@ import workspacecore
     }
 
     private static func makeCollapsedLine(
-        shortcut: NSView? = nil, status: AgentWindowStatus?, isEditable: Bool, nameLabel: NSTextField, detailLabel: NSTextField,
+        shortcut: NSView? = nil, status: AgentWindowStatus?, isEditable: Bool, nameLabel: NSTextField, detailLabel: NSTextField, tileText: String,
         onRun: @escaping () -> Void, onStop: @escaping () -> Void, onRestart: @escaping () -> Void, onEdit: @escaping () -> Void,
         onRemove: @escaping () -> Void, onFocus: (() -> Void)?
     ) -> (
         row: NSStackView, actionButtons: [NSButton], runButton: NSButton, stopButton: NSButton, restartButton: NSButton, editButton: NSButton?,
-        removeButton: NSButton?
+        removeButton: NSButton?, agentTileTextLabel: NSTextField?
     ) {
         var contentViews: [NSView] = []
         contentViews.append(RowPrimitives.statusSlot(status.flatMap(makeStatusIndicator)))
         if let shortcut { contentViews.append(shortcut) }
-        contentViews.append(RowPrimitives.typeIconTile(.agent, symbol: "cpu.fill", accessibilityLabel: "Coding Agent"))
+        let agentTile = RowPrimitives.typeTextTile(.agent, text: tileText, accessibilityLabel: "Coding Agent")
+        let agentTileTextLabel = agentTile.subviews.compactMap { $0 as? NSTextField }.first
+        agentTileTextLabel?.setAccessibilityIdentifier("agent-launcher-row-tile")
+        contentViews.append(agentTile)
         let textStack = NSStackView(views: [nameLabel, detailLabel])
         textStack.orientation = .horizontal
         textStack.alignment = .firstBaseline
@@ -561,7 +570,29 @@ import workspacecore
         row.spacing = 10
         row.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 14)
         row.translatesAutoresizingMaskIntoConstraints = false
-        return (row, actionButtons, runButton, stopButton, restartButton, editButton, removeButton)
+        return (row, actionButtons, runButton, stopButton, restartButton, editButton, removeButton, agentTileTextLabel)
+    }
+
+    static func agentTileText(for launcher: AgentLauncher) -> String { agentTileText(name: launcher.name, command: launcher.command) }
+
+    static func agentTileText(name: String, command: String) -> String {
+        for candidate in [name, command] { if let tileText = knownAgentTileText(in: candidate) { return tileText } }
+
+        let letters = name.uppercased().unicodeScalars.filter { CharacterSet.letters.contains($0) }
+        let text = letters.prefix(2).map { String($0) }.joined()
+        return text.isEmpty ? "AI" : text
+    }
+
+    private static func knownAgentTileText(in text: String) -> String? {
+        let tokens = Set(usefulTokens(in: text))
+        if tokens.contains("codex") || tokens.contains("codexcli") { return "CX" }
+        if tokens.contains("claude") || tokens.contains("claudecode") || tokens.contains("claudecodecli") { return "CL" }
+        if tokens.contains("opencode") || tokens.contains("opencodecli") { return "OC" }
+        return nil
+    }
+
+    private static func usefulTokens(in text: String) -> [String] {
+        text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
     }
 
     private func updateRuntimeActionVisibility() {

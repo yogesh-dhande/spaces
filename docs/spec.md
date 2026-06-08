@@ -181,7 +181,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Direct mode also supports deterministic interpolation of Spaces-provided environment variables such as named ports and `SPACES_*` paths inside executable arguments and leading env assignments, for example `PORT=$PORT1 npm run dev`.
 - Direct mode accepts only simple Spaces variable references such as `$PORT1` or `${PORT1}`. Other shell expansions such as `${PORT1:-3000}`, `$$`, or `$?` must be rejected and require Shell mode instead.
 - Shell mode supports composite shell behavior such as `cd x && y`, pipes, redirection, and shell expansion.
-- Configured coding-agent launchers should run inside an interactive login shell so user shell PATH and tool initialization are available to commands such as `claude` or `codex`.
+- Configured coding-agent launchers should run inside an interactive login shell so user shell PATH and tool initialization are available to commands such as `claude`, `codex`, or `opencode`.
 - Configured coding-agent rows should support direct run, stop, and restart controls. Stop should close the tracked native terminal window when present, terminate the backing built-in terminal session, remove runtime state, and keep the configured launcher available. Restart should relaunch configured or claimed launcher rows and report a clear unsupported action for unconfigured live agents.
 - Built-in process and coding-agent terminal windows should keep compact runtime controls visible above the terminal surface. The native window title shows the runtime name, and the control row keeps valid run, stop, and restart icon actions right-aligned. Kept-open exited terminals should offer stop as a cleanup action and run or restart when the configured row still exists.
 - App-level configuration is changed in the app only, not through `spaces`.
@@ -288,7 +288,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - `init` should identify the originating terminal and either attach to an already tracked terminal row or create a new tracked terminal row for that coding agent.
 - Coding-agent rows should render after browser and process rows so non-agent shortcut ordering stays stable when agents appear or disappear.
 - Configured and ad-hoc coding agents should share the same `Coding Agents` section rather than rendering as separate launcher and runtime sections.
-- A Spaces-owned ad-hoc built-in terminal should appear in `Coding Agents` while its live foreground process is a known coding agent such as Codex, Claude, or Claude Code. When the foreground process is a shell or an unknown command, that terminal should appear with the other terminal rows under `Processes`.
+- A Spaces-owned ad-hoc built-in terminal should appear in `Coding Agents` while its live foreground process is a known coding agent such as Codex, Claude, Claude Code, or opencode. When the foreground process is a shell or an unknown command, that terminal should appear with the other terminal rows under `Processes`.
 - Foreground process detection should not infer lifecycle state. `spaces signal` remains the source for agent status such as spinning, waiting, done, and exit.
 - Every tracked window row should have a unique visible name within its workspace. Two coding-agent rows must not share the same name.
 - Configured coding-agent launcher names are reserved within the workspace. An ad-hoc coding agent that reports the same label should be auto-renamed with a numeric suffix instead of colliding with the configured launcher slot.

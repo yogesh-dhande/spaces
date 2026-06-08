@@ -8,12 +8,14 @@ public enum TerminalDetectedAgentKind: String, Codable, Sendable, Equatable {
     case codex
     case claude
     case claudeCode = "claude-code"
+    case opencode
 
     public var displayLabel: String {
         switch self {
         case .codex: "Codex"
         case .claude: "Claude"
         case .claudeCode: "Claude Code"
+        case .opencode: "opencode"
         }
     }
 
@@ -22,6 +24,7 @@ public enum TerminalDetectedAgentKind: String, Codable, Sendable, Equatable {
         case .codex: "codex"
         case .claude: "claude"
         case .claudeCode: "claude-code"
+        case .opencode: "opencode"
         }
     }
 }
@@ -85,6 +88,11 @@ public enum TerminalForegroundProcessInspector {
         AgentDefinition(
             kind: .claudeCode, executableNames: ["claude-code"], nodeScriptNames: ["claude-code", "claude-code.js"], nodePathFragments: []),
         AgentDefinition(kind: .claude, executableNames: ["claude"], nodeScriptNames: ["claude", "claude.js"], nodePathFragments: []),
+        // The `opencode-ai` npm package installs the selected Darwin binary at
+        // `bin/opencode.exe`; npm exposes it to users as `opencode`.
+        AgentDefinition(
+            kind: .opencode, executableNames: ["opencode", "opencode.exe"], nodeScriptNames: ["opencode", "opencode.js"],
+            nodePathFragments: ["/opencode-ai/", "/opencode/bin/opencode"]),
     ]
 
     public static func inspect(pid: Int32) -> TerminalForegroundProcessSnapshot? {

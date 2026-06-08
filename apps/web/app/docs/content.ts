@@ -56,7 +56,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/coding-agents",
     title: "Coding Agents",
     summary:
-      "Track Claude Code, Codex, and other coding agents per workspace, and wire up global hooks so each session reports its state to Spaces automatically.",
+      "Track Claude Code, Codex, opencode, and other coding agents per workspace, and wire up hooks so each session reports its state to Spaces automatically.",
   },
   {
     href: "/docs/shortcuts",

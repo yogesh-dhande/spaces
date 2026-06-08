@@ -48,17 +48,29 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
         XCTAssertEqual(TerminalForegroundProcessInspector.classify(claudeCode)?.displayCommand, "claude-code resume")
     }
 
+    func testClassifiesOpencodeCommands() {
+        let opencode = TerminalForegroundProcessSnapshot(pid: 104, executablePath: "/usr/local/bin/opencode", argv: ["opencode", "run", "fix lint"])
+        let npmOpencode = TerminalForegroundProcessSnapshot(
+            pid: 105, executablePath: "/opt/homebrew/lib/node_modules/opencode-ai/bin/opencode.exe", argv: ["opencode", "tui"])
+
+        XCTAssertEqual(TerminalForegroundProcessInspector.classify(opencode)?.detectedAgentKind, .opencode)
+        XCTAssertEqual(TerminalForegroundProcessInspector.classify(opencode)?.displayLabel, "opencode")
+        XCTAssertEqual(TerminalForegroundProcessInspector.classify(opencode)?.displayCommand, "opencode run 'fix lint'")
+        XCTAssertEqual(TerminalForegroundProcessInspector.classify(npmOpencode)?.detectedAgentKind, .opencode)
+        XCTAssertEqual(TerminalForegroundProcessInspector.classify(npmOpencode)?.displayCommand, "opencode tui")
+    }
+
     func testDoesNotClassifyShellOrUnknownProcess() {
-        let shell = TerminalForegroundProcessSnapshot(pid: 104, executablePath: "/bin/zsh", argv: ["zsh"])
-        let unknown = TerminalForegroundProcessSnapshot(pid: 105, executablePath: "/usr/bin/vim", argv: ["vim", "README.md"])
+        let shell = TerminalForegroundProcessSnapshot(pid: 106, executablePath: "/bin/zsh", argv: ["zsh"])
+        let unknown = TerminalForegroundProcessSnapshot(pid: 107, executablePath: "/usr/bin/vim", argv: ["vim", "README.md"])
 
         XCTAssertNil(TerminalForegroundProcessInspector.classify(shell))
         XCTAssertNil(TerminalForegroundProcessInspector.classify(unknown))
     }
 
     func testDoesNotClassifyAgentNamesInNonExecutableArguments() {
-        let grep = TerminalForegroundProcessSnapshot(pid: 106, executablePath: "/usr/bin/grep", argv: ["grep", "codex", "README.md"])
-        let editor = TerminalForegroundProcessSnapshot(pid: 107, executablePath: "/usr/bin/vim", argv: ["vim", "./claude-code"])
+        let grep = TerminalForegroundProcessSnapshot(pid: 108, executablePath: "/usr/bin/grep", argv: ["grep", "codex", "README.md"])
+        let editor = TerminalForegroundProcessSnapshot(pid: 109, executablePath: "/usr/bin/vim", argv: ["vim", "./claude-code"])
 
         XCTAssertNil(TerminalForegroundProcessInspector.classify(grep))
         XCTAssertNil(TerminalForegroundProcessInspector.classify(editor))
@@ -66,13 +78,13 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
 
     func testDoesNotClassifyAgentNamesInLaterNodeArguments() {
         let process = TerminalForegroundProcessSnapshot(
-            pid: 108, executablePath: "/opt/homebrew/bin/node", argv: ["node", "/tmp/print-args.js", "codex", "claude"])
+            pid: 110, executablePath: "/opt/homebrew/bin/node", argv: ["node", "/tmp/print-args.js", "codex", "claude"])
 
         XCTAssertNil(TerminalForegroundProcessInspector.classify(process))
     }
 
     func testDoesNotClassifyAgentNamesInNodeEvalCode() {
-        let process = TerminalForegroundProcessSnapshot(pid: 109, executablePath: "/opt/homebrew/bin/node", argv: ["node", "-e", "codex"])
+        let process = TerminalForegroundProcessSnapshot(pid: 111, executablePath: "/opt/homebrew/bin/node", argv: ["node", "-e", "codex"])
 
         XCTAssertNil(TerminalForegroundProcessInspector.classify(process))
     }
@@ -80,7 +92,7 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
     func testDisplayCommandQuotesWhitespaceAndBoundsArguments() {
         let longArgument = String(repeating: "x", count: 180)
         let process = TerminalForegroundProcessSnapshot(
-            pid: 110, executablePath: "/usr/local/bin/codex", argv: ["codex", "hello world", longArgument])
+            pid: 112, executablePath: "/usr/local/bin/codex", argv: ["codex", "hello world", longArgument])
 
         let detected = TerminalForegroundProcessInspector.classify(process)
 
