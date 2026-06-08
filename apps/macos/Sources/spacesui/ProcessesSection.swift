@@ -110,13 +110,22 @@ import workspacecore
 
     // MARK: Public API
 
-    func reload(processes: [ProcessTemplate]) {
+    func reload(processes: [ProcessTemplate]) { update(processes: processes, preservingEditing: true) }
+
+    func replace(processes: [ProcessTemplate]) {
+        pendingDraftIndex = nil
+        update(processes: processes, preservingEditing: false)
+    }
+
+    private func update(processes: [ProcessTemplate], preservingEditing: Bool) {
         self.processes = processes
-        refreshRows(animated: true)
+        refreshRows(animated: true, preservingEditing: preservingEditing)
     }
 
     /// Exposed for tests — current in-memory process list.
     var currentProcesses: [ProcessTemplate] { processes }
+
+    var hasOpenEditor: Bool { rows.contains { $0.isEditing } }
 
     /// Exposed for tests — current row count.
     var rowCount: Int { rows.count }
@@ -198,15 +207,17 @@ import workspacecore
 
     // MARK: Row lifecycle
 
-    private func refreshRows(animated: Bool) {
+    private func refreshRows(animated: Bool, preservingEditing: Bool = true) {
         // Snapshot editing states so we don't lose in-flight edits on re-render
         // of the *same* underlying process list (e.g. when the host passes a
         // refreshed statusByName in).
-        let existingEditing: [String: ProcessTemplate] = Dictionary(
-            uniqueKeysWithValues: rows.enumerated().compactMap { index, row -> (String, ProcessTemplate)? in
-                guard row.isEditing else { return nil }
-                return (row.identity(from: processes[safe: index]), row.formSnapshot())
-            })
+        let existingEditing: [String: ProcessTemplate] =
+            preservingEditing
+            ? Dictionary(
+                uniqueKeysWithValues: rows.enumerated().compactMap { index, row -> (String, ProcessTemplate)? in
+                    guard row.isEditing else { return nil }
+                    return (row.identity(from: processes[safe: index]), row.formSnapshot())
+                }) : [:]
 
         clearRowsStack()
         rows.removeAll()

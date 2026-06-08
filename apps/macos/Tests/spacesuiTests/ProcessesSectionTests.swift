@@ -90,6 +90,46 @@ import workspacecore
         #expect(section.isEditing(at: 0), "Editing state should survive a no-op reload")
     }
 
+    @Test func replaceClearsDraftStateBeforeLoadingImportedProcesses() {
+        let section = ProcessesSection(processes: [ProcessTemplate(name: "api", command: "bun run dev")])
+        section.performAdd()
+        #expect(section.isEditing(at: 1))
+
+        section.replace(processes: [ProcessTemplate(name: "imported", command: "npm run imported")])
+
+        var presentedFor: ProcessTemplate?
+        section.presentRemoveConfirmation = { process, decide in
+            presentedFor = process
+            decide(false)
+        }
+        section.row(at: 0)?.triggerRemove()
+
+        #expect(section.rowCount == 1)
+        #expect(section.currentProcesses.map(\.name) == ["imported"])
+        #expect(presentedFor?.name == "imported")
+        #expect(!section.isEditing(at: 0))
+    }
+
+    @Test func browserSessionReplaceClearsDraftStateBeforeLoadingImportedSessions() {
+        let section = BrowserSessionsSection(sessions: [BrowserSession(name: "docs", url: "https://example.com/docs")])
+        section.performAdd()
+        #expect(section.isEditing(at: 1))
+
+        section.replace(sessions: [BrowserSession(name: "imported", url: "https://example.com/imported")])
+
+        var presentedFor: BrowserSession?
+        section.presentRemoveConfirmation = { session, decide in
+            presentedFor = session
+            decide(false)
+        }
+        section.browserRow(at: 0)?.onRemove?()
+
+        #expect(section.rowCount == 1)
+        #expect(section.currentSessions.map(\.name) == ["imported"])
+        #expect(presentedFor?.name == "imported")
+        #expect(!section.isEditing(at: 0))
+    }
+
     // MARK: Status + shortcut maps
 
     @Test func statusByNameDrivesTheStatusDot() {
@@ -415,6 +455,8 @@ extension BrowserSessionRowView {
 }
 
 extension BrowserSessionsSection {
+    func performAdd() { handleAdd(NSButton()) }
+
     func browserRow(at index: Int) -> BrowserSessionRowView? {
         guard index >= 0, index < rowCount else { return nil }
         return rowsStackForTesting.arrangedSubviews.compactMap { $0 as? BrowserSessionRowView }[safe: index]

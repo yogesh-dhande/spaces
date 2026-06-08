@@ -83,6 +83,33 @@ public final class WorkspaceOrchestrator {
         public init(notice: String?) { self.notice = notice }
     }
 
+    public struct PreparedGitProjectImport: Sendable {
+        public let project: ProjectRecord
+        public let defaultWorkspace: WorkspaceRecord
+        public let importedDocument: SpacesYAMLDocument?
+
+        public init(project: ProjectRecord, defaultWorkspace: WorkspaceRecord, importedDocument: SpacesYAMLDocument?) {
+            self.project = project
+            self.defaultWorkspace = defaultWorkspace
+            self.importedDocument = importedDocument
+        }
+    }
+
+    public struct ManagedDirectoryReplacementCandidate: Equatable, Sendable {
+        public enum Kind: String, Hashable, Sendable {
+            case projectRepository
+            case workspaceDirectory
+        }
+
+        public let kind: Kind
+        public let path: String
+
+        public init(kind: Kind, path: String) {
+            self.kind = kind
+            self.path = path
+        }
+    }
+
     public static func setProcessWideBuiltInTerminalSessionLauncher(_ launcher: BuiltInTerminalSessionLauncher?) {
         builtInTerminalSessionLauncherOverrideStore.set(launcher)
     }
@@ -101,6 +128,18 @@ public final class WorkspaceOrchestrator {
         let index: Int
         let prefix: String
         let session: BrowserSession
+    }
+
+    private struct WorkspaceConfigurationSnapshot {
+        let workspace: WorkspaceRecord
+        let settings: WorkspaceSettings?
+        let assignedPorts: [(definitionID: String, port: Int, name: String)]
+    }
+
+    private struct GitProjectImportPlan {
+        let gitURL: String
+        let project: ProjectRecord
+        let destination: URL
     }
 
     private struct BrowserWindowScanResult {
@@ -406,10 +445,12 @@ public final class WorkspaceOrchestrator {
         }
         let previousPorts = existing.ports
         let previousProcesses = existing.processes
+        let previousAgentLaunchers = existing.agentLaunchers
         update(&existing)
         existing.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: existing.ports)
         existing.ports = try normalizedPortDefinitions(existing.ports)
         existing.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: existing.processes)
+        existing.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: existing.agentLaunchers)
         try validateProcessTemplates(existing.processes)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: existing.processes, browserSessions: existing.browserSessions,
@@ -542,6 +583,19 @@ public final class WorkspaceOrchestrator {
 
     public func addProject(dir: String) throws -> ProjectRecord { try addProject(dir: dir) { _ in } }
 
+    public func previewProject(dir: String) throws -> ProjectRecord {
+        let normalizedDir = normalizePath(dir)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
+            throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
+        }
+        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
+        let importedDocument = try spacesYAMLDocumentIfPresent(in: URL(fileURLWithPath: normalizedDir, isDirectory: true))
+        return try configuredProjectRecord(baseRecord: normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir)) {
+            project in importedDocument?.applying(to: &project)
+        }
+    }
+
     public func addProject(dir: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
         let normalizedDir = normalizePath(dir)
         var isDir: ObjCBool = false
@@ -549,8 +603,28 @@ public final class WorkspaceOrchestrator {
             throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
         }
         if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
-        let record = try configuredProjectRecord(
-            baseRecord: normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir), update: configure)
+        let importedDocument = try spacesYAMLDocumentIfPresent(in: URL(fileURLWithPath: normalizedDir, isDirectory: true))
+        let record = try configuredProjectRecord(baseRecord: normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir)) {
+            project in
+            guard let importedDocument else {
+                configure(&project)
+                return
+            }
+            importedDocument.applying(to: &project)
+        }
+        try store.upsert(project: record)
+        do { try ensureDefaultWorkspace(for: record) } catch {
+            try? store.deleteProject(id: record.id)
+            throw error
+        }
+        return record
+    }
+
+    public func addReviewedProject(dir: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
+        let normalizedDir = normalizePath(dir)
+        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
+        let baseRecord = try normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir)
+        let record = try configuredProjectRecord(baseRecord: baseRecord, update: configure)
         try store.upsert(project: record)
         do { try ensureDefaultWorkspace(for: record) } catch {
             try? store.deleteProject(id: record.id)
@@ -562,50 +636,163 @@ public final class WorkspaceOrchestrator {
     public func addProject(gitURL: String) throws -> ProjectRecord { try addProject(gitURL: gitURL) { _ in } }
 
     public func addProject(gitURL: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
-        let trimmedURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedURL.isEmpty else { throw WorkspaceError.invalidArgument(message: "Git repository URL is required.") }
-        let inferredName = inferredProjectName(from: trimmedURL)
-        let projectID = projectID(namespace: "git", source: trimmedURL)
-        let projectName = sanitizeDirname(inferredName, fallback: "project")
-        let projectDirname = managedProjectStorageDirectoryName(projectID: projectID, preferredName: projectName)
-        let destination = repositoriesRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
-        let normalizedDestination = normalizePath(destination.path)
-
-        if try store.project(dir: normalizedDestination) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDestination) }
-        if FileManager.default.fileExists(atPath: destination.path) {
-            throw WorkspaceError.invalidArgument(message: "Project directory already exists: \(normalizedDestination)")
-        }
-        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try git.clone(url: trimmedURL, destination: destination.path, bare: true)
-
-        var shouldCleanupDestination = true
+        let prepared = try prepareGitProject(gitURL: gitURL, replaceExistingManagedDirectories: true)
         do {
-            let defaultBranch = try preferredImportedDefaultBranch(path: destination.path)
-            let baseRecord = ProjectRecord(
-                id: projectID, name: projectName, dir: normalizedDestination, isGitRepo: true, defaultBranch: defaultBranch)
-            let record = try configuredProjectRecord(baseRecord: baseRecord, update: configure)
-            let defaultWorkspaceDirectory = try importedDefaultWorkspaceDirectory(project: record, branch: defaultBranch)
-            try store.upsert(project: record)
-            do { try ensureImportedGitDefaultWorkspace(for: record, branch: defaultBranch) } catch {
-                try? rollbackFailedImportedProjectCreation(project: record, workspaceDirectory: defaultWorkspaceDirectory)
-                throw error
+            return try addPreparedGitProject(prepared) { project in
+                guard prepared.importedDocument == nil else { return }
+                configure(&project)
             }
-            shouldCleanupDestination = false
-            return record
         } catch {
-            if shouldCleanupDestination { try? FileManager.default.removeItem(at: destination) }
+            try? discardPreparedGitProject(prepared)
             throw error
         }
     }
 
-    public func updateProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws {
-        guard var record = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
-        let previousRecord = record
-        record = try configuredProjectRecord(baseRecord: record, update: update)
-        try store.upsert(project: record)
-        try ensureDefaultWorkspace(for: record)
-        try syncDefaultWorkspaceSettingsIfTemplateBased(project: record, previousRecord: previousRecord, updatedRecord: record)
+    public func prepareGitProject(gitURL: String, replaceExistingManagedDirectories: Bool = true) throws -> PreparedGitProjectImport {
+        let plan = try gitProjectImportPlan(gitURL: gitURL)
+        try replaceManagedGitProjectImportDirectoriesIfNeeded(plan: plan, allowReplacement: replaceExistingManagedDirectories)
+        try FileManager.default.createDirectory(at: plan.destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try git.clone(url: plan.gitURL, destination: plan.destination.path, bare: true)
+
+        var shouldCleanupDestination = true
+        do {
+            let defaultBranch = try preferredImportedDefaultBranch(path: plan.destination.path)
+            let baseRecord = ProjectRecord(
+                id: plan.project.id, name: plan.project.name, dir: plan.project.dir, isGitRepo: true, defaultBranch: defaultBranch)
+            var record = try configuredProjectRecord(baseRecord: baseRecord) { _ in }
+            let defaultWorkspace = try createImportedGitDefaultWorkspaceOnDisk(project: record, branch: defaultBranch)
+            let worktreeURL = URL(fileURLWithPath: defaultWorkspace.dir, isDirectory: true)
+            let importedDocument = try spacesYAMLDocumentIfPresent(in: worktreeURL)
+            if let importedDocument {
+                record = try configuredProjectRecord(baseRecord: record) { project in importedDocument.applying(to: &project) }
+            }
+            shouldCleanupDestination = false
+            return PreparedGitProjectImport(project: record, defaultWorkspace: defaultWorkspace, importedDocument: importedDocument)
+        } catch {
+            if shouldCleanupDestination {
+                try? removeManagedGitWorkspaceDirectoriesIfNeeded(project: plan.project)
+                try? FileManager.default.removeItem(at: plan.destination)
+            }
+            throw error
+        }
     }
+
+    public func managedGitProjectImportReplacementCandidates(gitURL: String) throws -> [ManagedDirectoryReplacementCandidate] {
+        try managedGitProjectImportReplacementCandidates(plan: gitProjectImportPlan(gitURL: gitURL))
+    }
+
+    public func managedWorkspaceReplacementCandidate(projectID: String, directoryName: String) throws -> ManagedDirectoryReplacementCandidate? {
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        guard project.isGitRepo else { return nil }
+        let trimmedDirectoryName = directoryName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedDirectoryName.isEmpty else { return nil }
+        try validateWorkspaceDirname(trimmedDirectoryName)
+        let workspaceDirectory = try worktreeRoot(project: project).appendingPathComponent(trimmedDirectoryName, isDirectory: true).path
+        return try managedDirectoryReplacementCandidate(path: workspaceDirectory, kind: .workspaceDirectory)
+    }
+
+    @discardableResult public func addPreparedGitProject(_ prepared: PreparedGitProjectImport, configure: (inout ProjectRecord) -> Void) throws
+        -> ProjectRecord
+    {
+        guard prepared.project.isGitRepo else { throw WorkspaceError.invalidArgument(message: "Prepared project must be a git project.") }
+        let normalizedDir = normalizePath(prepared.project.dir)
+        guard normalizedDir == prepared.project.dir else {
+            throw WorkspaceError.invalidArgument(message: "Prepared project directory is not normalized: \(prepared.project.dir)")
+        }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
+            throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
+        }
+        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
+        var workspaceIsDir = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: prepared.defaultWorkspace.dir, isDirectory: &workspaceIsDir), workspaceIsDir.boolValue else {
+            throw WorkspaceError.invalidArgument(message: "Default workspace directory not found: \(prepared.defaultWorkspace.dir)")
+        }
+        let record = try configuredProjectRecord(baseRecord: prepared.project, update: configure)
+        let defaultWorkspace = WorkspaceRecord(
+            id: prepared.defaultWorkspace.id, projectID: record.id, title: prepared.defaultWorkspace.title, dir: prepared.defaultWorkspace.dir,
+            dirname: prepared.defaultWorkspace.dirname, branch: prepared.defaultWorkspace.branch,
+            targetBranch: prepared.defaultWorkspace.targetBranch, isDefault: true, isArchived: false, isHidden: prepared.defaultWorkspace.isHidden,
+            isRunning: false, lastLaunchedAt: nil, notes: prepared.defaultWorkspace.notes)
+        try store.upsert(project: record)
+        do {
+            try store.upsert(workspace: defaultWorkspace)
+            try seedWorkspaceSettings(project: record, workspace: defaultWorkspace)
+            let appConfig = try store.appConfig()
+            let portDefinitions = try store.workspacePortDefinitions(workspaceID: defaultWorkspace.id)
+            _ = try PortAllocator(store: store).allocatePorts(
+                workspaceID: defaultWorkspace.id, definitions: portDefinitions, range: appConfig.portRange)
+            return record
+        } catch {
+            try? rollbackFailedImportedProjectCreation(project: record, workspaceDirectory: defaultWorkspace.dir)
+            throw error
+        }
+    }
+
+    public func discardPreparedGitProject(_ prepared: PreparedGitProjectImport) throws {
+        try removePreparedManagedGitWorkspaceRootIfUnowned(project: prepared.project)
+        try removePreparedManagedProjectDirectoryIfUnowned(project: prepared.project)
+    }
+
+    @discardableResult public func previewProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
+        guard let record = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        return try configuredProjectRecord(baseRecord: record, update: update)
+    }
+
+    public func updateProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws {
+        _ = try updateProjectConfig(projectID: projectID, updateAllWorkspaces: false, update: update)
+    }
+
+    @discardableResult public func updateProjectConfig(projectID: String, updateAllWorkspaces: Bool, update: (inout ProjectRecord) -> Void) throws
+        -> ProjectRecord
+    {
+        guard let originalProject = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        let updatedProject = try configuredProjectRecord(baseRecord: originalProject, update: update)
+        guard updateAllWorkspaces else {
+            try store.upsert(project: updatedProject)
+            try ensureDefaultWorkspace(for: updatedProject)
+            return updatedProject
+        }
+
+        try ensureDefaultWorkspace(for: originalProject)
+        let workspaceSnapshots = try workspaceConfigurationSnapshots(projectID: projectID)
+        do {
+            try store.upsert(project: updatedProject)
+            try applyProjectTemplateToAllWorkspaces(project: updatedProject)
+        } catch {
+            try restoreSpacesYAMLImportSnapshot(project: originalProject, workspaces: workspaceSnapshots)
+            throw error
+        }
+        return updatedProject
+    }
+
+    public func spacesYAMLConfigURL(projectID: String) throws -> URL {
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        return try spacesYAMLConfigURL(project: project)
+    }
+
+    public func loadSpacesYAML(projectID: String) throws -> SpacesYAMLDocument {
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        let document = try SpacesYAMLService.load(from: spacesYAMLConfigURL(project: project))
+        _ = try previewProjectConfig(projectID: projectID) { record in document.applying(to: &record) }
+        return document
+    }
+
+    @discardableResult public func exportSpacesYAML(projectID: String) throws -> URL {
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        let url = try spacesYAMLConfigURL(project: project)
+        try SpacesYAMLService.write(SpacesYAMLDocument(project: project), to: url)
+        return url
+    }
+
+    @discardableResult public func importSpacesYAML(projectID: String, updateAllWorkspaces: Bool = false) throws -> ProjectRecord {
+        let document = try loadSpacesYAML(projectID: projectID)
+        return try applySpacesYAMLDocument(document, projectID: projectID, updateAllWorkspaces: updateAllWorkspaces)
+    }
+
+    @discardableResult public func applySpacesYAMLDocument(_ document: SpacesYAMLDocument, projectID: String, updateAllWorkspaces: Bool = false)
+        throws -> ProjectRecord
+    { try updateProjectConfig(projectID: projectID, updateAllWorkspaces: updateAllWorkspaces) { record in document.applying(to: &record) } }
 
     public func removeProject(dir: String) throws {
         let normalizedDir = normalizePath(dir)
@@ -620,12 +807,14 @@ public final class WorkspaceOrchestrator {
 
     public func createWorkspace(
         projectID: String, name: String, branch: String? = nil, targetBranch: String? = nil, directoryName: String? = nil,
-        runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false
+        runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false,
+        replaceExistingManagedDirectory: Bool = false
     ) throws -> WorkspaceRecord {
         guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Workspace name is required.") }
         let trimmedDirectoryName = directoryName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let replacesExplicitManagedDirectory = replaceExistingManagedDirectory && trimmedDirectoryName?.isEmpty == false
         let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedBranch: String?
         let resolvedTargetBranch: String?
@@ -668,11 +857,13 @@ public final class WorkspaceOrchestrator {
             let revivedDirname: String?
             let revivedBranch: String?
             let dirname = try makeWorkspaceDirname(
-                project: project, preferredExistingDirname: existing.dirname, requestedDirname: trimmedDirectoryName, excludingDirname: nil)
+                project: project, preferredExistingDirname: existing.dirname, requestedDirname: trimmedDirectoryName, excludingDirname: nil,
+                excludingFilesystemDirname: replacesExplicitManagedDirectory ? trimmedDirectoryName : nil)
             revivedDirname = dirname
             let worktreeRoot = try worktreeRoot(project: project)
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
             revivedDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
+            try replaceManagedWorkspaceDirectoryIfNeeded(path: revivedDir, allowReplacement: replacesExplicitManagedDirectory)
             if !FileManager.default.fileExists(atPath: revivedDir) {
                 try git.createWorktree(
                     path: project.dir, worktreePath: revivedDir, branch: branchName, targetBranch: resolvedTargetBranch,
@@ -703,11 +894,13 @@ public final class WorkspaceOrchestrator {
         if project.isGitRepo {
             guard let branchName = resolvedBranch else { throw WorkspaceError.invalidArgument(message: "Branch name is required for git projects.") }
             let dirname = try makeWorkspaceDirname(
-                project: project, preferredExistingDirname: nil, requestedDirname: trimmedDirectoryName, excludingDirname: nil)
+                project: project, preferredExistingDirname: nil, requestedDirname: trimmedDirectoryName, excludingDirname: nil,
+                excludingFilesystemDirname: replacesExplicitManagedDirectory ? trimmedDirectoryName : nil)
             workspaceDirname = dirname
             let worktreeRoot = try worktreeRoot(project: project)
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
             workspaceDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
+            try replaceManagedWorkspaceDirectoryIfNeeded(path: workspaceDir, allowReplacement: replacesExplicitManagedDirectory)
             try git.createWorktree(
                 path: project.dir, worktreePath: workspaceDir, branch: branchName, targetBranch: resolvedTargetBranch,
                 allowRemoteBranchLookup: allowRemoteBranchLookup)
@@ -3875,12 +4068,14 @@ public final class WorkspaceOrchestrator {
         update(&record)
         let previousPorts = baseRecord.ports
         let previousProcesses = baseRecord.processes
+        let previousAgentLaunchers = baseRecord.agentLaunchers
         record = ProjectRecord(
             id: baseRecord.id, name: baseRecord.name, dir: baseRecord.dir, isGitRepo: baseRecord.isGitRepo, defaultBranch: baseRecord.defaultBranch,
             isCollapsed: baseRecord.isCollapsed, setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports,
             processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
         record.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: record.ports)
         record.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: record.processes)
+        record.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: record.agentLaunchers)
         record.ports = try normalizedPortDefinitions(record.ports)
         try validateProcessTemplates(record.processes)
         try validateUniqueConfiguredFocusNames(
@@ -3921,14 +4116,7 @@ public final class WorkspaceOrchestrator {
             return
         }
 
-        let worktreeRoot = try worktreeRoot(project: project)
-        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
-        let workspaceDir = worktreeRoot.appendingPathComponent(branch, isDirectory: true).path
-        try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branch, targetBranch: branch)
-
-        let workspace = WorkspaceRecord(
-            id: UUID().uuidString, projectID: project.id, title: branch, dir: workspaceDir, dirname: branch, branch: branch, targetBranch: branch,
-            isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        let workspace = try createImportedGitDefaultWorkspaceOnDisk(project: project, branch: branch)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         let appConfig = try store.appConfig()
@@ -3950,40 +4138,114 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func syncDefaultWorkspaceSettingsIfTemplateBased(project: ProjectRecord, previousRecord: ProjectRecord, updatedRecord: ProjectRecord)
-        throws
-    {
-        guard let defaultWorkspace = try defaultWorkspace(projectID: project.id) else { return }
+    private func createImportedGitDefaultWorkspaceOnDisk(project: ProjectRecord, branch: String) throws -> WorkspaceRecord {
+        let worktreeRoot = try worktreeRoot(project: project)
+        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
+        let workspaceDir = worktreeRoot.appendingPathComponent(branch, isDirectory: true).path
+        try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branch, targetBranch: branch)
+        return WorkspaceRecord(
+            id: UUID().uuidString, projectID: project.id, title: branch, dir: workspaceDir, dirname: branch, branch: branch, targetBranch: branch,
+            isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+    }
 
-        let hasSettings = try store.workspaceSettingsExists(workspaceID: defaultWorkspace.id)
-        if !hasSettings {
-            try seedWorkspaceSettings(project: updatedRecord, workspace: defaultWorkspace)
+    private func spacesYAMLConfigURL(project: ProjectRecord) throws -> URL {
+        let directory: String
+        if let defaultWorkspace = try defaultWorkspace(projectID: project.id) {
+            directory = defaultWorkspace.dir
+        } else if project.isGitRepo {
+            throw WorkspaceError.invalidArgument(message: "Default workspace not found for project \(project.name).")
+        } else {
+            directory = project.dir
+        }
+        return URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent(SpacesYAMLService.fileName)
+    }
+
+    private func spacesYAMLDocumentIfPresent(in directory: URL) throws -> SpacesYAMLDocument? {
+        let url = directory.appendingPathComponent(SpacesYAMLService.fileName)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try SpacesYAMLService.load(from: url)
+    }
+
+    private func applyProjectTemplateToAllWorkspaces(project: ProjectRecord) throws {
+        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+        for workspace in workspaces { try applyProjectTemplate(project, to: workspace, syncPorts: !workspace.isArchived) }
+    }
+
+    private func workspaceConfigurationSnapshots(projectID: String) throws -> [WorkspaceConfigurationSnapshot] {
+        let workspaces = try store.workspaces(projectID: projectID, includeArchived: true)
+        return try workspaces.map { workspace in
+            let settings: WorkspaceSettings?
+            if try store.workspaceSettingsExists(workspaceID: workspace.id) {
+                settings = WorkspaceSettings(
+                    stopScript: try store.workspaceStopScript(workspaceID: workspace.id),
+                    ports: try store.workspacePortDefinitions(workspaceID: workspace.id),
+                    processes: try store.workspaceProcesses(workspaceID: workspace.id),
+                    browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id),
+                    agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: workspace.id))
+            } else {
+                settings = nil
+            }
+            return WorkspaceConfigurationSnapshot(
+                workspace: workspace, settings: settings, assignedPorts: try store.workspacePortsAssigned(workspaceID: workspace.id))
+        }
+    }
+
+    private func restoreSpacesYAMLImportSnapshot(project: ProjectRecord, workspaces: [WorkspaceConfigurationSnapshot]) throws {
+        try store.upsert(project: project)
+        for snapshot in workspaces { try restoreWorkspaceConfiguration(snapshot) }
+    }
+
+    private func restoreWorkspaceConfiguration(_ snapshot: WorkspaceConfigurationSnapshot) throws {
+        try PortAllocator(store: store).releasePorts(workspaceID: snapshot.workspace.id)
+        guard let settings = snapshot.settings else {
+            try store.deleteWorkspaceConfiguration(workspaceID: snapshot.workspace.id)
             return
         }
 
-        let currentSettings = WorkspaceSettings(
-            stopScript: try store.workspaceStopScript(workspaceID: defaultWorkspace.id),
-            ports: try store.workspacePortDefinitions(workspaceID: defaultWorkspace.id),
-            processes: try store.workspaceProcesses(workspaceID: defaultWorkspace.id),
-            browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id),
-            agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: defaultWorkspace.id))
-
-        let previousTemplate = WorkspaceSettings(
-            stopScript: previousRecord.stopScript, ports: previousRecord.ports, processes: previousRecord.processes,
-            browserSessions: previousRecord.browserSessions, agentLaunchers: previousRecord.agentLaunchers)
-
-        guard workspaceSettingsMatch(currentSettings, previousTemplate) else { return }
-
-        try seedWorkspaceSettings(project: updatedRecord, workspace: defaultWorkspace)
+        try store.setWorkspaceStopScript(workspaceID: snapshot.workspace.id, stopScript: settings.stopScript)
+        try store.setWorkspacePortDefinitions(workspaceID: snapshot.workspace.id, definitions: settings.ports)
+        try store.setWorkspaceProcesses(workspaceID: snapshot.workspace.id, processes: settings.processes)
+        try store.setWorkspaceBrowserSessions(workspaceID: snapshot.workspace.id, sessions: settings.browserSessions)
+        try store.setWorkspaceAgentLaunchers(workspaceID: snapshot.workspace.id, launchers: settings.agentLaunchers)
+        try store.touchWorkspaceSettings(workspaceID: snapshot.workspace.id, updatedAt: nowISO8601())
+        try store.setWorkspacePorts(
+            workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port }, names: snapshot.assignedPorts.map { $0.name },
+            definitionIDs: snapshot.assignedPorts.map { $0.definitionID })
+        if !snapshot.workspace.isArchived, !snapshot.assignedPorts.isEmpty {
+            PortReserver.shared.reservePorts(workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port })
+        }
     }
 
-    private func workspaceSettingsMatch(_ lhs: WorkspaceSettings, _ rhs: WorkspaceSettings) -> Bool {
-        guard lhs.stopScript == rhs.stopScript else { return false }
-        guard lhs.ports == rhs.ports else { return false }
-        guard processTemplatesMatch(lhs.processes, rhs.processes) else { return false }
-        guard browserSessionsMatch(lhs.browserSessions, rhs.browserSessions) else { return false }
-        guard lhs.agentLaunchers == rhs.agentLaunchers else { return false }
-        return true
+    private func applyProjectTemplate(_ project: ProjectRecord, to workspace: WorkspaceRecord, syncPorts: Bool) throws {
+        guard var settings = try loadWorkspaceSettings(project: project, workspace: workspace) else {
+            throw WorkspaceError.missingProject(dir: project.dir)
+        }
+        let previousPorts = settings.ports
+        let previousProcesses = settings.processes
+        let previousAgentLaunchers = settings.agentLaunchers
+        settings.stopScript = project.stopScript
+        settings.ports = project.ports
+        settings.processes = seededWorkspaceProcesses(from: project.processes)
+        settings.browserSessions = project.browserSessions
+        settings.agentLaunchers = project.agentLaunchers
+        settings.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: settings.ports)
+        settings.ports = try normalizedPortDefinitions(settings.ports)
+        settings.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: settings.processes)
+        settings.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: settings.agentLaunchers)
+        try validateProcessTemplates(settings.processes)
+        try validateWorkspaceFocusNames(
+            workspaceID: workspace.id, processes: settings.processes, browserSessions: settings.browserSessions,
+            agentLaunchers: settings.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: settings.stopScript)
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: settings.ports)
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: settings.processes)
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: settings.browserSessions)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: settings.agentLaunchers)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
+        if syncPorts {
+            let appConfig = try store.appConfig()
+            _ = try PortAllocator(store: store).syncPorts(workspaceID: workspace.id, definitions: settings.ports, range: appConfig.portRange)
+        }
     }
 
     private func normalizePortDefinitionIDs(previous: [PortDefinition], updated: [PortDefinition]) -> [PortDefinition] {
@@ -4050,6 +4312,42 @@ public final class WorkspaceOrchestrator {
             }
 
             return template
+        }
+    }
+
+    private func normalizeAgentLauncherIDs(previous: [AgentLauncher], updated: [AgentLauncher]) -> [AgentLauncher] {
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        let previousNames = previous.map { normalizedFocusName($0.name) }
+        let previousCommands = previous.map { $0.command.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let nameCounts = Dictionary(previousNames.map { ($0, 1) }, uniquingKeysWith: +)
+        let commandCounts = Dictionary(previousCommands.map { ($0, 1) }, uniquingKeysWith: +)
+        var usedIDs = Set<String>()
+
+        return updated.map { launcher in
+            if previousByID[launcher.id] != nil {
+                usedIDs.insert(launcher.id)
+                return launcher
+            }
+
+            let normalizedName = normalizedFocusName(launcher.name)
+            if nameCounts[normalizedName] == 1,
+                let match = previous.first(where: { normalizedFocusName($0.name) == normalizedName && !usedIDs.contains($0.id) })
+            {
+                usedIDs.insert(match.id)
+                return AgentLauncher(id: match.id, name: launcher.name, command: launcher.command)
+            }
+
+            let trimmedCommand = launcher.command.trimmingCharacters(in: .whitespacesAndNewlines)
+            if commandCounts[trimmedCommand] == 1,
+                let match = previous.first(where: {
+                    $0.command.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedCommand && !usedIDs.contains($0.id)
+                })
+            {
+                usedIDs.insert(match.id)
+                return AgentLauncher(id: match.id, name: launcher.name, command: launcher.command)
+            }
+
+            return launcher
         }
     }
 
@@ -5033,6 +5331,18 @@ public final class WorkspaceOrchestrator {
         return URL(fileURLWithPath: expanded).resolvingSymlinksInPath().standardizedFileURL.path
     }
 
+    private func standardizePathPreservingSymlinks(_ path: String) -> String {
+        let expanded = expandTilde(path)
+        return URL(fileURLWithPath: expanded).standardizedFileURL.path
+    }
+
+    private func normalizePathPreservingLeaf(_ path: String) -> String {
+        let expanded = expandTilde(path)
+        let url = URL(fileURLWithPath: expanded)
+        let normalizedParent = normalizePath(url.deletingLastPathComponent().path)
+        return URL(fileURLWithPath: normalizedParent, isDirectory: true).appendingPathComponent(url.lastPathComponent).standardizedFileURL.path
+    }
+
     private func expandTilde(_ path: String) -> String {
         guard path.hasPrefix("~") else { return path }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -5067,12 +5377,174 @@ public final class WorkspaceOrchestrator {
         return workspaceRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
     }
 
-    private func makeWorkspaceDirname(project: ProjectRecord, preferredExistingDirname: String?, requestedDirname: String?, excludingDirname: String?)
-        throws -> String
+    private func gitProjectImportPlan(gitURL: String) throws -> GitProjectImportPlan {
+        let trimmedURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedURL.isEmpty else { throw WorkspaceError.invalidArgument(message: "Git repository URL is required.") }
+        let inferredName = inferredProjectName(from: trimmedURL)
+        let projectID = projectID(namespace: "git", source: trimmedURL)
+        let projectName = sanitizeDirname(inferredName, fallback: "project")
+        let projectDirname = managedProjectStorageDirectoryName(projectID: projectID, preferredName: projectName)
+        let destination = repositoriesRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
+        let normalizedDestination = normalizePathPreservingLeaf(destination.path)
+        let project = ProjectRecord(id: projectID, name: projectName, dir: normalizedDestination, isGitRepo: true, defaultBranch: nil)
+        return GitProjectImportPlan(gitURL: trimmedURL, project: project, destination: destination)
+    }
+
+    private func managedGitProjectImportReplacementCandidates(plan: GitProjectImportPlan) throws -> [ManagedDirectoryReplacementCandidate] {
+        try validateManagedGitProjectImportDirectoriesAreUnowned(plan: plan)
+        var candidates: [ManagedDirectoryReplacementCandidate] = []
+        if let projectCandidate = try managedDirectoryReplacementCandidate(path: plan.destination.path, kind: .projectRepository) {
+            candidates.append(projectCandidate)
+        }
+        if let workspaceCandidate = try managedDirectoryReplacementCandidate(
+            path: worktreeRoot(project: plan.project).path, kind: .workspaceDirectory)
+        {
+            candidates.append(workspaceCandidate)
+        }
+        return candidates
+    }
+
+    private func validateManagedGitProjectImportDirectoriesAreUnowned(plan: GitProjectImportPlan) throws {
+        try validateManagedDirectoryIsUnowned(path: plan.destination.path)
+        try validateManagedDirectoryIsUnowned(path: worktreeRoot(project: plan.project).path)
+    }
+
+    private func replaceManagedGitProjectImportDirectoriesIfNeeded(plan: GitProjectImportPlan, allowReplacement: Bool) throws {
+        let candidates = try managedGitProjectImportReplacementCandidates(plan: plan)
+        guard !candidates.isEmpty else { return }
+        guard allowReplacement else {
+            throw WorkspaceError.invalidArgument(
+                message: "Managed project import folders already exist: \(candidates.map(\.path).joined(separator: ", "))")
+        }
+        let orderedCandidates = candidates.sorted { lhs, rhs in lhs.kind == .workspaceDirectory && rhs.kind == .projectRepository }
+        for candidate in orderedCandidates { try removeReplaceableManagedDirectory(candidate) }
+    }
+
+    private func replaceManagedWorkspaceDirectoryIfNeeded(path: String, allowReplacement: Bool) throws {
+        guard let candidate = try managedDirectoryReplacementCandidate(path: path, kind: .workspaceDirectory) else { return }
+        guard allowReplacement else { throw WorkspaceError.invalidArgument(message: "Workspace directory already exists: \(candidate.path)") }
+        try removeReplaceableManagedDirectory(candidate)
+    }
+
+    func managedDirectoryReplacementCandidate(path: String, kind: ManagedDirectoryReplacementCandidate.Kind) throws
+        -> ManagedDirectoryReplacementCandidate?
     {
+        let managedPath = standardizePathPreservingSymlinks(path)
+        switch kind {
+        case .projectRepository:
+            guard isManagedRepositoryEntryPath(managedPath) else { return nil }
+            guard !hasSymlinkedAncestorBelowManagedRoot(path: managedPath, rootPath: repositoriesRootDirectory().path) else { return nil }
+        case .workspaceDirectory:
+            guard isManagedWorkspaceEntryPath(managedPath) else { return nil }
+            guard !hasSymlinkedAncestorBelowManagedRoot(path: managedPath, rootPath: workspaceRootDirectory().path) else { return nil }
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: managedPath, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
+        try validateManagedDirectoryIsUnowned(path: managedPath)
+        return ManagedDirectoryReplacementCandidate(kind: kind, path: managedPath)
+    }
+
+    private func removeReplaceableManagedDirectory(_ candidate: ManagedDirectoryReplacementCandidate) throws {
+        guard let revalidated = try managedDirectoryReplacementCandidate(path: candidate.path, kind: candidate.kind) else { return }
+        if revalidated.kind == .workspaceDirectory { try removeRegisteredGitWorktreeForReplacementIfNeeded(path: revalidated.path) }
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: revalidated.path, isDirectory: &isDirectory), isDirectory.boolValue else { return }
+        try FileManager.default.removeItem(atPath: revalidated.path)
+    }
+
+    private enum ManagedDirectoryOwnershipConflict {
+        case project(String)
+        case workspace(WorkspaceRecord)
+        case descendant(String)
+    }
+
+    private func validateManagedDirectoryIsUnowned(path: String) throws {
+        guard let conflict = try managedDirectoryOwnershipConflict(path: path) else { return }
+        switch conflict {
+        case .project(let path): throw WorkspaceError.projectAlreadyExists(dir: path)
+        case .workspace(let workspace): throw WorkspaceError.invalidArgument(message: "Workspace already exists: \(workspace.title)")
+        case .descendant(let path):
+            throw WorkspaceError.invalidArgument(message: "Managed folder contains a project or workspace owned by Spaces: \(path)")
+        }
+    }
+
+    private func managedDirectoryOwnershipConflict(path: String) throws -> ManagedDirectoryOwnershipConflict? {
+        let entryPath = standardizePathPreservingSymlinks(path)
+        let resolvedPath = normalizePath(entryPath)
+        var ownershipPaths = [entryPath]
+        if resolvedPath != entryPath { ownershipPaths.append(resolvedPath) }
+        for ownershipPath in ownershipPaths {
+            if try store.project(dir: ownershipPath) != nil { return .project(ownershipPath) }
+            if let workspace = try store.workspace(dir: ownershipPath) { return .workspace(workspace) }
+        }
+        for ownershipPath in ownershipPaths where try managedDirectoryContainsOwnedDescendant(path: ownershipPath) {
+            return .descendant(ownershipPath)
+        }
+        return nil
+    }
+
+    private func removeRegisteredGitWorktreeForReplacementIfNeeded(path: String) throws {
+        let entryPath = standardizePathPreservingSymlinks(path)
+        guard (try? FileManager.default.destinationOfSymbolicLink(atPath: entryPath)) == nil else { return }
+        let resolvedPath = normalizePath(entryPath)
+        for project in try store.projects() where project.isGitRepo {
+            let rootPath = standardizePathPreservingSymlinks(try worktreeRoot(project: project).path)
+            guard entryPath != rootPath, isPathPreservingSymlinks(entryPath, inside: rootPath) else { continue }
+            let worktrees = try git.listWorktrees(path: project.dir)
+            let isRegistered = worktrees.contains {
+                let worktreePath = standardizePathPreservingSymlinks($0.path)
+                return worktreePath == entryPath || normalizePath(worktreePath) == resolvedPath
+            }
+            guard isRegistered else { return }
+            do { try git.removeWorktree(path: project.dir, worktreePath: entryPath) } catch {
+                guard isMissingWorktreeError(error) else { throw error }
+                try git.pruneWorktrees(path: project.dir)
+                let prunedWorktrees = try git.listWorktrees(path: project.dir)
+                if prunedWorktrees.contains(where: {
+                    let worktreePath = standardizePathPreservingSymlinks($0.path)
+                    return worktreePath == entryPath || normalizePath(worktreePath) == resolvedPath
+                }) {
+                    throw error
+                }
+            }
+            return
+        }
+    }
+
+    private func hasSymlinkedAncestorBelowManagedRoot(path: String, rootPath: String) -> Bool {
+        let root = URL(fileURLWithPath: standardizePathPreservingSymlinks(rootPath), isDirectory: true)
+        let candidate = URL(fileURLWithPath: standardizePathPreservingSymlinks(path), isDirectory: true)
+        let rootComponentCount = root.pathComponents.count
+        var ancestor = candidate.deletingLastPathComponent()
+        while ancestor.pathComponents.count > rootComponentCount {
+            if (try? FileManager.default.destinationOfSymbolicLink(atPath: ancestor.path)) != nil { return true }
+            let parent = ancestor.deletingLastPathComponent()
+            guard parent.path != ancestor.path else { break }
+            ancestor = parent
+        }
+        return false
+    }
+
+    private func managedDirectoryContainsOwnedDescendant(path: String) throws -> Bool {
+        for project in try store.projects() {
+            let projectPath = normalizePath(project.dir)
+            if projectPath != path, isPath(projectPath, inside: path) { return true }
+            for workspace in try store.workspaces(projectID: project.id, includeArchived: true) {
+                let workspacePath = normalizePath(workspace.dir)
+                if workspacePath != path, isPath(workspacePath, inside: path) { return true }
+            }
+        }
+        return false
+    }
+
+    private func makeWorkspaceDirname(
+        project: ProjectRecord, preferredExistingDirname: String?, requestedDirname: String?, excludingDirname: String?,
+        excludingFilesystemDirname: String? = nil
+    ) throws -> String {
         if let requestedDirname, !requestedDirname.isEmpty {
             try validateWorkspaceDirname(requestedDirname)
-            let used = try usedWorkspaceDirnames(project: project, excludingDirname: excludingDirname)
+            let used = try usedWorkspaceDirnames(
+                project: project, excludingDirname: excludingDirname, excludingFilesystemDirname: excludingFilesystemDirname)
             guard !used.contains(requestedDirname) else {
                 throw WorkspaceError.invalidArgument(message: "Workspace directory name is already in use: \(requestedDirname)")
             }
@@ -5086,7 +5558,9 @@ public final class WorkspaceOrchestrator {
         throw WorkspaceError.invalidArgument(message: "No available workspace dirnames remain for project \(project.name).")
     }
 
-    private func usedWorkspaceDirnames(project: ProjectRecord, excludingDirname: String?) throws -> Set<String> {
+    private func usedWorkspaceDirnames(project: ProjectRecord, excludingDirname: String?, excludingFilesystemDirname: String? = nil) throws -> Set<
+        String
+    > {
         let records = try store.workspaces(projectID: project.id, includeArchived: true)
         var used = Set<String>()
         for record in records {
@@ -5095,7 +5569,7 @@ public final class WorkspaceOrchestrator {
         }
         let root = try worktreeRoot(project: project)
         if let entries = try? FileManager.default.contentsOfDirectory(atPath: root.path) {
-            for entry in entries where entry != excludingDirname { used.insert(entry) }
+            for entry in entries where entry != excludingDirname && entry != excludingFilesystemDirname { used.insert(entry) }
         }
         return used
     }
@@ -5205,13 +5679,37 @@ public final class WorkspaceOrchestrator {
         try FileManager.default.removeItem(atPath: project.dir)
     }
 
+    private func removePreparedManagedGitWorkspaceRootIfUnowned(project: ProjectRecord) throws {
+        guard project.isGitRepo else { return }
+        let root = try worktreeRoot(project: project)
+        guard isManagedWorkspaceEntryPath(root.path) else { return }
+        try removePreparedManagedDirectoryIfUnowned(path: root.path)
+    }
+
+    private func removePreparedManagedProjectDirectoryIfUnowned(project: ProjectRecord) throws {
+        guard project.isGitRepo, isManagedRepositoryDirectory(path: project.dir) else { return }
+        try removePreparedManagedDirectoryIfUnowned(path: project.dir)
+    }
+
+    private func removePreparedManagedDirectoryIfUnowned(path: String) throws {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { return }
+        if case .some = try managedDirectoryOwnershipConflict(path: path) { return }
+        try FileManager.default.removeItem(atPath: path)
+    }
+
     func rollbackFailedImportedProjectCreation(project: ProjectRecord, workspaceDirectory: String) throws {
+        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+        let portAllocator = PortAllocator(store: store)
+        for workspace in workspaces { try portAllocator.releasePorts(workspaceID: workspace.id) }
         try store.deleteProject(id: project.id)
         try removeManagedWorkspaceDirectoryIfNeeded(path: workspaceDirectory)
         try removeManagedProjectDirectoryIfNeeded(project: project)
     }
 
     private func isManagedRepositoryDirectory(path: String) -> Bool { isPath(path, inside: repositoriesRootDirectory().path) }
+
+    private func isManagedRepositoryEntryPath(_ path: String) -> Bool { isPathPreservingSymlinks(path, inside: repositoriesRootDirectory().path) }
 
     private func defaultWorkspace(projectID: String) throws -> WorkspaceRecord? {
         try store.workspaces(projectID: projectID, includeArchived: true).first(where: \.isDefault)
@@ -5232,6 +5730,10 @@ public final class WorkspaceOrchestrator {
         isPath(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
     }
 
+    private func isManagedWorkspaceEntryPath(_ path: String, allowEqual: Bool = false) -> Bool {
+        isPathPreservingSymlinks(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
+    }
+
     private func removeManagedWorkspaceDirectoryIfNeeded(path: String) throws {
         let normalizedPath = normalizePath(path)
         guard isManagedWorkspacesDirectory(path: normalizedPath) else { return }
@@ -5243,6 +5745,19 @@ public final class WorkspaceOrchestrator {
     private func isPath(_ path: String, inside rootPath: String, allowEqual: Bool = false) -> Bool {
         let root = URL(fileURLWithPath: rootPath, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
         let candidate = URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+        let rootComponents = root.pathComponents
+        let candidateComponents = candidate.pathComponents
+        if allowEqual {
+            guard candidateComponents.count >= rootComponents.count else { return false }
+        } else {
+            guard candidateComponents.count > rootComponents.count else { return false }
+        }
+        return candidateComponents.starts(with: rootComponents)
+    }
+
+    private func isPathPreservingSymlinks(_ path: String, inside rootPath: String, allowEqual: Bool = false) -> Bool {
+        let root = URL(fileURLWithPath: standardizePathPreservingSymlinks(rootPath), isDirectory: true)
+        let candidate = URL(fileURLWithPath: standardizePathPreservingSymlinks(path), isDirectory: true)
         let rootComponents = root.pathComponents
         let candidateComponents = candidate.pathComponents
         if allowEqual {

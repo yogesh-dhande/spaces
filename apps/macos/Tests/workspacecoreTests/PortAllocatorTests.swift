@@ -120,6 +120,32 @@ final class PortAllocatorTests: XCTestCase {
         PortReserver.shared.releasePorts(workspaceID: workspace.id)
     }
 
+    func testSyncPortsKeepsInsertedDefinitionsAlignedWithAssignments() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        try store.upsert(project: project)
+
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "alpha", dir: projectDir)
+        try store.upsert(workspace: workspace)
+
+        let api = PortDefinition(id: "port-api", name: "API_PORT")
+        let web = PortDefinition(id: "port-web", name: "WEB_PORT")
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [api])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [20010], names: [api.name], definitionIDs: [api.id])
+
+        let allocator = PortAllocator(store: store)
+        let ports = try allocator.syncPorts(workspaceID: workspace.id, definitions: [web, api], range: PortRange(start: 20010, end: 20020))
+
+        XCTAssertEqual(ports, [20011, 20010])
+        let assigned = try store.workspacePortsAssigned(workspaceID: workspace.id)
+        XCTAssertEqual(assigned.map(\.name), [web.name, api.name])
+        XCTAssertEqual(assigned.map(\.port), [20011, 20010])
+        XCTAssertEqual(assigned.map(\.definitionID), [web.id, api.id])
+
+        PortReserver.shared.releasePorts(workspaceID: workspace.id)
+    }
+
     func testSyncPortsPreservesAssignmentsByDefinitionIDAcrossReorderAndRename() throws {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path

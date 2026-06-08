@@ -1,6 +1,6 @@
 import AppKit
 
-struct ProjectFieldRefs {
+@MainActor final class ProjectFieldRefs {
     let projectID: String
     let setupScriptSection: SetupScriptSection
     let stopScriptSection: StopScriptSection
@@ -8,4 +8,31 @@ struct ProjectFieldRefs {
     let processesSection: ProcessesSection
     let browserSessionsSection: BrowserSessionsSection
     let agentLaunchersSection: AgentLaunchersSection
+    let importButton: NSButton
+    let exportButton: NSButton
+    let discardImportedConfigButton: NSButton
+    var hasPendingImportedConfig = false
+    var pendingImportUpdateAllWorkspaces = false
+
+    init(
+        projectID: String, setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection,
+        processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
+        importButton: NSButton, exportButton: NSButton, discardImportedConfigButton: NSButton
+    ) {
+        self.projectID = projectID
+        self.setupScriptSection = setupScriptSection
+        self.stopScriptSection = stopScriptSection
+        self.portsSection = portsSection
+        self.processesSection = processesSection
+        self.browserSessionsSection = browserSessionsSection
+        self.agentLaunchersSection = agentLaunchersSection
+        self.importButton = importButton
+        self.exportButton = exportButton
+        self.discardImportedConfigButton = discardImportedConfigButton
+    }
+
+    var hasOpenSectionEditor: Bool {
+        setupScriptSection.hasOpenEditor || stopScriptSection.hasOpenEditor || portsSection.hasOpenEditor || processesSection.hasOpenEditor
+            || browserSessionsSection.hasOpenEditor || agentLaunchersSection.hasOpenEditor
+    }
 }

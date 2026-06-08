@@ -19,38 +19,41 @@ public final class PortAllocator {
         }
         let existingNameCounts = Dictionary(existingAssignments.map { ($0.name, 1) }, uniquingKeysWith: +)
         var usedPorts = Set<Int>()
-        var allocated: [Int] = []
-        for definition in definitions {
-            if let existingPort = existingByDefinitionID[definition.id] {
-                allocated.append(existingPort)
+        var allocated = [Int?](repeating: nil, count: count)
+        for (index, definition) in definitions.enumerated() {
+            if let existingPort = existingByDefinitionID[definition.id], !usedPorts.contains(existingPort) {
+                allocated[index] = existingPort
                 usedPorts.insert(existingPort)
                 continue
             }
             if existingNameCounts[definition.name] == 1,
                 let existingPort = existingAssignments.first(where: { $0.name == definition.name && !usedPorts.contains($0.port) })?.port
             {
-                allocated.append(existingPort)
+                allocated[index] = existingPort
                 usedPorts.insert(existingPort)
             }
         }
-        if allocated.count < count {
+        if allocated.contains(where: { $0 == nil }) {
             var inUse = try allReservedPorts(excludingWorkspaceID: workspaceID)
-            for port in allocated { inUse.insert(port) }
-            for port in range.start...range.end {
-                if inUse.contains(port) { continue }
-                allocated.append(port)
-                inUse.insert(port)
-                if allocated.count == count { break }
+            for port in allocated.compactMap({ $0 }) { inUse.insert(port) }
+            for index in allocated.indices where allocated[index] == nil {
+                for port in range.start...range.end {
+                    if inUse.contains(port) { continue }
+                    allocated[index] = port
+                    inUse.insert(port)
+                    break
+                }
             }
         }
 
-        guard allocated.count == count else {
+        let resolved = allocated.compactMap { $0 }
+        guard resolved.count == count else {
             throw WorkspaceError.invalidArgument(message: "Insufficient free ports in range \(range.start)-\(range.end).")
         }
 
-        try store.setWorkspacePorts(workspaceID: workspaceID, ports: allocated, names: definitions.map(\.name), definitionIDs: definitions.map(\.id))
-        PortReserver.shared.reservePorts(workspaceID: workspaceID, ports: allocated)
-        return allocated
+        try store.setWorkspacePorts(workspaceID: workspaceID, ports: resolved, names: definitions.map(\.name), definitionIDs: definitions.map(\.id))
+        PortReserver.shared.reservePorts(workspaceID: workspaceID, ports: resolved)
+        return resolved
     }
 
     public func allocatePorts(workspaceID: String, definitions: [PortDefinition], range: PortRange) throws -> [Int] {

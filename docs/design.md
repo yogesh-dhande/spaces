@@ -119,6 +119,7 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - Use icon-only buttons for obvious actions such as edit, remove, copy, reveal, launch, stop, and overflow.
 - Use text buttons where clarity matters more than compactness.
 - Put infrequent or contextual actions behind an overflow menu instead of overcrowding the main UI.
+- Use text-only buttons with descriptive labels when the action targets a specific file or resource type — the label makes the target self-evident without needing an icon.
 
 ## Forms
 - Keep forms compact and aligned.

@@ -169,6 +169,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let mainWindowWasVisible: Bool
     }
 
+    private struct PreparedGitProjectDiscardEntry {
+        let id: UUID
+        let task: Task<Result<Void, Error>, Never>
+    }
+
     private var window: NSWindow!
     private var splitView: NSSplitView?
     private let outlineView = SidebarOutlineView()
@@ -288,6 +293,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var inlineWorkspaceOutsideClickMonitor: Any?
     private var activeAddWorkspaceFormTag: Int?
     private var activeAddProjectFormTag: Int?
+    private var preparedGitProjectDiscardTasksByURL: [String: PreparedGitProjectDiscardEntry] = [:]
     private var operationProgressOverlay: NSVisualEffectView?
     private var operationProgressOverlayTitleLabel: NSTextField?
     private var operationProgressOverlayDetailLabel: NSTextField?
@@ -546,6 +552,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        if let result = discardActiveAddProjectPreparedSourceSynchronouslyIfNeeded(), case .failure(let error) = result {
+            NSLog("spaces: prepared add-project cleanup failed during termination: \(String(describing: error))")
+        }
         periodicWorkspaceRefreshTask?.cancel()
         periodicProcessMonitorTask?.cancel()
         periodicWorktreeDiscoveryTask?.cancel()
@@ -1463,11 +1472,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let notes: String?
         let allowRemoteBranchLookup: Bool
         let allowExistingBranchReuse: Bool
+        let replaceExistingManagedDirectory: Bool
     }
 
     private struct ProjectCreateInput: Sendable {
-        let gitURL: String?
         let directoryPath: String?
+        let preparedGitProject: WorkspaceOrchestrator.PreparedGitProjectImport?
         let setupScript: String?
         let stopScript: String?
         let ports: [PortDefinition]
@@ -1770,7 +1780,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 var workspace = try orchestrator.createWorkspace(
                     projectID: input.projectID, name: input.name, branch: input.branch, targetBranch: input.targetBranch,
                     directoryName: input.directoryName, runSetupScript: false, allowRemoteBranchLookup: input.allowRemoteBranchLookup,
-                    allowExistingBranchReuse: input.allowExistingBranchReuse)
+                    allowExistingBranchReuse: input.allowExistingBranchReuse, replaceExistingManagedDirectory: input.replaceExistingManagedDirectory)
                 if let notes = input.notes {
                     try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes)
                     if let updated = try orchestrator.store.workspace(id: workspace.id) { workspace = updated }
@@ -1780,6 +1790,45 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
+    nonisolated private static func previewProjectSourceSnapshot(directoryPath: String) async -> Result<ProjectRecord, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                return .success(try orchestrator.previewProject(dir: directoryPath))
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func prepareGitProjectSourceSnapshot(gitURL: String, replaceExistingManagedDirectories: Bool) async -> Result<
+        WorkspaceOrchestrator.PreparedGitProjectImport, Error
+    > {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                return .success(
+                    try orchestrator.prepareGitProject(gitURL: gitURL, replaceExistingManagedDirectories: replaceExistingManagedDirectories))
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func discardPreparedGitProjectSnapshot(_ prepared: WorkspaceOrchestrator.PreparedGitProjectImport) async -> Result<
+        Void, Error
+    > { await Task.detached(priority: .utility) { discardPreparedGitProject(prepared) }.value }
+
+    nonisolated private static func discardPreparedGitProject(_ prepared: WorkspaceOrchestrator.PreparedGitProjectImport) -> Result<Void, Error> {
+        do {
+            let db = try DatabaseLocator.defaultPath()
+            let store = try SQLiteStore(path: db)
+            let orchestrator = WorkspaceOrchestrator(store: store)
+            try orchestrator.discardPreparedGitProject(prepared)
+            return .success(())
+        } catch { return .failure(error) }
+    }
+
     nonisolated private static func createProjectSnapshot(input: ProjectCreateInput) async -> Result<ProjectRecord, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
@@ -1787,8 +1836,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let store = try SQLiteStore(path: db)
                 let orchestrator = WorkspaceOrchestrator(store: store)
                 let record: ProjectRecord
-                if let gitURL = input.gitURL {
-                    record = try orchestrator.addProject(gitURL: gitURL) { project in
+                if let preparedGitProject = input.preparedGitProject {
+                    record = try orchestrator.addPreparedGitProject(preparedGitProject) { project in
                         project.setupScript = input.setupScript
                         project.stopScript = input.stopScript
                         project.ports = input.ports
@@ -1797,7 +1846,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         project.agentLaunchers = input.agentLaunchers
                     }
                 } else if let directoryPath = input.directoryPath {
-                    record = try orchestrator.addProject(dir: directoryPath) { project in
+                    record = try orchestrator.addReviewedProject(dir: directoryPath) { project in
                         project.setupScript = input.setupScript
                         project.stopScript = input.stopScript
                         project.ports = input.ports
@@ -2343,6 +2392,47 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     enum RunningWorkspaceProcessEditDecision: Equatable, Sendable {
         case applyImmediately
         case confirmRestart(processNames: [String])
+    }
+
+    enum ProjectImportWorkspaceSyncDecision: Equatable, Sendable {
+        case updateAllWorkspaces
+        case projectOnly
+        case cancel
+    }
+
+    enum ManagedDirectoryReplacementDecision: Equatable, Sendable {
+        case replace
+        case cancel
+    }
+
+    static func projectImportWorkspaceSyncDecision(for response: NSApplication.ModalResponse) -> ProjectImportWorkspaceSyncDecision {
+        switch response {
+        case .alertFirstButtonReturn: return .updateAllWorkspaces
+        case .alertSecondButtonReturn: return .projectOnly
+        default: return .cancel
+        }
+    }
+
+    static func managedDirectoryReplacementDecision(for response: NSApplication.ModalResponse) -> ManagedDirectoryReplacementDecision {
+        response == .alertFirstButtonReturn ? .replace : .cancel
+    }
+
+    static func shouldStartManagedDirectoryReplacementFlow(candidateCount: Int, decision: ManagedDirectoryReplacementDecision) -> Bool {
+        candidateCount == 0 || decision == .replace
+    }
+
+    @discardableResult static func applyProjectImportWorkspaceSyncDecision(_ decision: ProjectImportWorkspaceSyncDecision, to refs: ProjectFieldRefs)
+        -> Bool
+    {
+        switch decision {
+        case .updateAllWorkspaces:
+            refs.pendingImportUpdateAllWorkspaces = true
+            return true
+        case .projectOnly:
+            refs.pendingImportUpdateAllWorkspaces = false
+            return true
+        case .cancel: return false
+        }
     }
 
     nonisolated static func processTemplateKey(for template: ProcessTemplate) -> String {
@@ -3084,6 +3174,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showAlertsDetail() {
+        discardActiveAddProjectPreparedSourceIfNeeded()
         clearInlineWorkspaceFieldRefs()
         stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
@@ -3563,6 +3654,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showPlaceholder(message: String = "Select a project or workspace.") {
+        discardActiveAddProjectPreparedSourceIfNeeded()
         clearInlineWorkspaceFieldRefs()
         stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
@@ -3585,6 +3677,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showLoadingPlaceholder(message: String, detail: String?) {
+        discardActiveAddProjectPreparedSourceIfNeeded()
         clearInlineWorkspaceFieldRefs()
         stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
@@ -3858,6 +3951,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showSettingsDetail() {
+        discardActiveAddProjectPreparedSourceIfNeeded()
         clearInlineWorkspaceFieldRefs()
         stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
@@ -4133,6 +4227,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showProjectDetail(project: ProjectSummary) {
+        discardActiveAddProjectPreparedSourceIfNeeded()
         clearInlineWorkspaceFieldRefs()
         stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
@@ -4237,10 +4332,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Buttons ---
         let saveButton = actionButton(title: "Save", symbol: nil, tooltip: "Save project (⌘S)", action: #selector(saveProject(_:)), primary: true)
         saveButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+        saveButton.setAccessibilityIdentifier("project-settings-save")
         saveButton.keyEquivalent = "\r"
+
+        let importButton = actionButton(
+            title: "Import spaces.yaml", symbol: nil, tooltip: "Load spaces.yaml into project settings",
+            action: #selector(importProjectSpacesYAML(_:)), primary: false)
+        importButton.setAccessibilityIdentifier("project-settings-import-spaces-yaml")
+        Theme.applySecondaryStyle(to: importButton)
+
+        let exportButton = actionButton(
+            title: "Export spaces.yaml", symbol: nil, tooltip: "Export this project to spaces.yaml", action: #selector(exportProjectSpacesYAML(_:)),
+            primary: false)
+        exportButton.setAccessibilityIdentifier("project-settings-export-spaces-yaml")
+        Theme.applySecondaryStyle(to: exportButton)
+
+        let discardImportButton = actionButton(
+            title: "Discard Import", symbol: nil, tooltip: "Discard imported config changes and reload the saved project settings",
+            action: #selector(discardProjectConfigChanges(_:)), primary: false)
+        discardImportButton.setAccessibilityIdentifier("project-settings-discard-import")
+        discardImportButton.isHidden = true
+        Theme.applySecondaryStyle(to: discardImportButton)
 
         let deleteButton = NSButton(title: "Delete", target: self, action: #selector(deleteProject(_:)))
         deleteButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+        deleteButton.setAccessibilityIdentifier("project-settings-delete")
         Theme.applyTextStyle(to: deleteButton, color: .systemRed)
 
         let buttonRow = NSStackView()
@@ -4248,15 +4364,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         buttonRow.spacing = 8
         buttonRow.addArrangedSubview(deleteButton)
         buttonRow.addArrangedSubview(NSView())
+        buttonRow.addArrangedSubview(importButton)
+        buttonRow.addArrangedSubview(exportButton)
+        buttonRow.addArrangedSubview(discardImportButton)
         buttonRow.addArrangedSubview(saveButton)
         stack.addArrangedSubview(buttonRow)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         showScrollableDetailStack(stack)
 
-        saveButton.tag = storeProjectFields(
+        let fieldsTag = storeProjectFields(
             projectID: project.id, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
-            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
+            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
+            importButton: importButton, exportButton: exportButton, discardImportedConfigButton: discardImportButton)
+        saveButton.tag = fieldsTag
+        discardImportButton.tag = fieldsTag
+        importButton.tag = fieldsTag
+        exportButton.tag = fieldsTag
         registerDirtyTracking(
             setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
@@ -4409,6 +4533,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showAddProjectForm() {
+        discardActiveAddProjectPreparedSourceIfNeeded()
         clearInlineWorkspaceFieldRefs()
         stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
@@ -4476,6 +4601,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let repoURLField = NSTextField(string: "")
         repoURLField.placeholderString = "https://github.com/org/repo.git"
         repoURLField.delegate = self
+        let prepareButton = actionButton(
+            title: "Clone", symbol: "arrow.down.circle", tooltip: "Clone repository and load project settings",
+            action: #selector(prepareProjectSource(_:)), primary: false)
+        prepareButton.setAccessibilityIdentifier("add-project-prepare-source")
+        Theme.applySecondaryStyle(to: prepareButton)
 
         let setupScriptSection = SetupScriptSection(value: "", subtitle: "Runs when each new workspace is created or revived from archive.")
         let stopScriptSection = StopScriptSection(value: "", subtitle: "Runs on workspace stop, restart, or archive.")
@@ -4514,6 +4644,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         repoURLField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         cloneSourceSection.addArrangedSubview(repoURLField)
+        cloneSourceSection.addArrangedSubview(prepareButton)
 
         let sourceContentStack = NSStackView()
         sourceContentStack.orientation = .vertical
@@ -4579,7 +4710,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             sourceSegmented: sourceSegmented, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
-            browseButton: browseButton,
+            browseButton: browseButton, prepareButton: prepareButton,
             progressiveInputViews: [
                 setupScriptSection.view, portsSection.view, processesSection.view, browserSessionsSection.view, agentLaunchersSection.view,
                 stopScriptSection.view,
@@ -4589,6 +4720,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showAddWorkspaceForm(project: ProjectSummary) {
+        discardActiveAddProjectPreparedSourceIfNeeded()
         clearInlineWorkspaceFieldRefs()
         stopWorkspaceSetupDetailRefreshTimer()
         activeAddWorkspaceFormTag = nil
@@ -4832,6 +4964,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func prepareWorkspaceDetailContainer(workspaceID: String) {
         clearInlineWorkspaceFieldRefs()
+        discardActiveAddProjectPreparedSourceIfNeeded()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = workspaceID
@@ -6729,12 +6862,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func storeProjectFields(
         projectID: String, setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection,
-        processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection
+        processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
+        importButton: NSButton, exportButton: NSButton, discardImportedConfigButton: NSButton
     ) -> Int {
         let id = projectID.hashValue
         ProjectFieldCache.shared.cache[id] = ProjectFieldRefs(
             projectID: projectID, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
-            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
+            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
+            importButton: importButton, exportButton: exportButton, discardImportedConfigButton: discardImportedConfigButton)
         return id
     }
 
@@ -6742,16 +6877,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         sourceSegmented: NSSegmentedControl, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
         repoURLField: NSTextField, setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection,
         processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
-        browseButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton
+        browseButton: NSButton, prepareButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
             sourceSegmented: sourceSegmented, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
-            repoURLField: repoURLField, browseButton: browseButton, progressiveInputViews: progressiveInputViews, createButton: createButton,
-            setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
+            repoURLField: repoURLField, browseButton: browseButton, prepareButton: prepareButton, progressiveInputViews: progressiveInputViews,
+            createButton: createButton, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
         sourceSegmented.tag = id
         browseButton.tag = id
+        prepareButton.tag = id
         return id
     }
 
@@ -7304,18 +7440,99 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func saveProject(_ sender: NSButton) {
         commitEditing()
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard confirmProjectImportWorkspaceSyncIfNeeded(refs) else { return }
         do {
-            try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
-                config.setupScript = refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue
-                config.stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
-                config.ports = refs.portsSection.currentPorts
-                config.processes = refs.processesSection.currentProcesses
-                config.browserSessions = refs.browserSessionsSection.currentSessions
-                config.agentLaunchers = refs.agentLaunchersSection.currentLaunchers
-            }
+            try persistProjectFields(refs)
             projectHasUnsavedChanges = false
             reloadData()
         } catch { showError(error) }
+    }
+
+    @objc private func exportProjectSpacesYAML(_ sender: NSButton) {
+        commitEditing()
+        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard !projectHasUnsavedChanges, !refs.hasOpenSectionEditor else {
+            showInfoMessage(title: "Save project settings first", message: "Save or discard pending changes before exporting spaces.yaml.")
+            return
+        }
+        do {
+            let url = try orchestrator.exportSpacesYAML(projectID: refs.projectID)
+            showInfoMessage(title: "Exported spaces.yaml", message: url.path)
+        } catch { showError(error) }
+    }
+
+    @objc private func importProjectSpacesYAML(_ sender: NSButton) {
+        commitEditing()
+        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        do {
+            let document = try orchestrator.loadSpacesYAML(projectID: refs.projectID)
+            let preview = try orchestrator.previewProjectConfig(projectID: refs.projectID) { record in document.applying(to: &record) }
+            hydrateProjectSettings(refs, from: preview)
+            refs.hasPendingImportedConfig = true
+            refs.pendingImportUpdateAllWorkspaces = false
+            refs.importButton.isHidden = true
+            refs.exportButton.isHidden = true
+            refs.discardImportedConfigButton.isHidden = false
+            projectHasUnsavedChanges = true
+        } catch { showError(error) }
+    }
+
+    @objc private func discardProjectConfigChanges(_ sender: NSButton) {
+        commitEditing()
+        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        do {
+            guard let project = try orchestrator.project(id: refs.projectID) else { throw WorkspaceError.missingProject(dir: refs.projectID) }
+            hydrateProjectSettings(refs, from: project)
+            refs.hasPendingImportedConfig = false
+            refs.pendingImportUpdateAllWorkspaces = false
+            refs.importButton.isHidden = false
+            refs.exportButton.isHidden = false
+            refs.discardImportedConfigButton.isHidden = true
+            projectHasUnsavedChanges = false
+        } catch { showError(error) }
+    }
+
+    private func hydrateProjectSettings(_ refs: ProjectFieldRefs, from project: ProjectRecord) {
+        refs.setupScriptSection.replace(value: project.setupScript ?? "")
+        refs.stopScriptSection.replace(value: project.stopScript ?? "")
+        refs.portsSection.replace(ports: project.ports)
+        refs.processesSection.replace(processes: project.processes)
+        refs.browserSessionsSection.replace(sessions: project.browserSessions)
+        refs.agentLaunchersSection.replace(launchers: project.agentLaunchers)
+    }
+
+    private func confirmProjectImportWorkspaceSyncIfNeeded(_ refs: ProjectFieldRefs) -> Bool {
+        guard refs.hasPendingImportedConfig else { return true }
+        return Self.applyProjectImportWorkspaceSyncDecision(presentProjectImportWorkspaceSyncPrompt(), to: refs)
+    }
+
+    private func presentProjectImportWorkspaceSyncPrompt() -> ProjectImportWorkspaceSyncDecision {
+        let alert = NSAlert()
+        alert.messageText = "Update workspaces?"
+        alert.informativeText =
+            "Save the imported spaces.yaml settings to this project. Apply the same settings to every workspace in this project, including archived workspaces?"
+        alert.addButton(withTitle: "Update All Workspaces")
+        alert.addButton(withTitle: "Project Only")
+        alert.addButton(withTitle: "Cancel")
+        return Self.projectImportWorkspaceSyncDecision(for: alert.runModal())
+    }
+
+    private func presentManagedDirectoryReplacementPrompt(candidates: [WorkspaceOrchestrator.ManagedDirectoryReplacementCandidate]) -> Bool {
+        let paths = candidates.map(\.path).joined(separator: "\n")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = candidates.count == 1 ? "Replace existing managed folder?" : "Replace existing managed folders?"
+        alert.informativeText = """
+            Spaces found existing managed folders that are not registered to any project or workspace:
+
+            \(paths)
+
+            Replace them before continuing?
+            """
+        alert.addButton(withTitle: "Replace")
+        alert.addButton(withTitle: "Cancel")
+        let decision = Self.managedDirectoryReplacementDecision(for: alert.runModal())
+        return Self.shouldStartManagedDirectoryReplacementFlow(candidateCount: candidates.count, decision: decision)
     }
 
     @objc private func deleteProject(_ sender: NSButton) {
@@ -7359,21 +7576,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
             let input: ProjectCreateInput
             let progressDetail: String
+            let preparedGitProjectForSave: WorkspaceOrchestrator.PreparedGitProjectImport?
+            let preparedGitURLForSave: String?
             if refs.sourceSegmented.selectedSegment == 1 {
                 let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !repoURL.isEmpty else { throw WorkspaceError.invalidArgument(message: "Git repository URL is required.") }
+                guard let preparedGitProject = refs.preparedGitProject, refs.preparedGitURL == repoURL else {
+                    throw WorkspaceError.invalidArgument(message: "Clone the repository before creating the project.")
+                }
                 input = ProjectCreateInput(
-                    gitURL: repoURL, directoryPath: nil, setupScript: setupScript, stopScript: stopScript, ports: refs.portsSection.currentPorts,
-                    processes: refs.processesSection.currentProcesses, browserSessions: refs.browserSessionsSection.currentSessions,
-                    agentLaunchers: refs.agentLaunchersSection.currentLaunchers)
-                progressDetail = "Cloning repository and applying project settings."
+                    directoryPath: nil, preparedGitProject: preparedGitProject, setupScript: setupScript, stopScript: stopScript,
+                    ports: refs.portsSection.currentPorts, processes: refs.processesSection.currentProcesses,
+                    browserSessions: refs.browserSessionsSection.currentSessions, agentLaunchers: refs.agentLaunchersSection.currentLaunchers)
+                refs.preparedGitProject = nil
+                refs.preparedGitURL = nil
+                refs.gitPreparationID = nil
+                preparedGitProjectForSave = preparedGitProject
+                preparedGitURLForSave = repoURL
+                progressDetail = "Saving cloned repository and project settings."
             } else {
                 let dir = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !dir.isEmpty else { return }
+                guard refs.preparedLocalDirectoryPath == dir else {
+                    throw WorkspaceError.invalidArgument(message: "Choose the project directory before creating the project.")
+                }
                 input = ProjectCreateInput(
-                    gitURL: nil, directoryPath: dir, setupScript: setupScript, stopScript: stopScript, ports: refs.portsSection.currentPorts,
-                    processes: refs.processesSection.currentProcesses, browserSessions: refs.browserSessionsSection.currentSessions,
-                    agentLaunchers: refs.agentLaunchersSection.currentLaunchers)
+                    directoryPath: dir, preparedGitProject: nil, setupScript: setupScript, stopScript: stopScript,
+                    ports: refs.portsSection.currentPorts, processes: refs.processesSection.currentProcesses,
+                    browserSessions: refs.browserSessionsSection.currentSessions, agentLaunchers: refs.agentLaunchersSection.currentLaunchers)
+                preparedGitProjectForSave = nil
+                preparedGitURLForSave = nil
                 progressDetail = "Registering project and applying project settings."
             }
             let originalTitle = sender.title
@@ -7386,13 +7618,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     sender?.isEnabled = true
                     sender?.title = originalTitle
                     hideOperationProgressOverlay()
+                    if isActiveAddProjectForm(refs) { updateAddProjectSourceUI(refs) }
                 }
                 let result = await Self.createProjectSnapshot(input: input)
                 switch result {
                 case .success:
                     activeAddProjectFormTag = nil
                     reloadData()
-                case .failure(let error): showError(error)
+                case .failure(let error):
+                    if let preparedGitProjectForSave, let preparedGitURLForSave {
+                        await handleFailedPreparedGitProjectSave(preparedGitProjectForSave, repoURL: preparedGitURLForSave, refs: refs)
+                    }
+                    showError(error)
                 }
             }
         } catch { showError(error) }
@@ -7400,6 +7637,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func projectSourceChanged(_ sender: NSSegmentedControl) {
         guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
+        if refs.sourceSegmented.selectedSegment == 0 { discardPreparedAddProjectGitSourceIfNeeded(refs) }
         updateAddProjectSourceUI(refs)
     }
 
@@ -7416,28 +7654,262 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 refs.dirField.textColor = .labelColor
                 refs.dirField.isHidden = false
                 refs.browseButton.title = url.lastPathComponent
-                self.updateAddProjectSourceUI(refs)
+                self.prepareAddProjectLocalSource(refs, directoryPath: url.path)
             }
         }
+    }
+
+    @objc private func prepareProjectSource(_ sender: NSButton) {
+        guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
+        prepareAddProjectGitSource(refs)
     }
 
     private func updateAddProjectSourceUI(_ refs: AddProjectFieldRefs) {
         let cloneSelected = refs.sourceSegmented.selectedSegment == 1
         refs.localSourceSection.isHidden = cloneSelected
         refs.cloneSourceSection.isHidden = !cloneSelected
+        let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let gitPrepared = refs.preparedGitProject != nil && refs.preparedGitURL == repoURL
+        let gitPreparing = refs.gitPreparationID != nil
+        refs.prepareButton.title = gitPreparing ? "Cloning..." : (gitPrepared ? "Cloned" : "Clone")
+        refs.prepareButton.isEnabled = cloneSelected && !repoURL.isEmpty && !gitPrepared && !gitPreparing
         updateAddProjectProgressiveDisclosure(refs)
     }
 
     private func updateAddProjectProgressiveDisclosure(_ refs: AddProjectFieldRefs) {
-        let hasSource = isAddProjectSourceConfigured(refs)
-        for view in refs.progressiveInputViews { view.isHidden = !hasSource }
-        refs.createButton.isEnabled = hasSource
+        let hasPreparedSource = isAddProjectSourcePrepared(refs)
+        for view in refs.progressiveInputViews { view.isHidden = !hasPreparedSource }
+        refs.createButton.isEnabled = hasPreparedSource
     }
 
-    private func isAddProjectSourceConfigured(_ refs: AddProjectFieldRefs) -> Bool {
-        if refs.sourceSegmented.selectedSegment == 1 { return !refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private func isAddProjectSourcePrepared(_ refs: AddProjectFieldRefs) -> Bool {
+        if refs.sourceSegmented.selectedSegment == 1 {
+            let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            return refs.gitPreparationID == nil && refs.preparedGitProject != nil && refs.preparedGitURL == repoURL
+        }
         let directoryPath = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return !directoryPath.isEmpty
+        return !directoryPath.isEmpty && refs.preparedLocalDirectoryPath == directoryPath
+    }
+
+    nonisolated static func preparedGitProjectResultMatchesActiveRequest(
+        isActiveForm: Bool, selectedSegment: Int, currentRepoURL: String, requestedRepoURL: String, currentPreparationID: UUID?,
+        completionPreparationID: UUID
+    ) -> Bool { isActiveForm && selectedSegment == 1 && currentRepoURL == requestedRepoURL && currentPreparationID == completionPreparationID }
+
+    nonisolated static func localProjectPreviewResultMatchesActiveRequest(
+        isActiveForm: Bool, selectedSegment: Int, currentDirectoryPath: String, requestedDirectoryPath: String
+    ) -> Bool { isActiveForm && selectedSegment == 0 && currentDirectoryPath == requestedDirectoryPath }
+
+    nonisolated static func preparedGitProjectDiscardKey(repoURL: String?) -> String? {
+        guard let key = repoURL?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else { return nil }
+        return key
+    }
+
+    nonisolated static func preparedGitProjectCanBeRestoredAfterFailedSave(
+        isActiveForm: Bool, selectedSegment: Int, currentRepoURL: String, preparedRepoURL: String, sourceExists: Bool
+    ) -> Bool { sourceExists && isActiveForm && selectedSegment == 1 && currentRepoURL == preparedRepoURL }
+
+    private func isActiveAddProjectForm(_ refs: AddProjectFieldRefs) -> Bool {
+        activeAddProjectFormTag == refs.createButton.tag && AddProjectFieldCache.shared.cache[refs.createButton.tag] === refs
+    }
+
+    private func prepareAddProjectLocalSource(_ refs: AddProjectFieldRefs, directoryPath: String) {
+        refs.preparedLocalDirectoryPath = nil
+        hydrateAddProjectSettings(refs, from: ProjectRecord(id: "", name: "", dir: directoryPath, isGitRepo: false, defaultBranch: nil))
+        updateAddProjectSourceUI(refs)
+        let originalTitle = refs.browseButton.title
+        let selectedDirectoryName = URL(fileURLWithPath: directoryPath, isDirectory: true).lastPathComponent
+        refs.browseButton.isEnabled = false
+        refs.browseButton.title = "Loading..."
+        showOperationProgressOverlay(message: "Loading project settings...", detail: "Checking the selected folder for spaces.yaml.")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                refs.browseButton.isEnabled = true
+                refs.browseButton.title = selectedDirectoryName.isEmpty ? originalTitle : selectedDirectoryName
+                hideOperationProgressOverlay()
+            }
+            let result = await Self.previewProjectSourceSnapshot(directoryPath: directoryPath)
+            guard
+                Self.localProjectPreviewResultMatchesActiveRequest(
+                    isActiveForm: isActiveAddProjectForm(refs), selectedSegment: refs.sourceSegmented.selectedSegment,
+                    currentDirectoryPath: refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+                    requestedDirectoryPath: directoryPath)
+            else { return }
+            switch result {
+            case .success(let project):
+                refs.preparedLocalDirectoryPath = directoryPath
+                hydrateAddProjectSettings(refs, from: project)
+                updateAddProjectSourceUI(refs)
+            case .failure(let error):
+                refs.preparedLocalDirectoryPath = nil
+                updateAddProjectSourceUI(refs)
+                showError(error)
+            }
+        }
+    }
+
+    private func prepareAddProjectGitSource(_ refs: AddProjectFieldRefs) {
+        let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !repoURL.isEmpty else {
+            showError(WorkspaceError.invalidArgument(message: "Git repository URL is required."))
+            return
+        }
+        guard refs.gitPreparationID == nil else {
+            updateAddProjectSourceUI(refs)
+            return
+        }
+        if refs.preparedGitProject != nil, refs.preparedGitURL == repoURL {
+            updateAddProjectSourceUI(refs)
+            return
+        }
+        let preparationID = UUID()
+        refs.gitPreparationID = preparationID
+        refs.preparedLocalDirectoryPath = nil
+        refs.prepareButton.isEnabled = false
+        let originalTitle = refs.prepareButton.title
+        refs.prepareButton.title = "Cloning..."
+        updateAddProjectProgressiveDisclosure(refs)
+        showOperationProgressOverlay(message: "Cloning project...", detail: "Cloning repository and checking the default workspace for spaces.yaml.")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if refs.gitPreparationID == preparationID {
+                    refs.gitPreparationID = nil
+                    refs.prepareButton.title = originalTitle
+                }
+                hideOperationProgressOverlay()
+                updateAddProjectSourceUI(refs)
+            }
+            if let previous = refs.preparedGitProject {
+                let discardResult = await beginPreparedGitProjectDiscard(previous, repoURL: refs.preparedGitURL).value
+                if case .failure(let error) = discardResult {
+                    refs.preparedGitProject = nil
+                    refs.preparedGitURL = nil
+                    showError(error)
+                    return
+                }
+                refs.preparedGitProject = nil
+                refs.preparedGitURL = nil
+            }
+            if let discardResult = await activePreparedGitProjectDiscardResult(repoURL: repoURL), case .failure(let error) = discardResult {
+                showError(error)
+                return
+            }
+            let replacementCandidates: [WorkspaceOrchestrator.ManagedDirectoryReplacementCandidate]
+            do { replacementCandidates = try orchestrator.managedGitProjectImportReplacementCandidates(gitURL: repoURL) } catch {
+                showError(error)
+                return
+            }
+            let replaceExistingManagedDirectories = !replacementCandidates.isEmpty
+            if replaceExistingManagedDirectories, !presentManagedDirectoryReplacementPrompt(candidates: replacementCandidates) { return }
+            let result = await Self.prepareGitProjectSourceSnapshot(
+                gitURL: repoURL, replaceExistingManagedDirectories: replaceExistingManagedDirectories)
+            guard
+                Self.preparedGitProjectResultMatchesActiveRequest(
+                    isActiveForm: isActiveAddProjectForm(refs), selectedSegment: refs.sourceSegmented.selectedSegment,
+                    currentRepoURL: refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), requestedRepoURL: repoURL,
+                    currentPreparationID: refs.gitPreparationID, completionPreparationID: preparationID)
+            else {
+                if case .success(let prepared) = result { _ = await beginPreparedGitProjectDiscard(prepared, repoURL: repoURL).value }
+                return
+            }
+            switch result {
+            case .success(let prepared):
+                refs.preparedGitProject = prepared
+                refs.preparedGitURL = repoURL
+                hydrateAddProjectSettings(refs, from: prepared.project)
+            case .failure(let error):
+                refs.preparedGitProject = nil
+                refs.preparedGitURL = nil
+                showError(error)
+            }
+        }
+    }
+
+    private func hydrateAddProjectSettings(_ refs: AddProjectFieldRefs, from project: ProjectRecord) {
+        refs.setupScriptSection.replace(value: project.setupScript ?? "")
+        refs.stopScriptSection.replace(value: project.stopScript ?? "")
+        refs.portsSection.replace(ports: project.ports)
+        refs.processesSection.replace(processes: project.processes)
+        refs.browserSessionsSection.replace(sessions: project.browserSessions)
+        refs.agentLaunchersSection.replace(launchers: project.agentLaunchers)
+    }
+
+    private func handleFailedPreparedGitProjectSave(
+        _ prepared: WorkspaceOrchestrator.PreparedGitProjectImport, repoURL: String, refs: AddProjectFieldRefs
+    ) async {
+        let currentRepoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if Self.preparedGitProjectCanBeRestoredAfterFailedSave(
+            isActiveForm: isActiveAddProjectForm(refs), selectedSegment: refs.sourceSegmented.selectedSegment, currentRepoURL: currentRepoURL,
+            preparedRepoURL: repoURL, sourceExists: Self.preparedGitProjectSourceExists(prepared))
+        {
+            refs.preparedGitProject = prepared
+            refs.preparedGitURL = repoURL
+        } else {
+            _ = await beginPreparedGitProjectDiscard(prepared, repoURL: repoURL).value
+        }
+    }
+
+    nonisolated private static func preparedGitProjectSourceExists(_ prepared: WorkspaceOrchestrator.PreparedGitProjectImport) -> Bool {
+        var projectIsDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: prepared.project.dir, isDirectory: &projectIsDirectory), projectIsDirectory.boolValue else {
+            return false
+        }
+        var workspaceIsDirectory = ObjCBool(false)
+        return FileManager.default.fileExists(atPath: prepared.defaultWorkspace.dir, isDirectory: &workspaceIsDirectory)
+            && workspaceIsDirectory.boolValue
+    }
+
+    private func discardPreparedAddProjectGitSourceIfNeeded(_ refs: AddProjectFieldRefs) {
+        guard let prepared = refs.preparedGitProject else { return }
+        let repoURL = refs.preparedGitURL
+        refs.preparedGitProject = nil
+        refs.preparedGitURL = nil
+        let discardTask = beginPreparedGitProjectDiscard(prepared, repoURL: repoURL)
+        Task { @MainActor [weak self] in
+            let result = await discardTask.value
+            if case .failure(let error) = result { self?.showError(error) }
+        }
+    }
+
+    private func discardActiveAddProjectPreparedSourceIfNeeded() {
+        guard let activeAddProjectFormTag, let refs = AddProjectFieldCache.shared.cache[activeAddProjectFormTag] else { return }
+        discardPreparedAddProjectGitSourceIfNeeded(refs)
+    }
+
+    private func discardActiveAddProjectPreparedSourceSynchronouslyIfNeeded() -> Result<Void, Error>? {
+        guard let activeAddProjectFormTag, let refs = AddProjectFieldCache.shared.cache[activeAddProjectFormTag],
+            let prepared = refs.preparedGitProject
+        else { return nil }
+        refs.preparedGitProject = nil
+        refs.preparedGitURL = nil
+        return Self.discardPreparedGitProject(prepared)
+    }
+
+    @discardableResult private func beginPreparedGitProjectDiscard(_ prepared: WorkspaceOrchestrator.PreparedGitProjectImport, repoURL: String?)
+        -> Task<Result<Void, Error>, Never>
+    {
+        let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL)
+        let previousTask = key.flatMap { preparedGitProjectDiscardTasksByURL[$0]?.task }
+        let task = Task<Result<Void, Error>, Never> {
+            if let previousTask { _ = await previousTask.value }
+            return await Self.discardPreparedGitProjectSnapshot(prepared)
+        }
+        guard let key else { return task }
+        let id = UUID()
+        preparedGitProjectDiscardTasksByURL[key] = PreparedGitProjectDiscardEntry(id: id, task: task)
+        Task { @MainActor [weak self] in
+            _ = await task.value
+            guard let self, self.preparedGitProjectDiscardTasksByURL[key]?.id == id else { return }
+            self.preparedGitProjectDiscardTasksByURL[key] = nil
+        }
+        return task
+    }
+
+    private func activePreparedGitProjectDiscardResult(repoURL: String) async -> Result<Void, Error>? {
+        guard let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL), let entry = preparedGitProjectDiscardTasksByURL[key] else { return nil }
+        return await entry.task.value
     }
 
     private func defaultWorkspaceTargetBranch(project: ProjectSummary, branches: [String]) -> String? {
@@ -7562,9 +8034,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 throw WorkspaceError.invalidArgument(
                     message: "Branch '\(branch)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
+            let replacementCandidates: [WorkspaceOrchestrator.ManagedDirectoryReplacementCandidate]
+            if refs.isGitRepo, let resolvedDirectoryName {
+                if let replacementCandidate = try orchestrator.managedWorkspaceReplacementCandidate(
+                    projectID: refs.projectID, directoryName: resolvedDirectoryName)
+                {
+                    replacementCandidates = [replacementCandidate]
+                } else {
+                    replacementCandidates = []
+                }
+            } else {
+                replacementCandidates = []
+            }
+            if !replacementCandidates.isEmpty, !presentManagedDirectoryReplacementPrompt(candidates: replacementCandidates) { return }
             let input = WorkspaceCreateInput(
                 projectID: refs.projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: resolvedDirectoryName,
-                notes: resolvedNotes, allowRemoteBranchLookup: true, allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing)
+                notes: resolvedNotes, allowRemoteBranchLookup: true, allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing,
+                replaceExistingManagedDirectory: !replacementCandidates.isEmpty)
             let originalTitle = sender.title
             sender.isEnabled = false
             sender.title = "Creating..."
@@ -7671,7 +8157,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return false
     }
 
-    @objc private func cancelProjectForm() { refreshSelection() }
+    @objc private func cancelProjectForm() {
+        discardActiveAddProjectPreparedSourceIfNeeded()
+        refreshSelection()
+    }
 
     @objc private func launchWorkspace(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
@@ -9913,15 +10402,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let selectedProjectID else { return true }
         let tag = selectedProjectID.hashValue
         guard let refs = ProjectFieldCache.shared.cache[tag] else { return true }
+        guard confirmProjectImportWorkspaceSyncIfNeeded(refs) else { return false }
         do {
-            try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
-                config.setupScript = refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue
-                config.stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
-                config.ports = refs.portsSection.currentPorts
-                config.processes = refs.processesSection.currentProcesses
-                config.browserSessions = refs.browserSessionsSection.currentSessions
-                config.agentLaunchers = refs.agentLaunchersSection.currentLaunchers
-            }
+            try persistProjectFields(refs)
             projectHasUnsavedChanges = false
             reloadData()
             return true
@@ -9929,6 +10412,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showError(error)
             return false
         }
+    }
+
+    private func persistProjectFields(_ refs: ProjectFieldRefs) throws {
+        try orchestrator.updateProjectConfig(projectID: refs.projectID, updateAllWorkspaces: refs.pendingImportUpdateAllWorkspaces) { config in
+            config.setupScript = refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue
+            config.stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
+            config.ports = refs.portsSection.currentPorts
+            config.processes = refs.processesSection.currentProcesses
+            config.browserSessions = refs.browserSessionsSection.currentSessions
+            config.agentLaunchers = refs.agentLaunchersSection.currentLaunchers
+        }
+        refs.hasPendingImportedConfig = false
+        refs.pendingImportUpdateAllWorkspaces = false
+        refs.discardImportedConfigButton.isHidden = true
     }
 
     private func unsavedChangesPrompt() -> NSApplication.ModalResponse {

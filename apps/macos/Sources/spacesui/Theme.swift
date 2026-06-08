@@ -122,13 +122,18 @@ enum Theme {
 
     /// Applies shared layout constraints so both button styles match in height and have
     /// consistent horizontal padding (≥12 pt per side) regardless of title length.
-    @MainActor private static func applyButtonLayout(to button: NSButton) {
+    @MainActor private static func applyButtonLayout(to button: NSButton, minimumWidth: CGFloat = 84) {
         button.translatesAutoresizingMaskIntoConstraints = false
         // Resist expansion so the NSView() spacer in form-footer stack views
         // always absorbs leftover width instead of the button.
         button.setContentHuggingPriority(.required, for: .horizontal)
+        let titleWidth = button.attributedTitle.size().width
+        let imageWidth = button.image?.size.width ?? 0
+        let imageSpacing: CGFloat = button.image == nil || button.title.isEmpty ? 0 : 8
+        let contentWidth = ceil(titleWidth + imageWidth + imageSpacing + 36)
         NSLayoutConstraint.activate([
-            button.heightAnchor.constraint(equalToConstant: 22), button.widthAnchor.constraint(greaterThanOrEqualToConstant: 64),
+            button.heightAnchor.constraint(equalToConstant: 22),
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: max(minimumWidth, contentWidth)),
         ])
     }
 
@@ -147,7 +152,7 @@ enum Theme {
         button.contentTintColor = fg
         button.attributedTitle = NSAttributedString(
             string: button.title, attributes: [.foregroundColor: fg, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
-        applyButtonLayout(to: button)
+        applyButtonLayout(to: button, minimumWidth: 96)
     }
 
     /// Applies the design-system secondary button style (surface background, border, label text).
