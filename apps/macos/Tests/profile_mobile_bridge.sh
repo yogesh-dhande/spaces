@@ -435,7 +435,7 @@ def wait_for_line(stream: subprocess.Popen, predicate, timeout: float = 10) -> t
 
 client_app = {
     "installationID": str(uuid.uuid4()).upper(),
-    "bundleID": "com.yogeshdhande.spacesmobile",
+    "bundleID": "dev.usespaces.spacesmobile",
     "platform": "ios",
     "deviceName": "iPad Pro Simulator",
     "appVersion": "1.0",

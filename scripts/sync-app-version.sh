@@ -73,7 +73,7 @@ cat > "$INFO_PLIST" <<EOF
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIdentifier</key>
-    <string>com.spaces.app</string>
+    <string>dev.usespaces.spaces</string>
     <key>CFBundleShortVersionString</key>
     <string>$short_version</string>
     <key>CFBundleVersion</key>

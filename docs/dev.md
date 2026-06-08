@@ -257,7 +257,7 @@ $EDITOR .env
 scripts/install-ios-device.sh
 ```
 
-4. If Xcode reports that `com.yogeshdhande.spacesmobile` cannot be signed by the selected team, stop there and widen the first-party bundle policy before changing the bundle identifier. The current bridge accepts only that bundle identifier for pairing and reconnect. Set `SPACES_IOS_DEVELOPMENT_TEAM` in `.env` when the command-line build should override the project signing team.
+4. If Xcode reports that `dev.usespaces.spacesmobile` cannot be signed by the selected team, stop there and widen the first-party bundle policy before changing the bundle identifier. The current bridge accepts only that bundle identifier for pairing and reconnect. Set `SPACES_IOS_DEVELOPMENT_TEAM` in `.env` when the command-line build should override the project signing team.
 5. Keep the Mac app and mobile bridge on the same `SPACES_DB_PATH`; the daemon bridge binds all IPv4 interfaces on port `47847` by default and persists a profile-specific fallback port if that port is already occupied.
 
 ```bash

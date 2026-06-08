@@ -387,7 +387,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.yogeshdhande.spacesmobile.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.usespaces.spacesmobile.uitests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = SpacesMobile;
@@ -533,7 +533,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.yogeshdhande.spacesmobile;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.usespaces.spacesmobile;
 				PRODUCT_NAME = SpacesMobile;
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 6.0;
@@ -557,7 +557,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.yogeshdhande.spacesmobile;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.usespaces.spacesmobile;
 				PRODUCT_NAME = SpacesMobile;
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 6.0;
@@ -579,7 +579,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.yogeshdhande.spacesmobile.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.usespaces.spacesmobile.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SpacesMobile.app/SpacesMobile";
@@ -600,7 +600,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.yogeshdhande.spacesmobile.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.usespaces.spacesmobile.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SpacesMobile.app/SpacesMobile";
@@ -621,7 +621,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.yogeshdhande.spacesmobile.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.usespaces.spacesmobile.uitests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = SpacesMobile;
