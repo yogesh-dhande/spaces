@@ -10,7 +10,7 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
         let detected = TerminalForegroundProcessInspector.classify(process)
 
         XCTAssertEqual(detected?.detectedAgentKind, .codex)
-        XCTAssertEqual(detected?.displayLabel, "Codex")
+        XCTAssertEqual(detected?.displayLabel, "codex")
         XCTAssertEqual(detected?.displayCommand, "codex --model gpt-5")
     }
 
@@ -44,8 +44,20 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
         let claudeCode = TerminalForegroundProcessSnapshot(pid: 103, executablePath: "/usr/local/bin/claude-code", argv: ["claude-code", "resume"])
 
         XCTAssertEqual(TerminalForegroundProcessInspector.classify(claude)?.detectedAgentKind, .claude)
+        XCTAssertEqual(TerminalForegroundProcessInspector.classify(claude)?.displayLabel, "claude")
         XCTAssertEqual(TerminalForegroundProcessInspector.classify(claudeCode)?.detectedAgentKind, .claudeCode)
+        XCTAssertEqual(TerminalForegroundProcessInspector.classify(claudeCode)?.displayLabel, "claude-code")
         XCTAssertEqual(TerminalForegroundProcessInspector.classify(claudeCode)?.displayCommand, "claude-code resume")
+    }
+
+    func testClassifiesClaudeVersionedBinaryFromInvokedCommandName() {
+        let process = TerminalForegroundProcessSnapshot(
+            pid: 104, executablePath: "/Users/yogesh/.local/share/claude/versions/2.1.168", argv: ["claude", "--dangerously-skip-permissions"])
+
+        let detected = TerminalForegroundProcessInspector.classify(process)
+
+        XCTAssertEqual(detected?.detectedAgentKind, .claude)
+        XCTAssertEqual(detected?.displayCommand, "claude --dangerously-skip-permissions")
     }
 
     func testClassifiesOpencodeCommands() {

@@ -666,10 +666,10 @@ private func inferredAgentLabel(environment: [String: String]) -> String? {
     if let label = environment[WorkspaceOrchestrator.agentLabelEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
         return label
     }
-    if environment["CODEX_THREAD_ID"] != nil { return "Codex CLI" }
-    if environment["CODEX_MANAGED_BY_NPM"] != nil { return "Codex CLI" }
-    if environment["CLAUDE_CODE_ENTRYPOINT"] != nil { return "Claude Code CLI" }
-    if environment.keys.contains(where: { $0.uppercased().hasPrefix("OPENCODE") }) { return "opencode CLI" }
+    if environment["CODEX_THREAD_ID"] != nil { return "codex cli" }
+    if environment["CODEX_MANAGED_BY_NPM"] != nil { return "codex cli" }
+    if environment["CLAUDE_CODE_ENTRYPOINT"] != nil { return "claude cli" }
+    if environment.keys.contains(where: { $0.uppercased().hasPrefix("OPENCODE") }) { return "opencode cli" }
 
     return nil
 }

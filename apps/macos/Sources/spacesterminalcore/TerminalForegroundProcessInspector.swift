@@ -12,9 +12,9 @@ public enum TerminalDetectedAgentKind: String, Codable, Sendable, Equatable {
 
     public var displayLabel: String {
         switch self {
-        case .codex: "Codex"
-        case .claude: "Claude"
-        case .claudeCode: "Claude Code"
+        case .codex: "codex"
+        case .claude: "claude"
+        case .claudeCode: "claude-code"
         case .opencode: "opencode"
         }
     }
@@ -78,6 +78,11 @@ public enum TerminalForegroundProcessInspector {
         var displayLabel: String { kind.displayLabel }
     }
 
+    private struct CommandNameCandidate {
+        let name: String
+        let matchedArgumentIndex: Int?
+    }
+
     private static let maxArgumentCount = 16
     private static let maxArgumentLength = 160
     private static let nodeExecutableNames: Set<String> = ["node", "nodejs"]
@@ -114,17 +119,16 @@ public enum TerminalForegroundProcessInspector {
     }
 
     public static func classify(_ process: TerminalForegroundProcessSnapshot) -> TerminalForegroundAgentSnapshot? {
-        let executableName = normalizedBasename(process.executableName)
         let argv = boundedArguments(process.argv)
+        let commandNameCandidates = commandNameCandidates(executableName: process.executableName, argv: argv)
 
         for definition in definitions {
-            if definition.executableNames.contains(executableName) {
-                return snapshot(
-                    for: process, definition: definition, matchedArgumentIndex: executableArgumentIndex(in: argv, matching: executableName))
+            if let candidate = commandNameCandidates.first(where: { definition.executableNames.contains($0.name) }) {
+                return snapshot(for: process, definition: definition, matchedArgumentIndex: candidate.matchedArgumentIndex)
             }
         }
 
-        guard nodeExecutableNames.contains(executableName) else { return nil }
+        guard commandNameCandidates.contains(where: { nodeExecutableNames.contains($0.name) }) else { return nil }
         guard let scriptIndex = nodeScriptArgumentIndex(in: argv) else { return nil }
         for definition in definitions {
             if matchesNodeScript(argv[scriptIndex], definition: definition) {
@@ -141,6 +145,25 @@ public enum TerminalForegroundProcessInspector {
         }
         if argv.count > maxArgumentCount { bounded.append("...") }
         return Array(bounded)
+    }
+
+    private static func commandNameCandidates(executableName: String, argv: [String]) -> [CommandNameCandidate] {
+        var candidates: [CommandNameCandidate] = []
+        let executableBasename = normalizedBasename(executableName)
+        if !executableBasename.isEmpty {
+            candidates.append(
+                CommandNameCandidate(name: executableBasename, matchedArgumentIndex: executableArgumentIndex(in: argv, matching: executableBasename)))
+        }
+
+        // Some native tools run a versioned binary while preserving the user-facing
+        // command in argv[0]. Treat argv[0] as process identity, but never scan later arguments.
+        if let firstArgument = argv.first {
+            let invokedName = normalizedBasename(firstArgument)
+            if !invokedName.isEmpty, !candidates.contains(where: { $0.name == invokedName }) {
+                candidates.append(CommandNameCandidate(name: invokedName, matchedArgumentIndex: 0))
+            }
+        }
+        return candidates
     }
 
     private static func snapshot(for process: TerminalForegroundProcessSnapshot, definition: AgentDefinition, matchedArgumentIndex: Int?)

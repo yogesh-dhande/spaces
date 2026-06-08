@@ -443,7 +443,7 @@ final class MXCommandTests: XCTestCase {
                 ], orchestrator: orchestrator, context: context)
 
             XCTAssertEqual(agentContext?.provider, .spaces)
-            XCTAssertEqual(agentContext?.label, "Codex CLI")
+            XCTAssertEqual(agentContext?.label, "codex cli")
             XCTAssertEqual(agentContext?.codexThreadID, nil)
             XCTAssertEqual(agentContext?.environmentKeys, ["CODEX_MANAGED_BY_NPM", "SPACES_TERMINAL_HOST", "SPACES_TERMINAL_TRACKING_ID"])
         }
@@ -464,7 +464,7 @@ final class MXCommandTests: XCTestCase {
                 ], orchestrator: orchestrator, context: context)
 
             XCTAssertEqual(agentContext?.provider, .spaces)
-            XCTAssertEqual(agentContext?.label, "opencode CLI")
+            XCTAssertEqual(agentContext?.label, "opencode cli")
             XCTAssertEqual(agentContext?.codexThreadID, nil)
             XCTAssertEqual(
                 agentContext?.environmentKeys, ["OPENCODE_EXPERIMENTAL_FILEWATCHER", "SPACES_TERMINAL_HOST", "SPACES_TERMINAL_TRACKING_ID"])
