@@ -101,6 +101,14 @@ import AppKit
         showCollapsed()
     }
 
+    func replace(value: String) {
+        isEditing = false
+        currentValue = value
+        showCollapsed()
+    }
+
+    var hasOpenEditor: Bool { isEditing }
+
     // MARK: Collapsed
 
     private func showCollapsed() {

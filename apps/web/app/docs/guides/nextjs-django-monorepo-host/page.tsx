@@ -52,7 +52,7 @@ cp .env.example .env`}</code>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Processes</h3>
         <p className={prose}>
-          Add two processes and set both rows to <strong>Shell</strong> execution mode so <code>cd</code> plus env assignment runs naturally.
+          Add two processes. Process commands run as shell input, so <code>cd</code> plus env assignment runs naturally.
         </p>
         <pre className={code}>
           <code>{`# frontend process

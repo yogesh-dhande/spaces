@@ -267,7 +267,7 @@ public enum Shell {
         }
     }
 
-    static func resolvedLoginShellExecutablePath(environment: [String: String]) -> String? {
+    public static func resolvedLoginShellExecutablePath(environment: [String: String]) -> String? {
         let configuredShell = environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         let accountInfo = currentUserAccountInfo()
         if let accountShell = accountInfo?.shellPath, !accountShell.isEmpty {

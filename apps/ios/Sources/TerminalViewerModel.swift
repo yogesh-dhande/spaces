@@ -781,7 +781,7 @@ private enum TerminalViewerRenderMode: String {
         )
         isConnecting = false
         guard let refreshedState else { return false }
-        if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || refreshedState.runtimeState?.state.isInteractive == false {
+        if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
             isSessionUnavailable = false
             isAwaitingTakeoverConfirmation = false
             errorMessage = nil
@@ -797,6 +797,11 @@ private enum TerminalViewerRenderMode: String {
 
     private var isEndedState: Bool {
         let state = latestState?.runtimeState?.state ?? session.state
+        return Self.isEndedRuntimeState(state)
+    }
+
+    private static func isEndedRuntimeState(_ state: TerminalSessionState?) -> Bool {
+        guard let state else { return false }
         return state != .running && state != .starting
     }
 

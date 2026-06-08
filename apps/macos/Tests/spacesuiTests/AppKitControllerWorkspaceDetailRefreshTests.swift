@@ -65,6 +65,27 @@ import workspacecore
         #expect(AppKitController.shouldShowConfiguredBrowserSessions(workspaceIsRunning: false))
     }
 
+    @Test func workspaceSetupPanelReplacesNormalDetailUntilSetupSucceeds() {
+        #expect(AppKitController.shouldShowWorkspaceSetupPanel(status: .pending))
+        #expect(AppKitController.shouldShowWorkspaceSetupPanel(status: .running))
+        #expect(AppKitController.shouldShowWorkspaceSetupPanel(status: .failed))
+        #expect(!AppKitController.shouldShowWorkspaceSetupPanel(status: .succeeded))
+    }
+
+    @Test func workspaceSetupScriptEditorOnlyShowsForFailedSetup() {
+        #expect(!AppKitController.shouldShowWorkspaceSetupScriptEditor(status: .pending))
+        #expect(!AppKitController.shouldShowWorkspaceSetupScriptEditor(status: .running))
+        #expect(AppKitController.shouldShowWorkspaceSetupScriptEditor(status: .failed))
+        #expect(!AppKitController.shouldShowWorkspaceSetupScriptEditor(status: .succeeded))
+    }
+
+    @Test func workspaceSetupPanelStatusesSkipNormalWorkspaceDetailRefresh() {
+        #expect(!AppKitController.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: .pending))
+        #expect(!AppKitController.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: .running))
+        #expect(!AppKitController.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: .failed))
+        #expect(AppKitController.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: .succeeded))
+    }
+
     @MainActor @Test func browserSessionShortcutMatchingFallsBackToResolvedURLForTemplatedSession() {
         var resolvedCursor = 0
         let matchedURL = AppKitController.matchedBrowserSessionShortcutURL(

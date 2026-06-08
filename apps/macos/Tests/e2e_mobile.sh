@@ -30,7 +30,7 @@ E2E_GHOSTTY_XDG_CONFIG_HOME="${SPACES_MOBILE_GHOSTTY_XDG_CONFIG_HOME:-$USER_XDG_
 FIXTURE_LINE_COUNT=520
 SCROLLBACK_SWIPE_COUNT=2
 
-SCENARIOS=(codex codex-resume-reopen roundtrip scrollback two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard)
+SCENARIOS=(codex codex-resume-reopen roundtrip scrollback two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard app-recovery)
 SELECTED_SCENARIOS=()
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
 DEMO_PORT="${SPACES_MOBILE_DEMO_PORT:-}"
@@ -82,6 +82,7 @@ Scenarios:
   ctrl-c-final-frame
   ctrl-c-final-frame-codex-survivor
   ownership-guard
+  app-recovery
 EOF
 }
 
@@ -2588,6 +2589,241 @@ PY
   printf 'Mobile scenario passed: ownership-guard\n'
 }
 
+run_app_recovery_scenario() {
+  begin_scenario "app-recovery"
+  local session_id
+  session_id="$(new_terminal_session "app-recovery" "printf '__spaces_app_recovery_live__\\n'; sleep 300")"
+  track_current_scenario_session "$session_id"
+
+  local new_app_pid
+  if ! new_app_pid="$(python3 - "$DEMO_ROOT" "$DB_PATH" "$RUNTIME_DIR" "$session_id" "$DEMO_TERMINAL_SERVICE_PID" "$SPACES_CLI_BIN" "$BRIDGE_HOST" "$BRIDGE_PORT" "$TERMINAL_SERVICE_BIN" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$SCENARIO_DIR" <<'PY' 2>>"$SCENARIO_LOG"
+import json
+import os
+import shlex
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+demo_root = Path(sys.argv[1])
+db_path = Path(sys.argv[2])
+runtime_root = Path(sys.argv[3])
+session_id = sys.argv[4]
+metadata_terminal_service_pid = sys.argv[5]
+spaces_cli = Path(sys.argv[6])
+bridge_host = sys.argv[7]
+bridge_port = int(sys.argv[8])
+terminal_service_bin = sys.argv[9]
+bundle_id = sys.argv[10]
+mobile_device_key = sys.argv[11]
+mobile_device_name = sys.argv[12]
+scenario_dir = Path(sys.argv[13])
+pairing = json.loads((demo_root / "pairing.json").read_text())[mobile_device_key]
+app_recovery_state_path = demo_root / "app-recovery-state.json"
+
+env = os.environ | {
+    "HOME": str(demo_root / "home"),
+    "SPACES_DB_PATH": str(db_path),
+    "SPACES_RUNTIME_DIR": str(runtime_root),
+    "SPACES_TERMINAL_SERVICE_EXECUTABLE": terminal_service_bin,
+}
+client_app = {
+    "installationID": pairing["installationID"],
+    "bundleID": bundle_id,
+    "platform": "ios",
+    "deviceName": mobile_device_name,
+    "appVersion": "1.0",
+}
+
+def log(message: str) -> None:
+    print(message, file=sys.stderr)
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+def write_app_recovery_state(payload: dict) -> None:
+    temp_path = app_recovery_state_path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    temp_path.replace(app_recovery_state_path)
+
+def process_is_alive(pid: int) -> bool:
+    return subprocess.run(["/bin/kill", "-0", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+def process_command(pid: int) -> str:
+    completed = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+def profile_app_owner() -> dict:
+    completed = subprocess.run(
+        [str(spaces_cli), "profile", "app-owner", "--json"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+def wait_for_app_owner_present(timeout: float = 15) -> dict:
+    deadline = time.time() + timeout
+    last_payload = None
+    while time.time() < deadline:
+        payload = profile_app_owner()
+        last_payload = payload
+        owner = payload.get("owner")
+        if owner:
+            return owner
+        time.sleep(0.2)
+    raise RuntimeError(f"Timed out waiting for app-owner lease to appear.\nlast={json.dumps(last_payload, indent=2)}")
+
+def wait_for_app_owner_absent(timeout: float = 10) -> None:
+    deadline = time.time() + timeout
+    last_payload = None
+    while time.time() < deadline:
+        payload = profile_app_owner()
+        last_payload = payload
+        if payload.get("available") is True and payload.get("owner") is None:
+            return
+        time.sleep(0.2)
+    raise RuntimeError(f"Timed out waiting for app-owner lease to disappear.\nlast={json.dumps(last_payload, indent=2)}")
+
+def send_mobile_request(request: dict) -> dict:
+    completed = subprocess.run(
+        [
+            str(spaces_cli),
+            "mobile",
+            "request",
+            "--host",
+            bridge_host,
+            "--port",
+            str(bridge_port),
+            "--transport-key",
+            pairing["transportKey"],
+            "--request-json",
+            json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+def session_runtime_state() -> tuple[str, int, int | None]:
+    with sqlite3.connect(db_path) as db:
+        row = db.execute(
+            "SELECT state, service_pid, child_pid FROM terminal_runtime_states WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    require(row is not None, f"Missing runtime state for session {session_id}.")
+    return row[0], int(row[1]), int(row[2]) if row[2] is not None else None
+
+def assert_session_live(expected_service_pid: int, label: str) -> None:
+    state, service_pid, child_pid = session_runtime_state()
+    require(state == "running", f"{label}: session state is not running: {state!r}")
+    require(service_pid == expected_service_pid, f"{label}: service pid changed from {expected_service_pid} to {service_pid}.")
+    require(process_is_alive(service_pid), f"{label}: terminal service pid {service_pid} is not alive.")
+    require(child_pid is not None and process_is_alive(child_pid), f"{label}: session child pid is not alive: {child_pid!r}")
+
+def terminate_app_owner(owner: dict) -> None:
+    pid = int(owner["pid"])
+    executable = owner.get("executablePath") or ""
+    command = process_command(pid)
+    require(Path(executable).name == "SpacesApp", f"Refusing to kill app owner with unexpected executable: {executable!r}")
+    require("SpacesApp" in command, f"Refusing to kill pid {pid}; command does not look like SpacesApp: {command!r}")
+    log(f"Terminating current-profile SpacesApp owner pid={pid} command={command!r}")
+    subprocess.run(["/bin/kill", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if not process_is_alive(pid):
+            return
+        time.sleep(0.2)
+    subprocess.run(["/bin/kill", "-9", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        if not process_is_alive(pid):
+            return
+        time.sleep(0.1)
+    log(f"SpacesApp owner pid {pid} still appears in the process table after SIGKILL; waiting on lease removal.")
+
+expected_service_pid = int(metadata_terminal_service_pid) if metadata_terminal_service_pid else session_runtime_state()[1]
+assert_session_live(expected_service_pid, "before app recovery")
+
+old_owner = wait_for_app_owner_present(timeout=15)
+old_pid = int(old_owner["pid"])
+write_app_recovery_state({
+    "status": "recovering",
+    "sessionID": session_id,
+    "oldAppPID": old_pid,
+    "terminalServicePID": expected_service_pid,
+})
+terminate_app_owner(old_owner)
+wait_for_app_owner_absent(timeout=10)
+assert_session_live(expected_service_pid, "after app owner termination")
+
+overview_before = send_mobile_request({"command": "overview"})
+require(overview_before.get("ok"), f"Overview failed after app owner termination: {overview_before}")
+require(
+    any(session.get("id") == session_id and int(session.get("servicePID", -1)) == expected_service_pid for session in overview_before.get("overview", {}).get("sessions", [])),
+    f"Overview after app owner termination did not include the live session: {json.dumps(overview_before, indent=2)}",
+)
+
+launch_response = send_mobile_request({"command": "launchSpacesApp"})
+require(launch_response.get("ok"), f"launchSpacesApp failed: {launch_response}")
+require(launch_response.get("message") == "Launched Spaces on Mac.", f"Unexpected launch response: {launch_response}")
+
+new_owner = wait_for_app_owner_present(timeout=20)
+new_pid = int(new_owner["pid"])
+require(new_pid != old_pid, f"launchSpacesApp reused the old app pid {old_pid}.")
+new_command = process_command(new_pid)
+require("SpacesApp" in new_command, f"Relaunched owner pid {new_pid} is not SpacesApp: {new_command!r}")
+write_app_recovery_state({
+    "status": "recovered",
+    "sessionID": session_id,
+    "oldAppPID": old_pid,
+    "newAppPID": new_pid,
+    "terminalServicePID": expected_service_pid,
+})
+assert_session_live(expected_service_pid, "after app recovery")
+
+overview_after = send_mobile_request({"command": "overview"})
+require(overview_after.get("ok"), f"Overview failed after app recovery: {overview_after}")
+require(
+    any(session.get("id") == session_id and int(session.get("servicePID", -1)) == expected_service_pid for session in overview_after.get("overview", {}).get("sessions", [])),
+    f"Overview after app recovery did not include the live session: {json.dumps(overview_after, indent=2)}",
+)
+
+(scenario_dir / "app-recovery-result.json").write_text(json.dumps({
+    "sessionID": session_id,
+    "oldAppPID": old_pid,
+    "newAppPID": new_pid,
+    "terminalServicePID": expected_service_pid,
+    "launchResponse": launch_response,
+}, indent=2, sort_keys=True))
+log(
+    "App recovery result: "
+    + " ".join(
+        [
+            f"session={shlex.quote(session_id)}",
+            f"old_app_pid={old_pid}",
+            f"new_app_pid={new_pid}",
+            f"terminal_service_pid={expected_service_pid}",
+        ]
+    )
+)
+print(new_pid)
+PY
+  )"; then
+    fail "App recovery assertions failed."
+  fi
+  [[ "$new_app_pid" =~ ^[0-9]+$ ]] || fail "App recovery did not return a numeric app pid: $new_app_pid"
+  DEMO_APP_PID="$new_app_pid"
+  printf 'Mobile scenario passed: app-recovery\n'
+}
+
 run_selected_scenarios() {
   local scenario
   for scenario in "${SELECTED_SCENARIOS[@]}"; do
@@ -2612,6 +2848,9 @@ run_selected_scenarios() {
         ;;
       ownership-guard)
         run_ownership_guard_scenario
+        ;;
+      app-recovery)
+        run_app_recovery_scenario
         ;;
       *)
         fail "unknown scenario: $scenario"

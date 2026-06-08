@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public enum DatabaseSchema {
-    public static let currentVersion = 7
+    public static let currentVersion = 8
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "terminal metadata tables", requiresBackup: false) { database in
@@ -55,7 +55,10 @@ public enum DatabaseSchema {
                 try executeBatch(sql: terminalSessionRuntimeTargetOwnershipBackfillSQL, database: database)
             }
         },
-        DatabaseMigrationStep(fromVersion: 6, toVersion: 7, description: "terminal foreground process metadata", requiresBackup: false) { database in
+        DatabaseMigrationStep(fromVersion: 6, toVersion: 7, description: "workspace setup result metadata", requiresBackup: false) { database in
+            try addWorkspaceSetupResultColumns(database: database)
+        },
+        DatabaseMigrationStep(fromVersion: 7, toVersion: 8, description: "terminal foreground process metadata", requiresBackup: false) { database in
             try addTerminalForegroundRuntimeColumns(database: database)
         },
     ]
@@ -320,7 +323,6 @@ public enum DatabaseSchema {
               name TEXT,
               command TEXT NOT NULL,
               on_exit TEXT NOT NULL DEFAULT 'none',
-              execution_mode TEXT NOT NULL DEFAULT 'direct',
               order_index INTEGER NOT NULL,
               FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
@@ -391,6 +393,8 @@ public enum DatabaseSchema {
               setup_error TEXT,
               setup_started_at TEXT,
               setup_finished_at TEXT,
+              setup_exit_code INTEGER,
+              setup_log_path TEXT,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );
 
@@ -400,7 +404,6 @@ public enum DatabaseSchema {
               name TEXT,
               command TEXT NOT NULL,
               on_exit TEXT NOT NULL DEFAULT 'none',
-              execution_mode TEXT NOT NULL DEFAULT 'direct',
               order_index INTEGER NOT NULL,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );
@@ -545,6 +548,11 @@ public enum DatabaseSchema {
         try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_detected_agent_kind", definition: "TEXT", database: database)
         try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_display_label", definition: "TEXT", database: database)
         try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_display_command", definition: "TEXT", database: database)
+    }
+
+    private static func addWorkspaceSetupResultColumns(database: OpaquePointer) throws {
+        try addColumnIfNeeded(table: "workspace_settings", column: "setup_exit_code", definition: "INTEGER", database: database)
+        try addColumnIfNeeded(table: "workspace_settings", column: "setup_log_path", definition: "TEXT", database: database)
     }
 
     private static func tableExists(_ table: String, database: OpaquePointer) throws -> Bool {

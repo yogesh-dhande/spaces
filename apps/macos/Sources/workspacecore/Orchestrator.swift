@@ -83,6 +83,33 @@ public final class WorkspaceOrchestrator {
         public init(notice: String?) { self.notice = notice }
     }
 
+    public struct PreparedGitProjectImport: Sendable {
+        public let project: ProjectRecord
+        public let defaultWorkspace: WorkspaceRecord
+        public let importedDocument: SpacesYAMLDocument?
+
+        public init(project: ProjectRecord, defaultWorkspace: WorkspaceRecord, importedDocument: SpacesYAMLDocument?) {
+            self.project = project
+            self.defaultWorkspace = defaultWorkspace
+            self.importedDocument = importedDocument
+        }
+    }
+
+    public struct ManagedDirectoryReplacementCandidate: Equatable, Sendable {
+        public enum Kind: String, Hashable, Sendable {
+            case projectRepository
+            case workspaceDirectory
+        }
+
+        public let kind: Kind
+        public let path: String
+
+        public init(kind: Kind, path: String) {
+            self.kind = kind
+            self.path = path
+        }
+    }
+
     public static func setProcessWideBuiltInTerminalSessionLauncher(_ launcher: BuiltInTerminalSessionLauncher?) {
         builtInTerminalSessionLauncherOverrideStore.set(launcher)
     }
@@ -101,6 +128,18 @@ public final class WorkspaceOrchestrator {
         let index: Int
         let prefix: String
         let session: BrowserSession
+    }
+
+    private struct WorkspaceConfigurationSnapshot {
+        let workspace: WorkspaceRecord
+        let settings: WorkspaceSettings?
+        let assignedPorts: [(definitionID: String, port: Int, name: String)]
+    }
+
+    private struct GitProjectImportPlan {
+        let gitURL: String
+        let project: ProjectRecord
+        let destination: URL
     }
 
     private struct BrowserWindowScanResult {
@@ -125,11 +164,28 @@ public final class WorkspaceOrchestrator {
         let scanResult: BrowserWindowScanResult
     }
 
+    private struct ItermTerminalSessionMetadata {
+        let sessionID: String
+        let tabIndex: Int?
+    }
+
+    private struct ManagedTerminalHandle {
+        let fallbackWindowID: Int?
+        let providerIdentity: TerminalTrackingIdentity?
+        let hookAttributionID: String?
+        let containerIdentity: String?
+    }
+
     private struct SpacesTerminalSessionHandle {
         let sessionID: String
         let childPID: Int?
         let windowID: Int?
         let outputPath: String
+    }
+
+    private struct WorkspaceSetupRunResult {
+        let exitCode: Int
+        let logPath: String
     }
 
     private struct BuiltInTerminalSessionOwnership {
@@ -202,6 +258,9 @@ public final class WorkspaceOrchestrator {
     public let store: SQLiteStore
     private let git: GitClient
     private let yabai: YabaiAdapter
+    private let iterm: Iterm2Adapter
+    private let ghostty: GhosttyAdapter
+    private let tmux: TmuxAdapter
     private let chrome: ChromeAdapter
     private let browserWindowScanDebounceInterval: TimeInterval
     private let currentDate: () -> Date
@@ -213,6 +272,7 @@ public final class WorkspaceOrchestrator {
     private let builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
+    private let terminalAdaptersByHost: [TerminalHost: any TerminalAdapter]
     private let workspaceLifecycleLock = NSLock()
     private var workspaceLifecycleInFlight: Set<String> = []
     private let workspaceSetupLock = NSLock()
@@ -223,14 +283,17 @@ public final class WorkspaceOrchestrator {
     private var windowNavigationCycleSessionByWorkspace: [String: WorkspaceNavigationCycleSession] = [:]
     private let browserScanCacheLock = NSLock()
     private var browserWindowScanCacheByWorkspace: [String: BrowserWindowScanCacheEntry] = [:]
+    private let itermTerminalSessionLock = NSLock()
+    private var itermTerminalSessionByWorkspaceAndWindowID: [String: ItermTerminalSessionMetadata] = [:]
     private let terminalFocusPulseController: TerminalFocusPulseControlling
     private let windowNavigationCycleSessionTimeout: TimeInterval = 2
     private let windowNavigationHistoryLimit = 64
+    private let processStartupVerificationTimeout: TimeInterval = 1
 
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
-        yabai: YabaiAdapter = .init(), chrome: ChromeAdapter = .init(),
-        browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval,
+        yabai: YabaiAdapter = .init(), iterm: Iterm2Adapter = .init(), ghostty: GhosttyAdapter = .init(), tmux: TmuxAdapter = .init(),
+        chrome: ChromeAdapter = .init(), browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval,
         terminalFocusPulseController: TerminalFocusPulseControlling = TerminalFocusPulseController(),
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
         builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
@@ -241,8 +304,12 @@ public final class WorkspaceOrchestrator {
         projectsRootDirectoryURL = projectsRootDirectory
         self.git = git
         self.yabai = yabai
+        self.iterm = iterm
+        self.ghostty = ghostty
+        self.tmux = tmux
         self.chrome = chrome
         self.workspacesRootDirectoryURL = workspacesRootDirectory
+        terminalAdaptersByHost = [:]
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
         self.terminalFocusPulseController = terminalFocusPulseController
         self.notificationDeliverer = notificationDeliverer ?? Self.deliverUserNotification
@@ -294,13 +361,6 @@ public final class WorkspaceOrchestrator {
     @discardableResult public func updatePortRange(_ range: PortRange) throws -> AppConfig {
         var config = try store.appConfig()
         config.portRange = range
-        try store.setAppConfig(config)
-        return config
-    }
-
-    @discardableResult public func updateProcessShell(_ processShell: ProcessShell) throws -> AppConfig {
-        var config = try store.appConfig()
-        config.processShell = processShell
         try store.setAppConfig(config)
         return config
     }
@@ -385,11 +445,13 @@ public final class WorkspaceOrchestrator {
         }
         let previousPorts = existing.ports
         let previousProcesses = existing.processes
+        let previousAgentLaunchers = existing.agentLaunchers
         update(&existing)
         existing.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: existing.ports)
         existing.ports = try normalizedPortDefinitions(existing.ports)
         existing.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: existing.processes)
-        try validateProcessTemplates(existing.processes, allowedVariableNames: directProcessVariableNames(portDefinitions: existing.ports))
+        existing.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: existing.agentLaunchers)
+        try validateProcessTemplates(existing.processes)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: existing.processes, browserSessions: existing.browserSessions,
             agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
@@ -409,7 +471,7 @@ public final class WorkspaceOrchestrator {
             throw WorkspaceError.missingProject(dir: project.dir)
         }
         let normalizedProcesses = normalizeProcessTemplateIDs(previous: existing.processes, updated: processes)
-        try validateProcessTemplates(normalizedProcesses, allowedVariableNames: directProcessVariableNames(portDefinitions: existing.ports))
+        try validateProcessTemplates(normalizedProcesses)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: normalizedProcesses, browserSessions: existing.browserSessions,
             agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
@@ -521,6 +583,19 @@ public final class WorkspaceOrchestrator {
 
     public func addProject(dir: String) throws -> ProjectRecord { try addProject(dir: dir) { _ in } }
 
+    public func previewProject(dir: String) throws -> ProjectRecord {
+        let normalizedDir = normalizePath(dir)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
+            throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
+        }
+        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
+        let importedDocument = try spacesYAMLDocumentIfPresent(in: URL(fileURLWithPath: normalizedDir, isDirectory: true))
+        return try configuredProjectRecord(baseRecord: normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir)) {
+            project in importedDocument?.applying(to: &project)
+        }
+    }
+
     public func addProject(dir: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
         let normalizedDir = normalizePath(dir)
         var isDir: ObjCBool = false
@@ -528,8 +603,28 @@ public final class WorkspaceOrchestrator {
             throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
         }
         if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
-        let record = try configuredProjectRecord(
-            baseRecord: normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir), update: configure)
+        let importedDocument = try spacesYAMLDocumentIfPresent(in: URL(fileURLWithPath: normalizedDir, isDirectory: true))
+        let record = try configuredProjectRecord(baseRecord: normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir)) {
+            project in
+            guard let importedDocument else {
+                configure(&project)
+                return
+            }
+            importedDocument.applying(to: &project)
+        }
+        try store.upsert(project: record)
+        do { try ensureDefaultWorkspace(for: record) } catch {
+            try? store.deleteProject(id: record.id)
+            throw error
+        }
+        return record
+    }
+
+    public func addReviewedProject(dir: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
+        let normalizedDir = normalizePath(dir)
+        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
+        let baseRecord = try normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir)
+        let record = try configuredProjectRecord(baseRecord: baseRecord, update: configure)
         try store.upsert(project: record)
         do { try ensureDefaultWorkspace(for: record) } catch {
             try? store.deleteProject(id: record.id)
@@ -541,50 +636,163 @@ public final class WorkspaceOrchestrator {
     public func addProject(gitURL: String) throws -> ProjectRecord { try addProject(gitURL: gitURL) { _ in } }
 
     public func addProject(gitURL: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
-        let trimmedURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedURL.isEmpty else { throw WorkspaceError.invalidArgument(message: "Git repository URL is required.") }
-        let inferredName = inferredProjectName(from: trimmedURL)
-        let projectID = projectID(namespace: "git", source: trimmedURL)
-        let projectName = sanitizeDirname(inferredName, fallback: "project")
-        let projectDirname = managedProjectStorageDirectoryName(projectID: projectID, preferredName: projectName)
-        let destination = repositoriesRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
-        let normalizedDestination = normalizePath(destination.path)
-
-        if try store.project(dir: normalizedDestination) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDestination) }
-        if FileManager.default.fileExists(atPath: destination.path) {
-            throw WorkspaceError.invalidArgument(message: "Project directory already exists: \(normalizedDestination)")
-        }
-        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try git.clone(url: trimmedURL, destination: destination.path, bare: true)
-
-        var shouldCleanupDestination = true
+        let prepared = try prepareGitProject(gitURL: gitURL, replaceExistingManagedDirectories: true)
         do {
-            let defaultBranch = try preferredImportedDefaultBranch(path: destination.path)
-            let baseRecord = ProjectRecord(
-                id: projectID, name: projectName, dir: normalizedDestination, isGitRepo: true, defaultBranch: defaultBranch)
-            let record = try configuredProjectRecord(baseRecord: baseRecord, update: configure)
-            let defaultWorkspaceDirectory = try importedDefaultWorkspaceDirectory(project: record, branch: defaultBranch)
-            try store.upsert(project: record)
-            do { try ensureImportedGitDefaultWorkspace(for: record, branch: defaultBranch) } catch {
-                try? rollbackFailedImportedProjectCreation(project: record, workspaceDirectory: defaultWorkspaceDirectory)
-                throw error
+            return try addPreparedGitProject(prepared) { project in
+                guard prepared.importedDocument == nil else { return }
+                configure(&project)
             }
-            shouldCleanupDestination = false
-            return record
         } catch {
-            if shouldCleanupDestination { try? FileManager.default.removeItem(at: destination) }
+            try? discardPreparedGitProject(prepared)
             throw error
         }
     }
 
-    public func updateProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws {
-        guard var record = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
-        let previousRecord = record
-        record = try configuredProjectRecord(baseRecord: record, update: update)
-        try store.upsert(project: record)
-        try ensureDefaultWorkspace(for: record)
-        try syncDefaultWorkspaceSettingsIfTemplateBased(project: record, previousRecord: previousRecord, updatedRecord: record)
+    public func prepareGitProject(gitURL: String, replaceExistingManagedDirectories: Bool = true) throws -> PreparedGitProjectImport {
+        let plan = try gitProjectImportPlan(gitURL: gitURL)
+        try replaceManagedGitProjectImportDirectoriesIfNeeded(plan: plan, allowReplacement: replaceExistingManagedDirectories)
+        try FileManager.default.createDirectory(at: plan.destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try git.clone(url: plan.gitURL, destination: plan.destination.path, bare: true)
+
+        var shouldCleanupDestination = true
+        do {
+            let defaultBranch = try preferredImportedDefaultBranch(path: plan.destination.path)
+            let baseRecord = ProjectRecord(
+                id: plan.project.id, name: plan.project.name, dir: plan.project.dir, isGitRepo: true, defaultBranch: defaultBranch)
+            var record = try configuredProjectRecord(baseRecord: baseRecord) { _ in }
+            let defaultWorkspace = try createImportedGitDefaultWorkspaceOnDisk(project: record, branch: defaultBranch)
+            let worktreeURL = URL(fileURLWithPath: defaultWorkspace.dir, isDirectory: true)
+            let importedDocument = try spacesYAMLDocumentIfPresent(in: worktreeURL)
+            if let importedDocument {
+                record = try configuredProjectRecord(baseRecord: record) { project in importedDocument.applying(to: &project) }
+            }
+            shouldCleanupDestination = false
+            return PreparedGitProjectImport(project: record, defaultWorkspace: defaultWorkspace, importedDocument: importedDocument)
+        } catch {
+            if shouldCleanupDestination {
+                try? removeManagedGitWorkspaceDirectoriesIfNeeded(project: plan.project)
+                try? FileManager.default.removeItem(at: plan.destination)
+            }
+            throw error
+        }
     }
+
+    public func managedGitProjectImportReplacementCandidates(gitURL: String) throws -> [ManagedDirectoryReplacementCandidate] {
+        try managedGitProjectImportReplacementCandidates(plan: gitProjectImportPlan(gitURL: gitURL))
+    }
+
+    public func managedWorkspaceReplacementCandidate(projectID: String, directoryName: String) throws -> ManagedDirectoryReplacementCandidate? {
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        guard project.isGitRepo else { return nil }
+        let trimmedDirectoryName = directoryName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedDirectoryName.isEmpty else { return nil }
+        try validateWorkspaceDirname(trimmedDirectoryName)
+        let workspaceDirectory = try worktreeRoot(project: project).appendingPathComponent(trimmedDirectoryName, isDirectory: true).path
+        return try managedDirectoryReplacementCandidate(path: workspaceDirectory, kind: .workspaceDirectory)
+    }
+
+    @discardableResult public func addPreparedGitProject(_ prepared: PreparedGitProjectImport, configure: (inout ProjectRecord) -> Void) throws
+        -> ProjectRecord
+    {
+        guard prepared.project.isGitRepo else { throw WorkspaceError.invalidArgument(message: "Prepared project must be a git project.") }
+        let normalizedDir = normalizePath(prepared.project.dir)
+        guard normalizedDir == prepared.project.dir else {
+            throw WorkspaceError.invalidArgument(message: "Prepared project directory is not normalized: \(prepared.project.dir)")
+        }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
+            throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
+        }
+        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
+        var workspaceIsDir = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: prepared.defaultWorkspace.dir, isDirectory: &workspaceIsDir), workspaceIsDir.boolValue else {
+            throw WorkspaceError.invalidArgument(message: "Default workspace directory not found: \(prepared.defaultWorkspace.dir)")
+        }
+        let record = try configuredProjectRecord(baseRecord: prepared.project, update: configure)
+        let defaultWorkspace = WorkspaceRecord(
+            id: prepared.defaultWorkspace.id, projectID: record.id, title: prepared.defaultWorkspace.title, dir: prepared.defaultWorkspace.dir,
+            dirname: prepared.defaultWorkspace.dirname, branch: prepared.defaultWorkspace.branch,
+            targetBranch: prepared.defaultWorkspace.targetBranch, isDefault: true, isArchived: false, isHidden: prepared.defaultWorkspace.isHidden,
+            isRunning: false, lastLaunchedAt: nil, notes: prepared.defaultWorkspace.notes)
+        try store.upsert(project: record)
+        do {
+            try store.upsert(workspace: defaultWorkspace)
+            try seedWorkspaceSettings(project: record, workspace: defaultWorkspace)
+            let appConfig = try store.appConfig()
+            let portDefinitions = try store.workspacePortDefinitions(workspaceID: defaultWorkspace.id)
+            _ = try PortAllocator(store: store).allocatePorts(
+                workspaceID: defaultWorkspace.id, definitions: portDefinitions, range: appConfig.portRange)
+            return record
+        } catch {
+            try? rollbackFailedImportedProjectCreation(project: record, workspaceDirectory: defaultWorkspace.dir)
+            throw error
+        }
+    }
+
+    public func discardPreparedGitProject(_ prepared: PreparedGitProjectImport) throws {
+        try removePreparedManagedGitWorkspaceRootIfUnowned(project: prepared.project)
+        try removePreparedManagedProjectDirectoryIfUnowned(project: prepared.project)
+    }
+
+    @discardableResult public func previewProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
+        guard let record = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        return try configuredProjectRecord(baseRecord: record, update: update)
+    }
+
+    public func updateProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws {
+        _ = try updateProjectConfig(projectID: projectID, updateAllWorkspaces: false, update: update)
+    }
+
+    @discardableResult public func updateProjectConfig(projectID: String, updateAllWorkspaces: Bool, update: (inout ProjectRecord) -> Void) throws
+        -> ProjectRecord
+    {
+        guard let originalProject = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        let updatedProject = try configuredProjectRecord(baseRecord: originalProject, update: update)
+        guard updateAllWorkspaces else {
+            try store.upsert(project: updatedProject)
+            try ensureDefaultWorkspace(for: updatedProject)
+            return updatedProject
+        }
+
+        try ensureDefaultWorkspace(for: originalProject)
+        let workspaceSnapshots = try workspaceConfigurationSnapshots(projectID: projectID)
+        do {
+            try store.upsert(project: updatedProject)
+            try applyProjectTemplateToAllWorkspaces(project: updatedProject)
+        } catch {
+            try restoreSpacesYAMLImportSnapshot(project: originalProject, workspaces: workspaceSnapshots)
+            throw error
+        }
+        return updatedProject
+    }
+
+    public func spacesYAMLConfigURL(projectID: String) throws -> URL {
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        return try spacesYAMLConfigURL(project: project)
+    }
+
+    public func loadSpacesYAML(projectID: String) throws -> SpacesYAMLDocument {
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        let document = try SpacesYAMLService.load(from: spacesYAMLConfigURL(project: project))
+        _ = try previewProjectConfig(projectID: projectID) { record in document.applying(to: &record) }
+        return document
+    }
+
+    @discardableResult public func exportSpacesYAML(projectID: String) throws -> URL {
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        let url = try spacesYAMLConfigURL(project: project)
+        try SpacesYAMLService.write(SpacesYAMLDocument(project: project), to: url)
+        return url
+    }
+
+    @discardableResult public func importSpacesYAML(projectID: String, updateAllWorkspaces: Bool = false) throws -> ProjectRecord {
+        let document = try loadSpacesYAML(projectID: projectID)
+        return try applySpacesYAMLDocument(document, projectID: projectID, updateAllWorkspaces: updateAllWorkspaces)
+    }
+
+    @discardableResult public func applySpacesYAMLDocument(_ document: SpacesYAMLDocument, projectID: String, updateAllWorkspaces: Bool = false)
+        throws -> ProjectRecord
+    { try updateProjectConfig(projectID: projectID, updateAllWorkspaces: updateAllWorkspaces) { record in document.applying(to: &record) } }
 
     public func removeProject(dir: String) throws {
         let normalizedDir = normalizePath(dir)
@@ -599,12 +807,14 @@ public final class WorkspaceOrchestrator {
 
     public func createWorkspace(
         projectID: String, name: String, branch: String? = nil, targetBranch: String? = nil, directoryName: String? = nil,
-        runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false
+        runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false,
+        replaceExistingManagedDirectory: Bool = false
     ) throws -> WorkspaceRecord {
         guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Workspace name is required.") }
         let trimmedDirectoryName = directoryName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let replacesExplicitManagedDirectory = replaceExistingManagedDirectory && trimmedDirectoryName?.isEmpty == false
         let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedBranch: String?
         let resolvedTargetBranch: String?
@@ -647,11 +857,13 @@ public final class WorkspaceOrchestrator {
             let revivedDirname: String?
             let revivedBranch: String?
             let dirname = try makeWorkspaceDirname(
-                project: project, preferredExistingDirname: existing.dirname, requestedDirname: trimmedDirectoryName, excludingDirname: nil)
+                project: project, preferredExistingDirname: existing.dirname, requestedDirname: trimmedDirectoryName, excludingDirname: nil,
+                excludingFilesystemDirname: replacesExplicitManagedDirectory ? trimmedDirectoryName : nil)
             revivedDirname = dirname
             let worktreeRoot = try worktreeRoot(project: project)
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
             revivedDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
+            try replaceManagedWorkspaceDirectoryIfNeeded(path: revivedDir, allowReplacement: replacesExplicitManagedDirectory)
             if !FileManager.default.fileExists(atPath: revivedDir) {
                 try git.createWorktree(
                     path: project.dir, worktreePath: revivedDir, branch: branchName, targetBranch: resolvedTargetBranch,
@@ -682,11 +894,13 @@ public final class WorkspaceOrchestrator {
         if project.isGitRepo {
             guard let branchName = resolvedBranch else { throw WorkspaceError.invalidArgument(message: "Branch name is required for git projects.") }
             let dirname = try makeWorkspaceDirname(
-                project: project, preferredExistingDirname: nil, requestedDirname: trimmedDirectoryName, excludingDirname: nil)
+                project: project, preferredExistingDirname: nil, requestedDirname: trimmedDirectoryName, excludingDirname: nil,
+                excludingFilesystemDirname: replacesExplicitManagedDirectory ? trimmedDirectoryName : nil)
             workspaceDirname = dirname
             let worktreeRoot = try worktreeRoot(project: project)
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
             workspaceDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
+            try replaceManagedWorkspaceDirectoryIfNeeded(path: workspaceDir, allowReplacement: replacesExplicitManagedDirectory)
             try git.createWorktree(
                 path: project.dir, worktreePath: workspaceDir, branch: branchName, targetBranch: resolvedTargetBranch,
                 allowRemoteBranchLookup: allowRemoteBranchLookup)
@@ -893,6 +1107,7 @@ public final class WorkspaceOrchestrator {
         guard !initialWorkspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
         try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
         guard !(workspace.isRunning || hasTrackedRuntime) else {
@@ -1511,6 +1726,7 @@ public final class WorkspaceOrchestrator {
         workspaceID: String, process: RunningProcessRecord, templateOverride: ProcessTemplate? = nil, terminalHostOverride: TerminalHost? = nil,
         background: Bool = false
     ) throws {
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         let previousSessionID = process.terminalNativeID ?? process.terminalTrackingID
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
             fputs(
@@ -1524,7 +1740,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         _ = terminateProcessForRestart(process)
         terminateBuiltInTerminalSession(for: process)
-        let command = try spacesTerminalCommand(template: template, env: env, processShell: try store.appConfig().processShell)
+        let command = try spacesTerminalCommand(template: template, env: env)
         let session = try launchSpacesTerminalSession(
             title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner, backend: .ghosttyEmbedded,
             readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
@@ -2708,6 +2924,64 @@ public final class WorkspaceOrchestrator {
         return true
     }
 
+    private func closeTrackedItermTerminalContainer(_ process: RunningProcessRecord) throws -> Bool {
+        guard isManagedTerminalApp(process.terminalApp) else { return false }
+        if terminalHost(for: process.terminalApp) == .spaces {
+            guard let sessionID = process.terminalNativeID ?? process.terminalTrackingID, !sessionID.isEmpty else { return false }
+            builtInTerminalWindowCloser(sessionID)
+            return true
+        }
+        guard let windowID = process.windowID else { return false }
+        return (try? yabai.closeWindow(id: windowID)) != nil
+    }
+
+    private func closeTrackedItermTerminalWindow(_ trackedWindow: WindowRecord) throws -> Bool {
+        if terminalHost(for: trackedWindow.app) == .spaces {
+            guard let sessionID = trackedWindow.terminalNativeID ?? trackedWindow.terminalTrackingID, !sessionID.isEmpty else { return false }
+            builtInTerminalWindowCloser(sessionID)
+            return true
+        }
+        guard let windowID = trackedWindow.windowID else { return false }
+        return (try? yabai.closeWindow(id: windowID)) != nil
+    }
+
+    private func setItermTerminalSessionMetadata(workspaceID: String, windowID: Int, sessionID: String?, tabIndex: Int?) {
+        guard let sessionID, !sessionID.isEmpty else { return }
+        let key = "\(workspaceID):\(windowID)"
+        itermTerminalSessionLock.lock()
+        itermTerminalSessionByWorkspaceAndWindowID[key] = ItermTerminalSessionMetadata(sessionID: sessionID, tabIndex: tabIndex)
+        itermTerminalSessionLock.unlock()
+    }
+
+    private func itermTerminalSessionMetadata(workspaceID: String, windowID: Int) -> ItermTerminalSessionMetadata? {
+        let key = "\(workspaceID):\(windowID)"
+        itermTerminalSessionLock.lock()
+        defer { itermTerminalSessionLock.unlock() }
+        return itermTerminalSessionByWorkspaceAndWindowID[key]
+    }
+
+    private func clearItermTerminalSessionMetadata(workspaceID: String) {
+        itermTerminalSessionLock.lock()
+        itermTerminalSessionByWorkspaceAndWindowID = itermTerminalSessionByWorkspaceAndWindowID.filter { !$0.key.hasPrefix("\(workspaceID):") }
+        itermTerminalSessionLock.unlock()
+    }
+
+    private func persistItermTerminalWindowMetadata(workspaceID: String, windowID: Int, sessionID: String?, tabIndex: Int?) throws {
+        guard let sessionID, !sessionID.isEmpty else { return }
+        let windows = try store.windows(workspaceID: workspaceID)
+        guard let existing = windows.first(where: { $0.role == "terminal" && isManagedTerminalApp($0.app) && $0.windowID == windowID }) else {
+            return
+        }
+        let updated = WindowRecord(
+            id: existing.id, workspaceID: existing.workspaceID, app: existing.app, name: existing.name, detail: existing.detail,
+            targetURL: existing.targetURL, windowID: existing.windowID, terminalTrackingID: sessionID, terminalNativeID: existing.terminalNativeID,
+            terminalContainerID: existing.terminalContainerID, itermTabIndex: tabIndex, tmuxWindowID: existing.tmuxWindowID, role: existing.role,
+            orderIndex: existing.orderIndex, lastSeenAt: nowISO8601())
+        try store.upsert(window: updated)
+    }
+
+    private func tmuxSessionName(workspaceID: String) -> String { "spaces-\(workspaceID)" }
+
     private func terminalTargetID(process: RunningProcessRecord) -> String? {
         if let sessionID = process.terminalNativeID, !sessionID.isEmpty { return sessionID }
         return process.terminalTrackingKey
@@ -2736,6 +3010,18 @@ public final class WorkspaceOrchestrator {
 
     private func isManagedTerminalApp(_ appName: String?) -> Bool { terminalHost(for: appName) != nil }
 
+    private func terminalAdapter(for terminalHost: TerminalHost) -> (any TerminalAdapter)? { terminalAdaptersByHost[terminalHost] }
+
+    private func storedTerminalHookSessionID(terminalHost _: TerminalHost, handle: ManagedTerminalHandle) -> String? {
+        handle.hookAttributionID ?? handle.providerIdentity?.sessionID
+    }
+
+    private func storedTerminalNativeID(terminalHost _: TerminalHost, handle: ManagedTerminalHandle) -> String? {
+        return handle.providerIdentity?.sessionID
+    }
+
+    private func storedTerminalContainerID(terminalHost _: TerminalHost, handle _: ManagedTerminalHandle) -> String? { nil }
+
     private func resolvedFocusIdentity(for window: WindowRecord, workspaceID: String) -> TerminalTrackingIdentity? {
         if let terminalHost = terminalHost(for: window.app), terminalHost == .spaces, let focusIdentity = window.terminalFocusIdentity {
             return focusIdentity
@@ -2756,60 +3042,91 @@ public final class WorkspaceOrchestrator {
             }
             return .window(windowID)
         }
+        if let tmuxWindowID = window.tmuxWindowID, !tmuxWindowID.isEmpty { return .tmux(tmuxWindowID) }
         return nil
     }
 
     private func focusManagedTerminal(terminalApp: String?, providerIdentity: TerminalTrackingIdentity?, windowID: Int?, requestID: String? = nil)
         -> ManagedTerminalFocusResult
     {
-        guard let terminalHost = terminalHost(for: terminalApp), terminalHost == .spaces else { return .unavailable }
-        let startedAt = currentDate()
-        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
-        if case .session(let sessionID)? = providerIdentity {
-            builtInTerminalWindowFocuser(sessionID, requestID)
-            guard requestID == nil else {
+        guard let terminalHost = terminalHost(for: terminalApp) else { return .unavailable }
+        if terminalHost == .spaces {
+            let startedAt = currentDate()
+            let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+            if case .session(let sessionID)? = providerIdentity {
+                builtInTerminalWindowFocuser(sessionID, requestID)
+                guard requestID == nil else {
+                    logTerminalPerfMetric(
+                        "built_in_terminal_focus_route", target: "session=\(sessionID)", detail: "stage=session_request\(requestDetail)",
+                        elapsedMS: elapsedMS(since: startedAt), success: true)
+                    return .sessionRequest
+                }
+                if let capturedWindowID = try? captureSummonedBuiltInTerminalWindowID(appName: terminalAppName(for: terminalHost)) {
+                    if capturedWindowID != windowID {
+                        logTerminalPerfMetric(
+                            "built_in_terminal_focus_route", target: "session=\(sessionID)",
+                            detail: "stage=rebound_session window=\(capturedWindowID)\(requestDetail)", elapsedMS: elapsedMS(since: startedAt),
+                            success: true)
+                        return .reboundSession(windowID: capturedWindowID)
+                    }
+                    logTerminalPerfMetric(
+                        "built_in_terminal_focus_route", target: "session=\(sessionID)",
+                        detail: "stage=existing_window window=\(capturedWindowID)\(requestDetail)", elapsedMS: elapsedMS(since: startedAt),
+                        success: true)
+                    return .existingWindow
+                }
+                if windowID != nil {
+                    logTerminalPerfMetric(
+                        "built_in_terminal_focus_route", target: "session=\(sessionID)", detail: "stage=reopened_session window=nil\(requestDetail)",
+                        elapsedMS: elapsedMS(since: startedAt), success: true)
+                    return .reopenedSession(windowID: nil)
+                }
                 logTerminalPerfMetric(
                     "built_in_terminal_focus_route", target: "session=\(sessionID)", detail: "stage=session_request\(requestDetail)",
                     elapsedMS: elapsedMS(since: startedAt), success: true)
                 return .sessionRequest
             }
-            if let capturedWindowID = try? captureSummonedBuiltInTerminalWindowID(appName: terminalAppName(for: terminalHost)) {
-                if capturedWindowID != windowID {
-                    logTerminalPerfMetric(
-                        "built_in_terminal_focus_route", target: "session=\(sessionID)",
-                        detail: "stage=rebound_session window=\(capturedWindowID)\(requestDetail)", elapsedMS: elapsedMS(since: startedAt),
-                        success: true)
-                    return .reboundSession(windowID: capturedWindowID)
-                }
+            if let windowID, (try? yabai.focusWindow(id: windowID)) ?? false {
                 logTerminalPerfMetric(
-                    "built_in_terminal_focus_route", target: "session=\(sessionID)",
-                    detail: "stage=existing_window window=\(capturedWindowID)\(requestDetail)", elapsedMS: elapsedMS(since: startedAt), success: true)
+                    "built_in_terminal_focus_route", target: "window=\(windowID)", detail: "stage=existing_window\(requestDetail)",
+                    elapsedMS: elapsedMS(since: startedAt), success: true)
                 return .existingWindow
             }
-            if windowID != nil {
-                logTerminalPerfMetric(
-                    "built_in_terminal_focus_route", target: "session=\(sessionID)", detail: "stage=reopened_session window=nil\(requestDetail)",
-                    elapsedMS: elapsedMS(since: startedAt), success: true)
-                return .reopenedSession(windowID: nil)
-            }
-            logTerminalPerfMetric(
-                "built_in_terminal_focus_route", target: "session=\(sessionID)", detail: "stage=session_request\(requestDetail)",
-                elapsedMS: elapsedMS(since: startedAt), success: true)
-            return .sessionRequest
+            return .unavailable
         }
-        if let windowID, (try? yabai.focusWindow(id: windowID)) ?? false {
-            logTerminalPerfMetric(
-                "built_in_terminal_focus_route", target: "window=\(windowID)", detail: "stage=existing_window\(requestDetail)",
-                elapsedMS: elapsedMS(since: startedAt), success: true)
-            return .existingWindow
-        }
-        return .unavailable
+        guard let terminalAdapter = terminalAdapter(for: terminalHost) else { return .unavailable }
+        let hasPreciseTarget = providerIdentity != nil || windowID != nil
+        guard hasPreciseTarget else { return .unavailable }
+        let target = TerminalFocusTarget(providerIdentity: providerIdentity, windowID: windowID)
+        return (try? terminalAdapter.focusTrackedTerminal(target)) == true ? .trackedTerminal : .unavailable
     }
 
     private func pulseTerminalWindowIfNeeded(windowID: Int) {
         guard (try? windowFocusPulseEnabled()) ?? SettingsKey.defaultWindowFocusPulseEnabled else { return }
         let color = (try? windowFocusPulseColor()) ?? defaultWindowFocusPulseColor()
         terminalFocusPulseController.pulse(windowID: windowID, color: color, yabai: yabai)
+    }
+
+    private func terminalAdapterAvailable(_ terminalHost: TerminalHost) -> Bool {
+        if terminalHost == .spaces { return true }
+        return terminalAdapter(for: terminalHost)?.isAvailable() == true
+    }
+
+    private func missingTerminalDependencyMessage(for terminalHost: TerminalHost, operation: String) -> String {
+        if terminalHost == .spaces { return "SpacesApp must be running to \(operation) with the built-in terminal." }
+        return "\(terminalHost.displayName) is required to \(operation)."
+    }
+
+    private func openManagedTerminalWindow(
+        terminalHost: TerminalHost, command: String, cwd: String, environment: [String: String] = [:], background: Bool = false
+    ) throws -> ManagedTerminalHandle {
+        guard let terminalAdapter = terminalAdapter(for: terminalHost) else {
+            throw WorkspaceError.invalidArgument(message: "Unsupported terminal host: \(terminalHost.rawValue)")
+        }
+        let result = try terminalAdapter.openWindowAndRun(command: command, cwd: cwd, environment: environment, background: background)
+        return ManagedTerminalHandle(
+            fallbackWindowID: result.fallbackWindowID, providerIdentity: result.providerIdentity, hookAttributionID: result.hookAttributionID,
+            containerIdentity: result.containerIdentity)
     }
 
     private func workspaceTerminalWindowID(workspaceID: String) throws -> Int? {
@@ -2836,19 +3153,135 @@ public final class WorkspaceOrchestrator {
         return try store.agentWindows(workspaceID: workspaceID).first(where: { $0.terminalTrackingID?.isEmpty == false })?.terminalTrackingID
     }
 
+    private func waitForTmuxSession(named sessionName: String, timeout: TimeInterval = 5.0) -> Bool {
+        let deadline = currentDate().addingTimeInterval(timeout)
+        while currentDate() < deadline {
+            if tmux.hasSession(named: sessionName) { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return tmux.hasSession(named: sessionName)
+    }
+
+    private func workspaceAttachCommand(workspace: WorkspaceRecord) -> String {
+        "cd \(shellSingleQuoted(workspace.dir)) && exec tmux new-session -A -s \(shellSingleQuoted(tmuxSessionName(workspaceID: workspace.id))) -c \(shellSingleQuoted(workspace.dir))"
+    }
+
+    private func processTmuxSessionName(workspaceID: String, processName: String) -> String {
+        "spaces-\(workspaceID)-\(safeFilename(processName).lowercased())"
+    }
+
     private func shellSingleQuoted(_ raw: String) -> String { "'\(raw.replacingOccurrences(of: "'", with: "'\\''"))'" }
 
-    private func shellLaunchCommand(_ command: String) -> String {
-        let operators = ["&&", "||", ";", "|", ">", "<", "\n"]
-        guard !operators.contains(where: { command.contains($0) }) else { return command }
-        return "exec \(command)"
+    private func tmuxAttachCommand(sessionName: String, cwd: String) -> String {
+        "cd \(shellSingleQuoted(cwd)) && exec tmux attach-session -t \(shellSingleQuoted(sessionName))"
     }
 
-    private func interactiveShellCommand(cwd _: String) -> String {
-        let configuredShell = Shell.currentProcessEnvironment()["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let shellPath = configuredShell.flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/zsh"
-        return "exec \(shellSingleQuoted(shellPath)) -l"
+    private func startupFailureSummary(from paneOutput: String) -> String? {
+        let lines = paneOutput.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return nil }
+
+        let selectedLines = Array(lines.suffix(3))
+        guard !selectedLines.isEmpty else { return nil }
+
+        return selectedLines.map { String($0.prefix(160)) }.joined(separator: "\n")
     }
+
+    private func processStartupFailureMessage(processName: String, commandDescription: String?, exitStatus: Int?, paneOutput: String?) -> String {
+        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCommand = commandDescription?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label: String
+        if !trimmedProcessName.isEmpty, let trimmedCommand, !trimmedCommand.isEmpty {
+            label = "Process '\(trimmedProcessName)' failed to start (\(trimmedCommand))."
+        } else if !trimmedProcessName.isEmpty {
+            label = "Process '\(trimmedProcessName)' failed to start."
+        } else if let trimmedCommand, !trimmedCommand.isEmpty {
+            label = "Command failed to start (\(trimmedCommand))."
+        } else {
+            label = "Process failed to start."
+        }
+
+        if let paneOutput, let summary = startupFailureSummary(from: paneOutput) {
+            if summary.contains("\n") { return "\(label)\n\(summary)" }
+            return "\(label) \(summary)"
+        }
+        if let exitStatus { return "\(label) Exit status \(exitStatus)." }
+        return label
+    }
+
+    private func surfacedProcessStartupError(sessionName: String, windowID: String, processName: String, commandDescription: String?)
+        -> WorkspaceError
+    {
+        let paneOutput = try? tmux.capturePane(windowID: windowID)
+        let exitStatus = try? tmux.paneExitStatus(windowID: windowID)
+        if tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
+        return .invalidArgument(
+            message: processStartupFailureMessage(
+                processName: processName, commandDescription: commandDescription, exitStatus: exitStatus, paneOutput: paneOutput))
+    }
+
+    private func verifyProcessSessionStarted(sessionName: String, windowID: String, processName: String, commandDescription: String?) throws {
+        let deadline = currentDate().addingTimeInterval(processStartupVerificationTimeout)
+        var sawLiveWindow = false
+        while currentDate() < deadline {
+            if let window = try? tmux.currentWindow(sessionName: sessionName) {
+                if (try? tmux.isPaneDead(windowID: window.id)) == true {
+                    throw surfacedProcessStartupError(
+                        sessionName: sessionName, windowID: window.id, processName: processName, commandDescription: commandDescription)
+                }
+                sawLiveWindow = true
+            } else if !tmux.hasSession(named: sessionName) {
+                throw surfacedProcessStartupError(
+                    sessionName: sessionName, windowID: windowID, processName: processName, commandDescription: commandDescription)
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        if sawLiveWindow { return }
+        if !waitForTmuxSession(named: sessionName) {
+            throw WorkspaceError.invalidArgument(message: tmuxSessionTimeoutMessage(processName: processName, commandDescription: commandDescription))
+        }
+    }
+
+    @discardableResult private func attachProcessTmuxSession(
+        workspace: WorkspaceRecord, processName: String, commandDescription: String? = nil, terminalHost: TerminalHost, background: Bool = false
+    ) throws -> ManagedTerminalHandle {
+        let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: processName)
+        let windowInfo = try openManagedTerminalWindow(
+            terminalHost: terminalHost, command: tmuxAttachCommand(sessionName: sessionName, cwd: workspace.dir), cwd: workspace.dir,
+            background: background)
+        guard waitForTmuxSession(named: sessionName) else {
+            throw WorkspaceError.invalidArgument(message: tmuxSessionTimeoutMessage(processName: processName, commandDescription: commandDescription))
+        }
+        return windowInfo
+    }
+
+    private func launchProcessInTmux(
+        workspace: WorkspaceRecord, processName: String, rawCommand: String, command: String, env: [String: String], terminalHost: TerminalHost,
+        background: Bool = false, replaceExistingSession: Bool
+    ) throws -> ManagedTerminalHandle {
+        let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: processName)
+        if replaceExistingSession, tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
+        let runtimeEnv = terminalLaunchEnvironment(base: env, terminalHost: terminalHost)
+        _ = try tmux.startSession(
+            named: sessionName, windowName: processName, cwd: workspace.dir, env: runtimeEnv,
+            command: [terminalLoginShellPath(), "-l", "-c", command])
+        guard waitForTmuxSession(named: sessionName) else {
+            throw WorkspaceError.invalidArgument(message: tmuxSessionTimeoutMessage(processName: processName, commandDescription: rawCommand))
+        }
+        if let tmuxWindow = try? currentTmuxWindowInfo(workspaceID: workspace.id, processName: processName) {
+            try verifyProcessSessionStarted(
+                sessionName: sessionName, windowID: tmuxWindow.id, processName: processName, commandDescription: rawCommand)
+        }
+        let windowInfo = try attachProcessTmuxSession(
+            workspace: workspace, processName: processName, commandDescription: rawCommand, terminalHost: terminalHost, background: background)
+        return windowInfo
+    }
+
+    private func currentTmuxWindowInfo(workspaceID: String, processName: String) throws -> TmuxWindowInfo? {
+        try tmux.currentWindow(sessionName: processTmuxSessionName(workspaceID: workspaceID, processName: processName))
+    }
+
+    private func interactiveShellCommand(cwd _: String) -> String { "exec \(shellSingleQuoted(terminalLoginShellPath())) -l" }
 
     private func terminalLaunchEnvironment(base: [String: String], terminalHost: TerminalHost, includeInheritedPath: Bool = true) -> [String: String]
     {
@@ -2870,9 +3303,12 @@ public final class WorkspaceOrchestrator {
         return "\(exports); \(command)"
     }
 
-    private func terminalShellPathOverride() -> String? {
-        let configuredShell = Shell.currentProcessEnvironment()["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return configuredShell.flatMap { $0.isEmpty ? nil : $0 }
+    private func terminalShellPathOverride() -> String? { terminalLoginShellPath() }
+
+    private func terminalLoginShellPath() -> String {
+        let shellPath = Shell.resolvedLoginShellExecutablePath(environment: Shell.currentProcessEnvironment())?.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        return shellPath.flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/zsh"
     }
 
     private enum BuiltInTerminalReadinessPolicy: String {
@@ -2922,32 +3358,6 @@ public final class WorkspaceOrchestrator {
             outputPath: sessionSummary.outputPath)
     }
 
-    private struct DirectTerminalCommand {
-        let executable: String
-        let arguments: [String]
-    }
-
-    private enum ProcessLaunchCommand {
-        case direct(DirectProcessCommand)
-        case shell(shell: ProcessShell, command: String)
-    }
-
-    private struct DirectProcessCommand {
-        let executable: String
-        let arguments: [String]
-        let environment: [String: String]
-
-        var argv: [String] { [executable] + arguments }
-    }
-
-    private enum DirectProcessCommandValidationError: Error {
-        case unsupportedSyntax
-        case unsupportedVariableExpansion(String)
-        case unknownVariable(String)
-    }
-
-    private let builtInDirectProcessVariableNames: Set<String> = ["SPACES_PROJECT_DIR", "SPACES_WORKSPACE_DIR"]
-
     private func shellQuoted(_ token: String) -> String {
         guard !token.isEmpty else { return "''" }
         let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._/:")
@@ -2955,194 +3365,24 @@ public final class WorkspaceOrchestrator {
         return "'" + token.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    private func parseDirectTerminalCommand(_ raw: String) -> DirectTerminalCommand? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        var tokens: [String] = []
-        var current = ""
-        var quote: Character?
-        var iterator = trimmed.makeIterator()
-
-        while let char = iterator.next() {
-            if let currentQuote = quote {
-                if char == currentQuote {
-                    quote = nil
-                    continue
-                }
-                if char == "\\" && currentQuote == "\"" {
-                    if let escaped = iterator.next() { current.append(escaped) } else { current.append(char) }
-                    continue
-                }
-                current.append(char)
-                continue
-            }
-
-            switch char {
-            case "'", "\"": quote = char
-            case " ", "\t", "\n":
-                if !current.isEmpty {
-                    tokens.append(current)
-                    current = ""
-                }
-            case "\\": if let escaped = iterator.next() { current.append(escaped) } else { current.append(char) }
-            case "|", "&", ";", "<", ">", "(", ")", "`": return nil
-            default: current.append(char)
-            }
-        }
-
-        guard quote == nil else { return nil }
-        if !current.isEmpty { tokens.append(current) }
-        guard let executable = tokens.first else { return nil }
-        return DirectTerminalCommand(executable: executable, arguments: Array(tokens.dropFirst()))
-    }
-
-    private func parseDirectProcessCommand(_ raw: String, env: [String: String], allowedVariableNames: Set<String>? = nil) throws
-        -> DirectProcessCommand
-    {
-        guard let parsed = parseDirectTerminalCommand(raw) else { throw DirectProcessCommandValidationError.unsupportedSyntax }
-        let knownVariableNames = allowedVariableNames ?? (env.isEmpty ? nil : Set(env.keys))
-        let tokens = try ([parsed.executable] + parsed.arguments).map {
-            try interpolateDirectToken($0, env: env, allowedVariableNames: knownVariableNames)
-        }
-        var commandEnvironment: [String: String] = [:]
-        var executableIndex: Int?
-
-        for (index, token) in tokens.enumerated() {
-            let parts = token.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            let key = parts.first.map(String.init) ?? ""
-            let isAssignment =
-                parts.count == 2 && !key.isEmpty && (key.first?.isLetter == true || key.first == "_")
-                && key.dropFirst().allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
-            if executableIndex == nil, isAssignment {
-                commandEnvironment[key] = String(parts[1])
-                continue
-            }
-            executableIndex = index
-            break
-        }
-
-        guard let executableIndex else { throw DirectProcessCommandValidationError.unsupportedSyntax }
-        return DirectProcessCommand(
-            executable: tokens[executableIndex], arguments: Array(tokens.dropFirst(executableIndex + 1)), environment: commandEnvironment)
-    }
-
-    private func interpolateDirectToken(_ token: String, env: [String: String], allowedVariableNames: Set<String>?) throws -> String {
-        guard token.contains("$") else { return token }
-
-        var output = ""
-        var index = token.startIndex
-
-        while index < token.endIndex {
-            guard token[index] == "$" else {
-                output.append(token[index])
-                index = token.index(after: index)
-                continue
-            }
-
-            let dollarIndex = index
-            let nextIndex = token.index(after: index)
-            guard nextIndex < token.endIndex else { throw DirectProcessCommandValidationError.unsupportedVariableExpansion("$") }
-
-            if token[nextIndex] == "{" {
-                guard let closingIndex = token[token.index(after: nextIndex)...].firstIndex(of: "}") else {
-                    throw DirectProcessCommandValidationError.unsupportedVariableExpansion(String(token[dollarIndex...]))
-                }
-                let keyStart = token.index(after: nextIndex)
-                let key = String(token[keyStart..<closingIndex])
-                guard isDirectInterpolationVariableName(key) else {
-                    throw DirectProcessCommandValidationError.unsupportedVariableExpansion(String(token[dollarIndex...closingIndex]))
-                }
-                if let allowedVariableNames, !allowedVariableNames.contains(key) {
-                    throw DirectProcessCommandValidationError.unknownVariable("${\(key)}")
-                }
-                if let value = env[key] { output.append(value) } else { output.append(contentsOf: token[dollarIndex...closingIndex]) }
-                index = token.index(after: closingIndex)
-                continue
-            }
-
-            let first = token[nextIndex]
-            guard first.isLetter || first == "_" else {
-                let endIndex = token.index(after: nextIndex)
-                throw DirectProcessCommandValidationError.unsupportedVariableExpansion(String(token[dollarIndex..<endIndex]))
-            }
-
-            var variableEnd = token.index(after: nextIndex)
-            while variableEnd < token.endIndex {
-                let char = token[variableEnd]
-                guard char.isLetter || char.isNumber || char == "_" else { break }
-                variableEnd = token.index(after: variableEnd)
-            }
-
-            let key = String(token[nextIndex..<variableEnd])
-            if let allowedVariableNames, !allowedVariableNames.contains(key) { throw DirectProcessCommandValidationError.unknownVariable("$\(key)") }
-            if let value = env[key] { output.append(value) } else { output.append(contentsOf: token[dollarIndex..<variableEnd]) }
-            index = variableEnd
-        }
-
-        return output
-    }
-
-    private func isDirectInterpolationVariableName(_ key: String) -> Bool {
-        guard let first = key.first, first.isLetter || first == "_" else { return false }
-        return key.dropFirst().allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
-    }
-
-    private func invalidDirectProcessCommandMessage(_ raw: String, error: DirectProcessCommandValidationError) -> String {
-        switch error {
-        case .unsupportedSyntax:
-            return
-                "Process commands in Direct mode must be direct executable invocations without shell syntax: \(raw). Use Shell mode for composite commands."
-        case .unsupportedVariableExpansion(let expansion):
-            return
-                "Direct mode only supports simple Spaces variables like $API_PORT or ${API_PORT}. Unsupported expansion: \(expansion). Command: \(raw)"
-        case .unknownVariable(let variable):
-            return "Direct mode only supports Spaces-provided variables. Unknown variable: \(variable). Command: \(raw)"
-        }
-    }
-
-    private func directProcessVariableNames(portDefinitions: [PortDefinition]) -> Set<String> {
-        builtInDirectProcessVariableNames.union(portDefinitions.map(\.name))
-    }
-
-    public func directProcessVariableNamesForValidation(portDefinitions: [PortDefinition]) -> Set<String> {
-        directProcessVariableNames(portDefinitions: portDefinitions)
-    }
-
-    private func processLaunchCommand(
-        template: ProcessTemplate, env: [String: String], processShell: ProcessShell, allowedVariableNames: Set<String>? = nil
-    ) throws -> ProcessLaunchCommand {
+    private func processLaunchCommand(template: ProcessTemplate) throws -> String {
         let trimmed = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw WorkspaceError.invalidArgument(message: "Process command is required.") }
-
-        switch template.executionMode {
-        case .direct:
-            do { return .direct(try parseDirectProcessCommand(trimmed, env: env, allowedVariableNames: allowedVariableNames)) } catch let error
-                as DirectProcessCommandValidationError
-            { throw WorkspaceError.invalidArgument(message: invalidDirectProcessCommandMessage(template.command, error: error)) }
-        case .shell: return .shell(shell: processShell, command: trimmed)
-        }
+        return trimmed
     }
 
-    private func spacesTerminalCommand(template: ProcessTemplate, env: [String: String], processShell: ProcessShell) throws -> String {
-        let launchCommand = try processLaunchCommand(template: template, env: env, processShell: processShell)
+    private func spacesTerminalCommand(template: ProcessTemplate, env: [String: String]) throws -> String {
+        let command = try processLaunchCommand(template: template)
         let runtimeEnv = terminalLaunchEnvironment(base: env, terminalHost: .spaces)
-        switch launchCommand {
-        case .direct(let direct):
-            let mergedEnv = runtimeEnv.merging(direct.environment) { _, new in new }
-            let argv = direct.argv.map(shellQuoted).joined(separator: " ")
-            return commandPrefixedWithShellEnvironment("exec \(argv)", env: mergedEnv)
-        case .shell(let shell, let command):
-            return commandPrefixedWithShellEnvironment("exec \(shell.rawValue) -lc \(shellQuoted(command))", env: runtimeEnv)
-        }
+        let shellPath = terminalLoginShellPath()
+        return commandPrefixedWithShellEnvironment("exec \(shellQuoted(shellPath)) -l -c \(shellQuoted(command))", env: runtimeEnv)
     }
 
-    public func validateProcessTemplate(_ template: ProcessTemplate, env: [String: String] = [:], allowedVariableNames: Set<String>? = nil) throws {
-        _ = try processLaunchCommand(template: template, env: env, processShell: .zsh, allowedVariableNames: allowedVariableNames)
-    }
+    public func validateProcessTemplate(_ template: ProcessTemplate) throws { _ = try processLaunchCommand(template: template) }
 
-    public func validateProcessTemplates(_ templates: [ProcessTemplate], env: [String: String] = [:], allowedVariableNames: Set<String>? = nil) throws
-    { for template in templates { try validateProcessTemplate(template, env: env, allowedVariableNames: allowedVariableNames) } }
+    public func validateProcessTemplates(_ templates: [ProcessTemplate]) throws {
+        for template in templates { try validateProcessTemplate(template) }
+    }
 
     private func configuredProcessTemplate(for process: RunningProcessRecord, workspace: WorkspaceRecord, project: ProjectRecord) throws
         -> ProcessTemplate
@@ -3156,6 +3396,19 @@ public final class WorkspaceOrchestrator {
         let processKey = process.templateName.trimmingCharacters(in: .whitespacesAndNewlines)
         if let template = settings?.processes.first(where: { self.processKey(for: $0) == processKey }) { return template }
         return ProcessTemplate(name: process.templateName, command: process.command)
+    }
+
+    private func tmuxSessionTimeoutMessage(processName: String, commandDescription: String?) -> String {
+        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCommand = commandDescription?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedCommand, !trimmedCommand.isEmpty, !trimmedProcessName.isEmpty {
+            return "Timed out waiting for tmux session to become available for process '\(trimmedProcessName)' (\(trimmedCommand))."
+        }
+        if let trimmedCommand, !trimmedCommand.isEmpty {
+            return "Timed out waiting for tmux session to become available for command '\(trimmedCommand)'."
+        }
+        if !trimmedProcessName.isEmpty { return "Timed out waiting for tmux session to become available for process '\(trimmedProcessName)'." }
+        return "Timed out waiting for tmux session to become available."
     }
 
     private func indexedWorkspaceWindows(workspaceID: String) throws -> [WindowRecord] {
@@ -3723,14 +3976,16 @@ public final class WorkspaceOrchestrator {
         update(&record)
         let previousPorts = baseRecord.ports
         let previousProcesses = baseRecord.processes
+        let previousAgentLaunchers = baseRecord.agentLaunchers
         record = ProjectRecord(
             id: baseRecord.id, name: baseRecord.name, dir: baseRecord.dir, isGitRepo: baseRecord.isGitRepo, defaultBranch: baseRecord.defaultBranch,
             isCollapsed: baseRecord.isCollapsed, setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports,
             processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
         record.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: record.ports)
         record.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: record.processes)
+        record.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: record.agentLaunchers)
         record.ports = try normalizedPortDefinitions(record.ports)
-        try validateProcessTemplates(record.processes, allowedVariableNames: directProcessVariableNames(portDefinitions: record.ports))
+        try validateProcessTemplates(record.processes)
         try validateUniqueConfiguredFocusNames(
             processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
         return record
@@ -3769,14 +4024,7 @@ public final class WorkspaceOrchestrator {
             return
         }
 
-        let worktreeRoot = try worktreeRoot(project: project)
-        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
-        let workspaceDir = worktreeRoot.appendingPathComponent(branch, isDirectory: true).path
-        try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branch, targetBranch: branch)
-
-        let workspace = WorkspaceRecord(
-            id: UUID().uuidString, projectID: project.id, title: branch, dir: workspaceDir, dirname: branch, branch: branch, targetBranch: branch,
-            isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        let workspace = try createImportedGitDefaultWorkspaceOnDisk(project: project, branch: branch)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         let appConfig = try store.appConfig()
@@ -3798,40 +4046,114 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func syncDefaultWorkspaceSettingsIfTemplateBased(project: ProjectRecord, previousRecord: ProjectRecord, updatedRecord: ProjectRecord)
-        throws
-    {
-        guard let defaultWorkspace = try defaultWorkspace(projectID: project.id) else { return }
+    private func createImportedGitDefaultWorkspaceOnDisk(project: ProjectRecord, branch: String) throws -> WorkspaceRecord {
+        let worktreeRoot = try worktreeRoot(project: project)
+        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
+        let workspaceDir = worktreeRoot.appendingPathComponent(branch, isDirectory: true).path
+        try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branch, targetBranch: branch)
+        return WorkspaceRecord(
+            id: UUID().uuidString, projectID: project.id, title: branch, dir: workspaceDir, dirname: branch, branch: branch, targetBranch: branch,
+            isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+    }
 
-        let hasSettings = try store.workspaceSettingsExists(workspaceID: defaultWorkspace.id)
-        if !hasSettings {
-            try seedWorkspaceSettings(project: updatedRecord, workspace: defaultWorkspace)
+    private func spacesYAMLConfigURL(project: ProjectRecord) throws -> URL {
+        let directory: String
+        if let defaultWorkspace = try defaultWorkspace(projectID: project.id) {
+            directory = defaultWorkspace.dir
+        } else if project.isGitRepo {
+            throw WorkspaceError.invalidArgument(message: "Default workspace not found for project \(project.name).")
+        } else {
+            directory = project.dir
+        }
+        return URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent(SpacesYAMLService.fileName)
+    }
+
+    private func spacesYAMLDocumentIfPresent(in directory: URL) throws -> SpacesYAMLDocument? {
+        let url = directory.appendingPathComponent(SpacesYAMLService.fileName)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try SpacesYAMLService.load(from: url)
+    }
+
+    private func applyProjectTemplateToAllWorkspaces(project: ProjectRecord) throws {
+        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+        for workspace in workspaces { try applyProjectTemplate(project, to: workspace, syncPorts: !workspace.isArchived) }
+    }
+
+    private func workspaceConfigurationSnapshots(projectID: String) throws -> [WorkspaceConfigurationSnapshot] {
+        let workspaces = try store.workspaces(projectID: projectID, includeArchived: true)
+        return try workspaces.map { workspace in
+            let settings: WorkspaceSettings?
+            if try store.workspaceSettingsExists(workspaceID: workspace.id) {
+                settings = WorkspaceSettings(
+                    stopScript: try store.workspaceStopScript(workspaceID: workspace.id),
+                    ports: try store.workspacePortDefinitions(workspaceID: workspace.id),
+                    processes: try store.workspaceProcesses(workspaceID: workspace.id),
+                    browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id),
+                    agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: workspace.id))
+            } else {
+                settings = nil
+            }
+            return WorkspaceConfigurationSnapshot(
+                workspace: workspace, settings: settings, assignedPorts: try store.workspacePortsAssigned(workspaceID: workspace.id))
+        }
+    }
+
+    private func restoreSpacesYAMLImportSnapshot(project: ProjectRecord, workspaces: [WorkspaceConfigurationSnapshot]) throws {
+        try store.upsert(project: project)
+        for snapshot in workspaces { try restoreWorkspaceConfiguration(snapshot) }
+    }
+
+    private func restoreWorkspaceConfiguration(_ snapshot: WorkspaceConfigurationSnapshot) throws {
+        try PortAllocator(store: store).releasePorts(workspaceID: snapshot.workspace.id)
+        guard let settings = snapshot.settings else {
+            try store.deleteWorkspaceConfiguration(workspaceID: snapshot.workspace.id)
             return
         }
 
-        let currentSettings = WorkspaceSettings(
-            stopScript: try store.workspaceStopScript(workspaceID: defaultWorkspace.id),
-            ports: try store.workspacePortDefinitions(workspaceID: defaultWorkspace.id),
-            processes: try store.workspaceProcesses(workspaceID: defaultWorkspace.id),
-            browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id),
-            agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: defaultWorkspace.id))
-
-        let previousTemplate = WorkspaceSettings(
-            stopScript: previousRecord.stopScript, ports: previousRecord.ports, processes: previousRecord.processes,
-            browserSessions: previousRecord.browserSessions, agentLaunchers: previousRecord.agentLaunchers)
-
-        guard workspaceSettingsMatch(currentSettings, previousTemplate) else { return }
-
-        try seedWorkspaceSettings(project: updatedRecord, workspace: defaultWorkspace)
+        try store.setWorkspaceStopScript(workspaceID: snapshot.workspace.id, stopScript: settings.stopScript)
+        try store.setWorkspacePortDefinitions(workspaceID: snapshot.workspace.id, definitions: settings.ports)
+        try store.setWorkspaceProcesses(workspaceID: snapshot.workspace.id, processes: settings.processes)
+        try store.setWorkspaceBrowserSessions(workspaceID: snapshot.workspace.id, sessions: settings.browserSessions)
+        try store.setWorkspaceAgentLaunchers(workspaceID: snapshot.workspace.id, launchers: settings.agentLaunchers)
+        try store.touchWorkspaceSettings(workspaceID: snapshot.workspace.id, updatedAt: nowISO8601())
+        try store.setWorkspacePorts(
+            workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port }, names: snapshot.assignedPorts.map { $0.name },
+            definitionIDs: snapshot.assignedPorts.map { $0.definitionID })
+        if !snapshot.workspace.isArchived, !snapshot.assignedPorts.isEmpty {
+            PortReserver.shared.reservePorts(workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port })
+        }
     }
 
-    private func workspaceSettingsMatch(_ lhs: WorkspaceSettings, _ rhs: WorkspaceSettings) -> Bool {
-        guard lhs.stopScript == rhs.stopScript else { return false }
-        guard lhs.ports == rhs.ports else { return false }
-        guard processTemplatesMatch(lhs.processes, rhs.processes) else { return false }
-        guard browserSessionsMatch(lhs.browserSessions, rhs.browserSessions) else { return false }
-        guard lhs.agentLaunchers == rhs.agentLaunchers else { return false }
-        return true
+    private func applyProjectTemplate(_ project: ProjectRecord, to workspace: WorkspaceRecord, syncPorts: Bool) throws {
+        guard var settings = try loadWorkspaceSettings(project: project, workspace: workspace) else {
+            throw WorkspaceError.missingProject(dir: project.dir)
+        }
+        let previousPorts = settings.ports
+        let previousProcesses = settings.processes
+        let previousAgentLaunchers = settings.agentLaunchers
+        settings.stopScript = project.stopScript
+        settings.ports = project.ports
+        settings.processes = seededWorkspaceProcesses(from: project.processes)
+        settings.browserSessions = project.browserSessions
+        settings.agentLaunchers = project.agentLaunchers
+        settings.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: settings.ports)
+        settings.ports = try normalizedPortDefinitions(settings.ports)
+        settings.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: settings.processes)
+        settings.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: settings.agentLaunchers)
+        try validateProcessTemplates(settings.processes)
+        try validateWorkspaceFocusNames(
+            workspaceID: workspace.id, processes: settings.processes, browserSessions: settings.browserSessions,
+            agentLaunchers: settings.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: settings.stopScript)
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: settings.ports)
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: settings.processes)
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: settings.browserSessions)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: settings.agentLaunchers)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
+        if syncPorts {
+            let appConfig = try store.appConfig()
+            _ = try PortAllocator(store: store).syncPorts(workspaceID: workspace.id, definitions: settings.ports, range: appConfig.portRange)
+        }
     }
 
     private func normalizePortDefinitionIDs(previous: [PortDefinition], updated: [PortDefinition]) -> [PortDefinition] {
@@ -3884,9 +4206,7 @@ public final class WorkspaceOrchestrator {
                 })
             {
                 usedIDs.insert(match.id)
-                return ProcessTemplate(
-                    id: match.id, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit,
-                    executionMode: template.executionMode)
+                return ProcessTemplate(id: match.id, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit)
             }
 
             let trimmedCommand = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3896,23 +4216,53 @@ public final class WorkspaceOrchestrator {
                 })
             {
                 usedIDs.insert(match.id)
-                return ProcessTemplate(
-                    id: match.id, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit,
-                    executionMode: template.executionMode)
+                return ProcessTemplate(id: match.id, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit)
             }
 
             return template
         }
     }
 
+    private func normalizeAgentLauncherIDs(previous: [AgentLauncher], updated: [AgentLauncher]) -> [AgentLauncher] {
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        let previousNames = previous.map { normalizedFocusName($0.name) }
+        let previousCommands = previous.map { $0.command.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let nameCounts = Dictionary(previousNames.map { ($0, 1) }, uniquingKeysWith: +)
+        let commandCounts = Dictionary(previousCommands.map { ($0, 1) }, uniquingKeysWith: +)
+        var usedIDs = Set<String>()
+
+        return updated.map { launcher in
+            if previousByID[launcher.id] != nil {
+                usedIDs.insert(launcher.id)
+                return launcher
+            }
+
+            let normalizedName = normalizedFocusName(launcher.name)
+            if nameCounts[normalizedName] == 1,
+                let match = previous.first(where: { normalizedFocusName($0.name) == normalizedName && !usedIDs.contains($0.id) })
+            {
+                usedIDs.insert(match.id)
+                return AgentLauncher(id: match.id, name: launcher.name, command: launcher.command)
+            }
+
+            let trimmedCommand = launcher.command.trimmingCharacters(in: .whitespacesAndNewlines)
+            if commandCounts[trimmedCommand] == 1,
+                let match = previous.first(where: {
+                    $0.command.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedCommand && !usedIDs.contains($0.id)
+                })
+            {
+                usedIDs.insert(match.id)
+                return AgentLauncher(id: match.id, name: launcher.name, command: launcher.command)
+            }
+
+            return launcher
+        }
+    }
+
     private func processTemplatesMatch(_ lhs: [ProcessTemplate], _ rhs: [ProcessTemplate]) -> Bool {
         guard lhs.count == rhs.count else { return false }
         for (left, right) in zip(lhs, rhs) {
-            if left.name != right.name || left.command != right.command || left.kind != right.kind || left.onExit != right.onExit
-                || left.executionMode != right.executionMode
-            {
-                return false
-            }
+            if left.name != right.name || left.command != right.command || left.kind != right.kind || left.onExit != right.onExit { return false }
         }
         return true
     }
@@ -3937,9 +4287,7 @@ public final class WorkspaceOrchestrator {
 
     private func seededWorkspaceProcesses(from templates: [ProcessTemplate]) -> [ProcessTemplate] {
         templates.map { template in
-            ProcessTemplate(
-                id: UUID().uuidString, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit,
-                executionMode: template.executionMode)
+            ProcessTemplate(id: UUID().uuidString, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit)
         }
     }
 
@@ -3970,6 +4318,41 @@ public final class WorkspaceOrchestrator {
 
     private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }
 
+    private func workspaceSetupLogPath(workspaceID: String) throws -> String {
+        let workspaceSetupDirectory = URL(fileURLWithPath: try runtimeDirectory(), isDirectory: true).appendingPathComponent(
+            "workspace-setup", isDirectory: true
+        ).appendingPathComponent(workspaceID, isDirectory: true)
+        try FileManager.default.createDirectory(at: workspaceSetupDirectory, withIntermediateDirectories: true)
+        return workspaceSetupDirectory.appendingPathComponent("setup.log", isDirectory: false).path
+    }
+
+    private func prepareWorkspaceSetupLog(workspaceID: String) throws -> String {
+        let path = try workspaceSetupLogPath(workspaceID: workspaceID)
+        _ = FileManager.default.createFile(atPath: path, contents: nil)
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try handle.truncate(atOffset: 0)
+        try handle.close()
+        return path
+    }
+
+    private func runWorkspaceSetupScript(_ script: String, cwd: String, logPath: String) throws -> WorkspaceSetupRunResult {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-lc", script]
+        process.currentDirectoryURL = URL(fileURLWithPath: cwd, isDirectory: true)
+        process.environment = Shell.currentProcessEnvironment()
+
+        let logHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: logPath))
+        defer { try? logHandle.close() }
+        process.standardOutput = logHandle
+        process.standardError = logHandle
+        try process.run()
+
+        process.waitUntilExit()
+        try? logHandle.synchronize()
+        return WorkspaceSetupRunResult(exitCode: Int(process.terminationStatus), logPath: logPath)
+    }
+
     private func initializeWorkspaceRuntime(project: ProjectRecord, workspace: WorkspaceRecord, runSetupScript: Bool) throws {
         let appConfig = try store.appConfig()
         let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
@@ -3984,24 +4367,37 @@ public final class WorkspaceOrchestrator {
     private func runWorkspaceSetup(project: ProjectRecord, workspace: WorkspaceRecord) throws {
         let setupScript = project.setupScript?.trimmingCharacters(in: .whitespacesAndNewlines)
         let startedAt = nowISO8601()
-        try store.setWorkspaceSetupState(workspaceID: workspace.id, status: .running, errorMessage: nil, startedAt: startedAt, finishedAt: nil)
+        let logPath = try prepareWorkspaceSetupLog(workspaceID: workspace.id)
+        try store.setWorkspaceSetupState(
+            workspaceID: workspace.id, status: .running, errorMessage: nil, startedAt: startedAt, finishedAt: nil, exitCode: nil, logPath: logPath)
         guard let setupScript, !setupScript.isEmpty else {
             try store.setWorkspaceSetupState(
-                workspaceID: workspace.id, status: .succeeded, errorMessage: nil, startedAt: startedAt, finishedAt: nowISO8601())
+                workspaceID: workspace.id, status: .succeeded, errorMessage: nil, startedAt: startedAt, finishedAt: nowISO8601(), exitCode: 0,
+                logPath: logPath)
             return
         }
+        let result: WorkspaceSetupRunResult
         do {
             let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
             let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-            try runScript(applyEnvVars(setupScript, env: env), cwd: workspace.dir)
-            try store.setWorkspaceSetupState(
-                workspaceID: workspace.id, status: .succeeded, errorMessage: nil, startedAt: startedAt, finishedAt: nowISO8601())
+            result = try runWorkspaceSetupScript(applyEnvVars(setupScript, env: env), cwd: workspace.dir, logPath: logPath)
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             try store.setWorkspaceSetupState(
-                workspaceID: workspace.id, status: .failed, errorMessage: message, startedAt: startedAt, finishedAt: nowISO8601())
+                workspaceID: workspace.id, status: .failed, errorMessage: message, startedAt: startedAt, finishedAt: nowISO8601(), exitCode: nil,
+                logPath: logPath)
             throw error
         }
+        guard result.exitCode == 0 else {
+            let message = "Setup script exited with code \(result.exitCode)."
+            try store.setWorkspaceSetupState(
+                workspaceID: workspace.id, status: .failed, errorMessage: message, startedAt: startedAt, finishedAt: nowISO8601(),
+                exitCode: result.exitCode, logPath: result.logPath)
+            throw WorkspaceError.invalidArgument(message: "\(message) See log: \(result.logPath)")
+        }
+        try store.setWorkspaceSetupState(
+            workspaceID: workspace.id, status: .succeeded, errorMessage: nil, startedAt: startedAt, finishedAt: nowISO8601(),
+            exitCode: result.exitCode, logPath: result.logPath)
     }
 
     private func waitForWorkspaceSetupToComplete(workspaceID: String) throws {
@@ -4011,7 +4407,7 @@ public final class WorkspaceOrchestrator {
             switch setupState.status {
             case .succeeded: return
             case .failed:
-                let detail = setupState.errorMessage?.isEmpty == false ? setupState.errorMessage! : "unknown setup error"
+                let detail = workspaceSetupFailureDetail(setupState)
                 throw WorkspaceError.invalidArgument(message: "Workspace setup failed: \(detail)")
             case .pending, .running:
                 if currentDate().timeIntervalSince(waitStartedAt) > 900 {
@@ -4021,6 +4417,28 @@ public final class WorkspaceOrchestrator {
                 Thread.sleep(forTimeInterval: 0.2)
             }
         }
+    }
+
+    private func requireWorkspaceSetupSucceeded(workspaceID: String) throws {
+        let setupState = try workspaceSetupState(workspaceID: workspaceID)
+        guard setupState.status == .succeeded else { throw WorkspaceError.invalidArgument(message: workspaceSetupBlockedMessage(setupState)) }
+    }
+
+    private func workspaceSetupBlockedMessage(_ state: WorkspaceSetupState) -> String {
+        switch state.status {
+        case .succeeded: return "Workspace setup has completed."
+        case .pending: return "Workspace setup has not run. Run setup before launching workspace runtime."
+        case .running: return "Workspace setup is still running. Wait for setup to finish before launching workspace runtime."
+        case .failed: return "Workspace setup failed: \(workspaceSetupFailureDetail(state))"
+        }
+    }
+
+    private func workspaceSetupFailureDetail(_ state: WorkspaceSetupState) -> String {
+        var parts: [String] = []
+        if let message = state.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty { parts.append(message) }
+        if let exitCode = state.exitCode { parts.append("exit code \(exitCode)") }
+        if let logPath = state.logPath?.trimmingCharacters(in: .whitespacesAndNewlines), !logPath.isEmpty { parts.append("log: \(logPath)") }
+        return parts.isEmpty ? "unknown setup error" : parts.joined(separator: ", ")
     }
 
     private func withWorkspaceSetupLock<T>(workspaceID: String, operation: () throws -> T) throws -> T {
@@ -4065,7 +4483,6 @@ public final class WorkspaceOrchestrator {
         let updatedKey: String
 
         var commandChanged: Bool { previous.command != updated.command }
-        var modeChanged: Bool { previous.executionMode != updated.executionMode }
         var keyChanged: Bool { previousKey != updatedKey }
     }
 
@@ -4077,7 +4494,7 @@ public final class WorkspaceOrchestrator {
             let updatedKey = processKey(for: updatedTemplate)
             let edit = RunningWorkspaceProcessEdit(
                 previous: previousTemplate, updated: updatedTemplate, previousKey: previousKey, updatedKey: updatedKey)
-            guard edit.commandChanged || edit.modeChanged || edit.keyChanged else { return nil }
+            guard edit.commandChanged || edit.keyChanged else { return nil }
             return edit
         }
     }
@@ -4086,9 +4503,9 @@ public final class WorkspaceOrchestrator {
         project: ProjectRecord, workspace: WorkspaceRecord, previous: [ProcessTemplate], updated: [ProcessTemplate], restartChangedCommands: Bool
     ) throws {
         let edits = runningWorkspaceProcessEdits(previous: previous, updated: updated)
-        let restartRequiringEdits = edits.filter { $0.commandChanged || $0.modeChanged }
+        let restartRequiringEdits = edits.filter(\.commandChanged)
         if !restartRequiringEdits.isEmpty, !restartChangedCommands {
-            throw WorkspaceError.invalidArgument(message: "Changing a running process command or execution mode requires restart confirmation.")
+            throw WorkspaceError.invalidArgument(message: "Changing a running process command requires restart confirmation.")
         }
 
         let runningProcesses = try store.runningProcesses(workspaceID: workspace.id)
@@ -4103,7 +4520,7 @@ public final class WorkspaceOrchestrator {
 
         for edit in edits {
             guard let runningProcess = runningByKey[edit.previousKey] else { continue }
-            if edit.commandChanged || edit.modeChanged {
+            if edit.commandChanged {
                 let restartedProcess = RunningProcessRecord(
                     id: runningProcess.id, workspaceID: runningProcess.workspaceID, templateID: edit.updated.id, templateName: edit.updatedKey,
                     command: edit.updated.command, runtimeTargetID: runningProcess.runtimeTargetID, terminalApp: runningProcess.terminalApp,
@@ -4123,10 +4540,11 @@ public final class WorkspaceOrchestrator {
     private func validateRunningProcessRestart(
         project: ProjectRecord, workspace: WorkspaceRecord, process: RunningProcessRecord, updatedTemplate: ProcessTemplate
     ) throws {
-        _ = process
-        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-        try validateProcessTemplate(updatedTemplate, env: env)
+        let terminalHost = try configuredTerminalHost()
+        guard terminalAdapterAvailable(terminalHost) else {
+            throw WorkspaceError.dependencyMissing(message: missingTerminalDependencyMessage(for: terminalHost, operation: "launch processes"))
+        }
+        try validateProcessTemplate(updatedTemplate)
     }
 
     private func relabelRunningProcess(
@@ -4188,7 +4606,7 @@ public final class WorkspaceOrchestrator {
         var toRelabel: [(DesiredProcess, RunningProcessRecord)] = []
         for desired in desiredByMatch.values {
             if let running = runningByKey[desired.matchKey] {
-                if running.command != desired.template.command || previousByID[desired.template.id]?.executionMode != desired.template.executionMode {
+                if running.command != desired.template.command {
                     toRestart.append((desired, running))
                 } else if running.templateName != desired.desiredKey {
                     toRelabel.append((desired, running))
@@ -4484,35 +4902,72 @@ public final class WorkspaceOrchestrator {
     private func launchProcesses(workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], background: Bool = false) throws
         -> [WindowRecord]
     {
-        _ = background
+        try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         guard !templates.isEmpty else {
             try terminateBuiltInTerminalSessionsForConfiguredProcesses(workspaceID: workspace.id)
             try store.deleteRunningProcesses(workspaceID: workspace.id)
             return []
         }
         let terminalHost = try configuredTerminalHost()
-        let processShell = try store.appConfig().processShell
+        if terminalHost == .spaces {
+            try terminateBuiltInTerminalSessionsForConfiguredProcesses(workspaceID: workspace.id)
+            try store.deleteRunningProcesses(workspaceID: workspace.id)
+            var terminalWindows: [WindowRecord] = []
+            for (index, template) in templates.enumerated() {
+                let name = template.name ?? template.command
+                let sessionCommand = try spacesTerminalCommand(template: template, env: env)
+                let session = try launchSpacesTerminalSession(
+                    title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
+                    readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
+                let now = nowISO8601()
+                let running = RunningProcessRecord(
+                    id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
+                    terminalApp: terminalAppName(for: terminalHost), windowID: session.windowID, terminalTrackingID: session.sessionID,
+                    terminalNativeID: session.sessionID, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: session.childPID,
+                    status: .running, logPath: session.outputPath, lastOutputAt: nil, startedAt: now, exitedAt: nil)
+                try store.upsert(runningProcess: running)
+                terminalWindows.append(
+                    WindowRecord(
+                        id: UUID().uuidString, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: name,
+                        detail: template.command, targetURL: nil, windowID: session.windowID, terminalTrackingID: session.sessionID,
+                        terminalNativeID: session.sessionID, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
+                        orderIndex: 200 + index, lastSeenAt: now))
+            }
+            return terminalWindows
+        }
+        guard terminalAdapterAvailable(terminalHost) else {
+            throw WorkspaceError.dependencyMissing(message: missingTerminalDependencyMessage(for: terminalHost, operation: "launch processes"))
+        }
+        guard tmux.isAvailable() else { throw WorkspaceError.dependencyMissing(message: "tmux is required to launch processes.") }
         try terminateBuiltInTerminalSessionsForConfiguredProcesses(workspaceID: workspace.id)
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         var terminalWindows: [WindowRecord] = []
         for (index, template) in templates.enumerated() {
             let name = template.name ?? template.command
-            let sessionCommand = try spacesTerminalCommand(template: template, env: env, processShell: processShell)
-            let session = try launchSpacesTerminalSession(
-                title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-                readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
-            let now = nowISO8601()
+            let command = try processLaunchCommand(template: template)
+            let snapshot = bestEffortYabaiWindowSnapshot()
+            let terminalHandle = try launchProcessInTmux(
+                workspace: workspace, processName: name, rawCommand: template.command, command: command, env: env, terminalHost: terminalHost,
+                background: background, replaceExistingSession: true)
+            let windowID =
+                bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
+            let tmuxWindow = try currentTmuxWindowInfo(workspaceID: workspace.id, processName: name)
+            let pid = tmuxWindow?.panePID
+            let hookSessionID = storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle)
+            let terminalNativeID = storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle)
+            let terminalContainerID = storedTerminalContainerID(terminalHost: terminalHost, handle: terminalHandle)
             let running = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
-                terminalApp: terminalAppName(for: terminalHost), windowID: session.windowID, terminalTrackingID: session.sessionID,
-                terminalNativeID: session.sessionID, terminalContainerID: nil, pid: session.childPID, status: .running, logPath: session.outputPath,
-                lastOutputAt: nil, startedAt: now, exitedAt: nil)
+                terminalApp: terminalAppName(for: terminalHost), windowID: windowID, terminalTrackingID: hookSessionID,
+                terminalNativeID: terminalNativeID, terminalContainerID: terminalContainerID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id,
+                pid: pid, status: .running, logPath: nil, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
             try store.upsert(runningProcess: running)
             terminalWindows.append(
                 WindowRecord(
                     id: running.id, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: name, detail: template.command,
-                    targetURL: nil, windowID: session.windowID, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID,
-                    terminalContainerID: nil, role: "terminal", orderIndex: 200 + index, lastSeenAt: now))
+                    targetURL: nil, windowID: windowID, terminalTrackingID: hookSessionID, terminalNativeID: terminalNativeID,
+                    terminalContainerID: terminalContainerID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id, role: "terminal",
+                    orderIndex: 200 + index, lastSeenAt: nowISO8601()))
         }
         return terminalWindows
     }
@@ -4523,6 +4978,7 @@ public final class WorkspaceOrchestrator {
     ) throws -> (windows: [WindowRecord], sessions: [BrowserSession]) {
         _ = project
         _ = extractOnAttach
+        try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         guard !sessions.isEmpty else { return ([], []) }
         guard chrome.isAvailable() else { throw WorkspaceError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
         let resolvedSessions = resolveBrowserSessions(sessions, env: env)
@@ -4752,6 +5208,18 @@ public final class WorkspaceOrchestrator {
         return URL(fileURLWithPath: expanded).resolvingSymlinksInPath().standardizedFileURL.path
     }
 
+    private func standardizePathPreservingSymlinks(_ path: String) -> String {
+        let expanded = expandTilde(path)
+        return URL(fileURLWithPath: expanded).standardizedFileURL.path
+    }
+
+    private func normalizePathPreservingLeaf(_ path: String) -> String {
+        let expanded = expandTilde(path)
+        let url = URL(fileURLWithPath: expanded)
+        let normalizedParent = normalizePath(url.deletingLastPathComponent().path)
+        return URL(fileURLWithPath: normalizedParent, isDirectory: true).appendingPathComponent(url.lastPathComponent).standardizedFileURL.path
+    }
+
     private func expandTilde(_ path: String) -> String {
         guard path.hasPrefix("~") else { return path }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -4786,12 +5254,174 @@ public final class WorkspaceOrchestrator {
         return workspaceRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
     }
 
-    private func makeWorkspaceDirname(project: ProjectRecord, preferredExistingDirname: String?, requestedDirname: String?, excludingDirname: String?)
-        throws -> String
+    private func gitProjectImportPlan(gitURL: String) throws -> GitProjectImportPlan {
+        let trimmedURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedURL.isEmpty else { throw WorkspaceError.invalidArgument(message: "Git repository URL is required.") }
+        let inferredName = inferredProjectName(from: trimmedURL)
+        let projectID = projectID(namespace: "git", source: trimmedURL)
+        let projectName = sanitizeDirname(inferredName, fallback: "project")
+        let projectDirname = managedProjectStorageDirectoryName(projectID: projectID, preferredName: projectName)
+        let destination = repositoriesRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
+        let normalizedDestination = normalizePathPreservingLeaf(destination.path)
+        let project = ProjectRecord(id: projectID, name: projectName, dir: normalizedDestination, isGitRepo: true, defaultBranch: nil)
+        return GitProjectImportPlan(gitURL: trimmedURL, project: project, destination: destination)
+    }
+
+    private func managedGitProjectImportReplacementCandidates(plan: GitProjectImportPlan) throws -> [ManagedDirectoryReplacementCandidate] {
+        try validateManagedGitProjectImportDirectoriesAreUnowned(plan: plan)
+        var candidates: [ManagedDirectoryReplacementCandidate] = []
+        if let projectCandidate = try managedDirectoryReplacementCandidate(path: plan.destination.path, kind: .projectRepository) {
+            candidates.append(projectCandidate)
+        }
+        if let workspaceCandidate = try managedDirectoryReplacementCandidate(
+            path: worktreeRoot(project: plan.project).path, kind: .workspaceDirectory)
+        {
+            candidates.append(workspaceCandidate)
+        }
+        return candidates
+    }
+
+    private func validateManagedGitProjectImportDirectoriesAreUnowned(plan: GitProjectImportPlan) throws {
+        try validateManagedDirectoryIsUnowned(path: plan.destination.path)
+        try validateManagedDirectoryIsUnowned(path: worktreeRoot(project: plan.project).path)
+    }
+
+    private func replaceManagedGitProjectImportDirectoriesIfNeeded(plan: GitProjectImportPlan, allowReplacement: Bool) throws {
+        let candidates = try managedGitProjectImportReplacementCandidates(plan: plan)
+        guard !candidates.isEmpty else { return }
+        guard allowReplacement else {
+            throw WorkspaceError.invalidArgument(
+                message: "Managed project import folders already exist: \(candidates.map(\.path).joined(separator: ", "))")
+        }
+        let orderedCandidates = candidates.sorted { lhs, rhs in lhs.kind == .workspaceDirectory && rhs.kind == .projectRepository }
+        for candidate in orderedCandidates { try removeReplaceableManagedDirectory(candidate) }
+    }
+
+    private func replaceManagedWorkspaceDirectoryIfNeeded(path: String, allowReplacement: Bool) throws {
+        guard let candidate = try managedDirectoryReplacementCandidate(path: path, kind: .workspaceDirectory) else { return }
+        guard allowReplacement else { throw WorkspaceError.invalidArgument(message: "Workspace directory already exists: \(candidate.path)") }
+        try removeReplaceableManagedDirectory(candidate)
+    }
+
+    func managedDirectoryReplacementCandidate(path: String, kind: ManagedDirectoryReplacementCandidate.Kind) throws
+        -> ManagedDirectoryReplacementCandidate?
     {
+        let managedPath = standardizePathPreservingSymlinks(path)
+        switch kind {
+        case .projectRepository:
+            guard isManagedRepositoryEntryPath(managedPath) else { return nil }
+            guard !hasSymlinkedAncestorBelowManagedRoot(path: managedPath, rootPath: repositoriesRootDirectory().path) else { return nil }
+        case .workspaceDirectory:
+            guard isManagedWorkspaceEntryPath(managedPath) else { return nil }
+            guard !hasSymlinkedAncestorBelowManagedRoot(path: managedPath, rootPath: workspaceRootDirectory().path) else { return nil }
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: managedPath, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
+        try validateManagedDirectoryIsUnowned(path: managedPath)
+        return ManagedDirectoryReplacementCandidate(kind: kind, path: managedPath)
+    }
+
+    private func removeReplaceableManagedDirectory(_ candidate: ManagedDirectoryReplacementCandidate) throws {
+        guard let revalidated = try managedDirectoryReplacementCandidate(path: candidate.path, kind: candidate.kind) else { return }
+        if revalidated.kind == .workspaceDirectory { try removeRegisteredGitWorktreeForReplacementIfNeeded(path: revalidated.path) }
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: revalidated.path, isDirectory: &isDirectory), isDirectory.boolValue else { return }
+        try FileManager.default.removeItem(atPath: revalidated.path)
+    }
+
+    private enum ManagedDirectoryOwnershipConflict {
+        case project(String)
+        case workspace(WorkspaceRecord)
+        case descendant(String)
+    }
+
+    private func validateManagedDirectoryIsUnowned(path: String) throws {
+        guard let conflict = try managedDirectoryOwnershipConflict(path: path) else { return }
+        switch conflict {
+        case .project(let path): throw WorkspaceError.projectAlreadyExists(dir: path)
+        case .workspace(let workspace): throw WorkspaceError.invalidArgument(message: "Workspace already exists: \(workspace.title)")
+        case .descendant(let path):
+            throw WorkspaceError.invalidArgument(message: "Managed folder contains a project or workspace owned by Spaces: \(path)")
+        }
+    }
+
+    private func managedDirectoryOwnershipConflict(path: String) throws -> ManagedDirectoryOwnershipConflict? {
+        let entryPath = standardizePathPreservingSymlinks(path)
+        let resolvedPath = normalizePath(entryPath)
+        var ownershipPaths = [entryPath]
+        if resolvedPath != entryPath { ownershipPaths.append(resolvedPath) }
+        for ownershipPath in ownershipPaths {
+            if try store.project(dir: ownershipPath) != nil { return .project(ownershipPath) }
+            if let workspace = try store.workspace(dir: ownershipPath) { return .workspace(workspace) }
+        }
+        for ownershipPath in ownershipPaths where try managedDirectoryContainsOwnedDescendant(path: ownershipPath) {
+            return .descendant(ownershipPath)
+        }
+        return nil
+    }
+
+    private func removeRegisteredGitWorktreeForReplacementIfNeeded(path: String) throws {
+        let entryPath = standardizePathPreservingSymlinks(path)
+        guard (try? FileManager.default.destinationOfSymbolicLink(atPath: entryPath)) == nil else { return }
+        let resolvedPath = normalizePath(entryPath)
+        for project in try store.projects() where project.isGitRepo {
+            let rootPath = standardizePathPreservingSymlinks(try worktreeRoot(project: project).path)
+            guard entryPath != rootPath, isPathPreservingSymlinks(entryPath, inside: rootPath) else { continue }
+            let worktrees = try git.listWorktrees(path: project.dir)
+            let isRegistered = worktrees.contains {
+                let worktreePath = standardizePathPreservingSymlinks($0.path)
+                return worktreePath == entryPath || normalizePath(worktreePath) == resolvedPath
+            }
+            guard isRegistered else { return }
+            do { try git.removeWorktree(path: project.dir, worktreePath: entryPath) } catch {
+                guard isMissingWorktreeError(error) else { throw error }
+                try git.pruneWorktrees(path: project.dir)
+                let prunedWorktrees = try git.listWorktrees(path: project.dir)
+                if prunedWorktrees.contains(where: {
+                    let worktreePath = standardizePathPreservingSymlinks($0.path)
+                    return worktreePath == entryPath || normalizePath(worktreePath) == resolvedPath
+                }) {
+                    throw error
+                }
+            }
+            return
+        }
+    }
+
+    private func hasSymlinkedAncestorBelowManagedRoot(path: String, rootPath: String) -> Bool {
+        let root = URL(fileURLWithPath: standardizePathPreservingSymlinks(rootPath), isDirectory: true)
+        let candidate = URL(fileURLWithPath: standardizePathPreservingSymlinks(path), isDirectory: true)
+        let rootComponentCount = root.pathComponents.count
+        var ancestor = candidate.deletingLastPathComponent()
+        while ancestor.pathComponents.count > rootComponentCount {
+            if (try? FileManager.default.destinationOfSymbolicLink(atPath: ancestor.path)) != nil { return true }
+            let parent = ancestor.deletingLastPathComponent()
+            guard parent.path != ancestor.path else { break }
+            ancestor = parent
+        }
+        return false
+    }
+
+    private func managedDirectoryContainsOwnedDescendant(path: String) throws -> Bool {
+        for project in try store.projects() {
+            let projectPath = normalizePath(project.dir)
+            if projectPath != path, isPath(projectPath, inside: path) { return true }
+            for workspace in try store.workspaces(projectID: project.id, includeArchived: true) {
+                let workspacePath = normalizePath(workspace.dir)
+                if workspacePath != path, isPath(workspacePath, inside: path) { return true }
+            }
+        }
+        return false
+    }
+
+    private func makeWorkspaceDirname(
+        project: ProjectRecord, preferredExistingDirname: String?, requestedDirname: String?, excludingDirname: String?,
+        excludingFilesystemDirname: String? = nil
+    ) throws -> String {
         if let requestedDirname, !requestedDirname.isEmpty {
             try validateWorkspaceDirname(requestedDirname)
-            let used = try usedWorkspaceDirnames(project: project, excludingDirname: excludingDirname)
+            let used = try usedWorkspaceDirnames(
+                project: project, excludingDirname: excludingDirname, excludingFilesystemDirname: excludingFilesystemDirname)
             guard !used.contains(requestedDirname) else {
                 throw WorkspaceError.invalidArgument(message: "Workspace directory name is already in use: \(requestedDirname)")
             }
@@ -4805,7 +5435,9 @@ public final class WorkspaceOrchestrator {
         throw WorkspaceError.invalidArgument(message: "No available workspace dirnames remain for project \(project.name).")
     }
 
-    private func usedWorkspaceDirnames(project: ProjectRecord, excludingDirname: String?) throws -> Set<String> {
+    private func usedWorkspaceDirnames(project: ProjectRecord, excludingDirname: String?, excludingFilesystemDirname: String? = nil) throws -> Set<
+        String
+    > {
         let records = try store.workspaces(projectID: project.id, includeArchived: true)
         var used = Set<String>()
         for record in records {
@@ -4814,7 +5446,7 @@ public final class WorkspaceOrchestrator {
         }
         let root = try worktreeRoot(project: project)
         if let entries = try? FileManager.default.contentsOfDirectory(atPath: root.path) {
-            for entry in entries where entry != excludingDirname { used.insert(entry) }
+            for entry in entries where entry != excludingDirname && entry != excludingFilesystemDirname { used.insert(entry) }
         }
         return used
     }
@@ -4924,13 +5556,37 @@ public final class WorkspaceOrchestrator {
         try FileManager.default.removeItem(atPath: project.dir)
     }
 
+    private func removePreparedManagedGitWorkspaceRootIfUnowned(project: ProjectRecord) throws {
+        guard project.isGitRepo else { return }
+        let root = try worktreeRoot(project: project)
+        guard isManagedWorkspaceEntryPath(root.path) else { return }
+        try removePreparedManagedDirectoryIfUnowned(path: root.path)
+    }
+
+    private func removePreparedManagedProjectDirectoryIfUnowned(project: ProjectRecord) throws {
+        guard project.isGitRepo, isManagedRepositoryDirectory(path: project.dir) else { return }
+        try removePreparedManagedDirectoryIfUnowned(path: project.dir)
+    }
+
+    private func removePreparedManagedDirectoryIfUnowned(path: String) throws {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { return }
+        if case .some = try managedDirectoryOwnershipConflict(path: path) { return }
+        try FileManager.default.removeItem(atPath: path)
+    }
+
     func rollbackFailedImportedProjectCreation(project: ProjectRecord, workspaceDirectory: String) throws {
+        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+        let portAllocator = PortAllocator(store: store)
+        for workspace in workspaces { try portAllocator.releasePorts(workspaceID: workspace.id) }
         try store.deleteProject(id: project.id)
         try removeManagedWorkspaceDirectoryIfNeeded(path: workspaceDirectory)
         try removeManagedProjectDirectoryIfNeeded(project: project)
     }
 
     private func isManagedRepositoryDirectory(path: String) -> Bool { isPath(path, inside: repositoriesRootDirectory().path) }
+
+    private func isManagedRepositoryEntryPath(_ path: String) -> Bool { isPathPreservingSymlinks(path, inside: repositoriesRootDirectory().path) }
 
     private func defaultWorkspace(projectID: String) throws -> WorkspaceRecord? {
         try store.workspaces(projectID: projectID, includeArchived: true).first(where: \.isDefault)
@@ -4951,6 +5607,10 @@ public final class WorkspaceOrchestrator {
         isPath(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
     }
 
+    private func isManagedWorkspaceEntryPath(_ path: String, allowEqual: Bool = false) -> Bool {
+        isPathPreservingSymlinks(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
+    }
+
     private func removeManagedWorkspaceDirectoryIfNeeded(path: String) throws {
         let normalizedPath = normalizePath(path)
         guard isManagedWorkspacesDirectory(path: normalizedPath) else { return }
@@ -4962,6 +5622,19 @@ public final class WorkspaceOrchestrator {
     private func isPath(_ path: String, inside rootPath: String, allowEqual: Bool = false) -> Bool {
         let root = URL(fileURLWithPath: rootPath, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
         let candidate = URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+        let rootComponents = root.pathComponents
+        let candidateComponents = candidate.pathComponents
+        if allowEqual {
+            guard candidateComponents.count >= rootComponents.count else { return false }
+        } else {
+            guard candidateComponents.count > rootComponents.count else { return false }
+        }
+        return candidateComponents.starts(with: rootComponents)
+    }
+
+    private func isPathPreservingSymlinks(_ path: String, inside rootPath: String, allowEqual: Bool = false) -> Bool {
+        let root = URL(fileURLWithPath: standardizePathPreservingSymlinks(rootPath), isDirectory: true)
+        let candidate = URL(fileURLWithPath: standardizePathPreservingSymlinks(path), isDirectory: true)
         let rootComponents = root.pathComponents
         let candidateComponents = candidate.pathComponents
         if allowEqual {
@@ -5380,6 +6053,7 @@ public final class WorkspaceOrchestrator {
 
     @discardableResult public func restartCodingAgent(workspaceID: String, agentID: String) throws -> AgentWindowRecord {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
             guard let record = try store.agentWindows(workspaceID: workspaceID).first(where: { $0.id == agentID }) else {
                 throw WorkspaceError.invalidArgument(message: "Coding agent is not running.")
             }
@@ -5545,6 +6219,7 @@ public final class WorkspaceOrchestrator {
     }
 
     public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String, processTemplateID: String? = nil) throws {
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         let recoverStartedAt = currentDate()
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
@@ -5611,6 +6286,7 @@ public final class WorkspaceOrchestrator {
         _ launcher: AgentLauncher, project: ProjectRecord, workspace: WorkspaceRecord, background: Bool
     ) throws -> AgentWindowRecord {
         let workspaceID = workspace.id
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         if let existing = try store.agentWindows(workspaceID: workspaceID).first(where: {
             if $0.claimedLauncherID == launcher.id { return true }
             guard $0.claimedLauncherID == nil else { return false }
@@ -5682,11 +6358,13 @@ public final class WorkspaceOrchestrator {
     }
 
     public func recoverRunningWorkspaceProcessIfPossible(workspaceID: String, processID: String) throws -> Bool {
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return false }
         return try recoverRunningProcessTerminalIfPossible(workspaceID: workspaceID, process: process)
     }
 
     public func recoverMissingBrowserSession(workspaceID: String, targetURL: String) throws {
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         guard !sessions.isEmpty else { throw WorkspaceError.invalidArgument(message: "No browser sessions are configured for this workspace.") }
@@ -5775,34 +6453,76 @@ public final class WorkspaceOrchestrator {
     }
 
     private func recoverRunningProcessTerminalIfPossible(workspaceID: String, process: RunningProcessRecord) throws -> Bool {
-        guard let terminalHost = terminalHost(for: process.terminalApp), terminalHost == .spaces else { return false }
-        let sessionID = process.terminalNativeID ?? process.terminalTrackingID
-        guard let sessionID, !sessionID.isEmpty else { return false }
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return false }
-        guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return false }
-        guard runtimeState.state == .starting || runtimeState.state == .running else { return false }
+        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
+        guard let terminalHost = terminalHost(for: process.terminalApp) else { return false }
+        if terminalHost == .spaces {
+            let sessionID = process.terminalNativeID ?? process.terminalTrackingID
+            guard let sessionID, !sessionID.isEmpty else { return false }
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return false }
+            guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return false }
+            guard runtimeState.state == .starting || runtimeState.state == .running else { return false }
+            guard let pid = resolvedRuntimePID(for: process), isProcessAlive(pid: pid) else { return false }
+            let (_, workspace) = try resolveWorkspace(id: workspaceID)
+            let snapshot = bestEffortYabaiWindowSnapshot()
+            builtInTerminalWindowOpener(sessionID, .owner)
+            let capturedWindowID = bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost))
+            let now = nowISO8601()
+            try store.upsert(
+                runningProcess: RunningProcessRecord(
+                    id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
+                    terminalApp: process.terminalApp, windowID: capturedWindowID, terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                    terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: pid, status: .running,
+                    logPath: process.logPath ?? paths.outputPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nil))
+
+            let existingWindow = try store.windows(workspaceID: workspace.id).first(where: { window in
+                window.role == "terminal"
+                    && (window.id == process.id || window.windowID == process.windowID || window.terminalTrackingID == sessionID)
+            })
+            try store.upsert(
+                window: WindowRecord(
+                    id: existingWindow?.id ?? process.id, workspaceID: workspace.id, app: terminalAppName(for: terminalHost),
+                    name: process.templateName, detail: process.command, targetURL: nil, windowID: capturedWindowID, terminalTrackingID: sessionID,
+                    terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
+                    orderIndex: existingWindow?.orderIndex
+                        ?? Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200),
+                    lastSeenAt: now))
+            return true
+        }
+        guard tmux.isAvailable() else { return false }
         guard let pid = resolvedRuntimePID(for: process), isProcessAlive(pid: pid) else { return false }
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
+        let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: process.templateName)
+        guard tmux.hasSession(named: sessionName) else { return false }
+
         let snapshot = bestEffortYabaiWindowSnapshot()
-        builtInTerminalWindowOpener(sessionID, .owner)
-        let capturedWindowID = bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost))
+        let terminalHandle = try attachProcessTmuxSession(
+            workspace: workspace, processName: process.templateName, commandDescription: process.command, terminalHost: terminalHost,
+            background: false)
+        let capturedWindowID =
+            bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         let now = nowISO8601()
+        let hookSessionID = storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle)
+        let terminalNativeID = storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle)
+        let terminalContainerID = storedTerminalContainerID(terminalHost: terminalHost, handle: terminalHandle)
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                terminalApp: process.terminalApp, windowID: capturedWindowID, terminalTrackingID: sessionID, terminalNativeID: sessionID,
-                terminalContainerID: nil, pid: pid, status: .running, logPath: process.logPath ?? paths.outputPath,
-                lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nil))
+                runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: capturedWindowID,
+                terminalTrackingID: hookSessionID, terminalNativeID: terminalNativeID, terminalContainerID: terminalContainerID, itermTabIndex: nil,
+                tmuxWindowID: process.tmuxWindowID, pid: pid, status: .running, logPath: process.logPath, lastOutputAt: process.lastOutputAt,
+                startedAt: process.startedAt, exitedAt: nil))
 
         let existingWindow = try store.windows(workspaceID: workspace.id).first(where: { window in
-            window.role == "terminal" && (window.id == process.id || window.windowID == process.windowID || window.terminalTrackingID == sessionID)
+            window.role == "terminal"
+                && (window.id == process.id || window.windowID == process.windowID || window.tmuxWindowID == process.tmuxWindowID)
         })
         try store.upsert(
             window: WindowRecord(
                 id: existingWindow?.id ?? process.id, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: process.templateName,
-                detail: process.command, targetURL: nil, windowID: capturedWindowID, terminalTrackingID: sessionID, terminalNativeID: sessionID,
-                terminalContainerID: nil, role: "terminal",
+                detail: process.command, targetURL: nil, windowID: capturedWindowID, terminalTrackingID: hookSessionID,
+                terminalNativeID: terminalNativeID, terminalContainerID: terminalContainerID, itermTabIndex: nil, tmuxWindowID: process.tmuxWindowID,
+                role: "terminal",
                 orderIndex: existingWindow?.orderIndex
                     ?? Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200),
                 lastSeenAt: now))
@@ -5812,25 +6532,53 @@ public final class WorkspaceOrchestrator {
     @discardableResult private func launchConfiguredProcess(
         template: ProcessTemplate, workspace: WorkspaceRecord, env: [String: String], terminalHost: TerminalHost, background: Bool = false
     ) throws -> RunningProcessRecord {
-        _ = background
+        try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
+        if terminalHost == .spaces {
+            let name = processKey(for: template)
+            let sessionCommand = try spacesTerminalCommand(template: template, env: env)
+            let session = try launchSpacesTerminalSession(
+                title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
+                readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
+            let now = nowISO8601()
+            let record = RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
+                terminalApp: terminalAppName(for: terminalHost), windowID: session.windowID, terminalTrackingID: session.sessionID,
+                terminalNativeID: session.sessionID, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: session.childPID,
+                status: .running, logPath: session.outputPath, lastOutputAt: nil, startedAt: now, exitedAt: nil)
+            try store.upsert(runningProcess: record)
+            let nextOrder = Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200)
+            try store.upsert(
+                window: WindowRecord(
+                    id: UUID().uuidString, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: name, detail: template.command,
+                    targetURL: nil, windowID: session.windowID, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID,
+                    terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: nextOrder, lastSeenAt: now))
+            return record
+        }
         let name = processKey(for: template)
-        let sessionCommand = try spacesTerminalCommand(template: template, env: env, processShell: try store.appConfig().processShell)
-        let session = try launchSpacesTerminalSession(
-            title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-            readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
-        let now = nowISO8601()
+        let command = try processLaunchCommand(template: template)
+        let snapshot = try yabai.listWindows()
+        let terminalHandle = try launchProcessInTmux(
+            workspace: workspace, processName: name, rawCommand: template.command, command: command, env: env, terminalHost: terminalHost,
+            background: background, replaceExistingSession: true)
+        let capturedWindowID =
+            bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
+        let tmuxWindow = try currentTmuxWindowInfo(workspaceID: workspace.id, processName: name)
+        let hookSessionID = storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle)
+        let terminalNativeID = storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle)
+        let terminalContainerID = storedTerminalContainerID(terminalHost: terminalHost, handle: terminalHandle)
         let record = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
-            terminalApp: terminalAppName(for: terminalHost), windowID: session.windowID, terminalTrackingID: session.sessionID,
-            terminalNativeID: session.sessionID, terminalContainerID: nil, pid: session.childPID, status: .running, logPath: session.outputPath,
-            lastOutputAt: nil, startedAt: now, exitedAt: nil)
+            terminalApp: terminalAppName(for: terminalHost), windowID: capturedWindowID, terminalTrackingID: hookSessionID,
+            terminalNativeID: terminalNativeID, terminalContainerID: terminalContainerID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id,
+            pid: tmuxWindow?.panePID, status: .running, logPath: nil, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
         try store.upsert(runningProcess: record)
         let nextOrder = Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200)
         try store.upsert(
             window: WindowRecord(
                 id: record.id, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: name, detail: template.command,
-                targetURL: nil, windowID: session.windowID, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID,
-                terminalContainerID: nil, role: "terminal", orderIndex: nextOrder, lastSeenAt: now))
+                targetURL: nil, windowID: capturedWindowID, terminalTrackingID: hookSessionID, terminalNativeID: terminalNativeID,
+                terminalContainerID: terminalContainerID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id, role: "terminal", orderIndex: nextOrder,
+                lastSeenAt: nowISO8601()))
         return record
     }
 

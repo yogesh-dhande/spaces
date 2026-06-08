@@ -8,7 +8,7 @@ Spaces is a macOS Swift app and CLI built around a shared orchestration layer.
 Core invariants:
 - SQLite is the single source of truth for persisted model data and global preferences.
 - yabai is the source of truth for window IDs and cross-app window focus.
-- Workspace settings are seeded from project templates and preserved as per-workspace overrides.
+- Workspace settings are seeded from project templates at workspace creation and preserved as per-workspace overrides after that.
 - Schema changes must be additive and non-destructive.
 - GUI and CLI both call the same orchestration layer instead of re-implementing behavior independently.
 
@@ -65,6 +65,9 @@ flowchart LR
 - Mobile workspace-terminal stop requests pass workspace ID and session ID into workspacecore's ad hoc built-in terminal stop path. The path rejects process- and agent-owned sessions, terminates the matching service session, removes tracked terminal rows, and can resolve live sessions by working directory when a tracked window row is already gone.
 - Mobile process mutations call configured-process recovery for missing runtimes and running-process stop or restart for live runtimes.
 - Mobile coding-agent mutations call the workspace agent lifecycle methods. Stop removes runtime state and terminates the backing Spaces terminal session while preserving configured launchers. Restart resolves the claimed or configured launcher ID first, falls back to launcher names only for records without an ID claim, and launches that configured row again.
+- Mobile app recovery is hosted inside `spacesmobilebridge` because the daemon bridge remains reachable when `SpacesApp` has quit while `SpacesTerminalService` is still running. Only the daemon-hosted bridge installs the recovery launcher; standalone `spaces mobile serve` bridges reject `launchSpacesApp` because they do not have a terminal-service executable context. The launcher checks `SpacesLeaseCoordinator.currentProfileAppOwner(profile:)` before spawning and treats an existing owner as success, so the command is launch-if-needed rather than force-relaunch.
+- `SpacesApp` recovery resolves executables from the running service location only: sibling `SpacesApp` for SwiftPM builds, the app bundle's `Contents/MacOS/SpacesApp` when the service is in `Contents/Resources`, `/Applications/Spaces.app/Contents/MacOS/SpacesApp` for `/usr/local/bin/SpacesTerminalService`, and `~/Applications/Spaces.app/Contents/MacOS/SpacesApp` for `~/.local/bin/SpacesTerminalService`. The resolver intentionally avoids process-name scans, current-directory searches, `open`, service restarts, and relaunch fallbacks so recovery stays scoped to the intended install relationship.
+- The recovery launch environment overwrites `SPACES_DB_PATH`, `SPACES_RUNTIME_DIR`, and `SPACES_TERMINAL_SERVICE_EXECUTABLE` with the current profile database path, runtime directory, and service executable path. This binds the relaunched app to the same profile and keeps app-side terminal prewarm pointed at the still-running service binary instead of deriving a different profile or service path from the app process environment.
 - Native built-in terminal windows receive a workspace runtime-control provider from `spacesui`. The native window title owns the runtime name and the terminal UI owns the compact right-aligned action strip; `AppKitController` resolves the session back to a process, coding-agent, or ad hoc terminal row, preferring stable process template and coding-agent launcher IDs over user-editable names.
 - User window close detaches process and coding-agent terminal windows while ad hoc terminal window close uses the ad hoc session stop path. Terminal-toolbar stop uses the process, coding-agent, or ad hoc lifecycle path for the selected runtime. Programmatic closes produced by stop or restart carry a termination marker through IPC so AppKit window cleanup does not recursively run close cleanup.
 - Runtime-target refresh preserves live process-owned and agent-owned Spaces terminal sessions by service runtime state after their native window detaches. Preserved agent sessions clear dead native window IDs during refresh and rebind to the replacement native window when focused. Ad hoc terminal rows require an active or pending attachment and are pruned when their final local or remote attachment is gone.
@@ -76,7 +79,7 @@ flowchart LR
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
 - SQLite stores projects, workspaces, runtime state, terminal metadata, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` records the canonical schema version. The active schema is version `6`.
+- `migration_state.current_version` records the canonical schema version. The active schema is version `7`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
 
 ### Profile Resolution
@@ -138,6 +141,8 @@ classDiagram
     +setup_error
     +setup_started_at
     +setup_finished_at
+    +setup_exit_code
+    +setup_log_path
   }
 
   class WorkspacePort {
@@ -238,8 +243,21 @@ Projects persist:
 - port definitions
 - process templates
 
-Managed clone directories under `~/spaces/repos` and managed worktree roots under `~/spaces/workspaces` must be keyed by project identity rather than project name so cleanup, retries, and same-name projects cannot collide on disk ownership.
+Managed clone directories under `~/spaces/repos` and managed worktree roots under `~/spaces/workspaces` must be keyed by project identity rather than project name so cleanup, retries, and same-name projects cannot collide on disk ownership. Prepared Git imports persist normalized clone paths by resolving managed-root parents while replacement checks operate on the managed entry path. Replacement of existing managed folders is limited to entries inside those managed roots, and only when SQLite has no project or workspace owner at or beneath the entry or its resolved target. The ownership check runs during preflight and immediately before deletion so a folder that becomes database-owned is preserved. Discarding an unsaved prepared Git import also rechecks ownership before cleanup and skips paths that were registered by another process. Symlinked managed entries are unlinked at the managed path instead of following the link target, but replacement candidates below symlinked ancestors inside a managed root are rejected. Replacing an orphaned managed worktree clears any matching Git worktree registration before the folder is removed, pruning stale metadata when Git reports a corrupted or missing working tree.
 - browser-session templates
+
+Project configuration can also be represented as `spaces.yaml` through GUI-only import/export in `workspacecore`. The file is resolved from the default workspace directory: local projects use the project directory, while app-managed Git projects use the checked-out default worktree. The YAML document uses schema version `1`, treats a missing `version` as `1`, rejects versions greater than the supported schema version, and omits internal database IDs. Missing optional keys decode to app-state defaults without rewriting the source file.
+
+The YAML schema contains:
+- `version`
+- `setup_script`
+- `stop_script`
+- `ports[].name`
+- `processes[].name`, `processes[].command`, `processes[].on_exit`
+- `browser_sessions[].name`, `browser_sessions[].url`
+- `agent_launchers[].name`, `agent_launchers[].command`
+
+Import uses the same project/workspace normalization paths as GUI saves so existing port, process, and coding-agent launcher IDs are preserved by name or command where possible. GUI project creation previews a local directory by loading `spaces.yaml` into a project template before persistence, then saves the reviewed settings into the project and default workspace from the visible form snapshot without re-reading `spaces.yaml`. Git project creation prepares an app-managed bare clone plus default worktree before persistence, loads `spaces.yaml` from that worktree into the reviewed settings, and persists the prepared project only after the user saves; save-time validation failures keep the prepared source staged for retry, while explicit cancel, replacing the prepared source, or quitting with the form active removes the unmanaged clone and worktree. Async cleanup tasks are registered by trimmed Git URL, and preparation awaits any registered cleanup for that URL before touching the deterministic managed paths. If an unmanaged prepared clone or worktree is still present for the same Git URL, preparation treats it as abandoned state, removes the replaceable managed directories, and clones again so retrying the URL refreshes the loaded settings instead of failing on existing paths. Local and Git preparation results are accepted only while the originating add-project form and source segment remain active, and source hydration replaces open script editors and row section drafts so the visible settings match the selected source. Existing-project GUI import validates `spaces.yaml`, projects it through the normal configuration normalization path, and hydrates the visible project-settings sections without writing to SQLite; hydration uses the row-section replace path so import and discard clear stale inline editors and pending drafts before rendering the imported or saved rows. The imported state is tracked on the project form refs, and Save prompts for whether to apply the visible template to every workspace before calling the normal project update path. The workspace-sync save choice uses the same snapshot/rollback path as direct import when applying the visible template to every workspace. The direct core import API keeps `spaces.yaml` authoritative for compatibility, and invalid YAML still uses the managed-project rollback path. Export encodes the saved project template with Yams' Codable encoder and overwrites `spaces.yaml`.
 
 ### Workspaces
 Workspaces persist:
@@ -297,15 +315,16 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 3. Create or import the workspace directory.
 4. Persist the workspace and seed per-workspace settings from project templates.
 5. Allocate named ports.
-6. Run setup logic.
+6. Run setup logic. Setup executes through `/bin/bash -lc`, writes merged stdout and stderr to `<profile-runtime>/workspace-setup/<workspace-id>/setup.log`, and records setup status, timestamps, exit code, and log path in `workspace_settings`.
 
 ### Workspace Launch
 1. Validate that the workspace is launchable.
-2. Build the workspace environment, including named port variables and workspace paths.
-3. Close and terminate any prior Spaces-backed configured process sessions that occupy the same workspace slots.
-4. Start tracked processes inside dedicated built-in terminal sessions, wait for the session boundary to become available, and then record the terminal row plus runtime state.
-5. Leave configured browser sessions unopened until the user focuses them.
-6. Capture new terminal windows through yabai and persist the mapping.
+2. Require workspace setup status to be `succeeded`; pending, running, or failed setup blocks managed runtime launch and recovery paths.
+3. Build the workspace environment, including named port variables and workspace paths.
+4. Close and terminate any prior Spaces-backed configured process sessions that occupy the same workspace slots.
+5. Start tracked processes inside dedicated built-in terminal sessions, wait for the session boundary to become available, and then record the terminal row plus runtime state.
+6. Leave configured browser sessions unopened until the user focuses them.
+7. Capture new terminal windows through yabai and persist the mapping.
 
 ### Workspace Stop or Archive
 1. Stop tracked processes.
@@ -332,16 +351,13 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Configured process restart closes the old native Spaces terminal window and terminates the old service session before the replacement session is recorded as current. The process row remains the configured slot; the terminal session identity changes only through that explicit replacement path.
 - Immediate process-start failures should be surfaced from the recent built-in session output itself so launch errors report the real command failure instead of a follow-on recovery error.
 - Core external dependencies that the GUI invokes directly, such as `yabai` and `git`, are resolved through a shared executable-locator path instead of relying on the Finder app environment to provide a complete `PATH`.
-- App-level settings such as shell-mode process shell are persisted in the shared store but are configured through the app rather than through `spaces`.
 - Global app settings also store the app-toggle hotkey and the separate command-palette hotkey.
 - Global settings also store the shared window focus pulse color and enabled state behind window-scoped keys.
-- Each `ProcessTemplate` persists an `execution_mode` of `direct` or `shell`. Missing fields in older saved data decode as `direct`.
-- Direct mode is parsed as an executable plus argv and rejects shell-only syntax such as pipelines, redirection, command substitution, and backticks.
-- Before launching a direct-mode process, Spaces validates `$...` usage against a narrow allowlist and only interpolates simple Spaces-provided variables such as named ports and `SPACES_*` paths inside tokens without invoking a shell.
-- Supported direct-mode variable references are limited to `$NAME` and `${NAME}`. Unknown variable names and unsupported shell expansion forms such as `${NAME:-fallback}`, `$$`, and `$?` fail validation against the raw user command instead of being passed through literally.
-- Shell mode treats the command text as shell input and launches it through the global app `process_shell` setting with a consistent `<shell> -lc <command>` invocation. The allowed shell values are `zsh`, `bash`, and `sh`, with `zsh` as the default.
-- Project and workspace editors, workspace launch, running-process restart validation, JSON import/export, and CLI text output all preserve the same execution-mode semantics.
-- Configured coding-agent launchers remain shell-string based rather than using process `executionMode`. Spaces wraps those launchers in an inner interactive login shell so user shell PATH setup and tool bootstrap from files such as `.zshrc` are available without changing deterministic process-launch behavior.
+- Each `ProcessTemplate` stores name, command, kind, and on-exit behavior. Legacy persisted `execution_mode` data is ignored.
+- Process commands are validated as non-empty shell command strings.
+- Process launch exports the workspace environment, including named ports and `SPACES_*` directory variables, then executes the command through the user's resolved login shell.
+- Project and workspace editors, workspace launch, running-process restart validation, JSON import/export, and CLI text output all preserve shell-string process semantics.
+- Configured coding-agent launchers also run as shell strings through an inner interactive login shell so user shell PATH setup and tool bootstrap from files such as `.zshrc` are available.
 
 ## Window and Focus Architecture
 - yabai provides stable window identity and cross-app focusing.

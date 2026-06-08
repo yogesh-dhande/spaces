@@ -276,6 +276,20 @@ struct ContentView: View {
     @ToolbarContentBuilder private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
             Button {
+                Task { await model.launchSpacesAppIfNeeded() }
+            } label: {
+                if model.isLaunchingSpacesApp {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Label("Launch Spaces on Mac", systemImage: "macwindow")
+                }
+            }
+            .disabled(!model.settings.isPaired || model.isLaunchingSpacesApp)
+            .accessibilityLabel("Launch Spaces on Mac")
+            .accessibilityIdentifier("toolbar.launchSpacesApp")
+
+            Button {
                 model.isShowingWorkspaceCreateSheet = true
             } label: {
                 Label("New Workspace", systemImage: "plus")

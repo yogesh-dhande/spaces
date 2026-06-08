@@ -90,6 +90,46 @@ import workspacecore
         #expect(section.isEditing(at: 0), "Editing state should survive a no-op reload")
     }
 
+    @Test func replaceClearsDraftStateBeforeLoadingImportedProcesses() {
+        let section = ProcessesSection(processes: [ProcessTemplate(name: "api", command: "bun run dev")])
+        section.performAdd()
+        #expect(section.isEditing(at: 1))
+
+        section.replace(processes: [ProcessTemplate(name: "imported", command: "npm run imported")])
+
+        var presentedFor: ProcessTemplate?
+        section.presentRemoveConfirmation = { process, decide in
+            presentedFor = process
+            decide(false)
+        }
+        section.row(at: 0)?.triggerRemove()
+
+        #expect(section.rowCount == 1)
+        #expect(section.currentProcesses.map(\.name) == ["imported"])
+        #expect(presentedFor?.name == "imported")
+        #expect(!section.isEditing(at: 0))
+    }
+
+    @Test func browserSessionReplaceClearsDraftStateBeforeLoadingImportedSessions() {
+        let section = BrowserSessionsSection(sessions: [BrowserSession(name: "docs", url: "https://example.com/docs")])
+        section.performAdd()
+        #expect(section.isEditing(at: 1))
+
+        section.replace(sessions: [BrowserSession(name: "imported", url: "https://example.com/imported")])
+
+        var presentedFor: BrowserSession?
+        section.presentRemoveConfirmation = { session, decide in
+            presentedFor = session
+            decide(false)
+        }
+        section.browserRow(at: 0)?.onRemove?()
+
+        #expect(section.rowCount == 1)
+        #expect(section.currentSessions.map(\.name) == ["imported"])
+        #expect(presentedFor?.name == "imported")
+        #expect(!section.isEditing(at: 0))
+    }
+
     // MARK: Status + shortcut maps
 
     @Test func statusByNameDrivesTheStatusDot() {
@@ -193,7 +233,6 @@ import workspacecore
         #expect(row.isEditing)
         #expect(row.formContainsField(accessibilityID: "process-row-edit-name"))
         #expect(row.formContainsField(accessibilityID: "process-row-edit-command"))
-        #expect(row.formContainsField(accessibilityID: "process-row-edit-execution-mode"))
         #expect(row.formContainsField(accessibilityID: "process-row-edit-on-exit"))
     }
 
@@ -212,12 +251,11 @@ import workspacecore
 
         let row = section.row(at: 0)!
         row.enterEditing(prefill: nil, animated: false)
-        row.setEditingFormValues(name: "api", command: "bun run dev --verbose", executionMode: .shell, onExit: .restart)
+        row.setEditingFormValues(name: "api", command: "bun run dev --verbose", onExit: .restart)
         row.triggerSave()
 
         #expect(committed.count == 1)
         #expect(committed.first?.command == "bun run dev --verbose")
-        #expect(committed.first?.executionMode == .shell)
         #expect(committed.first?.onExit == .restart)
         #expect(row.isEditing == false)
     }
@@ -243,7 +281,7 @@ import workspacecore
 
         let row = section.row(at: 0)!
         row.enterEditing(prefill: nil, animated: false)
-        row.setEditingFormValues(name: "api", command: "PORT=$FRONTEND_PORT npm run dev", executionMode: .direct, onExit: .none)
+        row.setEditingFormValues(name: "api", command: "PORT=$FRONTEND_PORT npm run dev", onExit: .none)
         row.triggerSave()
 
         #expect(commitCount == 0)
@@ -368,7 +406,7 @@ extension ProcessRowView {
         subviews.flatMap { $0.subviewsRecursive() }.contains { $0.accessibilityIdentifier() == accessibilityID }
     }
 
-    func setEditingFormValues(name: String, command: String, executionMode: ProcessExecutionMode = .direct, onExit: ProcessExitAction) {
+    func setEditingFormValues(name: String, command: String, onExit: ProcessExitAction) {
         let allFields = subviews.flatMap { $0.subviewsRecursive() }
         if let nameField = allFields.compactMap({ $0 as? NSTextField }).first(where: { $0.accessibilityIdentifier() == "process-row-edit-name" }) {
             nameField.stringValue = name
@@ -376,11 +414,6 @@ extension ProcessRowView {
         if let commandField = allFields.compactMap({ $0 as? NSTextField }).first(where: { $0.accessibilityIdentifier() == "process-row-edit-command" }
         ) {
             commandField.stringValue = command
-        }
-        if let modeSegmented = allFields.compactMap({ $0 as? NSSegmentedControl }).first(where: {
-            $0.accessibilityIdentifier() == "process-row-edit-execution-mode"
-        }), let idx = ProcessExecutionMode.allCases.firstIndex(of: executionMode) {
-            modeSegmented.selectedSegment = idx
         }
         if let onExitSegmented = allFields.compactMap({ $0 as? NSSegmentedControl }).first(where: {
             $0.accessibilityIdentifier() == "process-row-edit-on-exit"
@@ -422,6 +455,8 @@ extension BrowserSessionRowView {
 }
 
 extension BrowserSessionsSection {
+    func performAdd() { handleAdd(NSButton()) }
+
     func browserRow(at index: Int) -> BrowserSessionRowView? {
         guard index >= 0, index < rowCount else { return nil }
         return rowsStackForTesting.arrangedSubviews.compactMap { $0 as? BrowserSessionRowView }[safe: index]

@@ -34,14 +34,14 @@ export default function NextjsDjangoSeparateReposGuidePage() {
           The frontend workspace must own both frontend and backend ports and run both processes if it is the central context for both services.
         </p>
         <h3 className="mt-4 text-sm font-semibold text-foreground">Frontend Project Template</h3>
-        <pre className={code}>
+<pre className={code}>
           <code>{`Ports: FRONTEND_PORT, BACKEND_PORT
 Frontend Server: API_URL=http://localhost:$BACKEND_PORT PORT=$FRONTEND_PORT npm run dev
-Backend Server (Shell mode): cd /path/to/backend-project && python manage.py runserver 0.0.0.0:$BACKEND_PORT
+Backend Server: cd /path/to/backend-project && python manage.py runserver 0.0.0.0:$BACKEND_PORT
 Browser Session: http://localhost:$FRONTEND_PORT`}</code>
         </pre>
         <p className={prose}>
-          The backend server is started from the frontend workspace so both processes can receive the same reserved env vars. Set the backend row to Shell mode because it changes directories before launching.
+          The backend server is started from the frontend workspace so both processes can receive the same reserved env vars. The backend row can change directories directly because process commands run as shell input.
         </p>
       </article>
 

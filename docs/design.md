@@ -100,6 +100,8 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - Keep status indicators small, consistent, and easy to scan.
 - Use color to reinforce meaning, not to carry meaning alone.
 - Surface actionable state near the affected item.
+- Setup recovery panels replace normal workspace detail content while setup is pending, running, or failed. Keep the panel compact: status and timestamps first, recovery actions in one row, and log tail in a monospaced inset area. Show inline setup script editing only after setup fails.
+- While setup is running, refresh status and log output in place without exposing normal process, agent, browser, port, or stop-script controls.
 - Example: the current status-dot language uses green for running, muted outline for idle, red outline for exited, and orange for waiting/attention.
 
 ## Icons And Chips
@@ -118,6 +120,7 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - Use icon-only buttons for obvious actions such as edit, remove, copy, reveal, launch, stop, and overflow.
 - Use text buttons where clarity matters more than compactness.
 - Put infrequent or contextual actions behind an overflow menu instead of overcrowding the main UI.
+- Use text-only buttons with descriptive labels when the action targets a specific file or resource type — the label makes the target self-evident without needing an icon.
 
 ## Forms
 - Keep forms compact and aligned.

@@ -73,11 +73,21 @@ import workspacecore
     // MARK: Public API
 
     func reload(sessions: [BrowserSession], collapsedDisplayURLs: [String?]? = nil) {
+        update(sessions: sessions, collapsedDisplayURLs: collapsedDisplayURLs, preservingEditing: true)
+    }
+
+    func replace(sessions: [BrowserSession], collapsedDisplayURLs: [String?]? = nil) {
+        pendingDraftIndex = nil
+        update(sessions: sessions, collapsedDisplayURLs: collapsedDisplayURLs, preservingEditing: false)
+    }
+
+    private func update(sessions: [BrowserSession], collapsedDisplayURLs: [String?]?, preservingEditing: Bool) {
         self.sessions = sessions
         if let collapsedDisplayURLs { self.collapsedDisplayURLs = collapsedDisplayURLs }
-        refreshRows(animated: true)
+        refreshRows(animated: true, preservingEditing: preservingEditing)
     }
     var rowCount: Int { rows.count }
+    var hasOpenEditor: Bool { rows.contains { $0.isEditing } }
     func isEditing(at index: Int) -> Bool { index >= 0 && index < rows.count ? rows[index].isEditing : false }
 
     // MARK: Header
@@ -145,12 +155,14 @@ import workspacecore
 
     // MARK: Row lifecycle
 
-    private func refreshRows(animated: Bool) {
-        let existingEditing: [String: BrowserSession] = Dictionary(
-            uniqueKeysWithValues: rows.enumerated().compactMap { index, row -> (String, BrowserSession)? in
-                guard row.isEditing else { return nil }
-                return (row.identity(from: sessions[safe: index]), row.formSnapshot())
-            })
+    private func refreshRows(animated: Bool, preservingEditing: Bool = true) {
+        let existingEditing: [String: BrowserSession] =
+            preservingEditing
+            ? Dictionary(
+                uniqueKeysWithValues: rows.enumerated().compactMap { index, row -> (String, BrowserSession)? in
+                    guard row.isEditing else { return nil }
+                    return (row.identity(from: sessions[safe: index]), row.formSnapshot())
+                }) : [:]
         clearRowsStack()
         rows.removeAll()
         for (index, session) in sessions.enumerated() {

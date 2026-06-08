@@ -20,15 +20,6 @@ import workspacecore
         #expect(decision == .confirmRestart(processNames: ["frontend"]))
     }
 
-    @Test func runningWorkspacePromptsBeforeRestartingChangedExecutionModes() {
-        let process = ProcessTemplate(name: "web", command: "npm run web", onExit: .none, executionMode: .direct)
-        let decision = AppKitController.runningWorkspaceProcessEditDecision(
-            previous: [process],
-            updated: [ProcessTemplate(id: process.id, name: "frontend", command: "npm run web", onExit: .restart, executionMode: .shell)])
-
-        #expect(decision == .confirmRestart(processNames: ["frontend"]))
-    }
-
     @Test func addedProcessesDoNotForceRestartConfirmationByThemselves() {
         let process = ProcessTemplate(name: "web", command: "npm run web", onExit: .none)
         let decision = AppKitController.runningWorkspaceProcessEditDecision(

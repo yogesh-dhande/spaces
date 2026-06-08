@@ -81,10 +81,10 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowReservesConfiguredLauncherNamesForLauncherOwnedAgent() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let (project, workspace) = try makeProjectAndWorkspace(store: store)
-        try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex")]
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex")]
         }
 
         let adHoc = try orchestrator.registerAgentWindow(

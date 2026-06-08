@@ -2,13 +2,35 @@
 set -eu
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+repo_root="$(cd "$root/../.." && pwd)"
+source "$repo_root/scripts/spaces-profile-helpers.sh"
 start_epoch="$(date +%s)"
 cache_dir="$root/.build/clang-module-cache"
 coverage_dir="$root/.build/coverage"
+test_config_home="$root/.build/test-config-home"
 mkdir -p "$cache_dir"
 mkdir -p "$coverage_dir"
+rm -rf "$test_config_home"
+mkdir -p "$test_config_home"
 export CLANG_MODULE_CACHE_PATH="$cache_dir"
+export XDG_CONFIG_HOME="$test_config_home"
 export MOCK_TEST_DELAY_CAP_MS="${MOCK_TEST_DELAY_CAP_MS:-25}"
+
+if [ "${SPACES_TEST_SKIP_BUILD:-0}" = "1" ]; then
+    echo "SPACES_TEST_SKIP_BUILD is not supported; SwiftPM coverage requires its build phase to prepare codecov artifacts." >&2
+    exit 1
+fi
+
+cli="$root/.build/debug/spaces"
+if [ -x "$cli" ]; then
+    spaces_profile_eval_shell_env "$cli"
+fi
+
+codecov_json_path="$("$root/scripts/swiftpm.sh" test --show-codecov-path)"
+codecov_dir="$(dirname "$codecov_json_path")"
+profdata_path="$codecov_dir/default.profdata"
+mkdir -p "$codecov_dir"
+rm -f "$codecov_json_path" "$profdata_path" "$codecov_dir"/*.profraw
 
 report_elapsed_time() {
     end_epoch="$(date +%s)"
@@ -17,53 +39,72 @@ report_elapsed_time() {
 }
 trap report_elapsed_time EXIT
 
-echo "Running swift test with coverage..."
-workers="${SPACES_TEST_WORKERS:-}"
-max_auto_workers="${SPACES_TEST_MAX_AUTO_WORKERS:-8}"
-if [ -z "$workers" ]; then
-    detected_workers="$(sysctl -n hw.logicalcpu 2>/dev/null || echo "")"
-    case "$detected_workers" in
-        ''|*[!0-9]*)
-            workers=""
-            ;;
-        *)
-            workers="$detected_workers"
-            case "$max_auto_workers" in
-                ''|*[!0-9]*)
-                    ;;
-                *)
-                    if [ "$max_auto_workers" -gt 0 ] && [ "$workers" -gt "$max_auto_workers" ]; then
-                        workers="$max_auto_workers"
-                    fi
-                    ;;
-            esac
-            ;;
-    esac
-fi
-
-set -- test --parallel --enable-code-coverage --disable-sandbox
-if [ -n "$workers" ]; then
-    echo "Using parallel test workers: $workers"
-    if [ -n "${detected_workers:-}" ] && [ "$workers" != "${detected_workers:-}" ]; then
-        echo "Auto worker count capped from $detected_workers to $workers"
+generate_codecov_artifacts() {
+    mkdir -p "$codecov_dir"
+    profraw_count="$(find "$codecov_dir" -maxdepth 1 -type f -name '*.profraw' | wc -l | tr -d ' ')"
+    if [ "$profraw_count" = "0" ]; then
+        echo "Coverage raw profiles not found in SwiftPM codecov directory: $codecov_dir" >&2
+        exit 1
     fi
-    set -- "$@" --num-workers "$workers"
-fi
-if [ "${SPACES_TEST_SKIP_BUILD:-0}" = "1" ]; then
-    echo "Skipping rebuild before tests (SPACES_TEST_SKIP_BUILD=1)"
-    set -- "$@" --skip-build
+
+    test_binary="$(cd "$codecov_dir/.." && pwd)/spacesPackageTests.xctest/Contents/MacOS/spacesPackageTests"
+    if [ ! -x "$test_binary" ]; then
+        echo "Coverage test binary not found: $test_binary" >&2
+        exit 1
+    fi
+
+    echo "Generating coverage artifacts from $profraw_count raw profile files..."
+    find "$codecov_dir" -maxdepth 1 -type f -name '*.profraw' -print0 |
+        xargs -0 xcrun llvm-profdata merge -sparse -o "$profdata_path"
+    xcrun llvm-cov export -format=text -instr-profile "$profdata_path" "$test_binary" >"$codecov_json_path"
+}
+
+echo "Running swift test with coverage..."
+set -- test --enable-code-coverage --disable-sandbox
+if [ "${SPACES_TEST_PARALLEL:-0}" = "1" ]; then
+    workers="${SPACES_TEST_WORKERS:-}"
+    max_auto_workers="${SPACES_TEST_MAX_AUTO_WORKERS:-8}"
+    if [ -z "$workers" ]; then
+        detected_workers="$(sysctl -n hw.logicalcpu 2>/dev/null || echo "")"
+        case "$detected_workers" in
+            ''|*[!0-9]*)
+                workers=""
+                ;;
+            *)
+                workers="$detected_workers"
+                case "$max_auto_workers" in
+                    ''|*[!0-9]*)
+                        ;;
+                    *)
+                        if [ "$max_auto_workers" -gt 0 ] && [ "$workers" -gt "$max_auto_workers" ]; then
+                            workers="$max_auto_workers"
+                        fi
+                        ;;
+                esac
+                ;;
+        esac
+    fi
+
+    set -- "$@" --parallel
+    if [ -n "$workers" ]; then
+        echo "Using parallel test workers: $workers"
+        if [ -n "${detected_workers:-}" ] && [ "$workers" != "${detected_workers:-}" ]; then
+            echo "Auto worker count capped from $detected_workers to $workers"
+        fi
+        set -- "$@" --num-workers "$workers"
+    fi
+else
+    echo "Using serial coverage tests. Set SPACES_TEST_PARALLEL=1 to opt into parallel coverage."
 fi
 
 "$root/scripts/swiftpm.sh" "$@"
 
-codecov_json_path="$("$root/scripts/swiftpm.sh" test --show-codecov-path)"
+generate_codecov_artifacts
 if [ ! -f "$codecov_json_path" ]; then
     echo "Coverage JSON not found at SwiftPM-reported path: $codecov_json_path" >&2
     exit 1
 fi
 
-codecov_dir="$(dirname "$codecov_json_path")"
-profdata_path="$codecov_dir/default.profdata"
 if [ ! -f "$profdata_path" ]; then
     echo "Coverage profdata not found next to SwiftPM coverage JSON: $profdata_path" >&2
     exit 1

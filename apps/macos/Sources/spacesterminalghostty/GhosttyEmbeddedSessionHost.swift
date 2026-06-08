@@ -42,8 +42,10 @@ extension Notification.Name {
     func sessionSnapshotText() -> String?
     func copySelectionToPasteboard() -> Bool
     func pasteClipboardContents() -> Bool
+    @discardableResult func performBindingAction(_ action: String) -> Bool
     @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool
     @discardableResult func clearScreenAndScrollback() -> Bool
+    var debugSearchState: GhosttyTerminalSearchDebugState { get }
     var debugSurfaceRefreshRequestCount: Int { get }
     func debugVisibleSurfaceText() -> String?
 }
@@ -150,11 +152,15 @@ extension TerminalGhosttyRendererHosting {
         return true
     }
 
+    @discardableResult public func performBindingAction(_ action: String) -> Bool { sessionDriver.performBindingAction(action) }
+
     @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
         sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
     }
 
     @discardableResult public func clearScreenAndScrollback() -> Bool { sessionDriver.clearScreenAndScrollback() }
+
+    public var debugSearchState: GhosttyTerminalSearchDebugState { .init(isVisible: false, query: "", total: nil, selected: nil) }
 
     public var debugSurfaceRefreshRequestCount: Int { sessionDriver.debugRefreshRequestCount }
 
@@ -860,6 +866,7 @@ extension TerminalGhosttyRendererHosting {
         switch event {
         case .setTitle(let title): currentTitle = Self.normalizedSessionMetadataValue(title)
         case .setWorkingDirectory(let path): currentWorkingDirectory = Self.normalizedSessionMetadataValue(path)
+        case .startSearch, .endSearch, .searchTotal, .searchSelected: return
         }
         postSessionMetadataDidChange()
         refreshRuntimeState(force: true)
@@ -1433,11 +1440,15 @@ private final class GhosttyMainActorSyncBox<T>: @unchecked Sendable { var value:
 
     public func pasteClipboardContents() -> Bool { core.rendererHost.pasteClipboardContents() }
 
+    @discardableResult public func performBindingAction(_ action: String) -> Bool { core.rendererHost.performBindingAction(action) }
+
     @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
         core.rendererHost.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
     }
 
     @discardableResult public func clearScreenAndScrollback() -> Bool { core.rendererHost.clearScreenAndScrollback() }
+
+    public var debugSearchState: GhosttyTerminalSearchDebugState { core.rendererHost.debugSearchState }
 
     public var debugSurfaceRefreshRequestCount: Int { core.rendererHost.debugSurfaceRefreshRequestCount }
     public func debugVisibleSurfaceText() -> String? { return core.rendererHost.debugVisibleSurfaceText() }

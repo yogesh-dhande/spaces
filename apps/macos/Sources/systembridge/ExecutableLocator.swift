@@ -1,11 +1,13 @@
 import Foundation
 
 public enum ExecutableTool: Sendable {
+    case tmux
     case yabai
     case git
 
     var commandName: String {
         switch self {
+        case .tmux: "tmux"
         case .yabai: "yabai"
         case .git: "git"
         }
@@ -13,6 +15,7 @@ public enum ExecutableTool: Sendable {
 
     var preferredAbsolutePaths: [String] {
         switch self {
+        case .tmux: ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/opt/local/bin/tmux", "/usr/bin/tmux"]
         case .yabai: ["/opt/homebrew/bin/yabai", "/usr/local/bin/yabai", "/opt/local/bin/yabai", "/usr/bin/yabai"]
         case .git: ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git", "/opt/local/bin/git"]
         }
