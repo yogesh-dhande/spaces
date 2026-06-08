@@ -4697,6 +4697,33 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(settings.processes.first?.name, "api")
     }
 
+    func testUpdateProjectConfigWithWorkspaceSyncKeepsInsertedPortsAlignedWithAssignments() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let api = PortDefinition(id: "port-api", name: "API_PORT")
+        let project = try orchestrator.addProject(dir: projectDir.path) { config in config.ports = [api] }
+        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        defer { PortReserver.shared.releasePorts(workspaceID: workspace.id) }
+        let previousAPIAssignment = try XCTUnwrap(try store.workspacePortsAssigned(workspaceID: workspace.id).first)
+
+        let updatedProject = try orchestrator.updateProjectConfig(projectID: project.id, updateAllWorkspaces: true) { config in
+            config.ports = [PortDefinition(name: "WEB_PORT"), PortDefinition(name: "API_PORT")]
+        }
+
+        XCTAssertEqual(updatedProject.ports.map(\.name), ["WEB_PORT", "API_PORT"])
+        XCTAssertEqual(updatedProject.ports.last?.id, api.id)
+        let assignments = try store.workspacePortsAssigned(workspaceID: workspace.id)
+        XCTAssertEqual(assignments.map(\.name), ["WEB_PORT", "API_PORT"])
+        let webAssignment = try XCTUnwrap(assignments.first { $0.name == "WEB_PORT" })
+        let apiAssignment = try XCTUnwrap(assignments.first { $0.name == "API_PORT" })
+        XCTAssertNotEqual(webAssignment.port, previousAPIAssignment.port)
+        XCTAssertEqual(apiAssignment.port, previousAPIAssignment.port)
+        XCTAssertEqual(apiAssignment.definitionID, api.id)
+    }
+
     func testImportSpacesYAMLUpdatesActiveAndArchivedWorkspacesWhenWorkspaceSyncIsOn() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
