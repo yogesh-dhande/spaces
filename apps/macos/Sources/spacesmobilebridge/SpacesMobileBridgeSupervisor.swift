@@ -114,7 +114,10 @@ import spacesmobilecore
     }
 
     private func startBridgeServer(host: String, port: Int, transportKey: String) throws -> SpacesMobileBridgeServer {
-        let createdServer = try SpacesMobileBridgeServer(host: host, port: port, transportKey: transportKey)
+        let appLauncher = SpacesAppLauncher()
+        let createdServer = SpacesMobileBridgeServer(
+            host: host, port: port, transportKey: transportKey, pairingStoreProtocol: try SpacesMobilePairingStore(),
+            launchSpacesAppHandler: { try appLauncher.launchIfNeeded() })
         do {
             try createdServer.start()
             return createdServer

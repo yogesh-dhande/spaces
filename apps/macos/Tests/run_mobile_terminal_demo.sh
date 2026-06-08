@@ -44,6 +44,7 @@ ipad_udid=""
 iphone_udid=""
 app_log=""
 bridge_log=""
+app_recovery_state_path=""
 ipad_screenshot=""
 iphone_screenshot=""
 ios_app_path=""
@@ -60,6 +61,7 @@ terminal_service_pid=""
 performance_log_path=""
 ghostty_demo_xdg_config_home=""
 demo_home=""
+app_recovery_wait_logged=0
 
 run_demo_env() {
   local -a env_args=(
@@ -398,6 +400,59 @@ wait_for_pid() {
   done
   echo "Timed out waiting for $label (pid $pid)." >&2
   exit 1
+}
+
+read_recovered_app_pid() {
+  [[ -n "$app_recovery_state_path" && -f "$app_recovery_state_path" ]] || return 1
+  python3 - "$app_recovery_state_path" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text())
+except Exception:
+    raise SystemExit(1)
+pid = payload.get("newAppPID")
+if not isinstance(pid, int) or pid <= 0:
+    raise SystemExit(1)
+print(pid)
+PY
+}
+
+process_command() {
+  local pid="$1"
+  ps -p "$pid" -o command= 2>/dev/null || true
+}
+
+continue_after_app_recovery_if_needed() {
+  [[ -n "$app_recovery_state_path" && -f "$app_recovery_state_path" ]] || return 1
+
+  local recovered_pid
+  if ! recovered_pid="$(read_recovered_app_pid)"; then
+    if [[ "$app_recovery_wait_logged" != "1" ]]; then
+      echo "SpacesApp exited during app recovery. Waiting for recovered app owner." >&2
+      app_recovery_wait_logged=1
+    fi
+    return 0
+  fi
+
+  local command
+  command="$(process_command "$recovered_pid")"
+  if [[ -z "$command" || "$command" != *"SpacesApp"* ]]; then
+    if [[ "$app_recovery_wait_logged" != "1" ]]; then
+      echo "SpacesApp recovery marker has no live SpacesApp replacement yet. Waiting." >&2
+      app_recovery_wait_logged=1
+    fi
+    return 0
+  fi
+
+  app_pid="$recovered_pid"
+  app_recovery_wait_logged=0
+  rm -f "$app_recovery_state_path" >/dev/null 2>&1 || true
+  echo "SpacesApp recovered with pid $app_pid. Continuing demo." >&2
+  return 0
 }
 
 wait_for_bridge_port() {
@@ -887,6 +942,7 @@ create_demo_root
 project_dir="$temp_root/project"
 app_log="$temp_root/app.log"
 bridge_log="$temp_root/bridge.log"
+app_recovery_state_path="$temp_root/app-recovery-state.json"
 performance_log_path="$temp_root/mobile-terminal-performance.jsonl"
 ipad_screenshot="$temp_root/ipad.png"
 iphone_screenshot="$temp_root/iphone.png"
@@ -1090,6 +1146,10 @@ echo "  spaces_demo_tail_ipad_stderr"
 
 while true; do
   if ! ps -p "$app_pid" >/dev/null 2>&1; then
+    if continue_after_app_recovery_if_needed; then
+      sleep 1
+      continue
+    fi
     echo "SpacesApp exited. Cleaning up demo." >&2
     exit 0
   fi

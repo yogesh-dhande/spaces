@@ -76,6 +76,15 @@ struct SpacesMobileBridgeClient: Sendable {
         return overview
     }
 
+    func launchSpacesApp(commandChannel: SpacesMobileBridgeCommandChannel? = nil) async throws {
+        let response = try await sendRequest(
+            .init(command: "launchSpacesApp", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            timeout: .seconds(8),
+            commandChannel: commandChannel
+        )
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+    }
+
     func fetchWorkspaceCreateOptions(
         projectID: String? = nil,
         commandChannel: SpacesMobileBridgeCommandChannel? = nil

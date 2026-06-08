@@ -373,6 +373,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var overview: SpacesMobileOverviewPayload?
     var isLoading = false
     var isMutating = false
+    var isLaunchingSpacesApp = false
     var isShowingConnectionSettings = false
     var isShowingWorkspaceCreateSheet = false
     var connectionNotice: String?
@@ -480,6 +481,19 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 return
             }
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func launchSpacesAppIfNeeded() async {
+        guard settings.isPaired, !isLaunchingSpacesApp else { return }
+        isLaunchingSpacesApp = true
+        defer { isLaunchingSpacesApp = false }
+        do {
+            try await bridgeClient.launchSpacesApp(commandChannel: commandChannel)
+            connectionNotice = nil
+            errorMessage = nil
+        } catch {
+            handleBridgeError(error)
         }
     }
 
