@@ -1,7 +1,7 @@
 import Foundation
 import spacesterminalcore
 
-public enum SpacesMobileFirstPartyPolicy { public static let allowedBundleID = "com.yogeshdhande.spacesmobile" }
+public enum SpacesMobileFirstPartyPolicy { public static let allowedBundleID = "dev.usespaces.spacesmobile" }
 
 public struct SpacesMobileClientApp: Codable, Sendable, Equatable {
     public let installationID: String
