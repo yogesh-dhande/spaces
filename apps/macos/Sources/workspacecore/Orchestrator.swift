@@ -1438,7 +1438,7 @@ public final class WorkspaceOrchestrator {
             }
             guard let detectedAgent = adHocDetectedForegroundAgent(from: session.runtimeState) else {
                 if try updateAdHocAgentRuntimeTargetDetail(existingAgent, displayCommand: nil) { didMutate = true }
-                if adHocAgentIsDetectorOwned(existingAgent, sessionID: sessionID) {
+                if try adHocAgentIsDetectorOwned(existingAgent, sessionID: sessionID) {
                     try store.deleteAgentWindow(id: existingAgent.id)
                     didMutate = true
                 }
@@ -1500,14 +1500,15 @@ public final class WorkspaceOrchestrator {
 
     private func adHocDetectedAgentID(sessionID: String) -> String { "terminal-agent-\(sessionID)" }
 
-    private func adHocAgentIsDetectorOwned(_ agent: AgentWindowRecord, sessionID: String) -> Bool {
-        agent.id == adHocDetectedAgentID(sessionID: sessionID)
+    private func adHocAgentIsDetectorOwned(_ agent: AgentWindowRecord, sessionID: String) throws -> Bool {
+        guard agent.id == adHocDetectedAgentID(sessionID: sessionID) else { return false }
+        return try !store.agentSessionHasEventSource(id: agent.id, source: "spaces_signal")
     }
 
     private func resolvedAdHocDetectedAgentLabel(existing: AgentWindowRecord?, detectedLabel: String, workspaceID: String, sessionID: String) throws
         -> String?
     {
-        if let existing, !adHocAgentIsDetectorOwned(existing, sessionID: sessionID) {
+        if let existing, try !adHocAgentIsDetectorOwned(existing, sessionID: sessionID) {
             let existingLabel = existing.label?.trimmingCharacters(in: .whitespacesAndNewlines)
             if let existingLabel, !existingLabel.isEmpty { return existing.label }
         }

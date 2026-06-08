@@ -5448,6 +5448,64 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    func testReconcileTerminalForegroundAgentClassificationsPreservesDetectorRowAfterSignalUpdate() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "detector-row-signal-update"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
+                    foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
+                    foregroundDisplayCommand: "codex --model gpt-5"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let detectedAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(detectedAgent.id, "terminal-agent-\(sessionID)")
+            XCTAssertEqual(detectedAgent.label, "Codex")
+
+            let signaledAgent = try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, terminalNativeID: sessionID, label: "Custom Hook Agent",
+                status: .spinning, eventType: "start", eventSource: "spaces_signal")
+            XCTAssertEqual(signaledAgent.id, detectedAgent.id)
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let knownForegroundAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(knownForegroundAgent.id, detectedAgent.id)
+            XCTAssertEqual(knownForegroundAgent.label, "Custom Hook Agent")
+            XCTAssertEqual(knownForegroundAgent.status, .spinning)
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/usr/bin/python3", foregroundExecutableName: "python3", foregroundArgv: ["python3", "agent.py"]),
+                paths: paths)
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let unknownForegroundAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(unknownForegroundAgent.id, detectedAgent.id)
+            XCTAssertEqual(unknownForegroundAgent.label, "Custom Hook Agent")
+            XCTAssertEqual(unknownForegroundAgent.status, .spinning)
+            XCTAssertNil(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail)
+        }
+    }
+
     func testUpdateAgentWindowStatusPreservesAdHocDetectedTerminalNameAndDetail() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path

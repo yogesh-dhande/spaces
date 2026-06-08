@@ -951,6 +951,17 @@ public final class SQLiteStore {
         return value
     }
 
+    public func agentSessionHasEventSource(id: String, source: String) throws -> Bool {
+        try queryRow(
+            sql: """
+                SELECT 1
+                FROM agent_session_events
+                WHERE agent_session_id = ?
+                  AND source = ?
+                LIMIT 1
+                """, bindings: [id, source]) != nil
+    }
+
     public func appendAgentSessionEvent(
         agentSessionID: String, eventType: String, source: String, message: String?, runtimeTargetID: String?, createdAt: String
     ) throws {
