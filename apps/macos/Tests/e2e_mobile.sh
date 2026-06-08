@@ -11,7 +11,7 @@ SPACES_E2E_BIN="${SPACES_E2E:-$ROOT_DIR/apps/macos/.build/debug/spacese2e}"
 TERMINAL_SERVICE_BIN="${SPACES_TERMINAL_SERVICE_EXECUTABLE:-$ROOT_DIR/apps/macos/.build/debug/SpacesTerminalService}"
 TERMINAL_CREATE_TIMEOUT="${SPACES_MOBILE_E2E_TERMINAL_CREATE_TIMEOUT:-60}"
 DEFAULT_UI_TEST_CONFIG="/tmp/spaces-mobile-ui-test-config.json"
-BUNDLE_ID="com.yogeshdhande.spacesmobile"
+BUNDLE_ID="dev.usespaces.spacesmobile"
 MOBILE_DEVICE_KEY="${SPACES_MOBILE_E2E_DEVICE_KEY:-iphone}"
 if [[ "$MOBILE_DEVICE_KEY" == "ipad" ]]; then
   MOBILE_DEVICE_NAME="${SPACES_MOBILE_E2E_DEVICE_NAME:-${SPACES_MOBILE_DEMO_IPAD_NAME:-iPad Pro 13-inch (M5)}}"

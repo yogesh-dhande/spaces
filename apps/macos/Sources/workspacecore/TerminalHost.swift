@@ -7,5 +7,5 @@ public enum TerminalHost: String, Sendable {
 
     public var appName: String { "Spaces" }
 
-    public var bundleIdentifier: String { "com.spaces.app" }
+    public var bundleIdentifier: String { "dev.usespaces.spaces" }
 }

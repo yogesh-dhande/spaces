@@ -795,7 +795,7 @@ final class SpacesMobileUITests: XCTestCase {
 
 private struct UITestConfiguration: Decodable {
     static let defaultConfigPath = "/tmp/spaces-mobile-ui-test-config.json"
-    static let defaultBundleID = "com.yogeshdhande.spacesmobile"
+    static let defaultBundleID = "dev.usespaces.spacesmobile"
 
     let sessionID: String
     let secondarySessionID: String?
