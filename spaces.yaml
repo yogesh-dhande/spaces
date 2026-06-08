@@ -1,0 +1,20 @@
+version: 1
+setup_script: '(cd apps/web && npm i)
+
+  git submodule update --init --recursive
+
+  apps/macos/scripts/setup_ghostty.sh'
+stop_script: ''
+ports:
+- name: PORT
+processes:
+- name: npm:dev
+  command: npm run dev
+  on_exit: none
+  execution_mode: direct
+browser_sessions:
+- name: web
+  url: http://localhost:$PORT
+agent_launchers:
+- name: codex
+  command: codex --yolo
