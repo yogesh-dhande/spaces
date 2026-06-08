@@ -130,6 +130,14 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(driver.foregroundPID(), foregroundPID)
     }
 
+    func testHostManagedPTYForegroundPIDFallsBackToLiveChildPID() {
+        let currentPID = getpid()
+
+        XCTAssertEqual(HostManagedPTYTerminalSessionDriver.resolvedForegroundPID(foregroundProcessGroup: nil, childPID: currentPID), currentPID)
+        XCTAssertEqual(HostManagedPTYTerminalSessionDriver.resolvedForegroundPID(foregroundProcessGroup: Int32.max, childPID: currentPID), currentPID)
+        XCTAssertEqual(HostManagedPTYTerminalSessionDriver.resolvedForegroundPID(foregroundProcessGroup: currentPID, childPID: nil), currentPID)
+    }
+
     func testHostManagedPTYStripsGhosttyCommandPrefixesBeforeShellExecution() {
         let direct = HostManagedPTYTerminalSessionDriver.execCommand(
             for: TerminalSessionLaunchConfiguration(
