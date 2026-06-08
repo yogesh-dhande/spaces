@@ -616,7 +616,9 @@ public final class WorkspaceOrchestrator {
     }
 
     public func addReviewedProject(dir: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
-        let baseRecord = try previewProject(dir: dir)
+        let normalizedDir = normalizePath(dir)
+        if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
+        let baseRecord = try normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir)
         let record = try configuredProjectRecord(baseRecord: baseRecord, update: configure)
         try store.upsert(project: record)
         do { try ensureDefaultWorkspace(for: record) } catch {
@@ -5380,10 +5382,8 @@ public final class WorkspaceOrchestrator {
     private func validateManagedDirectoryIsUnowned(path: String) throws {
         guard let conflict = try managedDirectoryOwnershipConflict(path: path) else { return }
         switch conflict {
-        case .project(let path):
-            throw WorkspaceError.projectAlreadyExists(dir: path)
-        case .workspace(let workspace):
-            throw WorkspaceError.invalidArgument(message: "Workspace already exists: \(workspace.title)")
+        case .project(let path): throw WorkspaceError.projectAlreadyExists(dir: path)
+        case .workspace(let workspace): throw WorkspaceError.invalidArgument(message: "Workspace already exists: \(workspace.title)")
         case .descendant(let path):
             throw WorkspaceError.invalidArgument(message: "Managed folder contains a project or workspace owned by Spaces: \(path)")
         }
@@ -5396,9 +5396,7 @@ public final class WorkspaceOrchestrator {
         if resolvedPath != entryPath { ownershipPaths.append(resolvedPath) }
         for ownershipPath in ownershipPaths {
             if try store.project(dir: ownershipPath) != nil { return .project(ownershipPath) }
-            if let workspace = try store.workspace(dir: ownershipPath) {
-                return .workspace(workspace)
-            }
+            if let workspace = try store.workspace(dir: ownershipPath) { return .workspace(workspace) }
         }
         for ownershipPath in ownershipPaths where try managedDirectoryContainsOwnedDescendant(path: ownershipPath) {
             return .descendant(ownershipPath)
@@ -5419,7 +5417,17 @@ public final class WorkspaceOrchestrator {
                 return worktreePath == entryPath || normalizePath(worktreePath) == resolvedPath
             }
             guard isRegistered else { return }
-            do { try git.removeWorktree(path: project.dir, worktreePath: entryPath) } catch { if !isMissingWorktreeError(error) { throw error } }
+            do { try git.removeWorktree(path: project.dir, worktreePath: entryPath) } catch {
+                guard isMissingWorktreeError(error) else { throw error }
+                try git.pruneWorktrees(path: project.dir)
+                let prunedWorktrees = try git.listWorktrees(path: project.dir)
+                if prunedWorktrees.contains(where: {
+                    let worktreePath = standardizePathPreservingSymlinks($0.path)
+                    return worktreePath == entryPath || normalizePath(worktreePath) == resolvedPath
+                }) {
+                    throw error
+                }
+            }
             return
         }
     }

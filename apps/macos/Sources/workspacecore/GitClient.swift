@@ -124,6 +124,8 @@ public final class GitClient {
         try runGitOrThrow(["-C", repoPath, "worktree", "remove", "--force", worktreePath])
     }
 
+    public func pruneWorktrees(path repoPath: String) throws { try runGitOrThrow(["-C", repoPath, "worktree", "prune"]) }
+
     public func listWorktrees(path repoPath: String) throws -> [WorktreeInfo] {
         let output = try runGitAndCapture(["-C", repoPath, "worktree", "list", "--porcelain"])
         return parseWorktreeList(output)

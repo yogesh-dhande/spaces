@@ -4418,6 +4418,33 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(settings?.processes.first?.command, "npm run edited")
     }
 
+    func testAddReviewedProjectDoesNotReloadLocalSpacesYAMLAtSaveTime() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("reviewed-project-invalid-yaml-after-preview", isDirectory: true)
+        let configURL = projectDir.appendingPathComponent("spaces.yaml")
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        try spacesYAMLFixture(stopScript: "echo preview-stop").write(to: configURL, atomically: true, encoding: .utf8)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let preview = try orchestrator.previewProject(dir: projectDir.path)
+        try "version: [".write(to: configURL, atomically: true, encoding: .utf8)
+
+        let project = try orchestrator.addReviewedProject(dir: projectDir.path) { config in
+            config.stopScript = preview.stopScript
+            config.ports = preview.ports
+            config.processes = preview.processes
+            config.browserSessions = preview.browserSessions
+            config.agentLaunchers = preview.agentLaunchers
+        }
+
+        XCTAssertEqual(project.stopScript, "echo preview-stop")
+        XCTAssertEqual(project.processes.first?.command, "npm run api")
+        let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
+        XCTAssertEqual(settings?.stopScript, "echo preview-stop")
+        XCTAssertEqual(settings?.processes.first?.command, "npm run api")
+    }
+
     func testPrepareGitProjectImportsSpacesYAMLWithoutPersistingUntilCommit() throws {
         let fixture = try makeTempGitRepo(name: "prepared-yaml-git-import")
         try spacesYAMLFixture(stopScript: "echo prepared-yaml-stop").write(
@@ -7265,6 +7292,36 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(candidate.path, orphanDir.path)
         let workspace = try orchestrator.createWorkspace(
             projectID: project.id, name: "Stale Feature", branch: "stale-feature", targetBranch: "main", directoryName: "stale-feature",
+            runSetupScript: false, allowExistingBranchReuse: true, replaceExistingManagedDirectory: true)
+
+        XCTAssertEqual(workspace.dir, orphanDir.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanMarker.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(workspace.dir)/README.md"))
+        let afterWorktrees = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: project.dir)
+        XCTAssertEqual(parseWorktreePaths(afterWorktrees).filter { $0 == listedOrphanDir }.count, 1, afterWorktrees)
+    }
+
+    func testCreateWorkspaceReplacementPrunesCorruptOrphanedGitWorktreeRegistration() throws {
+        let fixture = try makeTempGitRepo(name: "replace-corrupt-stale-worktree")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
+        let workspaceRoot = URL(fileURLWithPath: defaultWorkspace.dir, isDirectory: true).deletingLastPathComponent()
+        let orphanDir = workspaceRoot.appendingPathComponent("corrupt-feature", isDirectory: true)
+        try runGit(["worktree", "add", "-b", "corrupt-feature", orphanDir.path, "main"], cwd: project.dir)
+        let orphanMarker = orphanDir.appendingPathComponent("orphan.txt")
+        try "orphan".write(to: orphanMarker, atomically: true, encoding: .utf8)
+        try FileManager.default.removeItem(at: orphanDir.appendingPathComponent(".git"))
+        let listedOrphanDir = normalizeTestPath(orphanDir.path)
+        let beforeWorktrees = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: project.dir)
+        XCTAssertTrue(parseWorktreePaths(beforeWorktrees).contains(listedOrphanDir), beforeWorktrees)
+
+        let workspace = try orchestrator.createWorkspace(
+            projectID: project.id, name: "Corrupt Feature", branch: "corrupt-feature", targetBranch: "main", directoryName: "corrupt-feature",
             runSetupScript: false, allowExistingBranchReuse: true, replaceExistingManagedDirectory: true)
 
         XCTAssertEqual(workspace.dir, orphanDir.path)
