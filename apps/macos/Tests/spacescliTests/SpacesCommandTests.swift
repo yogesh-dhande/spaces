@@ -10,7 +10,7 @@ import workspacecore
 
 @testable import spacescli
 
-final class MXCommandTests: XCTestCase {
+final class SpacesCommandTests: XCTestCase {
     func testImportParsesPath() throws {
         let command = try ImportCommand.parse(["."])
 

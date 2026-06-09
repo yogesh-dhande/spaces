@@ -12,7 +12,7 @@ import workspacecore
 
 /// Small manual-testing helper that exposes fixture seeding and state-dump
 /// commands without expanding the user-facing `spaces` CLI surface.
-struct MXE2ECommand: ParsableCommand {
+struct SpacesE2ECommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "spacese2e", abstract: "Manual real-system test helpers for Spaces.",
         subcommands: [
@@ -1530,4 +1530,4 @@ private func postScrollEvent(at point: CGPoint, deltaY: Int, repetitions: Int) t
         firstScrollEventUptimeNanoseconds: firstScrollEventUptimeNanoseconds, lastScrollEventUptimeNanoseconds: lastScrollEventUptimeNanoseconds)
 }
 
-MXE2ECommand.main()
+SpacesE2ECommand.main()
