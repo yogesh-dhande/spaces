@@ -749,6 +749,53 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(agent.terminalTrackingID, sessionID)
     }
 
+    func testSignalStartRuntimeLabelMatchingConfiguredLauncherCreatesAdHocRow() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dbPath = directory.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let workspace = try makeWorkspace(store: store)
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let configuredAgent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "configured-codex-session",
+            terminalNativeID: "configured-codex-session", status: .waiting, claimedLauncherName: "Codex")
+        let adHocSessionID = "signal-start-runtime-label-configured-launcher"
+
+        var output = ""
+        try withAgentSignalEnvironment(dbPath: dbPath, sessionID: adHocSessionID) {
+            let paths = try TerminalSessionPaths.forSession(id: adHocSessionID)
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: adHocSessionID, backend: .ghosttyEmbedded, title: "shell", workingDirectory: workspace.dir, shell: "/bin/zsh",
+                    command: nil, createdAt: "2026-06-06T00:00:00Z", workspaceID: workspace.id, kind: .shell), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: adHocSessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:01Z", title: "shell", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex"), paths: paths)
+            try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+                output = try captureStandardOutput {
+                    let command = try SignalCommand.parse(["start", workspace.dir])
+                    try command.run()
+                }
+            }
+        }
+
+        XCTAssertTrue(output.contains("Agent start: workspace=\(workspace.id)"))
+        let configuredAfterSignal = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first { $0.id == configuredAgent.id })
+        let adHocAgent = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first { $0.id != configuredAgent.id })
+        XCTAssertEqual(configuredAfterSignal.label, "Codex")
+        XCTAssertEqual(configuredAfterSignal.terminalTrackingID, "configured-codex-session")
+        XCTAssertEqual(configuredAfterSignal.status, .waiting)
+        XCTAssertEqual(adHocAgent.label, "Codex-2")
+        XCTAssertEqual(adHocAgent.terminalTrackingID, adHocSessionID)
+        XCTAssertEqual(adHocAgent.status, .spinning)
+        XCTAssertNil(adHocAgent.claimedLauncherName)
+    }
+
     func testSignalStartRefreshesStaleExistingLabelFromRuntimeAgent() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

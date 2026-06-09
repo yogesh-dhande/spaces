@@ -100,6 +100,31 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 2)
     }
 
+    func testUpdateAgentWindowStatusDoesNotMatchConfiguredLauncherByLabel() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
+        let configured = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "configured-session",
+            terminalNativeID: "configured-session", status: .idle, claimedLauncherName: "Codex")
+
+        let adHoc = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "ad-hoc-session", terminalNativeID: "ad-hoc-session", label: "Codex",
+            status: .spinning)
+
+        let configuredAfterUpdate = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first { $0.id == configured.id })
+        XCTAssertEqual(configuredAfterUpdate.label, "Codex")
+        XCTAssertEqual(configuredAfterUpdate.terminalTrackingID, "configured-session")
+        XCTAssertEqual(configuredAfterUpdate.status, .idle)
+        XCTAssertNotEqual(adHoc.id, configured.id)
+        XCTAssertEqual(adHoc.label, "Codex-2")
+        XCTAssertEqual(adHoc.terminalTrackingID, "ad-hoc-session")
+        XCTAssertNil(adHoc.claimedLauncherName)
+        XCTAssertEqual(adHoc.status, .spinning)
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 2)
+    }
+
     func testUpdateAgentWindowStatusMatchesExistingWindowID() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)

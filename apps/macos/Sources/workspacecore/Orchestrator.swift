@@ -5293,24 +5293,13 @@ public final class WorkspaceOrchestrator {
 
     public func agentWindows(workspaceID: String) throws -> [AgentWindowRecord] { try store.agentWindows(workspaceID: workspaceID) }
 
-    private func matchingAgentWindow(
-        workspaceID: String, terminalTrackingID: String?, codexThreadID: String?, yabaiWindowID: Int?, label: String? = nil,
-        provider: AgentProvider? = nil, allowLabelFallbackWithExplicitIdentity: Bool = false
-    ) throws -> AgentWindowRecord? {
+    private func matchingAgentWindow(workspaceID: String, terminalTrackingID: String?, codexThreadID: String?, yabaiWindowID: Int?) throws
+        -> AgentWindowRecord?
+    {
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
-        let hasExplicitIdentity = {
-            if let terminalTrackingID, !terminalTrackingID.isEmpty { return true }
-            if let codexThreadID, !codexThreadID.isEmpty { return true }
-            if yabaiWindowID != nil { return true }
-            return false
-        }()
         return terminalTrackingID.flatMap { sessionID in allAgentWindows.first(where: { $0.terminalTrackingID == sessionID }) }
             ?? yabaiWindowID.flatMap { windowID in allAgentWindows.first(where: { ($0.yabaiWindowID ?? $0.windowID) == windowID }) }
             ?? allAgentWindows.first(where: { $0.codexThreadID == codexThreadID && codexThreadID != nil })
-            ?? ((!hasExplicitIdentity || allowLabelFallbackWithExplicitIdentity)
-                ? label.flatMap { label in
-                    allAgentWindows.first { record in record.label == label && (provider == nil || record.provider == provider) }
-                } : nil)
     }
 
     private func agentTerminalTargetID(terminalTrackingID: String?, yabaiWindowID: Int?) -> String? {
@@ -5472,11 +5461,6 @@ public final class WorkspaceOrchestrator {
             createdAt: createdAt)
     }
 
-    private func spacesAgentLabelMatchesConfiguredLauncher(workspaceID: String, label: String?) throws -> Bool {
-        guard let normalizedLabel = label.map(normalizedFocusName), !normalizedLabel.isEmpty else { return false }
-        return try store.workspaceAgentLaunchers(workspaceID: workspaceID).contains { normalizedFocusName($0.name) == normalizedLabel }
-    }
-
     private func spacesAgentRecordIsConfiguredLauncher(workspaceID: String, record: AgentWindowRecord) throws -> Bool {
         guard record.provider == .spaces else { return false }
         let launchers = try store.workspaceAgentLaunchers(workspaceID: workspaceID)
@@ -5508,16 +5492,8 @@ public final class WorkspaceOrchestrator {
             terminalNativeID: resolvedTerminalNativeID, yabaiWindowID: resolvedTrustedYabaiWindowID)
         let resolvedWindowID = trackedWindow?.windowID ?? resolvedTrustedYabaiWindowID
         let finalTerminalNativeID = trackedWindow?.terminalNativeID ?? resolvedTerminalNativeID
-        let allowConfiguredSpacesLabelFallback: Bool
-        if provider == .spaces {
-            let matchesConfiguredLauncher = try spacesAgentLabelMatchesConfiguredLauncher(workspaceID: workspaceID, label: label)
-            allowConfiguredSpacesLabelFallback = claimedLauncherID != nil || claimedLauncherName != nil || matchesConfiguredLauncher
-        } else {
-            allowConfiguredSpacesLabelFallback = false
-        }
         if let existing = try matchingAgentWindow(
-            workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID, yabaiWindowID: resolvedWindowID,
-            label: label, provider: provider, allowLabelFallbackWithExplicitIdentity: allowConfiguredSpacesLabelFallback)
+            workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID, yabaiWindowID: resolvedWindowID)
         {
             let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
             let resolvedLabel = try uniqueAgentFocusLabel(
@@ -5588,8 +5564,7 @@ public final class WorkspaceOrchestrator {
         let resolvedWindowID = trackedWindow?.windowID ?? resolvedTrustedYabaiWindowID
         let finalTerminalNativeID = trackedWindow?.terminalNativeID ?? resolvedTerminalNativeID
         let existing = try matchingAgentWindow(
-            workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID, yabaiWindowID: resolvedWindowID,
-            label: label, provider: provider, allowLabelFallbackWithExplicitIdentity: provider == .spaces)
+            workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID, yabaiWindowID: resolvedWindowID)
         if let existing {
             let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
             let resolvedLabel = try uniqueAgentFocusLabel(

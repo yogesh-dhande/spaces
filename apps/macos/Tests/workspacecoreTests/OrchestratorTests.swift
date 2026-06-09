@@ -530,7 +530,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(openCapture.sessionIDs.isEmpty)
     }
 
-    func testUpdateAgentWindowStatusFallsBackToConfiguredLabelForSpacesProvider() throws {
+    func testUpdateAgentWindowStatusDoesNotMatchConfiguredLauncherByLabel() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -538,8 +538,9 @@ final class OrchestratorTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Mock Agent", command: "mock-agent")])
 
-        _ = try orchestrator.registerAgentWindow(
+        let configured = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "session-a", terminalNativeID: "session-a",
             status: .idle, claimedLauncherName: "Mock Agent")
 
@@ -548,11 +549,15 @@ final class OrchestratorTests: XCTestCase {
             status: .waiting)
 
         let agentWindows = try store.agentWindows(workspaceID: workspace.id)
-        XCTAssertEqual(agentWindows.count, 1)
-        XCTAssertEqual(updated.label, "Mock Agent")
+        let configuredAfterUpdate = try XCTUnwrap(agentWindows.first { $0.id == configured.id })
+        XCTAssertEqual(agentWindows.count, 2)
+        XCTAssertEqual(configuredAfterUpdate.label, "Mock Agent")
+        XCTAssertEqual(configuredAfterUpdate.status, .idle)
+        XCTAssertEqual(configuredAfterUpdate.terminalTrackingID, "session-a")
+        XCTAssertNotEqual(updated.id, configured.id)
+        XCTAssertEqual(updated.label, "Mock Agent-2")
         XCTAssertEqual(updated.status, .waiting)
         XCTAssertEqual(updated.terminalTrackingID, "session-b")
-        XCTAssertEqual(agentWindows.first?.terminalTrackingID, "session-b")
     }
 
     // Tests next window order index uses role offset and max by arranging representative inputs and asserting the expected result.
