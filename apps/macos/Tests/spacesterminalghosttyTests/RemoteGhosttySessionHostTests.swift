@@ -426,17 +426,21 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             openedURLs.append(url)
             return true
         }
+        let macRecordingPath = "/Users/yogesh/Desktop/Screen Recording 2026-05-07 at 10.11.01\u{202F}AM.mov"
 
         mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "/tmp/screenshot.png"))
         mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "file:///tmp/movie.mp4"))
         mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "file://localhost/tmp/local-report.png"))
+        mirrorView.applyActionEvent(.openURL(kind: .unknown, value: macRecordingPath))
         mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "file://build-host/tmp/remote-report.png"))
         mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "https://example.com/report"))
         mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "relative/path.png"))
 
+        let openedLinkRepresentations = openedURLs.map { url in url.isFileURL ? url.path : url.absoluteString }
+        XCTAssertEqual(openedURLs.count, 5)
         XCTAssertEqual(
-            openedURLs.map(\.absoluteString),
-            ["file:///tmp/screenshot.png", "file:///tmp/movie.mp4", "file:///tmp/local-report.png", "https://example.com/report"])
+            openedLinkRepresentations,
+            ["/tmp/screenshot.png", "/tmp/movie.mp4", "/tmp/local-report.png", macRecordingPath, "https://example.com/report"])
 
         mirrorView.applyActionEvent(.mouseOverLink("https://example.com/report"))
         XCTAssertEqual(mirrorView.debugHoveredLink, "https://example.com/report")

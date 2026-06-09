@@ -173,6 +173,30 @@ final class SpacesMobileBridgeProtocolTests: XCTestCase {
         XCTAssertTrue(chunk.isFinal)
     }
 
+    func testTerminalLinkResolverReadsLocalMediaFileWithMacNoBreakSpace() throws {
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let movieName = "Screen Recording 2026-05-07 at 10.11.01\u{202F}AM.mov"
+        let movie = root.appendingPathComponent(movieName)
+        let payload = Data([0, 0, 0, 20, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20, 1, 2, 3, 4])
+        try payload.write(to: movie)
+
+        let metadata = try SpacesMobileTerminalLinkResolver.resolve(
+            sessionID: "session-1", link: movie.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
+        let chunk = try SpacesMobileTerminalLinkResolver.readChunk(
+            sessionID: "session-1", linkID: metadata.id, offset: 0, limit: 32, workspaceRoots: [root.path], homeDirectory: root.path)
+
+        XCTAssertEqual(metadata.source, .localFile)
+        XCTAssertEqual(metadata.originalLink, movie.path)
+        XCTAssertEqual(metadata.displayName, movieName)
+        XCTAssertEqual(metadata.contentType, "video/quicktime")
+        XCTAssertEqual(metadata.mediaKind, .video)
+        XCTAssertEqual(metadata.byteCount, Int64(payload.count))
+        XCTAssertEqual(Data(base64Encoded: chunk.base64Data), payload)
+        XCTAssertTrue(chunk.isFinal)
+    }
+
     func testTerminalLinkResolverRejectsRemoteFileURLHosts() throws {
         let tmpImage = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent("\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: tmpImage) }
