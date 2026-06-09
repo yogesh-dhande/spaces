@@ -5325,7 +5325,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
     }
 
-    func testReconcileTerminalForegroundAgentClassificationsPromotesAndDemotesAdHocShellSession() throws {
+    func testReconcileTerminalForegroundAgentClassificationsPromotesAndKeepsAdHocShellSession() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -5364,11 +5364,13 @@ final class OrchestratorTests: XCTestCase {
                     updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir),
                 paths: try TerminalSessionPaths.forSession(id: sessionID))
 
-            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
-            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
-            let demotedWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first)
-            XCTAssertEqual(demotedWindow.name, "shell-1")
-            XCTAssertNil(demotedWindow.detail)
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let stickyAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(stickyAgent.id, promotedAgent.id)
+            XCTAssertEqual(stickyAgent.label, "Codex")
+            let stickyWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first)
+            XCTAssertEqual(stickyWindow.name, "shell-1")
+            XCTAssertEqual(stickyWindow.detail, "codex --model gpt-5")
         }
     }
 
@@ -5415,7 +5417,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
-    func testReconcileTerminalForegroundAgentClassificationsPreservesSignalAgentUntilForegroundChanges() throws {
+    func testReconcileTerminalForegroundAgentClassificationsPreservesSignalAgentAcrossTransientAndRealForegrounds() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -5447,20 +5449,27 @@ final class OrchestratorTests: XCTestCase {
             XCTAssertEqual(agents.map(\.id), [signalAgent.id])
             XCTAssertEqual(agents.first?.label, "Custom Hook Agent")
             XCTAssertEqual(agents.first?.status, .spinning)
+            XCTAssertNil(
+                try store.latestAgentSessionEventMessage(id: signalAgent.id, eventType: "foreground_identity", source: "foreground_agent_signal"))
 
             try TerminalSessionPersistence.writeRuntimeState(
                 TerminalSessionRuntimeState(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .running,
                     updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 456,
-                    foregroundExecutablePath: "/bin/zsh", foregroundExecutableName: "zsh", foregroundArgv: ["zsh"]),
-                paths: try TerminalSessionPaths.forSession(id: sessionID))
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
+                    foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
+                    foregroundDisplayCommand: "codex --model gpt-5"), paths: try TerminalSessionPaths.forSession(id: sessionID))
 
-            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
-            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let stickyAgents = try store.agentWindows(workspaceID: workspace.id)
+            XCTAssertEqual(stickyAgents.map(\.id), [signalAgent.id])
+            XCTAssertEqual(stickyAgents.first?.label, "Custom Hook Agent")
+            XCTAssertEqual(stickyAgents.first?.status, .spinning)
+            XCTAssertNil(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail)
         }
     }
 
-    func testReconcileTerminalForegroundAgentClassificationsPreservesSignalAgentWhileForegroundIdentityIsPending() throws {
+    func testReconcileTerminalForegroundAgentClassificationsPreservesSignalAgentAcrossShellForeground() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -5495,12 +5504,15 @@ final class OrchestratorTests: XCTestCase {
                     updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 456,
                     foregroundExecutablePath: "/bin/zsh", foregroundExecutableName: "zsh", foregroundArgv: ["zsh"]), paths: paths)
 
-            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
-            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let stickyAgents = try store.agentWindows(workspaceID: workspace.id)
+            XCTAssertEqual(stickyAgents.map(\.id), [signalAgent.id])
+            XCTAssertEqual(stickyAgents.first?.label, "Custom Hook Agent")
+            XCTAssertEqual(stickyAgents.first?.status, .spinning)
         }
     }
 
-    func testReconcileTerminalForegroundAgentClassificationsInitializesSignalIdentityFromFirstNonShellSample() throws {
+    func testReconcileTerminalForegroundAgentClassificationsDoesNotRecordSignalIdentityFromFirstNonShellSample() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -5535,7 +5547,7 @@ final class OrchestratorTests: XCTestCase {
 
             XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
             XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), [signalAgent.id])
-            XCTAssertNotNil(
+            XCTAssertNil(
                 try store.latestAgentSessionEventMessage(id: signalAgent.id, eventType: "foreground_identity", source: "foreground_agent_signal"))
 
             try TerminalSessionPersistence.writeRuntimeState(
@@ -5544,8 +5556,8 @@ final class OrchestratorTests: XCTestCase {
                     updatedAt: "2026-06-06T00:00:20Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 456,
                     foregroundExecutablePath: "/bin/zsh", foregroundExecutableName: "zsh", foregroundArgv: ["zsh"]), paths: paths)
 
-            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
-            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), [signalAgent.id])
         }
     }
 
@@ -5577,17 +5589,17 @@ final class OrchestratorTests: XCTestCase {
                 workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, terminalNativeID: sessionID,
                 status: .waiting, eventSource: "spaces_signal")
 
-            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
 
             let agents = try store.agentWindows(workspaceID: workspace.id)
             XCTAssertEqual(agents.map(\.id), [signalAgent.id])
             XCTAssertEqual(agents.first?.label, "Custom Hook Agent")
             XCTAssertEqual(agents.first?.status, .waiting)
-            XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail, "codex --model gpt-5")
+            XCTAssertNil(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail)
         }
     }
 
-    func testReconcileTerminalForegroundAgentClassificationsRemovesSignaledDetectorRowAfterForegroundChanges() throws {
+    func testReconcileTerminalForegroundAgentClassificationsKeepsSignaledDetectorRowAfterForegroundChanges() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -5636,9 +5648,12 @@ final class OrchestratorTests: XCTestCase {
                     foregroundExecutablePath: "/usr/bin/python3", foregroundExecutableName: "python3", foregroundArgv: ["python3", "agent.py"]),
                 paths: paths)
 
-            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
-            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
-            XCTAssertNil(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail)
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let stickyAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(stickyAgent.id, detectedAgent.id)
+            XCTAssertEqual(stickyAgent.label, "Custom Hook Agent")
+            XCTAssertEqual(stickyAgent.status, .spinning)
+            XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail, "codex --model gpt-5")
         }
     }
 
