@@ -951,6 +951,23 @@ public final class SQLiteStore {
         return value
     }
 
+    public func latestAgentSessionEventMessage(id: String, eventType: String, source: String) throws -> String? {
+        guard
+            let value = try queryRow(
+                sql: """
+                    SELECT COALESCE(message, '')
+                    FROM agent_session_events
+                    WHERE agent_session_id = ?
+                      AND event_type = ?
+                      AND source = ?
+                      AND length(COALESCE(message, '')) > 0
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT 1
+                    """, bindings: [id, eventType, source])?.first, !value.isEmpty
+        else { return nil }
+        return value
+    }
+
     public func agentSessionHasEventSource(id: String, source: String) throws -> Bool {
         try queryRow(
             sql: """

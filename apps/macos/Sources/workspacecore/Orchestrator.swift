@@ -65,9 +65,58 @@ public final class WorkspaceOrchestrator {
 
     public static let terminalTrackingIDEnvVar = "SPACES_TERMINAL_TRACKING_ID"
     public static let agentLabelEnvVar = "SPACES_AGENT_LABEL"
+    private static let spacesSignalEventSource = "spaces_signal"
+    private static let signalForegroundIdentityEventType = "foreground_identity"
+    private static let signalForegroundIdentityEventSource = "foreground_agent_signal"
     private static let notificationAuthorizationCache = NotificationAuthorizationCache()
     private static let builtInTerminalSessionLauncherOverrideStore = BuiltInTerminalSessionLauncherOverrideStore()
     private static let builtInTerminalSessionTerminatorOverrideStore = BuiltInTerminalSessionTerminatorOverrideStore()
+
+    private struct ForegroundProcessIdentity: Codable, Equatable {
+        let pid: Int32?
+        let executablePath: String?
+        let executableName: String?
+        let argv0: String?
+
+        init?(runtimeState: TerminalSessionRuntimeState) {
+            let resolvedPID = runtimeState.foregroundPID
+            let resolvedExecutablePath = Self.normalizedString(runtimeState.foregroundExecutablePath)
+            let resolvedExecutableName = Self.normalizedBasename(runtimeState.foregroundExecutableName)
+            let resolvedArgv0 = runtimeState.foregroundArgv?.first.flatMap(Self.normalizedBasename)
+            guard resolvedPID != nil || resolvedExecutablePath != nil || resolvedExecutableName != nil || resolvedArgv0 != nil else { return nil }
+            pid = resolvedPID
+            executablePath = resolvedExecutablePath
+            executableName = resolvedExecutableName
+            argv0 = resolvedArgv0
+        }
+
+        func matches(_ other: ForegroundProcessIdentity) -> Bool {
+            if let pid, let otherPID = other.pid, pid != otherPID { return false }
+            let comparableValues = [(executablePath, other.executablePath), (executableName, other.executableName), (argv0, other.argv0)].compactMap {
+                lhs, rhs -> (String, String)? in
+                guard let lhs, let rhs else { return nil }
+                return (lhs, rhs)
+            }
+            if !comparableValues.isEmpty { return comparableValues.allSatisfy { $0.0 == $0.1 } }
+            return pid != nil && other.pid != nil
+        }
+
+        var isShellCommand: Bool {
+            let shellNames = Set(["bash", "dash", "fish", "ksh", "nu", "pwsh", "sh", "tcsh", "zsh"])
+            return [executableName, argv0].compactMap(\.self).contains { shellNames.contains($0) }
+        }
+
+        private static func normalizedString(_ value: String?) -> String? {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let trimmed, !trimmed.isEmpty else { return nil }
+            return trimmed
+        }
+
+        private static func normalizedBasename(_ value: String?) -> String? {
+            guard let value = normalizedString(value) else { return nil }
+            return URL(fileURLWithPath: value).lastPathComponent.lowercased()
+        }
+    }
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -1421,7 +1470,7 @@ public final class WorkspaceOrchestrator {
 
     @discardableResult public func reconcileTerminalForegroundAgentClassifications() throws -> Bool {
         let liveSessions = try TerminalSessionCatalog.listLiveSessions()
-        guard !liveSessions.isEmpty else { return false }
+        let liveSessionIDs = Set(liveSessions.map(\.sessionID))
         var didMutate = false
         for session in liveSessions where session.launchConfiguration.backend == .ghosttyEmbedded {
             let sessionID = session.sessionID
@@ -1438,10 +1487,11 @@ public final class WorkspaceOrchestrator {
             }
             guard let detectedAgent = adHocDetectedForegroundAgent(from: session.runtimeState) else {
                 if try updateAdHocAgentRuntimeTargetDetail(existingAgent, displayCommand: nil) { didMutate = true }
-                if try adHocAgentIsDetectorOwned(existingAgent, sessionID: sessionID) {
-                    try store.deleteAgentWindow(id: existingAgent.id)
-                    didMutate = true
+                if try adHocSignalForegroundIdentityMatchesOrInitializes(existingAgent, sessionID: sessionID, runtimeState: session.runtimeState) {
+                    continue
                 }
+                try store.deleteAgentWindow(id: existingAgent.id)
+                didMutate = true
                 continue
             }
             if try upsertAdHocDetectedAgent(
@@ -1450,6 +1500,7 @@ public final class WorkspaceOrchestrator {
                 didMutate = true
             }
         }
+        if try reconcileExitedAdHocForegroundAgentRows(excludingLiveSessionIDs: liveSessionIDs) { didMutate = true }
         return didMutate
     }
 
@@ -1462,7 +1513,7 @@ public final class WorkspaceOrchestrator {
 
     @discardableResult private func upsertAdHocDetectedAgent(
         existing: AgentWindowRecord?, detectedAgent: (label: String, displayCommand: String?), workspace: WorkspaceRecord, sessionID: String,
-        runtimeState _: TerminalSessionRuntimeState
+        runtimeState: TerminalSessionRuntimeState
     ) throws -> Bool {
         let terminalWindow = try store.windows(workspaceID: workspace.id).first { window in
             window.role == "terminal" && terminalHost(for: window.app) == .spaces && terminalSessionID(for: window) == sessionID
@@ -1472,7 +1523,7 @@ public final class WorkspaceOrchestrator {
             trackingID: sessionID)
         let now = nowISO8601()
         let resolvedLabel = try resolvedAdHocDetectedAgentLabel(
-            existing: existing, detectedLabel: detectedAgent.label, workspaceID: workspace.id, sessionID: sessionID)
+            existing: existing, detectedLabel: detectedAgent.label, workspaceID: workspace.id, sessionID: sessionID, runtimeState: runtimeState)
         let record = AgentWindowRecord(
             id: existing?.id ?? adHocDetectedAgentID(sessionID: sessionID), workspaceID: workspace.id, provider: .spaces, label: resolvedLabel,
             runtimeTargetID: existing?.runtimeTargetID ?? terminalWindow?.id, terminalTarget: terminalTarget, sessionKey: existing?.sessionKey,
@@ -1500,19 +1551,59 @@ public final class WorkspaceOrchestrator {
 
     private func adHocDetectedAgentID(sessionID: String) -> String { "terminal-agent-\(sessionID)" }
 
-    private func adHocAgentIsDetectorOwned(_ agent: AgentWindowRecord, sessionID: String) throws -> Bool {
-        guard agent.id == adHocDetectedAgentID(sessionID: sessionID) else { return false }
-        return try !store.agentSessionHasEventSource(id: agent.id, source: "spaces_signal")
-    }
-
-    private func resolvedAdHocDetectedAgentLabel(existing: AgentWindowRecord?, detectedLabel: String, workspaceID: String, sessionID: String) throws
-        -> String?
-    {
-        if let existing, try !adHocAgentIsDetectorOwned(existing, sessionID: sessionID) {
+    private func resolvedAdHocDetectedAgentLabel(
+        existing: AgentWindowRecord?, detectedLabel: String, workspaceID: String, sessionID: String, runtimeState: TerminalSessionRuntimeState
+    ) throws -> String? {
+        if let existing, try adHocSignalForegroundIdentityMatchesOrInitializes(existing, sessionID: sessionID, runtimeState: runtimeState) {
             let existingLabel = existing.label?.trimmingCharacters(in: .whitespacesAndNewlines)
             if let existingLabel, !existingLabel.isEmpty { return existing.label }
         }
         return try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: detectedLabel, excludingAgentWindowID: existing?.id)
+    }
+
+    private func adHocSignalForegroundIdentityMatchesOrInitializes(
+        _ agent: AgentWindowRecord, sessionID: String, runtimeState: TerminalSessionRuntimeState
+    ) throws -> Bool {
+        guard builtInTerminalSessionID(for: agent) == sessionID else { return false }
+        if let signalIdentity = try signalForegroundIdentity(agentID: agent.id) {
+            guard let currentIdentity = ForegroundProcessIdentity(runtimeState: runtimeState) else { return true }
+            return signalIdentity.matches(currentIdentity)
+        }
+        guard try store.agentSessionHasEventSource(id: agent.id, source: Self.spacesSignalEventSource) else { return false }
+        guard let currentIdentity = ForegroundProcessIdentity(runtimeState: runtimeState) else { return true }
+        guard !currentIdentity.isShellCommand else { return false }
+        recordSignalForegroundIdentity(agentID: agent.id, identity: currentIdentity, createdAt: nowISO8601())
+        return true
+    }
+
+    private func signalForegroundIdentity(agentID: String) throws -> ForegroundProcessIdentity? {
+        guard
+            let message = try store.latestAgentSessionEventMessage(
+                id: agentID, eventType: Self.signalForegroundIdentityEventType, source: Self.signalForegroundIdentityEventSource),
+            let data = message.data(using: .utf8)
+        else { return nil }
+        return try? JSONDecoder().decode(ForegroundProcessIdentity.self, from: data)
+    }
+
+    @discardableResult private func reconcileExitedAdHocForegroundAgentRows(excludingLiveSessionIDs liveSessionIDs: Set<String>) throws -> Bool {
+        var didMutate = false
+        for project in try store.projects() {
+            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
+                for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
+                    guard let sessionID = builtInTerminalSessionID(for: agent), !liveSessionIDs.contains(sessionID) else { continue }
+                    guard let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID), launchConfiguration.kind == .shell
+                    else { continue }
+                    guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+                        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive
+                    else { continue }
+                    if agent.status != .done {
+                        try store.updateAgentWindowStatus(id: agent.id, status: .done, updatedAt: nowISO8601())
+                        didMutate = true
+                    }
+                }
+            }
+        }
+        return didMutate
     }
 
     private func adHocAgent(_ existing: AgentWindowRecord?, differsFrom expected: AgentWindowRecord) -> Bool {
@@ -5858,6 +5949,22 @@ public final class WorkspaceOrchestrator {
             createdAt: createdAt)
     }
 
+    private func recordSignalForegroundIdentityIfAvailable(agent: AgentWindowRecord, eventSource: String, createdAt: String) {
+        guard eventSource == Self.spacesSignalEventSource, agent.provider == .spaces else { return }
+        guard let sessionID = builtInTerminalSessionID(for: agent), let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+            let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths),
+            let identity = ForegroundProcessIdentity(runtimeState: runtimeState)
+        else { return }
+        recordSignalForegroundIdentity(agentID: agent.id, identity: identity, createdAt: createdAt)
+    }
+
+    private func recordSignalForegroundIdentity(agentID: String, identity: ForegroundProcessIdentity, createdAt: String) {
+        guard let messageData = try? JSONEncoder().encode(identity), let message = String(data: messageData, encoding: .utf8) else { return }
+        appendAgentSessionEvent(
+            agentSessionID: agentID, eventType: Self.signalForegroundIdentityEventType, source: Self.signalForegroundIdentityEventSource,
+            message: message, createdAt: createdAt)
+    }
+
     private func spacesAgentLabelMatchesConfiguredLauncher(workspaceID: String, label: String?) throws -> Bool {
         guard let normalizedLabel = label.map(normalizedFocusName), !normalizedLabel.isEmpty else { return false }
         return try store.workspaceAgentLaunchers(workspaceID: workspaceID).contains { normalizedFocusName($0.name) == normalizedLabel }
@@ -5928,6 +6035,7 @@ public final class WorkspaceOrchestrator {
                     provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID,
                     terminalNativeID: updated.terminalNativeID, codexThreadID: updated.codexThreadID, yabaiWindowID: updated.yabaiWindowID,
                     environmentKeys: environmentKeys), createdAt: now)
+            recordSignalForegroundIdentityIfAvailable(agent: updated, eventSource: eventSource, createdAt: now)
             return updated
         }
         let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: label, claimedLauncherName: claimedLauncherName)
@@ -5947,6 +6055,7 @@ public final class WorkspaceOrchestrator {
                 provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID,
                 terminalNativeID: record.terminalNativeID, codexThreadID: record.codexThreadID, yabaiWindowID: record.yabaiWindowID,
                 environmentKeys: environmentKeys), createdAt: now)
+        recordSignalForegroundIdentityIfAvailable(agent: record, eventSource: eventSource, createdAt: now)
         return record
     }
 
@@ -6000,6 +6109,7 @@ public final class WorkspaceOrchestrator {
                     provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID,
                     terminalNativeID: updated.terminalNativeID, codexThreadID: updated.codexThreadID, yabaiWindowID: updated.yabaiWindowID,
                     environmentKeys: environmentKeys), createdAt: now)
+            recordSignalForegroundIdentityIfAvailable(agent: updated, eventSource: eventSource, createdAt: now)
             return updated
         }
         return try registerAgentWindow(
@@ -6207,7 +6317,7 @@ public final class WorkspaceOrchestrator {
         switch ownership.launchKind {
         case .process, .agent: return true
         case .shell: return false
-        case nil: return ownership.agent != nil
+        case nil: return false
         }
     }
 

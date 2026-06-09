@@ -5158,13 +5158,14 @@ final class OrchestratorTests: XCTestCase {
     }
 
     func testUserClosedBuiltInTerminalSessionLeavesOwningAgentRunning() throws {
-        let store = try makeTemporaryStore()
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
             store: store, builtInTerminalWindowCloser: { sessionID in closeCapture.sessionIDs.append(sessionID) },
             builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
-        let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -5181,7 +5182,15 @@ final class OrchestratorTests: XCTestCase {
                 windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, role: "terminal",
                 orderIndex: 200, lastSeenAt: "now"))
 
-        XCTAssertFalse(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .agent,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "Codex", workingDirectory: workspace.dir))
+
+            XCTAssertFalse(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
+        }
 
         XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
         XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
@@ -5261,10 +5270,11 @@ final class OrchestratorTests: XCTestCase {
 
     func testStopAdHocBuiltInTerminalSessionRejectsProcessAndAgentOwnedSessionsGlobally() throws {
         let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
         let parentDir = root.appendingPathComponent("project", isDirectory: true)
         let childDir = parentDir.appendingPathComponent("child", isDirectory: true)
         try FileManager.default.createDirectory(at: childDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
+        let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
@@ -5284,10 +5294,18 @@ final class OrchestratorTests: XCTestCase {
                 id: "agent-1", workspaceID: childWorkspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "agent-session",
                 terminalNativeID: "agent-session", codexThreadID: nil, windowID: nil, status: .spinning, createdAt: "now", updatedAt: "now"))
 
-        XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: parentWorkspace.id, sessionID: "process-session"))
-        XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: childWorkspace.id, sessionID: "process-session"))
-        XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: parentWorkspace.id, sessionID: "agent-session"))
-        XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: childWorkspace.id, sessionID: "agent-session"))
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: "agent-session", workspace: childWorkspace, kind: .agent,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "agent-session", backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "Codex", workingDirectory: childWorkspace.dir))
+
+            XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: parentWorkspace.id, sessionID: "process-session"))
+            XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: childWorkspace.id, sessionID: "process-session"))
+            XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: parentWorkspace.id, sessionID: "agent-session"))
+            XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: childWorkspace.id, sessionID: "agent-session"))
+        }
         XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
     }
 
@@ -5375,7 +5393,50 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
-    func testReconcileTerminalForegroundAgentClassificationsPreservesSignalAgentOnUnknownForeground() throws {
+    func testReconcileTerminalForegroundAgentClassificationsMarksExitedAdHocAgentSessionDone() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "ad-hoc-agent-session-exit"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "codex", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "codex", foregroundDisplayCommand: "codex"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "codex", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            var agent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(agent.id, "terminal-agent-\(sessionID)")
+            XCTAssertEqual(agent.status, .idle)
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
+                    updatedAt: "2026-06-06T00:00:10Z", exitedAt: "2026-06-06T00:00:10Z", title: "codex", workingDirectory: workspace.dir),
+                paths: paths)
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            agent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(agent.id, "terminal-agent-\(sessionID)")
+            XCTAssertEqual(agent.status, .done)
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsPreservesSignalAgentUntilForegroundChanges() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -5407,6 +5468,105 @@ final class OrchestratorTests: XCTestCase {
             XCTAssertEqual(agents.map(\.id), [signalAgent.id])
             XCTAssertEqual(agents.first?.label, "Custom Hook Agent")
             XCTAssertEqual(agents.first?.status, .spinning)
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .running,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 456,
+                    foregroundExecutablePath: "/bin/zsh", foregroundExecutableName: "zsh", foregroundArgv: ["zsh"]),
+                paths: try TerminalSessionPaths.forSession(id: sessionID))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsPreservesSignalAgentWhileForegroundIdentityIsPending() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "signal-agent-pending-foreground"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+            let signalAgent = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                status: .spinning, eventSource: "spaces_signal")
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), [signalAgent.id])
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .running,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 456,
+                    foregroundExecutablePath: "/bin/zsh", foregroundExecutableName: "zsh", foregroundArgv: ["zsh"]), paths: paths)
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsInitializesSignalIdentityFromFirstNonShellSample() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "signal-agent-first-sample"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+            let signalAgent = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                status: .spinning, eventSource: "spaces_signal")
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/usr/bin/python3", foregroundExecutableName: "python3", foregroundArgv: ["python3", "agent.py"]),
+                paths: paths)
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), [signalAgent.id])
+            XCTAssertNotNil(
+                try store.latestAgentSessionEventMessage(id: signalAgent.id, eventType: "foreground_identity", source: "foreground_agent_signal"))
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .running,
+                    updatedAt: "2026-06-06T00:00:20Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 456,
+                    foregroundExecutablePath: "/bin/zsh", foregroundExecutableName: "zsh", foregroundArgv: ["zsh"]), paths: paths)
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
         }
     }
 
@@ -5448,7 +5608,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
-    func testReconcileTerminalForegroundAgentClassificationsPreservesDetectorRowAfterSignalUpdate() throws {
+    func testReconcileTerminalForegroundAgentClassificationsRemovesSignaledDetectorRowAfterForegroundChanges() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -5498,10 +5658,7 @@ final class OrchestratorTests: XCTestCase {
                 paths: paths)
 
             XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
-            let unknownForegroundAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
-            XCTAssertEqual(unknownForegroundAgent.id, detectedAgent.id)
-            XCTAssertEqual(unknownForegroundAgent.label, "Custom Hook Agent")
-            XCTAssertEqual(unknownForegroundAgent.status, .spinning)
+            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
             XCTAssertNil(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail)
         }
     }
