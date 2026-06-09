@@ -408,31 +408,72 @@ final class SpacesMobileUITests: XCTestCase {
         timeout: TimeInterval
     ) -> Bool {
         guard let dump = waitForRenderDump(configuration: configuration, timeout: timeout, predicate: { dump in
-            isOwnerReady(dump, expectedSessionID: configuration.sessionID) && dump.renderedText.contains(target)
+            isOwnerReady(dump, expectedSessionID: configuration.sessionID) && terminalTextContains(target, in: dump.renderedText)
         }) else { return false }
         let lines = dump.renderedText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard let columns = dump.viewportColumns, columns > 0 else { return false }
         let configuredRows = dump.viewportRows ?? lines.count
         let rows = min(max(configuredRows, 1), max(lines.count, 1))
+        guard let tapLocation = terminalTextTapLocation(target, lines: lines, rows: rows, columns: columns) else { return false }
+        let normalizedX = min(max(tapLocation.x / Double(columns), 0.01), 0.99)
+        let normalizedY = min(max((Double(tapLocation.row) + 0.5) / Double(rows), 0.01), 0.99)
+        if let surface = terminalSurfaceElement(in: app) {
+            surface.coordinate(withNormalizedOffset: CGVector(dx: normalizedX, dy: normalizedY)).tap()
+            return true
+        }
+        return tapTerminalSurfaceFallback(
+            in: app,
+            configuration: configuration,
+            normalizedX: normalizedX,
+            normalizedY: normalizedY
+        )
+    }
+
+    private func terminalTextContains(_ target: String, in renderedText: String) -> Bool {
+        if renderedText.contains(target) { return true }
+        let lines = renderedText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        return terminalTextTapLocation(target, lines: lines, rows: lines.count, columns: 1_000) != nil
+    }
+
+    private func terminalTextTapLocation(
+        _ target: String,
+        lines: [String],
+        rows: Int,
+        columns: Int
+    ) -> (row: Int, x: Double)? {
         for (row, line) in lines.enumerated() where row < rows {
             guard let range = line.range(of: target) else { continue }
             let column = line.distance(from: line.startIndex, to: range.lowerBound)
             let targetColumns = max(line.distance(from: range.lowerBound, to: range.upperBound), 1)
             let tapColumn = min(Double(column) + Double(targetColumns) / 2, Double(columns) - 0.5)
-            let normalizedX = min(max(tapColumn / Double(columns), 0.01), 0.99)
-            let normalizedY = min(max((Double(row) + 0.5) / Double(rows), 0.01), 0.99)
-            if let surface = terminalSurfaceElement(in: app) {
-                surface.coordinate(withNormalizedOffset: CGVector(dx: normalizedX, dy: normalizedY)).tap()
-                return true
-            }
-            return tapTerminalSurfaceFallback(
-                in: app,
-                configuration: configuration,
-                normalizedX: normalizedX,
-                normalizedY: normalizedY
-            )
+            return (row: row, x: tapColumn)
         }
-        return false
+
+        for startRow in 0..<rows {
+            var joined = ""
+            var segments: [(row: Int, start: Int, length: Int)] = []
+            for row in startRow..<rows {
+                let line = row < lines.count ? lines[row] : ""
+                segments.append((row: row, start: joined.count, length: line.count))
+                joined += line
+                if let range = joined.range(of: target) {
+                    let targetStart = joined.distance(from: joined.startIndex, to: range.lowerBound)
+                    let targetEnd = joined.distance(from: joined.startIndex, to: range.upperBound)
+                    for segment in segments where segment.length > 0 {
+                        let segmentStart = segment.start
+                        let segmentEnd = segment.start + segment.length
+                        let overlapStart = max(targetStart, segmentStart)
+                        let overlapEnd = min(targetEnd, segmentEnd)
+                        guard overlapStart < overlapEnd else { continue }
+                        let column = overlapStart - segmentStart + max((overlapEnd - overlapStart) / 2, 0)
+                        return (row: segment.row, x: min(Double(column) + 0.5, Double(columns) - 0.5))
+                    }
+                    return nil
+                }
+                if joined.count > target.count + 1_000 { break }
+            }
+        }
+        return nil
     }
 
     private func tapTerminalSurfaceFallback(

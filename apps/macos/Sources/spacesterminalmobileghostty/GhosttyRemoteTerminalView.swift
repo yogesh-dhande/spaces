@@ -225,7 +225,6 @@ import Foundation
         private var suppressesSoftwareKeyboard = false
         private var tapLinkProbeDepth = 0
         private var openedLinkDuringTapProbe = false
-        private var hoveredLinkDuringTapProbe: String?
         private var surfaceViewportSizeOverrideForTesting: (columns: Int, rows: Int)?
         var userInterfaceIdiomOverrideForTesting: UIUserInterfaceIdiom?
         private var keyboardOccludedHeightOverrideForTesting: CGFloat?
@@ -707,9 +706,7 @@ import Foundation
             case .openURL(_, let value):
                 if tapLinkProbeDepth > 0 { openedLinkDuringTapProbe = true }
                 onOpenLink?(value)
-            case .mouseOverLink(let value):
-                guard tapLinkProbeDepth > 0 else { return }
-                hoveredLinkDuringTapProbe = Self.normalizedTerminalLink(value)
+            case .mouseOverLink: return
             }
         }
 
@@ -721,15 +718,8 @@ import Foundation
             let mods = Self.linkActivationMouseModifiers()
             tapLinkProbeDepth += 1
             openedLinkDuringTapProbe = false
-            hoveredLinkDuringTapProbe = nil
-            defer {
-                tapLinkProbeDepth -= 1
-                hoveredLinkDuringTapProbe = nil
-            }
+            defer { tapLinkProbeDepth -= 1 }
             ghostty_surface_mouse_pos(surface, position.x, position.y, mods)
-            ghostty_surface_refresh(surface)
-            GhosttyMobileAppService.shared.tick()
-            if openHoveredLinkDuringTapProbe() { return true }
             _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
             _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods)
             ghostty_surface_refresh(surface)
@@ -739,23 +729,11 @@ import Foundation
             return openedLink
         }
 
-        private func openHoveredLinkDuringTapProbe() -> Bool {
-            guard let link = hoveredLinkDuringTapProbe else { return false }
-            openedLinkDuringTapProbe = true
-            onOpenLink?(link)
-            return true
-        }
-
         private static func ghosttyMousePosition(for location: CGPoint) -> (x: Double, y: Double) {
             (Double(max(location.x, 0)), Double(max(location.y, 0)))
         }
 
         private static func linkActivationMouseModifiers() -> ghostty_input_mods_e { ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue) }
-
-        private static func normalizedTerminalLink(_ value: String?) -> String? {
-            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
-            return value
-        }
 
         private func updateSurfaceGeometry() {
             guard let mirror, let surface = mirrorSurface() else { return }
@@ -1092,13 +1070,8 @@ import Foundation
         @discardableResult func debugApplyActionEventsDuringTapProbeForTesting(_ events: [GhosttyMobileActionEvent]) -> Bool {
             tapLinkProbeDepth += 1
             openedLinkDuringTapProbe = false
-            hoveredLinkDuringTapProbe = nil
-            defer {
-                tapLinkProbeDepth -= 1
-                hoveredLinkDuringTapProbe = nil
-            }
+            defer { tapLinkProbeDepth -= 1 }
             for event in events { handleActionEvent(event) }
-            if openHoveredLinkDuringTapProbe() { return true }
             let openedLink = openedLinkDuringTapProbe
             openedLinkDuringTapProbe = false
             return openedLink

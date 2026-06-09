@@ -705,6 +705,52 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertFalse(receivedPayloads.contains { $0.reason == "input_output" })
     }
 
+    @MainActor func testInteractiveLocalOwnerCommandOutputKeepsDelayedInputOutputResync() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-interactive-command-input-output", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+            shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-28T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        defer { host.terminate() }
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in self.snapshot(text: "echo hello") }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        let localOwner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-05-28T00:00:00Z")
+        try host.attach(client: localOwner, mode: .owner, into: nil)
+
+        var receivedPayloads: [GhosttyRemoteSessionStatePayload] = []
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        try waitUntil(timeout: 2) { receivedPayloads.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        receivedPayloads.removeAll()
+
+        let output = Data("e".utf8)
+        host.debugHandleOwnerInputActivity(byteCount: output.count)
+        host.debugMarkLocalOwnerCommandInputOutputResyncPending()
+        host.debugHandleIncomingOutput(output)
+
+        try waitUntil(timeout: 2) {
+            receivedPayloads.contains { $0.reason == "output" && $0.outputByteCount == output.count && $0.renderUpdate != nil }
+                && receivedPayloads.contains { $0.reason == "input_output" && $0.renderUpdate != nil }
+        }
+
+        let outputIndex = try XCTUnwrap(receivedPayloads.firstIndex { $0.reason == "output" && $0.outputByteCount == output.count })
+        let inputOutputIndex = try XCTUnwrap(receivedPayloads.firstIndex { $0.reason == "input_output" })
+        XCTAssertLessThan(outputIndex, inputOutputIndex)
+        let inputOutputUpdate = try XCTUnwrap(receivedPayloads[inputOutputIndex].decodedRenderUpdate)
+        XCTAssertEqual(inputOutputUpdate.kind, .full)
+        XCTAssertEqual(inputOutputUpdate.fallbackReason, "explicit_resync")
+        let inputOutputFrame = try XCTUnwrap(inputOutputUpdate.fullFrame)
+        XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: inputOutputFrame.snapshot), "echo hello")
+    }
+
     @MainActor func testBulkLocalOwnerOutputPublishesSnapshotBeforeInputOutputResync() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

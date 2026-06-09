@@ -273,6 +273,7 @@ extension TerminalGhosttyRendererHosting {
     private var screenStateChangeBroadcastScheduled = false
     private var pendingScreenStateChangeBroadcastRevision: UInt64?
     private var pendingInputOutputResync = false
+    private var localOwnerCommandInputOutputResyncPending = false
     private var inputOutputResyncWorkItem: DispatchWorkItem?
     private let interactiveOutputGate = InteractiveOutputGate()
     private var ownerEpoch: UInt64 = 0
@@ -401,6 +402,7 @@ extension TerminalGhosttyRendererHosting {
         runtimeStateTimer = nil
         inputOutputResyncWorkItem?.cancel()
         inputOutputResyncWorkItem = nil
+        localOwnerCommandInputOutputResyncPending = false
         controlServer?.stop()
         controlServer = nil
         TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
@@ -612,6 +614,7 @@ extension TerminalGhosttyRendererHosting {
         if let rejection = ownerRequestRejection(for: request, commandName: "send", startedAt: startedAt) { return rejection }
         guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
         let payload = text + (request.appendNewline ? "\n" : "")
+        if payload.contains("\n") { markLocalOwnerCommandInputOutputResyncPending() }
         rendererHostStorage.sendRawBytes(Data(payload.utf8))
         TerminalPerformance.logMetric(
             "terminal_control_send", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
@@ -633,6 +636,7 @@ extension TerminalGhosttyRendererHosting {
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
             return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
         }
+        if bytes.contains(0x0D) { markLocalOwnerCommandInputOutputResyncPending() }
         rendererHostStorage.sendRawBytes(Data(bytes))
         TerminalPerformance.logMetric(
             "terminal_control_key", target: "session=\(launchConfiguration.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
@@ -939,11 +943,18 @@ extension TerminalGhosttyRendererHosting {
         NotificationCenter.default.post(
             name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID, "byteCount": data.count])
         if interactiveResync {
-            pendingInputOutputResync = false
-            inputOutputResyncWorkItem?.cancel()
-            inputOutputResyncWorkItem = nil
+            if localOwnerCommandInputOutputResyncPending || inputOutputResyncWorkItem != nil {
+                pendingInputOutputResync = false
+                localOwnerCommandInputOutputResyncPending = false
+                scheduleInputOutputResync()
+            } else {
+                pendingInputOutputResync = false
+                inputOutputResyncWorkItem?.cancel()
+                inputOutputResyncWorkItem = nil
+            }
         } else if pendingInputOutputResync || inputOutputResyncWorkItem != nil {
             pendingInputOutputResync = false
+            localOwnerCommandInputOutputResyncPending = false
             scheduleInputOutputResync()
         }
         guard shouldBroadcastState else { return }
@@ -962,6 +973,11 @@ extension TerminalGhosttyRendererHosting {
             return
         }
         scheduleInputStateBroadcast()
+    }
+
+    private func markLocalOwnerCommandInputOutputResyncPending() {
+        guard activeOwnerClient()?.kind == .localWindow else { return }
+        localOwnerCommandInputOutputResyncPending = true
     }
 
     private func scheduleInputStateBroadcast() {
@@ -1310,6 +1326,7 @@ extension TerminalGhosttyRendererHosting {
     }
     func debugBroadcastCurrentStateForTesting(reason: String) { broadcastCurrentState(reason: reason) }
     func debugHandleOwnerInputActivity(byteCount: Int = 1) { handleOwnerInputActivity(byteCount: byteCount) }
+    func debugMarkLocalOwnerCommandInputOutputResyncPending() { markLocalOwnerCommandInputOutputResyncPending() }
     func debugCurrentRemoteSessionState(reason: String) -> GhosttyRemoteSessionStatePayload? {
         currentRemoteSessionState(reason: reason, outputByteCount: nil, broadcastExport: true)
     }
@@ -1466,6 +1483,7 @@ private final class GhosttyMainActorSyncBox<T>: @unchecked Sendable { var value:
     func debugStopStateStreamServerForTesting() { core.debugStopStateStreamServerForTesting() }
     func debugBroadcastCurrentStateForTesting(reason: String) { core.debugBroadcastCurrentStateForTesting(reason: reason) }
     func debugHandleOwnerInputActivity(byteCount: Int = 1) { core.debugHandleOwnerInputActivity(byteCount: byteCount) }
+    func debugMarkLocalOwnerCommandInputOutputResyncPending() { core.debugMarkLocalOwnerCommandInputOutputResyncPending() }
     func debugCurrentRemoteSessionState(reason: String) -> GhosttyRemoteSessionStatePayload? { core.debugCurrentRemoteSessionState(reason: reason) }
     func debugPersistRuntimeState(force: Bool = true) { core.debugPersistRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { core.debugSetLastKnownChildPID(pid) }

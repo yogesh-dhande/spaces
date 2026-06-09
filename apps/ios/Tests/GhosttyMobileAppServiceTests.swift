@@ -189,6 +189,40 @@
             XCTAssertNil(model.linkPreviewErrorMessage)
         }
 
+        func testOpenTerminalLinkSendsSpacedPathUnchanged() async {
+            let settings = settings()
+            let spacedPath = "/Users/yogesh/Downloads/Screen Recording 2026-03-20 at 11.17.57 AM.mov"
+            var resolvedLinks: [String] = []
+            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { request in
+                XCTAssertEqual(request.command, "resolveTerminalLink")
+                resolvedLinks.append(request.terminalLink ?? "")
+                return SpacesMobileBridgeResponse(
+                    ok: true,
+                    message: "ok",
+                    terminalLinkMetadata: SpacesMobileTerminalLinkMetadata(
+                        id: "external|https://example.com/docs",
+                        source: .externalURL,
+                        originalLink: spacedPath,
+                        displayName: "docs",
+                        contentType: nil,
+                        mediaKind: nil,
+                        byteCount: nil,
+                        externalURL: "https://example.com/docs"))
+            }
+            var openedURLs: [URL] = []
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings,
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient,
+                openExternalURL: { openedURLs.append($0) })
+
+            await model.openTerminalLink(spacedPath)
+
+            XCTAssertEqual(resolvedLinks, [spacedPath])
+            XCTAssertEqual(openedURLs, [URL(string: "https://example.com/docs")!])
+        }
+
         func testOpenTerminalLinkDownloadsExternalMediaPreview() async throws {
             let settings = settings()
             let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1124,14 +1158,29 @@
             XCTAssertEqual(openedLinks, ["https://example.com/image.png"])
         }
 
-        func testRemoteTerminalHostViewConsumesHoveredLinkDuringTapProbe() {
+        func testRemoteTerminalHostViewIgnoresHoveredLinkDuringTapProbe() {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             var openedLinks: [String] = []
             hostView.onOpenLink = { openedLinks.append($0) }
 
-            XCTAssertTrue(hostView.debugApplyActionEventsDuringTapProbeForTesting([.mouseOverLink(" image.png ")]))
+            XCTAssertFalse(hostView.debugApplyActionEventsDuringTapProbeForTesting([.mouseOverLink(" image.png ")]))
 
-            XCTAssertEqual(openedLinks, ["image.png"])
+            XCTAssertEqual(openedLinks, [])
+        }
+
+        func testRemoteTerminalHostViewOpensFullURLAfterTruncatedHoverDuringTapProbe() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            let fullPath = "/Users/yogesh/Downloads/Screen Recording 2026-03-20 at 11.17.57 AM.mov"
+            var openedLinks: [String] = []
+            hostView.onOpenLink = { openedLinks.append($0) }
+
+            XCTAssertTrue(
+                hostView.debugApplyActionEventsDuringTapProbeForTesting([
+                    .mouseOverLink("/Users/yogesh/Downloads/Screen"),
+                    .openURL(kind: .unknown, value: fullPath),
+                ]))
+
+            XCTAssertEqual(openedLinks, [fullPath])
         }
 
         func testRemoteTerminalHostViewSuppressesSystemKeyboardAssistant() {

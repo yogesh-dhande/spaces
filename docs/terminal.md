@@ -105,6 +105,8 @@ Each live session also participates in a service-level control path:
 - The bridge takeover response carries a post-transfer terminal state payload when live state is readable; clients keep the takeover UI pending and issue one explicit state refresh when that payload is unavailable.
 - Each takeover creates one owner epoch on iOS. The epoch carries the bootstrap render frame used for first paint, and later service-published render frames update that same rendered epoch.
 - Active macOS and iOS owners receive screen-state-change render frames from the service, so command output, row clears, and prompts are published from the terminal state stream without depending on later input activity.
+- macOS owner command submissions keep a trailing `input_output` render-frame resync after the first interactive output chunk, while ordinary character echo can remain on the fast output path.
+- Render-frame snapshots preserve Ghostty row wrap metadata in internal cell flags when exported by the service and restore it when materialized into a local mirror surface. The iOS mirror therefore keeps Ghostty's native selection and link detection semantics for soft-wrapped output, including file paths with spaces that wrap across rows.
 - Output events carry byte counts and ending output byte offsets for ordering and diagnostics, but not raw output bytes for client rendering.
 - macOS remote windows and iOS owner rendering use the same render-frame coordination policy for preserving an already-bootstrapped owner render and applying fresh service frames.
 - Client renderers update from structured render frames and scroll gestures so prompt redraws and row clears are visible before readiness or rendered-text state advances.
