@@ -687,7 +687,6 @@ private func splitTrackingIdentity(_ identity: TerminalTrackingIdentity?) -> (se
     switch identity {
     case .session(let id): return (id, nil)
     case .window(let id): return (nil, id)
-    case .tmux: return (nil, nil)
     case nil: return (nil, nil)
     }
 }

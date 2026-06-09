@@ -9,7 +9,7 @@ Core invariants:
 - SQLite is the single source of truth for persisted model data and global preferences.
 - yabai is the source of truth for window IDs and cross-app window focus.
 - Workspace settings are seeded from project templates at workspace creation and preserved as per-workspace overrides after that.
-- Schema changes must be additive and non-destructive.
+- Schema migrations must preserve current project, workspace, and runtime data.
 - GUI and CLI both call the same orchestration layer instead of re-implementing behavior independently.
 
 ## Module Map
@@ -79,7 +79,7 @@ flowchart LR
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
 - SQLite stores projects, workspaces, runtime state, terminal metadata, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` records the canonical schema version. The active schema is version `7`.
+- `migration_state.current_version` records the canonical schema version. The active schema is version `9`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
 
 ### Profile Resolution
@@ -99,7 +99,7 @@ flowchart LR
 - Fresh installs create the latest schema directly and record the current schema version.
 - Existing installs should migrate in ordered `N -> N+1` steps until they reach the current schema version.
 - Each migration step should run inside `BEGIN IMMEDIATE ... COMMIT`, update `migration_state` in the same transaction, and roll back on failure.
-- Compatible schema changes should use additive techniques such as `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, backfills, indexes, and table rebuilds with copy when SQLite requires them.
+- Compatible schema changes should use additive techniques such as `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, backfills, indexes, and table rebuilds with copy when SQLite requires them. Cleanup migrations may remove retired columns or tables only after current schema fields own the required data and the migration preserves active rows.
 - Store startup validates `migration_state.current_version` against the canonical schema version and fails closed when they do not match.
 - Startup runs `PRAGMA integrity_check` and fails if validation does not return `ok`.
 
@@ -156,9 +156,11 @@ classDiagram
   class RunningProcess {
     +id
     +workspace_id
+    +template_id
     +template_name
     +command
     +runtime_target_id
+    +terminal_session_id
     +pid
     +status
     +log_path
@@ -194,7 +196,9 @@ classDiagram
     +label
     +status
     +runtime_target_id
+    +terminal_session_id
     +session_key
+    +claimed_launcher_id
     +claimed_launcher_name
     +created_at
     +updated_at

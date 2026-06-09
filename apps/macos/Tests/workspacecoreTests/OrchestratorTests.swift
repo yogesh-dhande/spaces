@@ -1556,9 +1556,8 @@ final class OrchestratorTests: XCTestCase {
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         let zombieProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
-            terminalTrackingID: "workspace-session", terminalNativeID: "spaces-terminal", terminalContainerID: "spaces-tab", pid: zombiePID,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)),
-            exitedAt: nil)
+            terminalTrackingID: "workspace-session", terminalNativeID: "spaces-terminal", pid: zombiePID, status: .running, logPath: nil,
+            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
         try store.upsert(runningProcess: zombieProcess)
 
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
@@ -2017,8 +2016,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                windowID: nil, terminalTrackingID: "session-123", terminalNativeID: "session-123", terminalContainerID: nil, role: "terminal",
-                orderIndex: 200, lastSeenAt: "2026-05-10T18:00:00Z"))
+                windowID: nil, terminalTrackingID: "session-123", terminalNativeID: "session-123", role: "terminal", orderIndex: 200,
+                lastSeenAt: "2026-05-10T18:00:00Z"))
 
         XCTAssertEqual(try orchestrator.workspaceIDForTerminalSession("session-123"), workspace.id)
     }
@@ -2035,8 +2034,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-1", workspaceID: workspace.id, templateName: "api", command: "zsh", terminalApp: TerminalHost.spaces.appName,
-                windowID: nil, terminalTrackingID: "session-456", terminalNativeID: "session-456", terminalContainerID: nil, pid: 1234,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-05-10T18:05:00Z", exitedAt: nil))
+                windowID: nil, terminalTrackingID: "session-456", terminalNativeID: "session-456", pid: 1234, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "2026-05-10T18:05:00Z", exitedAt: nil))
 
         XCTAssertEqual(try orchestrator.workspaceIDForTerminalSession("session-456"), workspace.id)
     }
@@ -2396,14 +2395,14 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-browser-cycle", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
             terminalApp: TerminalHost.spaces.appName, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle",
-            terminalNativeID: "spaces-session-browser-cycle", terminalContainerID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-browser-cycle", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-terminal", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend", detail: "npm run frontend",
                 targetURL: nil, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle", terminalNativeID: "spaces-session-browser-cycle",
-                terminalContainerID: nil, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+                role: "terminal", orderIndex: 0, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeFocusLog.path) {
@@ -2448,15 +2447,14 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-browser-cycle-google", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
             terminalApp: TerminalHost.spaces.appName, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle-google",
-            terminalNativeID: "spaces-session-browser-cycle-google", terminalContainerID: nil, pid: nil, status: .running, logPath: nil,
-            lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-browser-cycle-google", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-terminal-google", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend",
                 detail: "npm run frontend", targetURL: nil, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle-google",
-                terminalNativeID: "spaces-session-browser-cycle-google", terminalContainerID: nil, role: "terminal", orderIndex: 0, lastSeenAt: "now")
-        )
+                terminalNativeID: "spaces-session-browser-cycle-google", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeFocusLog.path) {
@@ -2531,14 +2529,13 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-cycle-priority", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
             terminalApp: TerminalHost.spaces.appName, windowID: 202, terminalTrackingID: "spaces-session-priority",
-            terminalNativeID: "spaces-session-priority", terminalContainerID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-priority", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-process", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend", detail: "npm run frontend",
                 targetURL: nil, windowID: 202, terminalTrackingID: "spaces-session-priority", terminalNativeID: "spaces-session-priority",
-                terminalContainerID: nil, role: "terminal", orderIndex: 1, lastSeenAt: "now"))
+                role: "terminal", orderIndex: 1, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
@@ -2601,14 +2598,13 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-cycle", workspaceID: workspace.id, templateName: "api", command: "npm run api",
             terminalApp: TerminalHost.spaces.appName, windowID: 202, terminalTrackingID: "spaces-session-cycle",
-            terminalNativeID: "spaces-session-cycle", terminalContainerID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-cycle", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-process", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api", targetURL: nil,
-                windowID: 202, terminalTrackingID: "spaces-session-cycle", terminalNativeID: "spaces-session-cycle", terminalContainerID: nil,
-                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                windowID: 202, terminalTrackingID: "spaces-session-cycle", terminalNativeID: "spaces-session-cycle", role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"))
 
         var hidesApp = true
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -2624,14 +2620,14 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusCapture.requestIDs, [nil])
     }
 
-    // Tests process focus throws a recoverable missing-window error when the tracked iTerm window no longer exists.
+    // Tests process focus throws a recoverable missing-window error when a legacy tracked terminal window no longer exists.
     func testFocusWorkspaceProcessThrowsRecoverableErrorForMissingProcessWindow() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
         let process = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 999,
-            terminalTrackingID: "session-999", itermTabIndex: nil, tmuxWindowID: nil, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "LegacyTerminal",
+            windowID: 999, terminalTrackingID: "session-999", pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
         try store.upsert(runningProcess: process)
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -2664,14 +2660,14 @@ final class OrchestratorTests: XCTestCase {
 
         let process = RunningProcessRecord(
             id: "process-spaces", workspaceID: workspace.id, templateName: "web", command: "npm run dev", terminalApp: TerminalHost.spaces.appName,
-            windowID: nil, terminalTrackingID: "spaces-session-1", terminalNativeID: "spaces-session-1", terminalContainerID: nil, pid: nil,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            windowID: nil, terminalTrackingID: "spaces-session-1", terminalNativeID: "spaces-session-1", pid: nil, status: .running, logPath: nil,
+            lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev", targetURL: nil,
-                windowID: nil, terminalTrackingID: "spaces-session-1", terminalNativeID: "spaces-session-1", terminalContainerID: nil,
-                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                windowID: nil, terminalTrackingID: "spaces-session-1", terminalNativeID: "spaces-session-1", role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
 
@@ -2704,14 +2700,14 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-session-only", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: "spaces-session-live-only",
-            terminalNativeID: "spaces-session-live-only", terminalContainerID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-live-only", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil
+        )
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-session-only", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
                 targetURL: nil, windowID: nil, terminalTrackingID: "spaces-session-live-only", terminalNativeID: "spaces-session-live-only",
-                terminalContainerID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUSED_ID", value: "889") {
@@ -2757,8 +2753,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2802,8 +2798,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2847,8 +2843,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2892,13 +2888,13 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, pid: nil, status: .running,
-                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "window-process-api", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -3025,14 +3021,13 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-live-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: 501, terminalTrackingID: "spaces-session-live",
-            terminalNativeID: "spaces-session-live", terminalContainerID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-live", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-live-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: 501, terminalTrackingID: "spaces-session-live", terminalNativeID: "spaces-session-live",
-                terminalContainerID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: 501, terminalTrackingID: "spaces-session-live", terminalNativeID: "spaces-session-live", role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
@@ -3069,14 +3064,14 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-request-id", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: "spaces-session-request-id",
-            terminalNativeID: "spaces-session-request-id", terminalContainerID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-request-id", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-request-id", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
                 targetURL: nil, windowID: nil, terminalTrackingID: "spaces-session-request-id", terminalNativeID: "spaces-session-request-id",
-                terminalContainerID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
@@ -3113,14 +3108,14 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-cycle-fast-path", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-cycle-fast-path",
-            terminalNativeID: "spaces-session-cycle-fast-path", terminalContainerID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-cycle-fast-path", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-cycle-fast-path", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
                 targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-cycle-fast-path",
-                terminalNativeID: "spaces-session-cycle-fast-path", terminalContainerID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                terminalNativeID: "spaces-session-cycle-fast-path", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
@@ -3159,14 +3154,13 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-stale-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-stale",
-            terminalNativeID: "spaces-session-stale", terminalContainerID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-stale", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-stale-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-stale", terminalNativeID: "spaces-session-stale",
-                terminalContainerID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-stale", terminalNativeID: "spaces-session-stale", role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
@@ -3215,14 +3209,13 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-rebound-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-rebound",
-            terminalNativeID: "spaces-session-rebound", terminalContainerID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-rebound", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-rebound-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
                 targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-rebound", terminalNativeID: "spaces-session-rebound",
-                terminalContainerID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
@@ -3276,14 +3269,13 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-live-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-live",
-            terminalNativeID: "spaces-session-live", terminalContainerID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-live", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-live-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-live", terminalNativeID: "spaces-session-live",
-                terminalContainerID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-live", terminalNativeID: "spaces-session-live", role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
@@ -3302,7 +3294,6 @@ final class OrchestratorTests: XCTestCase {
     }
 
     // Tests restarting a process recreates a tracked terminal window row even if the stale window row was already pruned.
-    // Tests explicit process restart kills the old tmux session and starts a fresh terminal instead of reattaching to it.
     func testRestartWorkspaceProcessUsesConfiguredSpacesHostEvenWhenStoredProcessHostDiffers() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
@@ -3310,7 +3301,7 @@ final class OrchestratorTests: XCTestCase {
         let capture = TerminalOpenCapture()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 capture.sessionIDs.append(sessionID)
                 capture.modes.append(mode)
@@ -3334,9 +3325,9 @@ final class OrchestratorTests: XCTestCase {
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 999,
-                terminalTrackingID: "session-old", terminalNativeID: nil, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "LegacyTerminal",
+                windowID: 999, terminalTrackingID: "session-old", terminalNativeID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "now", exitedAt: nil))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -3387,13 +3378,13 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", terminalContainerID: nil, pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", pid: nil, status: .running,
+                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "old-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api", targetURL: nil,
-                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", terminalContainerID: nil,
-                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -3456,14 +3447,12 @@ final class OrchestratorTests: XCTestCase {
             let process = RunningProcessRecord(
                 id: "process-spaces-recover", workspaceID: workspace.id, templateName: "api", command: "npm run api",
                 terminalApp: TerminalHost.spaces.appName, windowID: 401, terminalTrackingID: sessionID, terminalNativeID: sessionID,
-                terminalContainerID: nil, pid: Int(getpid()), status: .running, logPath: paths.outputPath, lastOutputAt: nil, startedAt: "now",
-                exitedAt: nil)
+                pid: Int(getpid()), status: .running, logPath: paths.outputPath, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
             try store.upsert(runningProcess: process)
             try store.upsert(
                 window: WindowRecord(
                     id: process.id, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api", targetURL: nil,
-                    windowID: 401, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, role: "terminal",
-                    orderIndex: 200, lastSeenAt: "now"))
+                    windowID: 401, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
                 try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
@@ -3540,8 +3529,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-web", workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: TerminalHost.spaces.appName,
-                windowID: 222, terminalTrackingID: "session-web", terminalNativeID: "session-web", terminalContainerID: nil, pid: 2222,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                windowID: 222, terminalTrackingID: "session-web", terminalNativeID: "session-web", pid: 2222, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -3758,7 +3747,7 @@ final class OrchestratorTests: XCTestCase {
     }
 
     func testUpdateRunningWorkspaceProcessesRestartsCompositeShellCommand() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         let process = ProcessTemplate(id: "process-web", name: "web", command: "npm run web", onExit: .none)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [process])
@@ -3766,13 +3755,8 @@ final class OrchestratorTests: XCTestCase {
         let processID = UUID().uuidString
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
-                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
-        mockIterm.nextWindowID = 603
-        mockIterm.nextSessionID = "session-web-shell"
-
+                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "LegacyTerminal", windowID: 222,
+                terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try orchestrator.updateRunningWorkspaceProcesses(
                 workspaceID: workspace.id,
@@ -3788,8 +3772,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNotEqual(running.first?.terminalTrackingID, "session-web")
         XCTAssertEqual(running.first?.terminalTrackingID, running.first?.terminalNativeID)
         XCTAssertEqual(running.first?.pid, 4321)
-        XCTAssertTrue(mockTmux.lastStartedCommand.isEmpty)
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
     }
 
     func testUpdateRunningWorkspaceProcessesDeletingEarlierRowKeepsLaterRunningProcessMatchedByID() throws {
@@ -5082,13 +5064,13 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "running-process-spaces", workspaceID: workspace.id, templateName: "api", command: "npm run api",
-                terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID,
-                terminalContainerID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil,
+                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "tracked-window-spaces", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
 
@@ -5114,8 +5096,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "tracked-ad-hoc-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
 
@@ -5141,13 +5123,12 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-1", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, pid: nil, status: .running,
-                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "process-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: nil, targetURL: nil,
-                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
+                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         XCTAssertFalse(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
 
@@ -5179,8 +5160,7 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "agent-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Codex", detail: nil, targetURL: nil,
-                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
+                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try writeTerminalSessionFixture(
@@ -5226,8 +5206,7 @@ final class OrchestratorTests: XCTestCase {
             try store.upsert(
                 window: WindowRecord(
                     id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, role: "terminal",
-                    orderIndex: 200, lastSeenAt: "now"))
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
             XCTAssertTrue(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
         }
@@ -6140,38 +6119,6 @@ final class OrchestratorTests: XCTestCase {
         """
     }
 
-    private func makeMockItermOrchestratorWithWorkspace(
-        browserWindowScanDebounceInterval: TimeInterval = 10,
-        terminalFocusPulseController: TerminalFocusPulseControlling = MockTerminalFocusPulseController(),
-        currentDate: @escaping () -> Date = Date.init
-    ) throws -> (WorkspaceOrchestrator, SQLiteStore, ProjectRecord, WorkspaceRecord, URL, MockIterm2Adapter, MockTmuxAdapter) {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        let mockTmux = MockTmuxAdapter()
-        mockIterm.pairedTmux = mockTmux
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: mockIterm, tmux: mockTmux, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval,
-            terminalFocusPulseController: terminalFocusPulseController,
-            builtInTerminalWindowOpener: { sessionID, _ in
-                let paths = try! TerminalSessionPaths.forSession(id: sessionID)
-                try! paths.ensureDirectories()
-                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
-                try! TerminalSessionPersistence.writeRuntimeState(
-                    .init(
-                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
-                        updatedAt: "2026-05-15T18:00:00Z"), paths: paths)
-                try! "test output\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
-            }, currentDate: currentDate)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        mockTmux.createSession(named: "spaces-\(workspace.id)")
-        return (orchestrator, store, project, workspace, root, mockIterm, mockTmux)
-    }
-
     private func writeTerminalSessionFixture(
         sessionID: String, workspace: WorkspaceRecord, kind: TerminalSessionKind, runtimeState: TerminalSessionRuntimeState
     ) throws {
@@ -7002,13 +6949,13 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, pid: nil, status: .running,
-                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
-                targetURL: nil, windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)

@@ -158,7 +158,7 @@ def render_snapshot_row(label: str, row: dict[str, str] | None) -> str:
 
 
 def host_label(terminal_host: str) -> str:
-    return "iTerm2" if terminal_host == "iterm2" else "Ghostty" if terminal_host == "ghostty" else terminal_host
+    return "Spaces" if terminal_host == "spaces" else terminal_host
 
 
 def scope_label(workspace_scope: str) -> str:

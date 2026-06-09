@@ -59,6 +59,13 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(projectProcessColumns.contains("execution_mode"))
         XCTAssertTrue(runningProcessColumns.contains("template_id"))
         XCTAssertTrue(runningProcessColumns.contains("terminal_session_id"))
+        XCTAssertFalse(runningProcessColumns.contains("terminal_app"))
+        XCTAssertFalse(runningProcessColumns.contains("window_id"))
+        XCTAssertFalse(runningProcessColumns.contains("terminal_tracking_id"))
+        XCTAssertFalse(runningProcessColumns.contains("terminal_native_id"))
+        XCTAssertFalse(runningProcessColumns.contains("terminal_container_id"))
+        XCTAssertFalse(runningProcessColumns.contains("iterm_tab_index"))
+        XCTAssertFalse(runningProcessColumns.contains("tmux_window_id"))
         XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
         XCTAssertTrue(workspaceSettingsColumns.contains("setup_exit_code"))
         XCTAssertTrue(workspaceSettingsColumns.contains("setup_log_path"))
@@ -106,6 +113,135 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "workspace_status_checks"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "status_results"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
+    }
+
+    func testVersionEightDatabaseDropsLegacyExternalTerminalStorage() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("v8-legacy-terminal-cleanup.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE running_processes (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  template_id TEXT,
+                  template_name TEXT NOT NULL,
+                  command TEXT NOT NULL,
+                  runtime_target_id TEXT,
+                  terminal_session_id TEXT,
+                  terminal_app TEXT,
+                  window_id INTEGER,
+                  terminal_tracking_id TEXT,
+                  terminal_native_id TEXT,
+                  terminal_container_id TEXT,
+                  iterm_tab_index INTEGER,
+                  tmux_window_id TEXT,
+                  pid INTEGER,
+                  status TEXT NOT NULL,
+                  log_path TEXT,
+                  last_output_at TEXT,
+                  started_at TEXT,
+                  exited_at TEXT
+                );
+                CREATE TABLE runtime_targets (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  type TEXT NOT NULL,
+                  name TEXT,
+                  detail TEXT,
+                  app TEXT NOT NULL,
+                  window_id INTEGER,
+                  native_id TEXT,
+                  provider TEXT,
+                  container_id TEXT,
+                  tracking_id TEXT,
+                  order_index INTEGER NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE agent_sessions (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  label TEXT,
+                  status TEXT NOT NULL DEFAULT 'idle',
+                  runtime_target_id TEXT,
+                  terminal_target_id TEXT,
+                  terminal_session_id TEXT,
+                  terminal_tracking_id TEXT,
+                  terminal_native_id TEXT,
+                  yabai_window_id INTEGER,
+                  session_key TEXT,
+                  claimed_launcher_id TEXT,
+                  claimed_launcher_name TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE terminal_targets (id TEXT PRIMARY KEY);
+                CREATE TABLE windows (id TEXT PRIMARY KEY);
+                CREATE TABLE agent_windows (id TEXT PRIMARY KEY);
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO runtime_targets(
+                  id, workspace_id, type, name, detail, app, window_id, native_id, provider, container_id, tracking_id, order_index, created_at, updated_at
+                )
+                VALUES (
+                  'runtime-1', 'workspace-1', 'terminal', 'api', 'npm run api', 'Spaces', 44, 'native-1', 'spaces', 'container-1',
+                  'session-1', 10, '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z'
+                );
+                INSERT INTO running_processes(
+                  id, workspace_id, template_id, template_name, command, runtime_target_id, terminal_session_id, terminal_app, window_id,
+                  terminal_tracking_id, terminal_native_id, terminal_container_id, iterm_tab_index, tmux_window_id, status, started_at
+                )
+                VALUES (
+                  'process-1', 'workspace-1', 'template-1', 'api', 'npm run api', 'runtime-1', 'session-1', 'Spaces', 44,
+                  'session-1', 'native-1', 'container-1', 2, 'tmux-1', 'running', '2026-01-01T00:00:00Z'
+                );
+                INSERT INTO agent_sessions(
+                  id, workspace_id, provider, label, status, runtime_target_id, terminal_target_id, terminal_session_id, terminal_tracking_id,
+                  terminal_native_id, yabai_window_id, session_key, claimed_launcher_id, claimed_launcher_name, created_at, updated_at
+                )
+                VALUES (
+                  'agent-1', 'workspace-1', 'spaces', 'Codex', 'idle', 'runtime-1', 'terminal-target-1', 'session-1', 'session-1',
+                  'native-1', 44, 'thread-1', 'launcher-1', 'Codex', '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z'
+                );
+                INSERT INTO migration_state(current_version) VALUES (8);
+                """)
+
+        _ = try SQLiteStore(path: dbURL.path)
+
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+        let runningProcessColumns = try readTableColumns(dbURL: dbURL, table: "running_processes")
+        XCTAssertFalse(runningProcessColumns.contains("terminal_app"))
+        XCTAssertFalse(runningProcessColumns.contains("window_id"))
+        XCTAssertFalse(runningProcessColumns.contains("terminal_tracking_id"))
+        XCTAssertFalse(runningProcessColumns.contains("terminal_native_id"))
+        XCTAssertFalse(runningProcessColumns.contains("terminal_container_id"))
+        XCTAssertFalse(runningProcessColumns.contains("iterm_tab_index"))
+        XCTAssertFalse(runningProcessColumns.contains("tmux_window_id"))
+        let runtimeTargetColumns = try readTableColumns(dbURL: dbURL, table: "runtime_targets")
+        XCTAssertFalse(runtimeTargetColumns.contains("native_id"))
+        XCTAssertFalse(runtimeTargetColumns.contains("provider"))
+        XCTAssertFalse(runtimeTargetColumns.contains("container_id"))
+        let agentSessionColumns = try readTableColumns(dbURL: dbURL, table: "agent_sessions")
+        XCTAssertFalse(agentSessionColumns.contains("terminal_target_id"))
+        XCTAssertFalse(agentSessionColumns.contains("terminal_tracking_id"))
+        XCTAssertFalse(agentSessionColumns.contains("terminal_native_id"))
+        XCTAssertFalse(agentSessionColumns.contains("yabai_window_id"))
+        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "terminal_targets"))
+        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "windows"))
+        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "agent_windows"))
+        XCTAssertEqual(
+            try readRows(
+                dbURL: dbURL,
+                sql: "SELECT id, workspace_id, template_id, template_name, runtime_target_id, terminal_session_id FROM running_processes"),
+            [["process-1", "workspace-1", "template-1", "api", "runtime-1", "session-1"]])
+        XCTAssertEqual(
+            try readRows(dbURL: dbURL, sql: "SELECT id, workspace_id, type, app, window_id, tracking_id FROM runtime_targets"),
+            [["runtime-1", "workspace-1", "terminal", "Spaces", "44", "session-1"]])
+        XCTAssertEqual(
+            try readRows(
+                dbURL: dbURL, sql: "SELECT id, workspace_id, provider, label, runtime_target_id, terminal_session_id, session_key FROM agent_sessions"
+            ), [["agent-1", "workspace-1", "spaces", "Codex", "runtime-1", "session-1", "thread-1"]])
     }
 
     // Tests opening a current-version database is a no-op by arranging a fresh current DB and asserting no migration backup is created on reopen.

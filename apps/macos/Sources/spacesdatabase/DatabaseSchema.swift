@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public enum DatabaseSchema {
-    public static let currentVersion = 8
+    public static let currentVersion = 9
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "terminal metadata tables", requiresBackup: false) { database in
@@ -60,6 +60,9 @@ public enum DatabaseSchema {
         },
         DatabaseMigrationStep(fromVersion: 7, toVersion: 8, description: "terminal foreground process metadata", requiresBackup: false) { database in
             try addTerminalForegroundRuntimeColumns(database: database)
+        },
+        DatabaseMigrationStep(fromVersion: 8, toVersion: 9, description: "legacy external terminal storage cleanup", requiresBackup: false) {
+            database in try dropLegacyExternalTerminalStorage(database: database)
         },
     ]
 
@@ -553,6 +556,29 @@ public enum DatabaseSchema {
     private static func addWorkspaceSetupResultColumns(database: OpaquePointer) throws {
         try addColumnIfNeeded(table: "workspace_settings", column: "setup_exit_code", definition: "INTEGER", database: database)
         try addColumnIfNeeded(table: "workspace_settings", column: "setup_log_path", definition: "TEXT", database: database)
+    }
+
+    private static func dropLegacyExternalTerminalStorage(database: OpaquePointer) throws {
+        for column in [
+            "terminal_app", "window_id", "terminal_tracking_id", "terminal_native_id", "terminal_container_id", "iterm_tab_index", "tmux_window_id",
+        ] { try dropColumnIfNeeded(table: "running_processes", column: column, database: database) }
+        for column in ["native_id", "provider", "container_id"] {
+            try dropColumnIfNeeded(table: "runtime_targets", column: column, database: database)
+        }
+        for column in ["terminal_target_id", "terminal_tracking_id", "terminal_native_id", "yabai_window_id"] {
+            try dropColumnIfNeeded(table: "agent_sessions", column: column, database: database)
+        }
+        for table in ["agent_windows", "windows", "terminal_targets"] { try dropTableIfNeeded(table, database: database) }
+    }
+
+    private static func dropColumnIfNeeded(table: String, column: String, database: OpaquePointer) throws {
+        guard try tableExists(table, database: database), try columnExists(table: table, column: column, database: database) else { return }
+        try executeBatch(sql: "ALTER TABLE \(table) DROP COLUMN \(column);", database: database)
+    }
+
+    private static func dropTableIfNeeded(_ table: String, database: OpaquePointer) throws {
+        guard try tableExists(table, database: database) else { return }
+        try executeBatch(sql: "DROP TABLE \(table);", database: database)
     }
 
     private static func tableExists(_ table: String, database: OpaquePointer) throws -> Bool {
