@@ -89,6 +89,7 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
   - Primary label (13pt medium, `Theme.text`) + secondary detail (12pt regular, `Theme.muted`) in a horizontal first-baseline stack with spacing `6`.
   - Flex spacer.
   - Trailing action buttons (pencil / xmark), icon-only, muted, borderless.
+- Coding-agent rows use a 22×22 neutral text tile with the agent tile colors. Known tools use compact uppercase markers such as `CX`, `CL`, and `OC`; custom agents use useful display-name letters. Do not bundle third-party product logos or wordmarks for coding-agent rows.
 - Rows have two states: collapsed (summary) and editing (inline form). Clicking the pencil swaps the collapsed subtree for the editing form inside the same row container; Cancel restores the collapsed view.
 - Keep repeated list patterns visually consistent across the app.
 - Shared primitives live in `apps/macos/Sources/gui/RowPrimitives.swift`. Extend those before inventing unrelated visual treatments.

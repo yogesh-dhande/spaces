@@ -98,6 +98,30 @@ import workspacecore
         #expect(section.row(at: 0)?.displayNameForTesting == "Coding Agent shell-1")
     }
 
+    @Test func agentRowsUseNeutralTileTextForKnownAgents() {
+        let rows = [
+            AgentLauncherRowView(launcher: AgentLauncher(name: "Codex CLI", command: "codex")),
+            AgentLauncherRowView(launcher: AgentLauncher(name: "claude code cli", command: "claude")),
+            AgentLauncherRowView(launcher: AgentLauncher(name: "Reviewer", command: "OPENCODE run")),
+        ]
+
+        #expect(rows.map(\.agentTileTextForTesting) == ["CX", "CL", "OC"])
+    }
+
+    @Test func agentRowsUseDisplayNameLettersForCustomTileText() {
+        let row = AgentLauncherRowView(launcher: AgentLauncher(name: "review-bot", command: "review notes"))
+
+        #expect(row.agentTileTextForTesting == "RE")
+    }
+
+    @Test func rebindUpdatesAgentTileText() {
+        let row = AgentLauncherRowView(launcher: AgentLauncher(name: "review-bot", command: "review notes"))
+
+        row.rebindCollapsedContent(from: AgentLauncher(name: "Codex", command: "codex"))
+
+        #expect(row.agentTileTextForTesting == "CX")
+    }
+
     @Test func launcherEditFormUsesPlainActionLabels() {
         let row = AgentLauncherRowView(launcher: AgentLauncher(name: "claude", command: "claude"))
         row.enterEditing(prefill: nil, animated: false)
@@ -196,8 +220,9 @@ extension AgentLaunchersSection {
 }
 
 extension AgentLauncherRowView {
-    var displayNameForTesting: String { subviewsRecursiveForAgentTests().compactMap { $0 as? NSTextField }.first?.stringValue ?? "" }
-    var displayDetailForTesting: String { subviewsRecursiveForAgentTests().compactMap { $0 as? NSTextField }.dropFirst().first?.stringValue ?? "" }
+    var displayNameForTesting: String { textFieldForTesting(accessibilityID: "agent-launcher-row-name")?.stringValue ?? "" }
+    var displayDetailForTesting: String { textFieldForTesting(accessibilityID: "agent-launcher-row-detail")?.stringValue ?? "" }
+    var agentTileTextForTesting: String { textFieldForTesting(accessibilityID: "agent-launcher-row-tile")?.stringValue ?? "" }
 
     var hasEditButtonForTesting: Bool {
         subviewsRecursiveForAgentTests().compactMap { $0 as? NSButton }.contains { $0.accessibilityIdentifier() == "agent-launcher-row-edit" }

@@ -1890,18 +1890,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
                     return .success(.focus(hidesApp: trackedWindow?.app != TerminalHost.spaces.appName))
                 case .workspaceProcess(let workspaceID, let processID):
-                    let process = try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID })
                     try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
-                    return .success(.focus(hidesApp: process?.terminalApp != TerminalHost.spaces.appName))
+                    return .success(.focus(hidesApp: false))
                 case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
                     try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
                     return .success(.open(hidesApp: false))
                 case .workspaceAgentLauncher(let workspaceID, let name):
                     _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
-                    return .success(.open(hidesApp: Self.shouldHideAfterConfiguredAgentLauncherOpen(terminalHost: .spaces)))
+                    return .success(.open(hidesApp: false))
                 case .agentWindow(let record):
                     try orchestrator.focusAgentWindow(record)
-                    return .success(.focus(hidesApp: Self.shouldHideAfterAgentWindowFocus(provider: record.provider)))
+                    return .success(.focus(hidesApp: false))
                 }
             } catch { return .failure(error) }
         }.value
@@ -1945,9 +1944,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated static func recoveredProcessWindowDetail(title: String, terminalApp: String?) -> String {
-        let destination = terminalApp == TerminalHost.spaces.appName ? "a new Spaces window" : "a new terminal window"
-        return "\(title) reopened in \(destination)."
+    nonisolated static func recoveredProcessWindowDetail(title: String, terminalApp _: String?) -> String {
+        "\(title) reopened in a new Spaces window."
     }
 
     nonisolated private static func recoverRunningWorkspaceProcessIfPossibleSnapshot(_ context: MissingTrackedWindowContext) async -> Result<
@@ -2004,25 +2002,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                                 kind: "alerts_window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
                                 hidesApp: trackedWindow?.app != TerminalHost.spaces.appName))
                     case .workspaceProcess(let workspaceID, let processID):
-                        let process = try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID })
                         try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
                         return .success(
                             .focused(
                                 kind: "alerts_process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
-                                hidesApp: process?.terminalApp != TerminalHost.spaces.appName))
+                                hidesApp: false))
                     case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
                         try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
                         return .success(.opened(kind: "alerts_process", hidesApp: false))
                     case .workspaceAgentLauncher(let workspaceID, let name):
                         _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
-                        return .success(
-                            .opened(kind: "alerts_agent_launcher", hidesApp: Self.shouldHideAfterConfiguredAgentLauncherOpen(terminalHost: .spaces)))
+                        return .success(.opened(kind: "alerts_agent_launcher", hidesApp: false))
                     case .agentWindow(let record):
                         try orchestrator.focusAgentWindow(record)
                         return .success(
                             .focused(
                                 kind: "alerts_agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
-                                hidesApp: Self.shouldHideAfterAgentWindowFocus(provider: record.provider)))
+                                hidesApp: false))
                     }
                 }
                 guard let selectedWorkspaceID else { return .success(.noWorkspace) }
@@ -2054,12 +2050,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 case .process:
                     guard let processID = target.processID else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.workspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
-                    let process = processesByID[processID]
                     try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
                     return .success(
-                        .focused(
-                            kind: "process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest),
-                            hidesApp: process?.terminalApp != TerminalHost.spaces.appName))
+                        .focused(kind: "process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest), hidesApp: false))
                 case .window:
                     guard let windowListIndex = target.windowListIndex else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.workspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
@@ -2076,15 +2069,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 case .agentLauncher:
                     guard let launcherName = target.launcherName else { return .success(.noMatch) }
                     _ = try orchestrator.launchAgentLauncher(workspaceID: selectedWorkspaceID, name: launcherName)
-                    return .success(.opened(kind: "agent_launcher", hidesApp: Self.shouldHideAfterConfiguredAgentLauncherOpen(terminalHost: .spaces)))
+                    return .success(.opened(kind: "agent_launcher", hidesApp: false))
                 case .agent:
                     guard let record = target.agentWindow else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.agentWindow(record)
                     try orchestrator.focusAgentWindow(record)
                     return .success(
-                        .focused(
-                            kind: "agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest),
-                            hidesApp: Self.shouldHideAfterAgentWindowFocus(provider: record.provider)))
+                        .focused(kind: "agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest), hidesApp: false))
                 }
             } catch { return .failure(error) }
         }.value
@@ -2314,10 +2305,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    nonisolated static func shouldHideAfterConfiguredAgentLauncherOpen(terminalHost: TerminalHost) -> Bool { terminalHost != .spaces }
-
-    nonisolated static func shouldHideAfterAgentWindowFocus(provider: AgentProvider) -> Bool { provider != .spaces }
-
     nonisolated static func hideDelayAfterSuccessfulExternalWindowAction(_ succeeded: Bool, action: ExternalWindowAction) -> Duration? {
         guard shouldHideAfterSuccessfulExternalWindowAction(succeeded, action: action) else { return nil }
         switch action {
@@ -2512,6 +2499,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return "Coding Agent \(runtimeWindowTitle)"
         }
         return "Coding Agent"
+    }
+
+    nonisolated static func isAdHocCodingAgent(_ agentWindow: AgentWindowRecord) -> Bool {
+        agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+            && agentWindow.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
     }
 
     nonisolated static func agentTerminalTrackingKeys(for record: AgentWindowRecord) -> Set<String> {
@@ -5592,6 +5584,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     return false
                 })
             else { return }
+
+            if isAdHocCodingAgent(agentWindow) {
+                if let detail = window.detail?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty {
+                    let label = agentWindow.label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if normalizedRunRowName(detail) != normalizedRunRowName(label) { result[agentWindow.id] = detail }
+                }
+                return
+            }
 
             let title =
                 (window.name?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }

@@ -151,7 +151,10 @@ spaces signal exit`}</CodeBlock>
           <Flag name="[path]" description="Workspace directory to associate with the event. Defaults to the current working directory." />
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Spaces records agent lifecycle events only from Spaces-managed terminal sessions. If the current shell is not running inside a tracked Spaces terminal session, Spaces drops the event instead of recording it.
+          Spaces records agent lifecycle events only from Spaces-managed terminal sessions. If the current shell is not running inside a tracked Spaces terminal session, Spaces drops the event instead of recording it. Use <code>init</code> to establish the agent row; later events update that row, or establish one when the signal context identifies the terminal as a coding agent.
+        </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Custom hook integrations can set <code>SPACES_AGENT_LABEL</code> before invoking <code>spaces signal</code>. Spaces also infers labels from known Codex, Claude Code, and opencode environments.
         </p>
       </article>
 

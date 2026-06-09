@@ -337,7 +337,7 @@ final class OrchestratorTests: XCTestCase {
         }
         defer { WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil) }
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 openCapture.sessionIDs.append(sessionID)
                 openCapture.modes.append(mode)
@@ -394,7 +394,7 @@ final class OrchestratorTests: XCTestCase {
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 openCapture.sessionIDs.append(sessionID)
                 openCapture.modes.append(mode)
@@ -447,7 +447,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let openCapture = TerminalOpenCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 openCapture.sessionIDs.append(sessionID)
                 openCapture.modes.append(mode)
@@ -490,7 +490,7 @@ final class OrchestratorTests: XCTestCase {
         let openCapture = TerminalOpenCapture()
         let focusCapture = TerminalFocusCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 openCapture.sessionIDs.append(sessionID)
                 openCapture.modes.append(mode)
@@ -530,16 +530,17 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(openCapture.sessionIDs.isEmpty)
     }
 
-    func testUpdateAgentWindowStatusFallsBackToConfiguredLabelForSpacesProvider() throws {
+    func testUpdateAgentWindowStatusDoesNotMatchConfiguredLauncherByLabel() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Mock Agent", command: "mock-agent")])
 
-        _ = try orchestrator.registerAgentWindow(
+        let configured = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "session-a", terminalNativeID: "session-a",
             status: .idle, claimedLauncherName: "Mock Agent")
 
@@ -548,11 +549,15 @@ final class OrchestratorTests: XCTestCase {
             status: .waiting)
 
         let agentWindows = try store.agentWindows(workspaceID: workspace.id)
-        XCTAssertEqual(agentWindows.count, 1)
-        XCTAssertEqual(updated.label, "Mock Agent")
+        let configuredAfterUpdate = try XCTUnwrap(agentWindows.first { $0.id == configured.id })
+        XCTAssertEqual(agentWindows.count, 2)
+        XCTAssertEqual(configuredAfterUpdate.label, "Mock Agent")
+        XCTAssertEqual(configuredAfterUpdate.status, .idle)
+        XCTAssertEqual(configuredAfterUpdate.terminalTrackingID, "session-a")
+        XCTAssertNotEqual(updated.id, configured.id)
+        XCTAssertEqual(updated.label, "Mock Agent-2")
         XCTAssertEqual(updated.status, .waiting)
         XCTAssertEqual(updated.terminalTrackingID, "session-b")
-        XCTAssertEqual(agentWindows.first?.terminalTrackingID, "session-b")
     }
 
     // Tests next window order index uses role offset and max by arranging representative inputs and asserting the expected result.
@@ -562,10 +567,10 @@ final class OrchestratorTests: XCTestCase {
                 id: UUID().uuidString, workspaceID: "ws", app: "Chrome", title: "Browser", windowID: 10, role: "browser", orderIndex: 0,
                 lastSeenAt: "now"),
             WindowRecord(
-                id: UUID().uuidString, workspaceID: "ws", app: "iTerm2", title: "Term 1", windowID: 11, role: "terminal", orderIndex: 200,
+                id: UUID().uuidString, workspaceID: "ws", app: "Spaces", title: "Term 1", windowID: 11, role: "terminal", orderIndex: 200,
                 lastSeenAt: "now"),
             WindowRecord(
-                id: UUID().uuidString, workspaceID: "ws", app: "iTerm2", title: "Term 2", windowID: 12, role: "terminal", orderIndex: 205,
+                id: UUID().uuidString, workspaceID: "ws", app: "Spaces", title: "Term 2", windowID: 12, role: "terminal", orderIndex: 205,
                 lastSeenAt: "now"),
         ]
 
@@ -1472,17 +1477,15 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let mockTmux = MockTmuxAdapter()
-        let orchestrator = WorkspaceOrchestrator(store: store, tmux: mockTmux)
+        let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        let liveWindow = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
         // Create a process with a PID that doesn't exist
         let deadProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
-            terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: liveWindow.id, pid: 99999, status: .running, logPath: nil,
-            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            terminalTrackingID: "workspace-session", pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
         try store.upsert(runningProcess: deadProcess)
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
         XCTAssertTrue(didUpdate)
@@ -1497,17 +1500,15 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let mockTmux = MockTmuxAdapter()
-        let orchestrator = WorkspaceOrchestrator(store: store, tmux: mockTmux)
+        let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        let liveWindow = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
         // Create a process that just started (within grace period)
         let newProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
-            terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: liveWindow.id, pid: 99999, status: .running, logPath: nil,
-            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5)), exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            terminalTrackingID: "workspace-session", pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5)), exitedAt: nil)
         try store.upsert(runningProcess: newProcess)
         _ = try orchestrator.checkAndUpdateProcessStatuses()
         let unchanged = try store.runningProcesses(workspaceID: workspace.id).first
@@ -1520,8 +1521,7 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let mockTmux = MockTmuxAdapter()
-        let orchestrator = WorkspaceOrchestrator(store: store, tmux: mockTmux)
+        let orchestrator = WorkspaceOrchestrator(store: store)
 
         let python = "/usr/bin/python3"
         guard FileManager.default.isExecutableFile(atPath: python) else {
@@ -1559,12 +1559,10 @@ final class OrchestratorTests: XCTestCase {
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        let liveWindow = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
         let zombieProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Ghostty", windowID: 123,
-            terminalTrackingID: "workspace-session", terminalNativeID: "ghostty-terminal", terminalContainerID: "ghostty-tab",
-            tmuxWindowID: liveWindow.id, pid: zombiePID, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            terminalTrackingID: "workspace-session", terminalNativeID: "spaces-terminal", pid: zombiePID, status: .running, logPath: nil,
+            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
         try store.upsert(runningProcess: zombieProcess)
 
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
@@ -1581,49 +1579,44 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let mockTmux = MockTmuxAdapter()
-        let orchestrator = WorkspaceOrchestrator(store: store, tmux: mockTmux)
+        let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        let liveWindow = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
         // Create a process without a PID (still starting up)
         let noPidProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
-            terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: liveWindow.id, pid: nil, status: .running, logPath: nil,
-            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            terminalTrackingID: "workspace-session", pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
         try store.upsert(runningProcess: noPidProcess)
         _ = try orchestrator.checkAndUpdateProcessStatuses()
         let unchanged = try store.runningProcesses(workspaceID: workspace.id).first
         XCTAssertEqual(unchanged?.status, .running)
     }
 
-    // Tests check and update process statuses refreshes a stale tracked pid from the live tmux session for managed terminals.
+    // Tests check and update process statuses refreshes a stale tracked pid from the live built-in terminal session for managed terminals.
     // Tests check and update process statuses only checks running processes by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesOnlyChecksRunningProcesses() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let mockTmux = MockTmuxAdapter()
-        let orchestrator = WorkspaceOrchestrator(store: store, tmux: mockTmux)
+        let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        let liveWindow = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
         // Create an already-exited process
         let exitedProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
-            terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: liveWindow.id, pid: 99999, status: .exited, logPath: nil,
-            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)),
-            exitedAt: ISO8601DateFormatter().string(from: Date()))
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            terminalTrackingID: "workspace-session", pid: 99999, status: .exited, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: ISO8601DateFormatter().string(from: Date()))
         try store.upsert(runningProcess: exitedProcess)
         _ = try orchestrator.checkAndUpdateProcessStatuses()
         let unchanged = try store.runningProcesses(workspaceID: workspace.id).first
         XCTAssertEqual(unchanged?.status, .exited)
     }
 
-    // Tests tmux runtime sync revives an exited managed process when the tracked pane is still alive by arranging representative inputs and asserting the expected result.
+    // Tests built-in terminal runtime sync revives an exited managed process when the tracked pane is still alive by arranging representative inputs and asserting the expected result.
 
     // Tests create workspace throws for unknown project by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceThrowsForUnknownProject() throws {
@@ -1870,21 +1863,21 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(openArgs.contains("-a Visual Studio Code"))
     }
 
-    // Tests open workspace terminal creates a dedicated workspace terminal and tracks the new tmux shell window.
+    // Tests open workspace terminal creates a dedicated workspace terminal and tracks the new built-in terminal shell window.
 
     // Tests that opening a terminal for a not-running workspace marks it as running so the UI shows Restart instead of Launch.
     func testRefreshWorkspaceWindowsPreservesGeneratedAdHocTerminalName() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell-1", windowID: 101, terminalTrackingID: "session-1",
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell-1", windowID: 101, terminalTrackingID: "session-1",
                 role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(
                 name: "YABAI_WINDOWS_JSON",
                 value:
-                    #"[{"id":101,"pid":11,"app":"iTerm2","title":"zsh","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                    #"[{"id":101,"pid":11,"app":"Spaces","title":"zsh","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
             ) { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
         }
 
@@ -1901,7 +1894,7 @@ final class OrchestratorTests: XCTestCase {
 
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 XCTAssertEqual(mode, .owner)
                 let paths = try! TerminalSessionPaths.forSession(id: sessionID)
@@ -1956,7 +1949,7 @@ final class OrchestratorTests: XCTestCase {
         }
         defer { WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil) }
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 openCapture.sessionIDs.append(sessionID)
                 openCapture.modes.append(mode)
@@ -2028,8 +2021,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                windowID: nil, terminalTrackingID: "session-123", terminalNativeID: "session-123", terminalContainerID: nil, itermTabIndex: nil,
-                tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "2026-05-10T18:00:00Z"))
+                windowID: nil, terminalTrackingID: "session-123", terminalNativeID: "session-123", role: "terminal", orderIndex: 200,
+                lastSeenAt: "2026-05-10T18:00:00Z"))
 
         XCTAssertEqual(try orchestrator.workspaceIDForTerminalSession("session-123"), workspace.id)
     }
@@ -2046,8 +2039,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-1", workspaceID: workspace.id, templateName: "api", command: "zsh", terminalApp: TerminalHost.spaces.appName,
-                windowID: nil, terminalTrackingID: "session-456", terminalNativeID: "session-456", terminalContainerID: nil, itermTabIndex: nil,
-                tmuxWindowID: nil, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-05-10T18:05:00Z", exitedAt: nil))
+                windowID: nil, terminalTrackingID: "session-456", terminalNativeID: "session-456", pid: 1234, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "2026-05-10T18:05:00Z", exitedAt: nil))
 
         XCTAssertEqual(try orchestrator.workspaceIDForTerminalSession("session-456"), workspace.id)
     }
@@ -2060,7 +2053,7 @@ final class OrchestratorTests: XCTestCase {
 
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 XCTAssertEqual(mode, .owner)
                 let paths = try! TerminalSessionPaths.forSession(id: sessionID)
@@ -2095,11 +2088,11 @@ final class OrchestratorTests: XCTestCase {
 
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "bad", windowID: 999, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "bad", windowID: 999, role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "good", windowID: 101, role: "terminal", orderIndex: 1,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "good", windowID: 101, role: "terminal", orderIndex: 1,
                 lastSeenAt: "now"))
 
         // Mocked dependency: `yabai` focus command outcomes.
@@ -2114,7 +2107,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedIDs, ["101"])
     }
 
-    // Tests focusing a workspace process targets the process's iTerm2 session when multiple processes share a window.
+    // Tests focusing a workspace process targets the process's Spaces session when multiple processes share a window.
 
     // Tests focus workspace process does not borrow another shared-tab index when targeting a specific session.
 
@@ -2124,18 +2117,18 @@ final class OrchestratorTests: XCTestCase {
 
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "Claude Code", windowID: 101,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "Claude Code", windowID: 101,
                 terminalTrackingID: "workspace-session", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "Claude Code", command: "claude", terminalApp: "iTerm2",
-                windowID: 101, terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: nil, pid: 123, status: .running,
-                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "Claude Code", command: "claude", terminalApp: "Spaces",
+                windowID: 101, terminalTrackingID: "workspace-session", pid: 123, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI",
-                terminalTrackingID: "workspace-session", tmuxWindowID: nil, codexThreadID: nil, windowID: 101, yabaiWindowID: 101, status: .idle,
-                createdAt: "now", updatedAt: "now"))
+                terminalTrackingID: "workspace-session", codexThreadID: nil, windowID: 101, yabaiWindowID: 101, status: .idle, createdAt: "now",
+                updatedAt: "now"))
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "frontend", targetURL: "http://localhost:3000",
@@ -2158,15 +2151,15 @@ final class OrchestratorTests: XCTestCase {
 
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "one", windowID: 101, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "one", windowID: 101, role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "two", windowID: 202, role: "terminal", orderIndex: 1,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "two", windowID: 202, role: "terminal", orderIndex: 1,
                 lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "three", windowID: 303, role: "terminal", orderIndex: 2,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "three", windowID: 303, role: "terminal", orderIndex: 2,
                 lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -2189,15 +2182,15 @@ final class OrchestratorTests: XCTestCase {
 
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "one", windowID: 101, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "one", windowID: 101, role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "two", windowID: 202, role: "terminal", orderIndex: 1,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "two", windowID: 202, role: "terminal", orderIndex: 1,
                 lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "three", windowID: 303, role: "terminal", orderIndex: 2,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "three", windowID: 303, role: "terminal", orderIndex: 2,
                 lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -2288,7 +2281,7 @@ final class OrchestratorTests: XCTestCase {
             try withEnv(
                 name: "YABAI_WINDOWS_JSON",
                 value:
-                    #"[{"id":101,"pid":11,"app":"iTerm2","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":888,"pid":22,"app":"Google Chrome","title":"Frontend","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                    #"[{"id":101,"pid":11,"app":"Spaces","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":888,"pid":22,"app":"Google Chrome","title":"Frontend","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
             ) {
                 try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
                     XCTAssertNoThrow(try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1))
@@ -2312,7 +2305,7 @@ final class OrchestratorTests: XCTestCase {
             try withEnv(
                 name: "YABAI_WINDOWS_JSON",
                 value:
-                    #"[{"id":101,"pid":11,"app":"iTerm2","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":888,"pid":22,"app":"Google Chrome","title":"Frontend","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                    #"[{"id":101,"pid":11,"app":"Spaces","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":888,"pid":22,"app":"Google Chrome","title":"Frontend","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
             ) {
                 try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
                     XCTAssertNoThrow(try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspace.id, targetURL: "http://localhost:3001"))
@@ -2363,7 +2356,7 @@ final class OrchestratorTests: XCTestCase {
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 101, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "api", windowID: 101, role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
@@ -2374,7 +2367,7 @@ final class OrchestratorTests: XCTestCase {
             try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: tabIndexLog.path) {
                 try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
                     try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
-                        try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "Spaces") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
                     }
                 }
             }
@@ -2392,7 +2385,7 @@ final class OrchestratorTests: XCTestCase {
         let chromeFocusLog = root.appendingPathComponent("browser-cycle-url-focus.log")
         let chromeTabIndexLog = root.appendingPathComponent("browser-cycle-tab-index.log")
         let yabaiFocusLog = root.appendingPathComponent("browser-cycle-url-yabai.log")
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -2407,14 +2400,14 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-browser-cycle", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
             terminalApp: TerminalHost.spaces.appName, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle",
-            terminalNativeID: "spaces-session-browser-cycle", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-browser-cycle", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-terminal", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend", detail: "npm run frontend",
                 targetURL: nil, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle", terminalNativeID: "spaces-session-browser-cycle",
-                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+                role: "terminal", orderIndex: 0, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeFocusLog.path) {
@@ -2444,7 +2437,7 @@ final class OrchestratorTests: XCTestCase {
         let chromeFocusLog = root.appendingPathComponent("browser-cycle-google-focus.log")
         let chromeTabIndexLog = root.appendingPathComponent("browser-cycle-google-tab-index.log")
         let yabaiFocusLog = root.appendingPathComponent("browser-cycle-google-yabai.log")
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -2459,15 +2452,14 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-browser-cycle-google", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
             terminalApp: TerminalHost.spaces.appName, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle-google",
-            terminalNativeID: "spaces-session-browser-cycle-google", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-browser-cycle-google", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-terminal-google", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend",
                 detail: "npm run frontend", targetURL: nil, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle-google",
-                terminalNativeID: "spaces-session-browser-cycle-google", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil,
-                role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+                terminalNativeID: "spaces-session-browser-cycle-google", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeFocusLog.path) {
@@ -2524,8 +2516,7 @@ final class OrchestratorTests: XCTestCase {
         let focusCapture = TerminalFocusCapture()
         let root = try makeTempDirectory()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalWindowOpener: { _, _ in XCTFail("cycle focus should not reopen built-in sessions") },
+            store: store, builtInTerminalWindowOpener: { _, _ in XCTFail("cycle focus should not reopen built-in sessions") },
             builtInTerminalWindowFocuser: { sessionID, requestID in
                 focusCapture.sessionIDs.append(sessionID)
                 focusCapture.requestIDs.append(requestID)
@@ -2543,14 +2534,13 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-cycle-priority", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
             terminalApp: TerminalHost.spaces.appName, windowID: 202, terminalTrackingID: "spaces-session-priority",
-            terminalNativeID: "spaces-session-priority", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
-            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-priority", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-process", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend", detail: "npm run frontend",
                 targetURL: nil, windowID: 202, terminalTrackingID: "spaces-session-priority", terminalNativeID: "spaces-session-priority",
-                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 1, lastSeenAt: "now"))
+                role: "terminal", orderIndex: 1, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
@@ -2575,7 +2565,7 @@ final class OrchestratorTests: XCTestCase {
                 windowID: 999, role: "browser", orderIndex: 0, lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 101, role: "terminal", orderIndex: 200,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "api", windowID: 101, role: "terminal", orderIndex: 200,
                 lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -2595,8 +2585,7 @@ final class OrchestratorTests: XCTestCase {
         let focusCapture = TerminalFocusCapture()
         let root = try makeTempDirectory()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalWindowOpener: { _, _ in XCTFail("built-in cycle focus should not reopen the session") },
+            store: store, builtInTerminalWindowOpener: { _, _ in XCTFail("built-in cycle focus should not reopen the session") },
             builtInTerminalWindowFocuser: { sessionID, requestID in
                 focusCapture.sessionIDs.append(sessionID)
                 focusCapture.requestIDs.append(requestID)
@@ -2614,14 +2603,13 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-cycle", workspaceID: workspace.id, templateName: "api", command: "npm run api",
             terminalApp: TerminalHost.spaces.appName, windowID: 202, terminalTrackingID: "spaces-session-cycle",
-            terminalNativeID: "spaces-session-cycle", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
-            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-cycle", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-process", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api", targetURL: nil,
-                windowID: 202, terminalTrackingID: "spaces-session-cycle", terminalNativeID: "spaces-session-cycle", terminalContainerID: nil,
-                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                windowID: 202, terminalTrackingID: "spaces-session-cycle", terminalNativeID: "spaces-session-cycle", role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"))
 
         var hidesApp = true
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -2637,14 +2625,14 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusCapture.requestIDs, [nil])
     }
 
-    // Tests process focus throws a recoverable missing-window error when the tracked iTerm window no longer exists.
+    // Tests process focus throws a recoverable missing-window error when a legacy tracked terminal window no longer exists.
     func testFocusWorkspaceProcessThrowsRecoverableErrorForMissingProcessWindow() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
         let process = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 999,
-            terminalTrackingID: "session-999", itermTabIndex: nil, tmuxWindowID: nil, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "LegacyTerminal",
+            windowID: 999, terminalTrackingID: "session-999", pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
         try store.upsert(runningProcess: process)
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -2663,7 +2651,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let focusCapture = TerminalFocusCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowFocuser: { sessionID, requestID in
                 focusCapture.sessionIDs.append(sessionID)
                 focusCapture.requestIDs.append(requestID)
@@ -2677,14 +2665,14 @@ final class OrchestratorTests: XCTestCase {
 
         let process = RunningProcessRecord(
             id: "process-spaces", workspaceID: workspace.id, templateName: "web", command: "npm run dev", terminalApp: TerminalHost.spaces.appName,
-            windowID: nil, terminalTrackingID: "spaces-session-1", terminalNativeID: "spaces-session-1", terminalContainerID: nil, itermTabIndex: nil,
-            tmuxWindowID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            windowID: nil, terminalTrackingID: "spaces-session-1", terminalNativeID: "spaces-session-1", pid: nil, status: .running, logPath: nil,
+            lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev", targetURL: nil,
-                windowID: nil, terminalTrackingID: "spaces-session-1", terminalNativeID: "spaces-session-1", terminalContainerID: nil,
-                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                windowID: nil, terminalTrackingID: "spaces-session-1", terminalNativeID: "spaces-session-1", role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
 
@@ -2699,7 +2687,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let queryLog = root.appendingPathComponent("yabai-query.log")
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 openCapture.sessionIDs.append(sessionID)
                 openCapture.modes.append(mode)
@@ -2717,14 +2705,14 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-session-only", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: "spaces-session-live-only",
-            terminalNativeID: "spaces-session-live-only", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
-            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-live-only", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil
+        )
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-session-only", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
                 targetURL: nil, windowID: nil, terminalTrackingID: "spaces-session-live-only", terminalNativeID: "spaces-session-live-only",
-                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUSED_ID", value: "889") {
@@ -2759,7 +2747,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
         let store = try SQLiteStore(path: dbPath.path, )
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -2770,8 +2758,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil,
-                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2804,7 +2792,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
         let store = try SQLiteStore(path: dbPath.path, )
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -2815,8 +2803,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil,
-                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2849,7 +2837,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
         let store = try SQLiteStore(path: dbPath.path, )
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -2860,8 +2848,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil,
-                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2894,7 +2882,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
         let store = try SQLiteStore(path: dbPath.path, )
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -2905,13 +2893,13 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil,
-                tmuxWindowID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "window-process-api", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil,
-                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2935,7 +2923,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
         let store = try SQLiteStore(path: dbPath.path, )
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -2985,7 +2973,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let focusCapture = TerminalFocusCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowFocuser: { sessionID, requestID in
                 focusCapture.sessionIDs.append(sessionID)
                 focusCapture.requestIDs.append(requestID)
@@ -3024,8 +3012,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let focusLog = root.appendingPathComponent("spaces-live-window-focus.log")
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalWindowOpener: { _, _ in XCTFail("live built-in window focus should not reopen the session") },
+            store: store, builtInTerminalWindowOpener: { _, _ in XCTFail("live built-in window focus should not reopen the session") },
             builtInTerminalWindowFocuser: { sessionID, requestID in
                 focusCapture.sessionIDs.append(sessionID)
                 focusCapture.requestIDs.append(requestID)
@@ -3039,14 +3026,13 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-live-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: 501, terminalTrackingID: "spaces-session-live",
-            terminalNativeID: "spaces-session-live", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
-            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-live", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-live-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: 501, terminalTrackingID: "spaces-session-live", terminalNativeID: "spaces-session-live",
-                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: 501, terminalTrackingID: "spaces-session-live", terminalNativeID: "spaces-session-live", role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
@@ -3067,8 +3053,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let focusCapture = TerminalFocusCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalWindowOpener: { _, _ in XCTFail("focus should not reopen built-in session") },
+            store: store, builtInTerminalWindowOpener: { _, _ in XCTFail("focus should not reopen built-in session") },
             builtInTerminalWindowFocuser: { sessionID, requestID in
                 focusCapture.sessionIDs.append(sessionID)
                 focusCapture.requestIDs.append(requestID)
@@ -3084,14 +3069,14 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-request-id", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: "spaces-session-request-id",
-            terminalNativeID: "spaces-session-request-id", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-request-id", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-request-id", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
                 targetURL: nil, windowID: nil, terminalTrackingID: "spaces-session-request-id", terminalNativeID: "spaces-session-request-id",
-                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
@@ -3110,7 +3095,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let focusLog = root.appendingPathComponent("yabai-focus.log")
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 openCapture.sessionIDs.append(sessionID)
                 openCapture.modes.append(mode)
@@ -3128,15 +3113,14 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-cycle-fast-path", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-cycle-fast-path",
-            terminalNativeID: "spaces-session-cycle-fast-path", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-cycle-fast-path", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-cycle-fast-path", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
                 targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-cycle-fast-path",
-                terminalNativeID: "spaces-session-cycle-fast-path", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
+                terminalNativeID: "spaces-session-cycle-fast-path", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
@@ -3161,8 +3145,7 @@ final class OrchestratorTests: XCTestCase {
         let pulseController = MockTerminalFocusPulseController()
         let root = try makeTempDirectory()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            terminalFocusPulseController: pulseController,
+            store: store, terminalFocusPulseController: pulseController,
             builtInTerminalWindowFocuser: { sessionID, requestID in
                 focusCapture.sessionIDs.append(sessionID)
                 focusCapture.requestIDs.append(requestID)
@@ -3176,19 +3159,20 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-stale-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-stale",
-            terminalNativeID: "spaces-session-stale", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
-            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-stale", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-stale-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-stale", terminalNativeID: "spaces-session-stale",
-                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-stale", terminalNativeID: "spaces-session-stale", role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
-                try withEnv(name: "YABAI_FOCUS_FAIL_IDS", value: "777") {
-                    try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+                try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
+                    try withEnv(name: "YABAI_FOCUS_FAIL_IDS", value: "777") {
+                        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+                    }
                 }
             }
         }
@@ -3210,7 +3194,7 @@ final class OrchestratorTests: XCTestCase {
         let capture = TerminalOpenCapture()
         let focusCapture = TerminalFocusCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 capture.sessionIDs.append(sessionID)
                 capture.modes.append(mode)
@@ -3230,14 +3214,13 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-rebound-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-rebound",
-            terminalNativeID: "spaces-session-rebound", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
-            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-rebound", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-rebound-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
                 targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-rebound", terminalNativeID: "spaces-session-rebound",
-                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
@@ -3277,8 +3260,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let focusLog = root.appendingPathComponent("spaces-tracked-live-window-focus.log")
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            terminalFocusPulseController: pulseController,
+            store: store, terminalFocusPulseController: pulseController,
             builtInTerminalWindowFocuser: { sessionID, requestID in
                 focusCapture.sessionIDs.append(sessionID)
                 focusCapture.requestIDs.append(requestID)
@@ -3292,14 +3274,13 @@ final class OrchestratorTests: XCTestCase {
         let process = RunningProcessRecord(
             id: "process-spaces-live-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
             terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-live",
-            terminalNativeID: "spaces-session-live", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
-            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalNativeID: "spaces-session-live", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-live-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-live", terminalNativeID: "spaces-session-live",
-                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-live", terminalNativeID: "spaces-session-live", role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
@@ -3314,11 +3295,10 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-live"])
         XCTAssertEqual(focusCapture.requestIDs, [nil])
         XCTAssertFalse(FileManager.default.fileExists(atPath: focusLog.path))
-        XCTAssertEqual(pulseController.pulsedWindowIDs, [777])
+        XCTAssertTrue(pulseController.pulsedWindowIDs.isEmpty)
     }
 
     // Tests restarting a process recreates a tracked terminal window row even if the stale window row was already pruned.
-    // Tests explicit process restart kills the old tmux session and starts a fresh terminal instead of reattaching to it.
     func testRestartWorkspaceProcessUsesConfiguredSpacesHostEvenWhenStoredProcessHostDiffers() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
@@ -3326,7 +3306,7 @@ final class OrchestratorTests: XCTestCase {
         let capture = TerminalOpenCapture()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 capture.sessionIDs.append(sessionID)
                 capture.modes.append(mode)
@@ -3350,9 +3330,9 @@ final class OrchestratorTests: XCTestCase {
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 999,
-                terminalTrackingID: "session-old", terminalNativeID: nil, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "LegacyTerminal",
+                windowID: 999, terminalTrackingID: "session-old", terminalNativeID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "now", exitedAt: nil))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -3381,7 +3361,7 @@ final class OrchestratorTests: XCTestCase {
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 openCapture.sessionIDs.append(sessionID)
                 openCapture.modes.append(mode)
@@ -3403,13 +3383,13 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", terminalContainerID: nil,
-                itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", pid: nil, status: .running,
+                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "old-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api", targetURL: nil,
-                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", terminalContainerID: nil,
-                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -3426,23 +3406,19 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(restartedProcess.terminalTrackingID, openCapture.sessionIDs.first)
     }
 
-    // Tests running-process recovery reattaches without restarting when the tmux session is still available.
+    // Tests running-process recovery reattaches without restarting when the built-in terminal session is still available.
     // Tests running-process recovery returns false instead of restarting when the tracked process is no longer alive.
     func testRecoverRunningWorkspaceProcessIfPossibleReturnsFalseWhenProcessIsNotRunning() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
-        mockTmux.createSession(named: "spaces-\(workspace.id)-api")
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
         let process = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 999,
-            terminalTrackingID: "session-old", itermTabIndex: nil, tmuxWindowID: nil, pid: 999_999, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 999,
+            terminalTrackingID: "session-old", pid: 999_999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
 
         let recovered = try orchestrator.recoverRunningWorkspaceProcessIfPossible(workspaceID: workspace.id, processID: process.id)
 
         XCTAssertFalse(recovered)
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
-        XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
     }
 
     func testRecoverRunningWorkspaceProcessIfPossibleReopensBuiltInSpacesSession() throws {
@@ -3451,7 +3427,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let capture = TerminalOpenCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 capture.sessionIDs.append(sessionID)
                 capture.modes.append(mode)
@@ -3476,14 +3452,12 @@ final class OrchestratorTests: XCTestCase {
             let process = RunningProcessRecord(
                 id: "process-spaces-recover", workspaceID: workspace.id, templateName: "api", command: "npm run api",
                 terminalApp: TerminalHost.spaces.appName, windowID: 401, terminalTrackingID: sessionID, terminalNativeID: sessionID,
-                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: Int(getpid()), status: .running, logPath: paths.outputPath,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+                pid: Int(getpid()), status: .running, logPath: paths.outputPath, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
             try store.upsert(runningProcess: process)
             try store.upsert(
                 window: WindowRecord(
                     id: process.id, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api", targetURL: nil,
-                    windowID: 401, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil,
-                    tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                    windowID: 401, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
                 try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
@@ -3512,12 +3486,9 @@ final class OrchestratorTests: XCTestCase {
 
     // Tests configured-but-missing processes can be recovered directly without restarting unrelated running processes.
     func testRecoverMissingConfiguredProcessMarksStoppedWorkspaceRunning() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
-        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-api", id: "@1", name: "api", isActive: true)
-        mockIterm.nextWindowID = 701
-        mockIterm.nextSessionID = "session-api"
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
@@ -3535,7 +3506,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let capture = TerminalOpenCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 capture.sessionIDs.append(sessionID)
                 capture.modes.append(mode)
@@ -3563,8 +3534,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-web", workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: TerminalHost.spaces.appName,
-                windowID: 222, terminalTrackingID: "session-web", terminalNativeID: "session-web", terminalContainerID: nil, itermTabIndex: nil,
-                tmuxWindowID: nil, pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                windowID: 222, terminalTrackingID: "session-web", terminalNativeID: "session-web", pid: 2222, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -3590,15 +3561,13 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
     }
 
-    func testRecoverMissingConfiguredProcessUsesBuiltInSpacesSessionHostWithoutTmux() throws {
+    func testRecoverMissingConfiguredProcessUsesBuiltInSpacesSessionHostWhenNoPriorRuntimeExists() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try makeTemporaryStore()
         let capture = TerminalOpenCapture()
-        let mockTmux = MockTmuxAdapter()
-        mockTmux.available = false
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: mockTmux,
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 capture.sessionIDs.append(sessionID)
                 capture.modes.append(mode)
@@ -3641,18 +3610,14 @@ final class OrchestratorTests: XCTestCase {
 
     // Tests no-op settings saves do not restart a recovered named process.
     func testUpdateWorkspaceSettingsDoesNotRestartRecoveredNamedProcess() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run web")])
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
-                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
-        mockIterm.nextWindowID = 601
-        mockIterm.nextSessionID = "session-web"
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 222,
+                terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in }
@@ -3661,22 +3626,18 @@ final class OrchestratorTests: XCTestCase {
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(processes.count, 1)
         XCTAssertEqual(processes.first?.templateName, "web")
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
-        XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
     }
 
     func testUpdateWorkspaceSettingsWhileRunningDoesNotReconcileProcessesAndSyncsPorts() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run web")])
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [24000], names: ["API_PORT"])
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
-                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 222,
+                terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
@@ -3688,8 +3649,6 @@ final class OrchestratorTests: XCTestCase {
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(processes.count, 1)
         XCTAssertEqual(processes.first?.templateName, "web")
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
-        XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
 
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         XCTAssertEqual(namedPorts.map(\.port), [24000, 20000])
@@ -3705,7 +3664,7 @@ final class OrchestratorTests: XCTestCase {
     }
 
     func testUpdateRunningWorkspaceProcessesRelabelsRunningProcessAndUpdatesOnExit() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         let process = ProcessTemplate(id: "process-web", name: "web", command: "npm run web", onExit: .none)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [process])
@@ -3713,15 +3672,12 @@ final class OrchestratorTests: XCTestCase {
         let processID = UUID().uuidString
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
-                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 222,
+                terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
-                id: processID, workspaceID: workspace.id, app: "iTerm2", name: "web", detail: "npm run web", windowID: 222,
-                terminalTrackingID: "session-web", terminalNativeID: nil, itermTabIndex: nil, tmuxWindowID: "@2", role: "terminal", orderIndex: 200,
-                lastSeenAt: "now"))
-        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
+                id: processID, workspaceID: workspace.id, app: "Spaces", name: "web", detail: "npm run web", windowID: 222,
+                terminalTrackingID: "session-web", terminalNativeID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try orchestrator.updateRunningWorkspaceProcesses(
             workspaceID: workspace.id, processes: [ProcessTemplate(id: process.id, name: "frontend", command: "npm run web", onExit: .restart)],
@@ -3737,12 +3693,10 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(running.first?.command, "npm run web")
         let windows = try store.windows(workspaceID: workspace.id).filter { $0.role == "terminal" }
         XCTAssertEqual(windows.map(\.name), ["frontend"])
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
-        XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
     }
 
     func testUpdateRunningWorkspaceProcessesRestartsChangedCommandAfterConfirmation() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         let process = ProcessTemplate(id: "process-web", name: "web", command: "npm run web", onExit: .none)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [process])
@@ -3750,12 +3704,8 @@ final class OrchestratorTests: XCTestCase {
         let processID = UUID().uuidString
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
-                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
-        mockIterm.nextWindowID = 602
-        mockIterm.nextSessionID = "session-web-v2"
+                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 222,
+                terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try orchestrator.updateRunningWorkspaceProcesses(
@@ -3775,22 +3725,18 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNotEqual(running.first?.terminalTrackingID, "session-web")
         XCTAssertEqual(running.first?.terminalTrackingID, running.first?.terminalNativeID)
         XCTAssertEqual(running.first?.pid, 4321)
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
-        XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
     }
 
     func testUpdateRunningWorkspaceProcessesRejectsChangedCommandWithoutRestartConfirmation() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         let process = ProcessTemplate(id: "process-web", name: "web", command: "npm run web", onExit: .none)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [process])
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
-                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 222,
+                terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         XCTAssertThrowsError(
             try orchestrator.updateRunningWorkspaceProcesses(
@@ -3803,11 +3749,10 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(configured.first?.command, "npm run web")
         XCTAssertEqual(configured.first?.onExit, ProcessExitAction.none)
         XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.command), ["npm run web"])
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
     }
 
     func testUpdateRunningWorkspaceProcessesRestartsCompositeShellCommand() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         let process = ProcessTemplate(id: "process-web", name: "web", command: "npm run web", onExit: .none)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [process])
@@ -3815,13 +3760,8 @@ final class OrchestratorTests: XCTestCase {
         let processID = UUID().uuidString
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
-                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
-        mockIterm.nextWindowID = 603
-        mockIterm.nextSessionID = "session-web-shell"
-
+                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "LegacyTerminal", windowID: 222,
+                terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try orchestrator.updateRunningWorkspaceProcesses(
                 workspaceID: workspace.id,
@@ -3837,12 +3777,10 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNotEqual(running.first?.terminalTrackingID, "session-web")
         XCTAssertEqual(running.first?.terminalTrackingID, running.first?.terminalNativeID)
         XCTAssertEqual(running.first?.pid, 4321)
-        XCTAssertTrue(mockTmux.lastStartedCommand.isEmpty)
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
     }
 
     func testUpdateRunningWorkspaceProcessesDeletingEarlierRowKeepsLaterRunningProcessMatchedByID() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         let web = ProcessTemplate(id: "process-web", name: "web", command: "npm run web", onExit: .none)
         let worker = ProcessTemplate(id: "process-worker", name: "worker", command: "npm run worker", onExit: .none)
@@ -3851,26 +3789,21 @@ final class OrchestratorTests: XCTestCase {
 
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: "running-web", workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 221,
-                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@1", pid: 1111, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: "running-web", workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 221,
+                terminalTrackingID: "session-web", pid: 1111, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: "running-worker", workspaceID: workspace.id, templateName: "worker", command: "npm run worker", terminalApp: "iTerm2",
-                windowID: 222, terminalTrackingID: "session-worker", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running,
-                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: "running-worker", workspaceID: workspace.id, templateName: "worker", command: "npm run worker", terminalApp: "Spaces",
+                windowID: 222, terminalTrackingID: "session-worker", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
-                id: "window-web", workspaceID: workspace.id, app: "iTerm2", name: "web", detail: "npm run web", windowID: 221,
-                terminalTrackingID: "session-web", terminalNativeID: nil, itermTabIndex: nil, tmuxWindowID: "@1", role: "terminal", orderIndex: 100,
-                lastSeenAt: "now"))
+                id: "window-web", workspaceID: workspace.id, app: "Spaces", name: "web", detail: "npm run web", windowID: 221,
+                terminalTrackingID: "session-web", terminalNativeID: nil, role: "terminal", orderIndex: 100, lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: "window-worker", workspaceID: workspace.id, app: "iTerm2", name: "worker", detail: "npm run worker", windowID: 222,
-                terminalTrackingID: "session-worker", terminalNativeID: nil, itermTabIndex: nil, tmuxWindowID: "@2", role: "terminal",
-                orderIndex: 101, lastSeenAt: "now"))
-        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-web", id: "@1", name: "web", isActive: true)
-        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-worker", id: "@2", name: "worker", isActive: true)
+                id: "window-worker", workspaceID: workspace.id, app: "Spaces", name: "worker", detail: "npm run worker", windowID: 222,
+                terminalTrackingID: "session-worker", terminalNativeID: nil, role: "terminal", orderIndex: 101, lastSeenAt: "now"))
 
         try orchestrator.updateRunningWorkspaceProcesses(workspaceID: workspace.id, processes: [worker], restartChangedCommands: false)
 
@@ -3885,11 +3818,9 @@ final class OrchestratorTests: XCTestCase {
 
         let windows = try store.windows(workspaceID: workspace.id).filter { $0.role == "terminal" }
         XCTAssertEqual(Set(windows.map(\.name)), ["web", "worker"])
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
-        XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
     }
 
-    // Tests workspace cycling includes orphaned running processes so recovered iTerm windows remain reachable even before a terminal row is rebuilt.
+    // Tests workspace cycling includes orphaned running processes so recovered Spaces windows remain reachable even before a terminal row is rebuilt.
     // Tests direct coding-agent focus throws a missing-window error without offering process/browser recovery metadata.
     // Tests focus workspace window uses tracked chrome window id when target url is shared by arranging representative inputs and asserting the expected result.
 
@@ -3901,11 +3832,11 @@ final class OrchestratorTests: XCTestCase {
 
     // Tests focus window navigation falls back to the remembered cursor when Chrome window matching is ambiguous for an unrelated active tab.
 
-    // Tests focus window navigation cycles agent and process iTerm sessions separately when they share one iTerm window.
+    // Tests focus window navigation cycles agent and process Spaces sessions separately when they share one Spaces window.
 
     // Tests focus window navigation remembers browser targets by identity instead of stale array index when targets reorder.
 
-    // Tests focus window navigation uses remembered iTerm target identity when focused-session lookup cannot disambiguate shared tabs.
+    // Tests focus window navigation uses remembered Spaces target identity when focused-session lookup cannot disambiguate shared tabs.
 
     // Tests windows live scan uses session prefixes and deduplicates overlapping matches by arranging representative inputs and asserting the expected result.
 
@@ -3935,7 +3866,7 @@ final class OrchestratorTests: XCTestCase {
 
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 XCTAssertEqual(mode, .owner)
                 let paths = try! TerminalSessionPaths.forSession(id: sessionID)
@@ -3980,7 +3911,7 @@ final class OrchestratorTests: XCTestCase {
         let openLog = root.appendingPathComponent("launch-open.log")
 
         let windowsJSON =
-            "[{\"id\":101,\"pid\":11,\"app\":\"iTerm2\",\"title\":\"shell\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false},{\"id\":202,\"pid\":22,\"app\":\"Google Chrome\",\"title\":\"docs\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false}]"
+            "[{\"id\":101,\"pid\":11,\"app\":\"Spaces\",\"title\":\"shell\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false},{\"id\":202,\"pid\":22,\"app\":\"Google Chrome\",\"title\":\"docs\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false}]"
 
         // Mocked dependencies: `yabai`, `osascript`, and `open`.
         // Why: verify launch behavior keeps editor unopened/untracked.
@@ -4028,7 +3959,7 @@ final class OrchestratorTests: XCTestCase {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "stale", windowID: 909, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "stale", windowID: 909, role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
 
         // Mocked dependency: live yabai window inventory.
@@ -4083,7 +4014,7 @@ final class OrchestratorTests: XCTestCase {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 501,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 501,
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
@@ -4101,7 +4032,7 @@ final class OrchestratorTests: XCTestCase {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 501,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 501,
                 pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "later"))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
@@ -4120,7 +4051,7 @@ final class OrchestratorTests: XCTestCase {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "name:api", command: "npm run api", terminalApp: "iTerm2",
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "name:api", command: "npm run api", terminalApp: "Spaces",
                 windowID: 501, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
@@ -4139,7 +4070,7 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "web server", command: "PORT=20003 npm run dev",
-                terminalApp: "iTerm2", windowID: 501, pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalApp: "Spaces", windowID: 501, pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
         XCTAssertEqual(runtimeStatus.lifecycleState, .running)
@@ -4156,7 +4087,7 @@ final class OrchestratorTests: XCTestCase {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 501,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 501,
                 pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
@@ -4175,7 +4106,7 @@ final class OrchestratorTests: XCTestCase {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 501,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 501,
                 pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
@@ -4216,9 +4147,9 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(runtimeStatus.runtimeHealth, .partial)
     }
 
-    // Tests refresh workspace windows prunes legacy terminal rows that do not have tmux identity.
+    // Tests refresh workspace windows prunes legacy terminal rows that do not have built-in terminal identity.
 
-    // Tests refresh workspace windows prunes legacy process-backed terminal rows without tmux identity.
+    // Tests refresh workspace windows prunes legacy process-backed terminal rows without built-in terminal identity.
 
     // Tests refresh all workspace windows skips archived workspaces by arranging representative inputs and asserting the expected result.
     func testRefreshAllWorkspaceWindowsSkipsArchivedWorkspaces() throws {
@@ -4237,15 +4168,15 @@ final class OrchestratorTests: XCTestCase {
 
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: defaultWorkspace.id, app: "iTerm2", title: "default-stale", windowID: 910, role: "terminal",
+                id: UUID().uuidString, workspaceID: defaultWorkspace.id, app: "Spaces", title: "default-stale", windowID: 910, role: "terminal",
                 orderIndex: 0, lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: activeWorkspace.id, app: "iTerm2", title: "active-stale", windowID: 911, role: "terminal",
+                id: UUID().uuidString, workspaceID: activeWorkspace.id, app: "Spaces", title: "active-stale", windowID: 911, role: "terminal",
                 orderIndex: 0, lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: archivedWorkspace.id, app: "iTerm2", title: "archived-stale", windowID: 912, role: "terminal",
+                id: UUID().uuidString, workspaceID: archivedWorkspace.id, app: "Spaces", title: "archived-stale", windowID: 912, role: "terminal",
                 orderIndex: 0, lastSeenAt: "now"))
 
         // Mocked dependency: live yabai window inventory.
@@ -5047,14 +4978,14 @@ final class OrchestratorTests: XCTestCase {
 
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 501, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", windowID: 501, role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 501,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 501,
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        // Mocked dependencies: window close via `yabai` and iTerm cleanup via `osascript`.
+        // Mocked dependencies: window close via `yabai` and Spaces cleanup via `osascript`.
         // Why: verify cleanup semantics without touching real windows/processes.
         // Remaining risk: real process/window teardown can fail or race differently than this mocked path.
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
@@ -5082,44 +5013,50 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
 
-    // Tests stop workspace terminates process before closing tracked terminal window by arranging representative inputs and asserting the expected result.
-
-    // Tests stop workspace resolves pid from runtime file when tracked pid is missing by arranging representative inputs and asserting the expected result.
+    // Tests stop workspace terminates each tracked Spaces terminal session once.
     func testStopWorkspaceClosesManagedTerminalWindowOnlyOnce() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
-        let closeLog = root.appendingPathComponent("stop-workspace-yabai-close.log")
+        let store = try makeTemporaryStore()
+        let closeCapture = TerminalCloseCapture()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowCloser: { sessionID in closeCapture.sessionIDs.append(sessionID) },
+            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "frontend", windowID: 501, role: "terminal", orderIndex: 200,
-                lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend", windowID: 501,
+                terminalTrackingID: "spaces-frontend", terminalNativeID: "spaces-frontend", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "backend", windowID: 502, role: "terminal", orderIndex: 201,
-                lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "backend", windowID: 502,
+                terminalTrackingID: "spaces-backend", terminalNativeID: "spaces-backend", role: "terminal", orderIndex: 201, lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "frontend", command: "npm run dev", terminalApp: "iTerm2",
-                windowID: 501, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "frontend", command: "npm run dev",
+                terminalApp: TerminalHost.spaces.appName, windowID: 501, terminalTrackingID: "spaces-frontend", terminalNativeID: "spaces-frontend",
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "backend", command: "npm run api", terminalApp: "iTerm2",
-                windowID: 502, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "backend", command: "npm run api",
+                terminalApp: TerminalHost.spaces.appName, windowID: 502, terminalTrackingID: "spaces-backend", terminalNativeID: "spaces-backend",
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_CLOSE_LOG_FILE", value: closeLog.path) { _ = try orchestrator.stopWorkspace(workspaceID: workspace.id) }
-        }
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { _ = try orchestrator.stopWorkspace(workspaceID: workspace.id) }
 
-        let closedIDs = try String(contentsOf: closeLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(closedIDs, ["501", "502"])
+        XCTAssertEqual(closeCapture.sessionIDs, ["spaces-frontend", "spaces-backend"])
+        XCTAssertEqual(terminateCapture.sessionIDs, ["spaces-frontend", "spaces-backend"])
     }
 
     func testStopWorkspaceClosesBuiltInTerminalSessionWithoutTrackedYabaiWindowID() throws {
         let store = try makeTemporaryStore()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+            store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -5132,14 +5069,13 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "running-process-spaces", workspaceID: workspace.id, templateName: "api", command: "npm run api",
-                terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID,
-                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-                startedAt: "now", exitedAt: nil))
+                terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil,
+                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "tracked-window-spaces", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil,
-                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
 
@@ -5154,8 +5090,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+            store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -5166,8 +5101,8 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "tracked-ad-hoc-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil,
-                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
 
@@ -5181,8 +5116,7 @@ final class OrchestratorTests: XCTestCase {
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalWindowCloser: { sessionID in closeCapture.sessionIDs.append(sessionID) },
+            store: store, builtInTerminalWindowCloser: { sessionID in closeCapture.sessionIDs.append(sessionID) },
             builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -5194,13 +5128,12 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-1", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil,
-                tmuxWindowID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "process-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: nil, targetURL: nil,
-                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil,
-                tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         XCTAssertFalse(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
 
@@ -5211,14 +5144,14 @@ final class OrchestratorTests: XCTestCase {
     }
 
     func testUserClosedBuiltInTerminalSessionLeavesOwningAgentRunning() throws {
-        let store = try makeTemporaryStore()
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalWindowCloser: { sessionID in closeCapture.sessionIDs.append(sessionID) },
+            store: store, builtInTerminalWindowCloser: { sessionID in closeCapture.sessionIDs.append(sessionID) },
             builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
-        let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -5232,15 +5165,61 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             window: WindowRecord(
                 id: "agent-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Codex", detail: nil, targetURL: nil,
-                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil,
-                tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
-        XCTAssertFalse(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .agent,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "Codex", workingDirectory: workspace.dir))
+
+            XCTAssertFalse(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
+        }
 
         XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
         XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), ["agent-1"])
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).map(\.terminalTrackingID), [sessionID])
+    }
+
+    func testUserClosedAdHocShellSessionStopsEvenWhenAgentRegistered() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "ad-hoc-shell-with-agent-signal"
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir))
+            try store.upsertAgentWindow(
+                AgentWindowRecord(
+                    id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "Codex",
+                    terminalTarget: TerminalTargetRecord(trackingID: sessionID), sessionKey: "thread-1", claimedLauncherName: "Codex",
+                    status: .spinning, createdAt: "now", updatedAt: "now"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
+        }
+
+        XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
     }
 
     func testStopAdHocBuiltInTerminalSessionUsesLiveSessionDirectoryWithoutTrackedWindow() throws {
@@ -5249,8 +5228,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+            store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -5276,14 +5254,14 @@ final class OrchestratorTests: XCTestCase {
 
     func testStopAdHocBuiltInTerminalSessionRejectsProcessAndAgentOwnedSessionsGlobally() throws {
         let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
         let parentDir = root.appendingPathComponent("project", isDirectory: true)
         let childDir = parentDir.appendingPathComponent("child", isDirectory: true)
         try FileManager.default.createDirectory(at: childDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
+        let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+            store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let project = makeProjectRecord(dir: parentDir.path)
         let parentWorkspace = makeWorkspaceRecord(projectID: project.id, title: "parent", dir: parentDir.path)
         let childWorkspace = makeWorkspaceRecord(projectID: project.id, title: "child", dir: childDir.path)
@@ -5300,10 +5278,18 @@ final class OrchestratorTests: XCTestCase {
                 id: "agent-1", workspaceID: childWorkspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "agent-session",
                 terminalNativeID: "agent-session", codexThreadID: nil, windowID: nil, status: .spinning, createdAt: "now", updatedAt: "now"))
 
-        XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: parentWorkspace.id, sessionID: "process-session"))
-        XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: childWorkspace.id, sessionID: "process-session"))
-        XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: parentWorkspace.id, sessionID: "agent-session"))
-        XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: childWorkspace.id, sessionID: "agent-session"))
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: "agent-session", workspace: childWorkspace, kind: .agent,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "agent-session", backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "Codex", workingDirectory: childWorkspace.dir))
+
+            XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: parentWorkspace.id, sessionID: "process-session"))
+            XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: childWorkspace.id, sessionID: "process-session"))
+            XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: parentWorkspace.id, sessionID: "agent-session"))
+            XCTAssertFalse(try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: childWorkspace.id, sessionID: "agent-session"))
+        }
         XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
     }
 
@@ -5313,8 +5299,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+            store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let parentDir = root.appendingPathComponent("project", isDirectory: true)
         let childDir = parentDir.appendingPathComponent("child", isDirectory: true)
         try FileManager.default.createDirectory(at: childDir, withIntermediateDirectories: true)
@@ -5345,9 +5330,553 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
     }
 
+    func testReconcileTerminalForegroundAgentClassificationsPromotesAndKeepsAdHocShellSession() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "ad-hoc-foreground-agent"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
+                    foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
+                    foregroundDisplayCommand: "codex --model gpt-5"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let promotedAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(promotedAgent.label, "Codex")
+            XCTAssertNil(promotedAgent.claimedLauncherID)
+            let promotedWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first)
+            XCTAssertEqual(promotedWindow.name, "shell-1")
+            XCTAssertEqual(promotedWindow.detail, "codex --model gpt-5")
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .running,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir),
+                paths: try TerminalSessionPaths.forSession(id: sessionID))
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let stickyAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(stickyAgent.id, promotedAgent.id)
+            XCTAssertEqual(stickyAgent.label, "Codex")
+            let stickyWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first)
+            XCTAssertEqual(stickyWindow.name, "shell-1")
+            XCTAssertEqual(stickyWindow.detail, "codex --model gpt-5")
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsMarksExitedAdHocAgentSessionDone() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "ad-hoc-agent-session-exit"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "codex", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "codex", foregroundDisplayCommand: "codex"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "codex", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            var agent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(agent.id, "terminal-agent-\(sessionID)")
+            XCTAssertEqual(agent.status, .idle)
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
+                    updatedAt: "2026-06-06T00:00:10Z", exitedAt: "2026-06-06T00:00:10Z", title: "codex", workingDirectory: workspace.dir),
+                paths: paths)
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            agent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(agent.id, "terminal-agent-\(sessionID)")
+            XCTAssertEqual(agent.status, .done)
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsPreservesSignalAgentAcrossTransientAndRealForegrounds() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "signal-custom-agent-unknown-foreground"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/usr/bin/python3", foregroundExecutableName: "python3", foregroundArgv: ["python3", "agent.py"]))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+            let signalAgent = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                status: .spinning, eventSource: "spaces_signal")
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+
+            let agents = try store.agentWindows(workspaceID: workspace.id)
+            XCTAssertEqual(agents.map(\.id), [signalAgent.id])
+            XCTAssertEqual(agents.first?.label, "Custom Hook Agent")
+            XCTAssertEqual(agents.first?.status, .spinning)
+            XCTAssertNil(
+                try store.latestAgentSessionEventMessage(id: signalAgent.id, eventType: "foreground_identity", source: "foreground_agent_signal"))
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .running,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 456,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
+                    foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
+                    foregroundDisplayCommand: "codex --model gpt-5"), paths: try TerminalSessionPaths.forSession(id: sessionID))
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let stickyAgents = try store.agentWindows(workspaceID: workspace.id)
+            XCTAssertEqual(stickyAgents.map(\.id), [signalAgent.id])
+            XCTAssertEqual(stickyAgents.first?.label, "Custom Hook Agent")
+            XCTAssertEqual(stickyAgents.first?.status, .spinning)
+            XCTAssertNil(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail)
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsPreservesSignalAgentAcrossShellForeground() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "signal-agent-pending-foreground"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+            let signalAgent = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                status: .spinning, eventSource: "spaces_signal")
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), [signalAgent.id])
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .running,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 456,
+                    foregroundExecutablePath: "/bin/zsh", foregroundExecutableName: "zsh", foregroundArgv: ["zsh"]), paths: paths)
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let stickyAgents = try store.agentWindows(workspaceID: workspace.id)
+            XCTAssertEqual(stickyAgents.map(\.id), [signalAgent.id])
+            XCTAssertEqual(stickyAgents.first?.label, "Custom Hook Agent")
+            XCTAssertEqual(stickyAgents.first?.status, .spinning)
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsDoesNotRecordSignalIdentityFromFirstNonShellSample() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "signal-agent-first-sample"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+            let signalAgent = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                status: .spinning, eventSource: "spaces_signal")
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/usr/bin/python3", foregroundExecutableName: "python3", foregroundArgv: ["python3", "agent.py"]),
+                paths: paths)
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), [signalAgent.id])
+            XCTAssertNil(
+                try store.latestAgentSessionEventMessage(id: signalAgent.id, eventType: "foreground_identity", source: "foreground_agent_signal"))
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .running,
+                    updatedAt: "2026-06-06T00:00:20Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 456,
+                    foregroundExecutablePath: "/bin/zsh", foregroundExecutableName: "zsh", foregroundArgv: ["zsh"]), paths: paths)
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), [signalAgent.id])
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsPreservesSignalLabelOnKnownForeground() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "signal-custom-agent-known-foreground"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
+                    foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
+                    foregroundDisplayCommand: "codex --model gpt-5"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+            let signalAgent = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                status: .waiting, eventSource: "spaces_signal")
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+
+            let agents = try store.agentWindows(workspaceID: workspace.id)
+            XCTAssertEqual(agents.map(\.id), [signalAgent.id])
+            XCTAssertEqual(agents.first?.label, "Custom Hook Agent")
+            XCTAssertEqual(agents.first?.status, .waiting)
+            XCTAssertNil(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail)
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsKeepsSignaledDetectorRowAfterForegroundChanges() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "detector-row-signal-update"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
+                    foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
+                    foregroundDisplayCommand: "codex --model gpt-5"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let detectedAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(detectedAgent.id, "terminal-agent-\(sessionID)")
+            XCTAssertEqual(detectedAgent.label, "Codex")
+
+            let signaledAgent = try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, terminalNativeID: sessionID, label: "Custom Hook Agent",
+                status: .spinning, eventType: "start", eventSource: "spaces_signal")
+            XCTAssertEqual(signaledAgent.id, detectedAgent.id)
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let knownForegroundAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(knownForegroundAgent.id, detectedAgent.id)
+            XCTAssertEqual(knownForegroundAgent.label, "Custom Hook Agent")
+            XCTAssertEqual(knownForegroundAgent.status, .spinning)
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/usr/bin/python3", foregroundExecutableName: "python3", foregroundArgv: ["python3", "agent.py"]),
+                paths: paths)
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let stickyAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(stickyAgent.id, detectedAgent.id)
+            XCTAssertEqual(stickyAgent.label, "Custom Hook Agent")
+            XCTAssertEqual(stickyAgent.status, .spinning)
+            XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail, "codex --model gpt-5")
+        }
+    }
+
+    func testUpdateAgentWindowStatusPreservesAdHocDetectedTerminalNameAndDetail() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "ad-hoc-foreground-agent-signal"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
+                    foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
+                    foregroundDisplayCommand: "codex --model gpt-5"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).name, "shell-1")
+            XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail, "codex --model gpt-5")
+
+            let updated = try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, codexThreadID: "thread-1", label: "Codex",
+                status: .spinning)
+
+            XCTAssertNil(updated.claimedLauncherName)
+            let window = try XCTUnwrap(store.windows(workspaceID: workspace.id).first)
+            XCTAssertEqual(window.name, "shell-1")
+            XCTAssertEqual(window.detail, "codex --model gpt-5")
+        }
+    }
+
+    func testRefreshWorkspaceWindowsPreservesAdHocDetectedAgentForegroundCommandDetail() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "ad-hoc-foreground-agent-title-refresh"
+        let windowsJSON = """
+            [{"id":101,"pid":11,"app":"Spaces","title":"live shell title","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]
+            """
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
+                    foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
+                    foregroundDisplayCommand: "codex --model gpt-5"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: 101, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail, "codex --model gpt-5")
+
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: windowsJSON) {
+                    _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
+                }
+            }
+        }
+
+        XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail, "codex --model gpt-5")
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsSuffixesDuplicateAdHocLabels() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let firstSessionID = "ad-hoc-foreground-agent-1"
+        let secondSessionID = "ad-hoc-foreground-agent-2"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            for (index, sessionID) in [firstSessionID, secondSessionID].enumerated() {
+                try writeTerminalSessionFixture(
+                    sessionID: sessionID, workspace: workspace, kind: .shell,
+                    runtimeState: TerminalSessionRuntimeState(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: Int32(123 + index), state: .running,
+                        updatedAt: "2026-06-06T00:00:00Z", title: "shell-\(index + 1)", workingDirectory: workspace.dir,
+                        foregroundPID: Int32(123 + index), foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
+                        foregroundArgv: ["codex"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
+                        foregroundDisplayCommand: "codex"))
+                try store.upsert(
+                    window: WindowRecord(
+                        id: "terminal-window-\(index + 1)", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-\(index + 1)",
+                        detail: nil, targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal",
+                        orderIndex: 200 + index, lastSeenAt: "now"))
+            }
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let labels = try store.agentWindows(workspaceID: workspace.id).compactMap(\.label)
+
+            XCTAssertEqual(Set(labels), Set(["Codex", "Codex-2"]))
+            XCTAssertNoThrow(try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in })
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsReservesConfiguredLauncherNames() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
+        let sessionID = "ad-hoc-reserved-foreground-agent"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let promotedAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+
+            XCTAssertEqual(promotedAgent.label, "Codex-2")
+            XCTAssertNoThrow(try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in })
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsPreservesConfiguredLauncherRowOnUnknownForeground() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "configured-agent-session"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .agent,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "Codex", workingDirectory: workspace.dir))
+            try store.upsertAgentWindow(
+                AgentWindowRecord(
+                    id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "Codex",
+                    terminalTarget: TerminalTargetRecord(trackingID: sessionID), claimedLauncherName: "Codex", status: .idle, createdAt: "now",
+                    updatedAt: "now"))
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+
+            let agents = try store.agentWindows(workspaceID: workspace.id)
+            XCTAssertEqual(agents.map(\.id), ["agent-1"])
+            XCTAssertEqual(agents.first?.claimedLauncherName, "Codex")
+        }
+    }
+
+    func testReconcileTerminalForegroundAgentClassificationsSkipsConfiguredProcessSession() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let sessionID = "process-foreground-agent"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .process,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "api", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex"))
+            try store.upsert(
+                runningProcess: RunningProcessRecord(
+                    id: "process-1", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
+                    lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+        }
+    }
+
     // Tests stop workspace closes tracked browser tabs without closing chrome window by arranging representative inputs and asserting the expected result.
 
-    // Tests stop workspace closes the shared iTerm window without yabai-closing it by arranging representative inputs and asserting the expected result.
+    // Tests stop workspace closes the shared Spaces window without yabai-closing it by arranging representative inputs and asserting the expected result.
 
     // Tests stop workspace closes all live detected browser session tabs by arranging representative inputs and asserting the expected result.
 
@@ -5356,14 +5885,14 @@ final class OrchestratorTests: XCTestCase {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 701,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 701,
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         XCTAssertThrowsError(try orchestrator.launchWorkspace(workspaceID: workspace.id))
     }
 
-    // Tests launch workspace without processes does not require i term by arranging representative inputs and asserting the expected result.
-    func testLaunchWorkspaceWithoutProcessesDoesNotRequireITerm() throws {
+    // Tests launch workspace without processes does not require terminal runtime.
+    func testLaunchWorkspaceWithoutProcessesDoesNotRequireTerminalRuntime() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
@@ -5399,11 +5928,11 @@ final class OrchestratorTests: XCTestCase {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 501, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", windowID: 501, role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "iTerm2", windowID: 501,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "Spaces", windowID: 501,
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
@@ -5425,14 +5954,14 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
-    // Tests up workspace launches multiple configured processes in one iTerm2 window using separate tabs.
+    // Tests up workspace launches multiple configured processes in one Spaces window using separate tabs.
 
     // Tests up workspace does nothing to running processes when runtime indicators exist and restart is disabled by arranging representative inputs and asserting the expected result.
     func testUpWorkspaceDoesNothingWhenRuntimeIndicatorsExistByDefault() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "iTerm2", windowID: 501,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "Spaces", windowID: 501,
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.upWorkspace(workspaceID: workspace.id) }
@@ -5443,11 +5972,11 @@ final class OrchestratorTests: XCTestCase {
 
     // Tests up workspace restarts exited processes when workspace is running by arranging representative inputs and asserting the expected result.
     func testUpWorkspaceRestartsExitedProcessesWhenRunning() throws {
-        let (orchestrator, store, _, workspace, _, _, _) = try makeMockItermOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "echo web", terminalApp: "iTerm2", windowID: nil,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "echo web", terminalApp: "Spaces", windowID: nil,
                 pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.upWorkspace(workspaceID: workspace.id) }
@@ -5464,7 +5993,7 @@ final class OrchestratorTests: XCTestCase {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "iTerm2", windowID: 501,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "Spaces", windowID: 501,
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
@@ -5475,39 +6004,35 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
-    // Tests restart workspace clears agent windows by arranging a running workspace with an iterm2 agent window and asserting the record and tmux window are removed before relaunch.
+    // Tests restart workspace clears agent windows by arranging a running workspace with an Spaces2 agent window and asserting the record and built-in terminal window are removed before relaunch.
     func testRestartWorkspaceClearsAgentWindows() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
-        let agentWindow = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)", id: "@2", name: "Claude Code", index: 1, isActive: true)
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "Claude Code", windowID: 501,
-                terminalTrackingID: "workspace-session", tmuxWindowID: agentWindow.id, role: "terminal", orderIndex: 201, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "Claude Code", windowID: 501,
+                terminalTrackingID: "workspace-session", role: "terminal", orderIndex: 201, lastSeenAt: "now"))
         let agentRecord = AgentWindowRecord(
             id: UUID().uuidString, workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "workspace-session",
-            tmuxWindowID: agentWindow.id, codexThreadID: nil, windowID: 501, yabaiWindowID: 501, status: .spinning, createdAt: "now", updatedAt: "now"
-        )
+            codexThreadID: nil, windowID: 501, yabaiWindowID: 501, status: .spinning, createdAt: "now", updatedAt: "now")
         try store.upsertAgentWindow(agentRecord)
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(
                 name: "YABAI_WINDOWS_JSON",
                 value:
-                    #"[{"id":501,"pid":11,"app":"iTerm2","title":"Claude Code","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                    #"[{"id":501,"pid":11,"app":"Spaces","title":"Claude Code","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
             ) { try orchestrator.restartWorkspace(workspaceID: workspace.id) }
         }
 
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "Agent window records should be cleared during restart")
-        XCTAssertFalse(mockIterm.closedWindowIDs.contains(501), "Dedicated terminal windows close through yabai, not iTerm AppleScript.")
-        XCTAssertTrue(mockTmux.killedWindowIDs.contains(agentWindow.id), "Agent tmux window should be killed during restart")
     }
 
-    // Tests restart workspace kills every tmux window in the shared iTerm container so stale windows do not survive the teardown.
+    // Tests restart workspace kills every built-in terminal window in the shared Spaces container so stale windows do not survive the teardown.
 
-    // Tests up workspace with restart enabled clears agent windows by arranging a running workspace with an iterm2 agent window and asserting the record and tmux window are removed before relaunch.
+    // Tests up workspace with restart enabled clears agent windows by arranging a running workspace with an Spaces2 agent window and asserting the record and built-in terminal window are removed before relaunch.
 
-    // Tests stopWorkspace tears down the full tmux session by arranging a running workspace with an iterm2 agent window and asserting the record and session are removed.
+    // Tests stopWorkspace tears down the full built-in terminal session by arranging a running workspace with an Spaces2 agent window and asserting the record and session are removed.
 
     // Tests update workspace settings removing browser sessions closes tabs without closing chrome window by arranging representative inputs and asserting the expected result.
 
@@ -5574,15 +6099,23 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let mockTmux = MockTmuxAdapter()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, tmux: mockTmux, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval,
-            terminalFocusPulseController: terminalFocusPulseController, currentDate: currentDate)
+            store: store, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval,
+            terminalFocusPulseController: terminalFocusPulseController,
+            builtInTerminalWindowOpener: { sessionID, _ in
+                let paths = try! TerminalSessionPaths.forSession(id: sessionID)
+                try! paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try! TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
+                        updatedAt: "2026-05-15T18:00:00Z"), paths: paths)
+                try! "test output\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+            }, currentDate: currentDate)
         if let editor { _ = try orchestrator.updateEditorPreference(editor) }
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        mockTmux.createSession(named: "spaces-\(workspace.id)")
         return (orchestrator, store, project, workspace, root)
     }
 
@@ -5606,37 +6139,18 @@ final class OrchestratorTests: XCTestCase {
         """
     }
 
-    private func makeMockItermOrchestratorWithWorkspace(
-        browserWindowScanDebounceInterval: TimeInterval = 10,
-        terminalFocusPulseController: TerminalFocusPulseControlling = MockTerminalFocusPulseController(),
-        currentDate: @escaping () -> Date = Date.init
-    ) throws -> (WorkspaceOrchestrator, SQLiteStore, ProjectRecord, WorkspaceRecord, URL, MockIterm2Adapter, MockTmuxAdapter) {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        let mockTmux = MockTmuxAdapter()
-        mockIterm.pairedTmux = mockTmux
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: mockIterm, tmux: mockTmux, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval,
-            terminalFocusPulseController: terminalFocusPulseController,
-            builtInTerminalWindowOpener: { sessionID, _ in
-                let paths = try! TerminalSessionPaths.forSession(id: sessionID)
-                try! paths.ensureDirectories()
-                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
-                try! TerminalSessionPersistence.writeRuntimeState(
-                    .init(
-                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
-                        updatedAt: "2026-05-15T18:00:00Z"), paths: paths)
-                try! "test output\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
-            }, currentDate: currentDate)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        mockTmux.createSession(named: "spaces-\(workspace.id)")
-        return (orchestrator, store, project, workspace, root, mockIterm, mockTmux)
+    private func writeTerminalSessionFixture(
+        sessionID: String, workspace: WorkspaceRecord, kind: TerminalSessionKind, runtimeState: TerminalSessionRuntimeState
+    ) throws {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: runtimeState.title ?? sessionID,
+                workingDirectory: runtimeState.workingDirectory ?? workspace.dir, shell: "/bin/zsh", command: nil, createdAt: "2026-06-06T00:00:00Z",
+                workspaceID: workspace.id, kind: kind), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
     }
+
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
         let original = ProcessInfo.processInfo.environment[name]
         setenv(name, value, 1)
@@ -5666,7 +6180,7 @@ final class OrchestratorTests: XCTestCase {
         }
 
         focused_id="${YABAI_FOCUSED_ID:-101}"
-        focused_app="${YABAI_FOCUSED_APP:-iTerm2}"
+        focused_app="${YABAI_FOCUSED_APP:-Spaces}"
         focused_title="${YABAI_FOCUSED_TITLE:-focused}"
         focused_json="{\\"id\\":${focused_id},\\"pid\\":11,\\"app\\":\\"${focused_app}\\",\\"title\\":\\"${focused_title}\\",\\"space\\":1,\\"display\\":1,\\"is-sticky\\":false,\\"is-hidden\\":false,\\"is-visible\\":true,\\"is-native-fullscreen\\":false}"
         query_log_file="${YABAI_QUERY_LOG_FILE:-}"
@@ -5706,7 +6220,7 @@ final class OrchestratorTests: XCTestCase {
           if [[ -n "${YABAI_WINDOWS_JSON:-}" ]]; then
             echo "$YABAI_WINDOWS_JSON"
           else
-            echo '[{"id":101,"pid":11,"app":"iTerm2","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":202,"pid":22,"app":"Google Chrome","title":"docs","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]'
+            echo '[{"id":101,"pid":11,"app":"Spaces","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":202,"pid":22,"app":"Google Chrome","title":"docs","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]'
           fi
           exit 0
         fi
@@ -5745,9 +6259,8 @@ final class OrchestratorTests: XCTestCase {
 
     private static let orchestratorOsaScriptMock = """
         #!/bin/bash
-        # Mock `osascript` bridge for iTerm/Chrome paths used by orchestrator tests.
+        # Mock `osascript` bridge for Chrome paths used by orchestrator tests.
         # Coverage intent:
-        # - iTerm availability and window-id responses
         # - Chrome availability/session stubs
         # Residual risk: no validation of true AppleScript syntax/runtime against installed applications.
         script="${*: -1}"
@@ -5777,69 +6290,6 @@ final class OrchestratorTests: XCTestCase {
           fi
           perl -e "select(undef, undef, undef, $value / 1000);"
         }
-
-        if [[ "$script" == *'tell application "iTerm2" to version'* ]]; then
-          if [[ "${MOCK_ITERM_UNAVAILABLE:-}" == "1" ]]; then
-            echo "iTerm2 unavailable" >&2
-            exit 1
-          fi
-          echo "3.5.0"
-          exit 0
-        fi
-
-        if [[ "$script" == *'create tab with default profile'* ]]; then
-          wid="$(printf '%s\n' "$script" | grep -Eo 'if id of w is [0-9]+' | awk '{print $6}' | head -n1)"
-          if [[ -z "$wid" ]]; then
-            wid="${MOCK_ITERM_WINDOW_ID:-701}"
-          fi
-          if [[ -n "${MOCK_ITERM_TAB_COUNTER_FILE:-}" ]]; then
-            current="$(cat "$MOCK_ITERM_TAB_COUNTER_FILE" 2>/dev/null)"
-            if [[ -z "$current" ]]; then current=1; fi
-            next=$((current + 1))
-            echo "$next" > "$MOCK_ITERM_TAB_COUNTER_FILE"
-            echo "${wid}|session-${wid}-tab-${next}|${next}"
-            exit 0
-          fi
-          echo "${wid}|session-${wid}-tab-2|2"
-          exit 0
-        fi
-
-        if [[ "$script" == *'create window with default profile'* ]]; then
-          if [[ -n "${MOCK_ITERM_WINDOW_IDS_FILE:-}" ]]; then
-            ids="$(cat "$MOCK_ITERM_WINDOW_IDS_FILE" 2>/dev/null)"
-            if [[ -z "$ids" ]]; then
-              ids="${MOCK_ITERM_WINDOW_ID:-701}"
-            fi
-            first="${ids%%,*}"
-            if [[ "$ids" == *","* ]]; then
-              rest="${ids#*,}"
-            else
-              rest="$first"
-            fi
-            echo "$rest" > "$MOCK_ITERM_WINDOW_IDS_FILE"
-            echo "${first}|session-${first}|1"
-            exit 0
-          fi
-          wid="${MOCK_ITERM_WINDOW_ID:-701}"
-          echo "${wid}|session-${wid}|1"
-          exit 0
-        fi
-
-        if [[ "$script" == *'set targetSessionID to'* && "$script" == *'tell application "iTerm2"'* ]]; then
-          if [[ "$script" != *'activate'* && "$script" != *'set current window to w'* ]]; then
-            # closeSessionOrTab scripts are handled by the close logger branch below
-            :
-          else
-          if [[ -n "${MOCK_ITERM_FOCUS_LOG_FILE:-}" ]]; then
-            session_id="$(printf '%s\n' "$script" | awk -F'set targetSessionID to \"' 'NF>1 { sub(/\".*/, "", $2); print $2; exit }')"
-            tab_index="$(printf '%s\n' "$script" | grep -Eo 'set targetTabIndex to -?[0-9]+' | awk '{print $4}' | head -n1)"
-            window_id="$(printf '%s\n' "$script" | grep -Eo 'set targetWindowID to -?[0-9]+' | awk '{print $4}' | head -n1)"
-            echo "${session_id}|${tab_index}|${window_id}" >> "$MOCK_ITERM_FOCUS_LOG_FILE"
-          fi
-          echo "${MOCK_ITERM_FOCUS_RESULT:-session}"
-          exit 0
-          fi
-        fi
 
         if [[ "$script" == *'tell application "Google Chrome" to version'* ]]; then
           echo "122"
@@ -5981,26 +6431,6 @@ final class OrchestratorTests: XCTestCase {
             echo "$script" >> "$MOCK_CHROME_OPEN_LOG_FILE"
           fi
           echo "${MOCK_CHROME_OPEN_TAB_RESULT:-1}"
-          exit 0
-        fi
-
-        if [[ "$script" == *'close s'* || "$script" == *'close t'* || "$script" == *'close w'* ]]; then
-          close_window_id="$(printf '%s\n' "$script" | grep -Eo 'set targetWindowID to -?[0-9]+' | awk '{print $4}' | head -n1)"
-          if [[ -z "$close_window_id" ]]; then
-            close_window_id="$(printf '%s\n' "$script" | grep -Eo 'if id of w is [0-9]+ then' | awk '{print $6}' | head -n1)"
-          fi
-          close_kind="window"
-          if [[ "$script" == *'close s'* ]]; then close_kind="session"; fi
-          if [[ "$script" == *'close t'* ]]; then close_kind="tab"; fi
-          if [[ -n "${MOCK_ITERM_CLOSE_LOG_FILE:-}" ]]; then
-            echo "iterm-close ${close_window_id:-unknown} ${close_kind}" >> "$MOCK_ITERM_CLOSE_LOG_FILE"
-          fi
-          echo "${close_kind}"
-          exit 0
-        fi
-
-        if [[ "$script" == *'write text'* ]]; then
-          echo ""
           exit 0
         fi
 
@@ -6499,61 +6929,24 @@ final class OrchestratorTests: XCTestCase {
     }
 
     func testStopWorkspaceProcessRemovesTrackedRuntimeAndClearsRunningFlagWhenLastProcessStops() throws {
-        let (orchestrator, store, _, workspace, _, _, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
-        let sessionName = "spaces-\(workspace.id)-api"
-        let tmuxWindow = mockTmux.addWindow(sessionName: sessionName, id: "@1", name: "api", index: 0, isActive: true)
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         let processID = UUID().uuidString
 
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 559, terminalTrackingID: "workspace-session",
-                tmuxWindowID: tmuxWindow.id, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
-        try store.upsert(
-            runningProcess: RunningProcessRecord(
-                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 559,
-                terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, pid: nil, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
-        }
-
-        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
-        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
-        XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
-        XCTAssertFalse(mockTmux.hasSession(named: sessionName))
-    }
-
-    func testStopWorkspaceProcessDoesNotTerminateBuiltInSessionForNonSpacesTerminalProcess() throws {
-        let store = try makeTemporaryStore()
-        let terminateCapture = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-
-        let processID = UUID().uuidString
-        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
-        try store.upsert(
-            runningProcess: RunningProcessRecord(
-                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 559,
-                terminalTrackingID: "iterm-session", terminalNativeID: nil, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 559, terminalTrackingID: "iterm-session",
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "api", windowID: 559, terminalTrackingID: "workspace-session",
                 role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 559,
+                terminalTrackingID: "workspace-session", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        )
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
         }
 
-        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
         XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
@@ -6563,8 +6956,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
-            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+            store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -6577,13 +6969,13 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil,
-                tmuxWindowID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
-                targetURL: nil, windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil,
-                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
@@ -6595,7 +6987,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
     }
 
-    // Tests focus terminal window triggers overlay pulse for iTerm2 by arranging representative inputs and asserting the expected result.
+    // Tests focus terminal window triggers overlay pulse for Spaces by arranging representative inputs and asserting the expected result.
     // Tests window focus pulse enabled returns true by default when not set.
     func testWindowFocusPulseEnabledDefaultsToTrue() throws {
         let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
@@ -6770,8 +7162,7 @@ final class OrchestratorTests: XCTestCase {
     // Tests refreshAllWorkspaceWindows iterates all projects and workspaces by arranging representative inputs and asserting the expected result.
     func testRefreshAllWorkspaceWindowsIteratesAllWorkspaces() throws {
         let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm)
+        let orchestrator = WorkspaceOrchestrator(store: store)
 
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -6780,7 +7171,7 @@ final class OrchestratorTests: XCTestCase {
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 707, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", windowID: 707, role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
 
@@ -6801,8 +7192,7 @@ final class OrchestratorTests: XCTestCase {
     // Tests stopWorkspace with running processes clears all runtime state by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceClearsAllRuntimeState() throws {
         let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm)
+        let orchestrator = WorkspaceOrchestrator(store: store)
 
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -6812,11 +7202,11 @@ final class OrchestratorTests: XCTestCase {
 
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 200,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 200,
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 200, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "api", windowID: 200, role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
 
@@ -6984,8 +7374,7 @@ final class OrchestratorTests: XCTestCase {
     // Tests upWorkspace with restartIfRunning stops then restarts workspace by arranging representative inputs and asserting the expected result.
     func testUpWorkspaceWithRestartIfRunningStopsThenRestarts() throws {
         let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm)
+        let orchestrator = WorkspaceOrchestrator(store: store)
 
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -7097,8 +7486,7 @@ final class OrchestratorTests: XCTestCase {
     // Tests upWorkspace allocates ports when port definitions exist but no ports are allocated by arranging representative inputs and asserting the expected result.
     func testUpWorkspaceAllocatesPortsWhenDefinitionsExistButNoPortsAllocated() throws {
         let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm)
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -7120,8 +7508,7 @@ final class OrchestratorTests: XCTestCase {
     // Tests stopWorkspace skips stop script when workspace directory is missing by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceSkipsStopScriptWhenWorkspaceDirMissing() throws {
         let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm)
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -7148,18 +7535,17 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
-    // Tests stopWorkspace closes non-iTerm2 tracked windows via yabai by arranging representative inputs and asserting the expected result.
-    func testStopWorkspaceClosesNonItermTrackedWindowsViaYabai() throws {
+    // Tests stopWorkspace closes non-Spaces tracked windows via yabai by arranging representative inputs and asserting the expected result.
+    func testStopWorkspaceClosesNonSpacesTrackedWindowsViaYabai() throws {
         let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm)
+        let orchestrator = WorkspaceOrchestrator(store: store)
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
 
-        // Insert a tracked "editor" window (non-browser, non-iTerm2) so lines 702-705 are reached.
+        // Insert a tracked "editor" window (non-browser, non-Spaces) so lines 702-705 are reached.
         let editorWindow = WindowRecord(
             id: UUID().uuidString, workspaceID: workspace.id, app: "Cursor", title: "editor", windowID: 42, role: "editor", orderIndex: 100,
             lastSeenAt: "2024-01-01T00:00:00Z")
@@ -7578,7 +7964,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: outsideDir.path))
     }
 
-    // Tests checkAndUpdateProcessStatuses keeps live iTerm2 agent sessions by arranging representative inputs and asserting the expected result.
+    // Tests checkAndUpdateProcessStatuses keeps live Spaces agent sessions by arranging representative inputs and asserting the expected result.
 
     // Tests gitBranchOptions returns branches for a real git project by arranging representative inputs and asserting the expected result.
     func testGitBranchOptionsForGitProject() throws {
@@ -7898,8 +8284,7 @@ final class OrchestratorTests: XCTestCase {
         let recentStart = ISO8601DateFormatter().string(from: Date())
         let proc = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "sleep 1", terminalApp: "Terminal", windowID: nil,
-            terminalTrackingID: nil, itermTabIndex: nil, pid: 2_000_000, status: .running, logPath: nil, lastOutputAt: nil, startedAt: recentStart,
-            exitedAt: nil)
+            terminalTrackingID: nil, pid: 2_000_000, status: .running, logPath: nil, lastOutputAt: nil, startedAt: recentStart, exitedAt: nil)
         try store.upsert(runningProcess: proc)
 
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
@@ -7953,8 +8338,8 @@ final class OrchestratorTests: XCTestCase {
 
         let process = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "sleep 1", terminalApp: "Terminal", windowID: nil,
-            terminalTrackingID: nil, itermTabIndex: nil, pid: zombiePID, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "2020-01-01T00:00:00Z", exitedAt: nil)
+            terminalTrackingID: nil, pid: zombiePID, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2020-01-01T00:00:00Z",
+            exitedAt: nil)
         try store.upsert(runningProcess: process)
 
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
@@ -8038,9 +8423,9 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
-    // Tests openWorkspaceTerminal falls back to the first sorted tracked iTerm2 window ID when no running process provides one by arranging representative inputs and asserting the expected result.
+    // Tests openWorkspaceTerminal falls back to the first sorted tracked Spaces window ID when no running process provides one by arranging representative inputs and asserting the expected result.
 
-    // Tests openWorkspaceTerminal uses the window ID from a running iTerm2 process when the focused window is not iTerm2 by arranging representative inputs and asserting the expected result.
+    // Tests openWorkspaceTerminal uses the window ID from a running Spaces process when the focused window is not Spaces by arranging representative inputs and asserting the expected result.
 
     // Tests ensureDefaultWorkspace revives an archived default workspace via updateProjectConfig by arranging representative inputs and asserting the expected result.
     func testEnsureDefaultWorkspaceRevivesArchivedDefaultViaUpdateProjectConfig() throws {

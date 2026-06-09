@@ -12,8 +12,8 @@ MACOS_DIR="$ROOT_DIR/apps/macos"
 # build command must not add a second package-path override.
 BUILD_CMD="${BUILD_CMD:-$ROOT_DIR/scripts/swiftpm.sh build}"
 SPACES_APP="${SPACES_APP:-$MACOS_DIR/.build/debug/SpacesApp}"
-MX_BIN="${MX_BIN:-$MACOS_DIR/.build/debug/spaces}"
-MX_E2E_BIN="${MX_E2E_BIN:-$MACOS_DIR/.build/debug/spacese2e}"
+SPACES_CLI="${SPACES_CLI:-$MACOS_DIR/.build/debug/spaces}"
+SPACES_E2E_CLI="${SPACES_E2E_CLI:-$MACOS_DIR/.build/debug/spacese2e}"
 APP_LOG="${APP_LOG:-/tmp/spaces-e2e-app.log}"
 EVENT_LOG="${EVENT_LOG:-/tmp/spaces-e2e-events.log}"
 METRICS_LOG="${METRICS_LOG:-/tmp/spaces-e2e-metrics.log}"
@@ -123,13 +123,13 @@ cleanup() {
   # Always tear down the isolated Spaces instance, helper fixtures, and optional
   # recorder. Recording mode intentionally starts from a minimized desktop.
   stop_screen_recording
-  "$MX_E2E_BIN" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-stop-fixtures-exit.json 2>/dev/null || true
+  "$SPACES_E2E_CLI" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-stop-fixtures-exit.json 2>/dev/null || true
   close_fixture_chrome_windows
   if [[ -n "${SPACES_PID}" ]]; then
     kill "${SPACES_PID}" >/dev/null 2>&1 || true
     wait "${SPACES_PID}" >/dev/null 2>&1 || true
   fi
-  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_stop_running_app "$MX_BIN" "$ACTION_TIMEOUT_SECONDS" || true
+  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI" "$ACTION_TIMEOUT_SECONDS" || true
   print_run_summary "$exit_code"
   open_final_recording
 }
@@ -321,8 +321,8 @@ build_binaries() {
   log_step "building macOS binaries"
   (cd "$ROOT_DIR" && eval "$BUILD_CMD") >/dev/null
   require_file "$SPACES_APP"
-  require_file "$MX_BIN"
-  require_file "$MX_E2E_BIN"
+  require_file "$SPACES_CLI"
+  require_file "$SPACES_E2E_CLI"
 }
 
 stop_stale_fixture_port_listeners() {
@@ -379,10 +379,9 @@ cleanup_existing_fixture_projects() {
   log_step "cleaning existing E2E fixture projects"
   stop_stale_fixture_terminal_processes
   stop_stale_fixture_port_listeners
-  "$MX_E2E_BIN" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-stop-fixtures-start.json || true
+  "$SPACES_E2E_CLI" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-stop-fixtures-start.json || true
   close_fixture_chrome_windows
-  close_fixture_iterm_windows
-  "$MX_E2E_BIN" cleanup-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-cleanup.json || true
+  "$SPACES_E2E_CLI" cleanup-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-cleanup.json || true
   rm -rf "$TMP_PREFIX".* /private"$TMP_PREFIX".* 2>/dev/null || true
   ensure_fixture_ports_free
 }
@@ -398,10 +397,9 @@ reset_fixture_runtime() {
   log_step "resetting tracked workspace runtime"
   local workspace_dump="$TMP_ROOT/reset-workspace-state.json"
   if dump_workspace "$workspace_dir" "$workspace_dump" 2>/dev/null && [[ "$(json_get "$workspace_dump" "workspace.isRunning")" == "true" ]]; then
-    "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace.json 2>/dev/null || true
+    "$SPACES_E2E_CLI" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace.json 2>/dev/null || true
   fi
   close_fixture_chrome_windows
-  close_fixture_iterm_windows
   stop_stale_fixture_port_listeners
   sleep 1
   ensure_fixture_ports_free
@@ -409,10 +407,10 @@ reset_fixture_runtime() {
 
 close_existing_spaces_instances() {
   log_step "stopping any existing Spaces instance for this profile"
-  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_stop_running_app "$MX_BIN" "$ACTION_TIMEOUT_SECONDS" \
+  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI" "$ACTION_TIMEOUT_SECONDS" \
     || fail "timed out waiting for the prior profile-owned Spaces instance to exit"
   log_step "waiting for desktop control availability"
-  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_wait_for_desktop_control "$MX_BIN" \
+  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_wait_for_desktop_control "$SPACES_CLI" \
     || fail "desktop control remained busy; retry when the current owner exits"
 }
 
@@ -500,7 +498,7 @@ start_screen_recording() {
   if [[ -n "$RECORD_VIDEO_CAPTURE_DEVICE" ]]; then
     log_debug "ignoring legacy capture-device=$RECORD_VIDEO_CAPTURE_DEVICE; using ScreenCaptureKit main display recorder"
   fi
-  "$MX_E2E_BIN" record-screen \
+  "$SPACES_E2E_CLI" record-screen \
     --output "$RECORD_VIDEO_PATH" \
     --ready-file "$RECORDER_READY_FILE" \
     --fps "$RECORD_VIDEO_FRAMERATE" >"$RECORDER_LOG" 2>&1 &
@@ -583,7 +581,7 @@ print_recording_summary() {
 
 ensure_profile_spaces_owner() {
   local expected_pid="$1"
-  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_wait_for_owner_pid "$MX_BIN" "$expected_pid" \
+  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_wait_for_owner_pid "$SPACES_CLI" "$expected_pid" \
     "$ACTION_TIMEOUT_SECONDS" || fail "expected Spaces profile owner pid $expected_pid"
 }
 
@@ -779,7 +777,7 @@ seed_fixture() {
   log_step "seeding project fixture (beacon-status)"
   # spacese2e seeds deterministic project/workspace templates through the real
   # workspacecore layer so the manual test is reproducible.
-  "$MX_E2E_BIN" seed-fixture \
+  "$SPACES_E2E_CLI" seed-fixture \
     --project-dir "$TEST_REPO" \
     --workspace-title "$PRIMARY_WORKSPACE_TITLE" \
     --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
@@ -788,7 +786,7 @@ seed_fixture() {
 
 seed_second_fixture() {
   log_step "seeding second project fixture (scout-errors)"
-  "$MX_E2E_BIN" seed-fixture \
+  "$SPACES_E2E_CLI" seed-fixture \
     --project-dir "$TEST_REPO_2" \
     --workspace-title "$SECONDARY_WORKSPACE_TITLE" \
     --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
@@ -797,7 +795,7 @@ seed_second_fixture() {
 
 seed_third_fixture() {
   log_step "seeding third project fixture (prism-analytics)"
-  "$MX_E2E_BIN" seed-fixture \
+  "$SPACES_E2E_CLI" seed-fixture \
     --project-dir "$TEST_REPO_3" \
     --workspace-title "$TERTIARY_WORKSPACE_TITLE" \
     --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
@@ -809,14 +807,14 @@ add_workspace_process() {
   local process_name="$2"
   local process_command="$3"
   env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
-    "$MX_E2E_BIN" add-workspace-process --workspace-dir "$workspace_dir" --name "$process_name" --command "$process_command"
+    "$SPACES_E2E_CLI" add-workspace-process --workspace-dir "$workspace_dir" --name "$process_name" --command "$process_command"
 }
 
 remove_workspace_process() {
   local workspace_dir="$1"
   local process_name="$2"
   env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
-    "$MX_E2E_BIN" remove-workspace-process --workspace-dir "$workspace_dir" --name "$process_name"
+    "$SPACES_E2E_CLI" remove-workspace-process --workspace-dir "$workspace_dir" --name "$process_name"
 }
 
 workspace_named_port() {
@@ -926,27 +924,27 @@ PY
 create_mock_agent_script() {
   local project_dir="$1"
   local script_path="$project_dir/.spaces-e2e-mock-agent"
-  python3 - "$script_path" "$MX_BIN" "$EVENT_LOG" <<'PY'
+  python3 - "$script_path" "$SPACES_CLI" "$EVENT_LOG" <<'PY'
 import os
 import sys
 from pathlib import Path
 
-script_path, mx_bin, event_log = sys.argv[1:4]
+script_path, spaces_cli, event_log = sys.argv[1:4]
 content = f"""#!/usr/bin/env bash
 set -euo pipefail
 workspace_dir="${{SPACES_WORKSPACE_DIR:-$PWD}}"
 agent_log="{event_log}"
-mx_bin="{mx_bin}"
-"$mx_bin" signal init "$workspace_dir" >/dev/null
-"$mx_bin" signal start "$workspace_dir" >/dev/null
+spaces_cli="{spaces_cli}"
+"$spaces_cli" signal init "$workspace_dir" >/dev/null
+"$spaces_cli" signal start "$workspace_dir" >/dev/null
 printf 'agent-start:%s\\n' "$workspace_dir" >>"$agent_log"
 sleep 2
-"$mx_bin" signal waiting "$workspace_dir" >/dev/null
+"$spaces_cli" signal waiting "$workspace_dir" >/dev/null
 printf 'agent-waiting:%s\\n' "$workspace_dir" >>"$agent_log"
 sleep 6
-"$mx_bin" signal done "$workspace_dir" >/dev/null
+"$spaces_cli" signal done "$workspace_dir" >/dev/null
 printf 'agent-done:%s\\n' "$workspace_dir" >>"$agent_log"
-trap '"$mx_bin" signal exit "$workspace_dir" >/dev/null 2>&1 || true; printf "agent-exit:%s\\n" "$workspace_dir" >>"$agent_log"; exit 0' TERM INT
+trap '"$spaces_cli" signal exit "$workspace_dir" >/dev/null 2>&1 || true; printf "agent-exit:%s\\n" "$workspace_dir" >>"$agent_log"; exit 0' TERM INT
 while true; do sleep 5; done
 """
 Path(script_path).write_text(content)
@@ -984,18 +982,18 @@ set_workspace_agent_launcher() {
   local workspace_dir="$1"
   local launcher_name="$2"
   local launcher_command="$3"
-  "$MX_E2E_BIN" set-workspace-agent-launchers --workspace-dir "$workspace_dir" --name "$launcher_name" --command "$launcher_command" \
+  "$SPACES_E2E_CLI" set-workspace-agent-launchers --workspace-dir "$workspace_dir" --name "$launcher_name" --command "$launcher_command" \
     >/tmp/spaces-e2e-agent-launcher.json
 }
 
 clear_workspace_agent_launchers() {
   local workspace_dir="$1"
-  "$MX_E2E_BIN" set-workspace-agent-launchers --workspace-dir "$workspace_dir" --clear >/tmp/spaces-e2e-agent-launcher-clear.json
+  "$SPACES_E2E_CLI" set-workspace-agent-launchers --workspace-dir "$workspace_dir" --clear >/tmp/spaces-e2e-agent-launcher-clear.json
 }
 
 clear_workspace_agent_windows() {
   local workspace_dir="$1"
-  "$MX_E2E_BIN" clear-workspace-agent-windows --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-agent-windows-clear.json
+  "$SPACES_E2E_CLI" clear-workspace-agent-windows --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-agent-windows-clear.json
 }
 
 json_get() {
@@ -1028,11 +1026,11 @@ PY
 }
 
 dump_workspace() {
-  "$MX_E2E_BIN" dump-workspace --workspace-dir "$1" >"$2"
+  "$SPACES_E2E_CLI" dump-workspace --workspace-dir "$1" >"$2"
 }
 
 dump_focusable_window_names() {
-  "$MX_E2E_BIN" focusable-window-names --workspace-dir "$1" >"$2"
+  "$SPACES_E2E_CLI" focusable-window-names --workspace-dir "$1" >"$2"
 }
 
 spaces_main_window_id() {
@@ -1049,7 +1047,7 @@ for window in windows:
 }
 
 lookup_workspace() {
-  "$MX_E2E_BIN" lookup-workspace --project-dir "$TEST_REPO" --title "$1" >"$2"
+  "$SPACES_E2E_CLI" lookup-workspace --project-dir "$TEST_REPO" --title "$1" >"$2"
 }
 
 wait_for_workspace_lookup() {
@@ -1282,8 +1280,8 @@ APPLESCRIPT
 ui_show_workspace_detail() {
   local workspace_dir="$1"
   local workspace_title="$2"
-  "$MX_E2E_BIN" show-main-window >/tmp/spaces-e2e-show-main-window.json
-  "$MX_E2E_BIN" select-workspace-detail --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-select-workspace-detail.json
+  "$SPACES_E2E_CLI" show-main-window >/tmp/spaces-e2e-show-main-window.json
+  "$SPACES_E2E_CLI" select-workspace-detail --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-select-workspace-detail.json
   local main_window_id
   main_window_id="$(spaces_main_window_id)"
   if [[ -n "$main_window_id" ]]; then
@@ -1319,7 +1317,7 @@ create_workspace_via_gui() {
   log_step "creating beacon hero-redesign branch workspace through real orchestrator helper"
   # Workspace creation exercises the real store, git worktree creation, and
   # workspace initialization logic against a branch with distinct HTML content.
-  "$MX_E2E_BIN" create-workspace \
+  "$SPACES_E2E_CLI" create-workspace \
     --project-dir "$TEST_REPO" \
     --title "$WORKSPACE_TITLE" \
     --existing-branch \
@@ -1331,7 +1329,7 @@ create_workspace_via_gui() {
 
 create_scout_branch_workspace() {
   log_step "creating scout hero-redesign branch workspace"
-  "$MX_E2E_BIN" create-workspace \
+  "$SPACES_E2E_CLI" create-workspace \
     --project-dir "$TEST_REPO_2" \
     --title "$SCOUT_BRANCH_WORKSPACE_TITLE" \
     --existing-branch \
@@ -1345,7 +1343,7 @@ set_workspace_browser_urls() {
   local workspace_dir="$1"
   local docs_url="$2"
   local admin_url="$3"
-  "$MX_E2E_BIN" set-workspace-browser-session-urls \
+  "$SPACES_E2E_CLI" set-workspace-browser-session-urls \
     --workspace-dir "$workspace_dir" \
     --docs-url "$docs_url" \
     --admin-url "$admin_url" >/tmp/spaces-e2e-browser-session-urls.json
@@ -1355,7 +1353,7 @@ set_workspace_stop_script_via_gui() {
   local marker="$1"
   local workspace_dir="$2"
   log_step "overriding workspace stop script through real workspace-settings path"
-  "$MX_E2E_BIN" set-workspace-stop-script \
+  "$SPACES_E2E_CLI" set-workspace-stop-script \
     --workspace-dir "$workspace_dir" \
     --stop-script "bash -lc 'for port in \"\$APP_PORT\" \"\$API_PORT\"; do if [ -n \"\$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"\$pid\" ] && pids+=(\"\$pid\"); done < <(lsof -tiTCP:\"\$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"\${pids[@]}\"; do kill \"\$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"\${pids[@]}\"; do kill -0 \"\$pid\" >/dev/null 2>&1 && kill -9 \"\$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"$marker\\n\" >> \"$EVENT_LOG\"'" >/tmp/spaces-e2e-stop-script.json
 }
@@ -1384,7 +1382,7 @@ APPLESCRIPT
     sleep 0.5
   done
   log_debug "archive_workspace_via_gui fallback=archive-workspace-helper"
-  "$MX_E2E_BIN" archive-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-archive-workspace-fallback.json
+  "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-archive-workspace-fallback.json
 }
 
 stop_workspace_via_gui() {
@@ -1400,18 +1398,18 @@ stop_workspace_via_gui() {
   done
   if [[ "$(spaces_main_window_visible)" != "1" ]]; then
     log_debug "stop_workspace_via_gui fallback=main-window-not-visible"
-    "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
+    "$SPACES_E2E_CLI" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
     return 0
   fi
   if ! spaces_splitter_ready; then
     log_debug "stop_workspace_via_gui fallback=stop-workspace-helper"
-    "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
+    "$SPACES_E2E_CLI" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
     return 0
   fi
   sleep 0.5
   if ! ui_click_workspace_detail_header_button "Stop"; then
     log_debug "stop_workspace_via_gui fallback=identifier-stop-workspace-helper"
-    "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
+    "$SPACES_E2E_CLI" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
     return 0
   fi
   local out="$TMP_ROOT/stop-workspace-state.json"
@@ -1424,7 +1422,7 @@ stop_workspace_via_gui() {
     sleep 0.5
   done
   log_debug "stop_workspace_via_gui fallback=post-click-stop-workspace-helper"
-  "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
+  "$SPACES_E2E_CLI" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
 }
 
 restart_workspace_via_gui() {
@@ -1784,9 +1782,9 @@ raise SystemExit(0 if ok else 1)' \
 
 surface_snapshot_json() {
   if [[ "${1:-}" == "include-yabai" ]]; then
-    "$MX_E2E_BIN" surface-snapshot --spaces-pid "$SPACES_PID" --include-yabai-focused-window
+    "$SPACES_E2E_CLI" surface-snapshot --spaces-pid "$SPACES_PID" --include-yabai-focused-window
   else
-    "$MX_E2E_BIN" surface-snapshot --spaces-pid "$SPACES_PID"
+    "$SPACES_E2E_CLI" surface-snapshot --spaces-pid "$SPACES_PID"
   fi
 }
 
@@ -1960,12 +1958,6 @@ end run
 APPLESCRIPT
 }
 
-activate_ghostty() {
-  osascript <<'APPLESCRIPT'
-tell application id "com.mitchellh.ghostty" to activate
-APPLESCRIPT
-}
-
 activate_google_chrome() {
   osascript <<'APPLESCRIPT'
 tell application "Google Chrome" to activate
@@ -2125,110 +2117,6 @@ on run argv
     end repeat
   end tell
 end run
-APPLESCRIPT
-}
-
-close_fixture_iterm_windows() {
-  osascript - "$TMP_PREFIX" <<'APPLESCRIPT' >/dev/null 2>&1 || true
-on run argv
-  set targetPrefix to item 1 of argv
-  set targetPrivatePrefix to "/private" & targetPrefix
-  tell application "iTerm2"
-    set doomedWindowIDs to {}
-    repeat with w in windows
-      set shouldClose to false
-      try
-        repeat with t in tabs of w
-          repeat with s in sessions of t
-            try
-              set sessionText to contents of s
-            on error
-              set sessionText to ""
-            end try
-            if sessionText contains targetPrefix or sessionText contains targetPrivatePrefix then
-              set shouldClose to true
-              exit repeat
-            end if
-          end repeat
-          if shouldClose then exit repeat
-        end repeat
-      end try
-      if shouldClose then set end of doomedWindowIDs to (id of w)
-    end repeat
-    repeat with doomedID in doomedWindowIDs
-      try
-        close (first window whose id is doomedID)
-      end try
-    end repeat
-  end tell
-end run
-APPLESCRIPT
-}
-
-iterm_open_extra_tab() {
-  local window_id="$1"
-  osascript - "$window_id" <<'APPLESCRIPT'
-on run argv
-  set targetWindowID to (item 1 of argv) as integer
-  tell application "iTerm2"
-    activate
-    repeat with w in windows
-      if id of w is targetWindowID then
-        tell w
-          create tab with default profile
-        end tell
-        return
-      end if
-    end repeat
-  end tell
-end run
-APPLESCRIPT
-}
-
-iterm_focused_session() {
-  local window_id="$1"
-  osascript - "$window_id" <<'APPLESCRIPT'
-on run argv
-  set targetWindowID to (item 1 of argv) as integer
-  tell application "iTerm2"
-    repeat with w in windows
-      if id of w is targetWindowID then
-        return (id of current session of w) as string
-      end if
-    end repeat
-  end tell
-  return ""
-end run
-APPLESCRIPT
-}
-
-iterm_front_session() {
-  osascript <<'APPLESCRIPT'
-tell application "iTerm2"
-  try
-    return (id of current session of current window) as string
-  on error
-    return ""
-  end try
-end tell
-APPLESCRIPT
-}
-
-ghostty_open_extra_tab() {
-  osascript <<'APPLESCRIPT'
-tell application id "com.mitchellh.ghostty" to activate
-tell application "System Events"
-  keystroke "t" using command down
-end tell
-APPLESCRIPT
-}
-
-ghostty_focused_terminal() {
-  osascript <<'APPLESCRIPT'
-tell application id "com.mitchellh.ghostty"
-  if (count of windows) is 0 then return ""
-  return id of focused terminal of selected tab of front window
-end tell
 APPLESCRIPT
 }
 
@@ -2525,7 +2413,7 @@ wait_for_app_log_pattern_anywhere() {
 focusable_window_names() {
   local workspace_dir="$1"
   env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
-    "$MX_E2E_BIN" focusable-window-names --workspace-dir "$workspace_dir"
+    "$SPACES_E2E_CLI" focusable-window-names --workspace-dir "$workspace_dir"
 }
 
 shortcut_index_for_name() {
@@ -2806,65 +2694,6 @@ record_process_focus_metric() {
   record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
 }
 
-wait_for_iterm_session_focus() {
-  local expected_session_id="$1"
-  [[ -n "$expected_session_id" ]] || fail "missing expected iTerm session id"
-  wait_for_app_log_pattern_optional "spaces: iterm session_verification_succeeded session_id=$expected_session_id " >/dev/null || true
-  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
-  while (( SECONDS < deadline )); do
-    if [[ "$(iterm_front_session)" == "$expected_session_id" ]]; then
-      return 0
-    fi
-    sleep 0.2
-  done
-  {
-    printf '\n[%s] iterm-session-timeout expected=%s actual=%s\n' "$(date +%H:%M:%S)" "$expected_session_id" "$(iterm_front_session)"
-    osascript <<'APPLESCRIPT'
-tell application "iTerm2"
-  set out to ""
-  repeat with w in windows
-    set out to out & "window " & (id of w as string)
-    try
-      set out to out & " current_session=" & (id of current session of w as string)
-    end try
-    try
-      set out to out & " name=" & (name of w as string)
-    end try
-    set out to out & linefeed
-  end repeat
-  return out
-end tell
-APPLESCRIPT
-  } >>"$DEBUG_LOG" 2>&1 || true
-  fail "timed out waiting for condition: iterm_front_session == $expected_session_id"
-}
-
-ensure_iterm_session_focus_after_cli_open() {
-  local workspace_dir="$1"
-  local target_name="$2"
-  local expected_session_id="$3"
-  local log_file="$4"
-  if wait_for_iterm_session_focus_optional "$expected_session_id"; then
-    return 0
-  fi
-  log_debug "retrying spaces open $target_name after iTerm session focus timeout expected=$expected_session_id"
-  run_spaces_logged "$log_file" open "$target_name" "$workspace_dir"
-  wait_for_iterm_session_focus "$expected_session_id"
-}
-
-wait_for_iterm_session_focus_optional() {
-  local expected_session_id="$1"
-  [[ -n "$expected_session_id" ]] || return 1
-  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
-  while (( SECONDS < deadline )); do
-    if [[ "$(iterm_front_session)" == "$expected_session_id" ]]; then
-      return 0
-    fi
-    sleep 0.2
-  done
-  return 1
-}
-
 git_worktree_clean() {
   [[ -z "$(git -C "$ROOT_DIR" status --short)" ]]
 }
@@ -3136,7 +2965,6 @@ wait_for_process_running_recovery() {
   local process_name="$2"
   local previous_pid="$3"
   local frontend_port="${4:-}"
-  local tmux_session_name="${5:-}"
   local out="$TMP_ROOT/process-recovery-state.json"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
@@ -3177,11 +3005,11 @@ PY
       continue
     fi
     if [[ -n "$recovered_pid" && "$recovered_status" == "running" && "$recovered_pid" != "$previous_pid" ]]; then
-      log_process_recovery_snapshot "recovered-$process_name" "$workspace_dir" "$process_name" "$frontend_port" "$tmux_session_name" "$recovered_pid"
+      log_process_recovery_snapshot "recovered-$process_name" "$workspace_dir" "$process_name" "$frontend_port" "$recovered_pid"
       printf '%s\t%s\n' "$recovered_pid" "$recovered_status"
       return 0
     fi
-    log_process_recovery_snapshot "poll-$process_name" "$workspace_dir" "$process_name" "$frontend_port" "$tmux_session_name" "$recovered_pid"
+    log_process_recovery_snapshot "poll-$process_name" "$workspace_dir" "$process_name" "$frontend_port" "$recovered_pid"
     sleep 0.2
   done
   fail "$process_name process did not recover"
@@ -3222,13 +3050,12 @@ log_process_recovery_snapshot() {
   local workspace_dir="$2"
   local process_name="$3"
   local port="$4"
-  local tmux_session_name="$5"
-  local pid_hint="${6:-}"
+  local pid_hint="${5:-}"
   local dump_file="$TMP_ROOT/process-recovery-snapshot-${process_name}.json"
 
   {
-    printf '\n[%s] recovery-state %s process=%s workspace=%s pid_hint=%s port=%s tmux=%s\n' \
-      "$(date +%H:%M:%S)" "$label" "$process_name" "$workspace_dir" "${pid_hint:-}" "${port:-}" "${tmux_session_name:-}"
+    printf '\n[%s] recovery-state %s process=%s workspace=%s pid_hint=%s port=%s\n' \
+      "$(date +%H:%M:%S)" "$label" "$process_name" "$workspace_dir" "${pid_hint:-}" "${port:-}"
 
     if dump_workspace "$workspace_dir" "$dump_file" 2>/dev/null; then
       python3 - "$dump_file" "$process_name" <<'PY'
@@ -3259,19 +3086,13 @@ PY
     fi
 
     printf 'matching_frontend_processes:\n'
-    pgrep -af "spaces-e2e-demo frontend|tmux: server|tmux new-session|tmux attach" 2>/dev/null || true
+    pgrep -af "spaces-e2e-demo frontend" 2>/dev/null || true
 
     if [[ -n "$port" ]]; then
       printf 'tcp_listeners_port_%s:\n' "$port"
       lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
     fi
 
-    if [[ -n "$tmux_session_name" ]]; then
-      printf 'tmux_has_session_%s:\n' "$tmux_session_name"
-      tmux has-session -t "$tmux_session_name" >/dev/null 2>&1 && printf 'present\n' || printf 'missing\n'
-      printf 'tmux_list_windows_%s:\n' "$tmux_session_name"
-      tmux list-windows -t "$tmux_session_name" -F '#{window_id} #{window_name} #{pane_pid} #{pane_current_command}' 2>/dev/null || true
-    fi
   } >>"$DEBUG_LOG"
 }
 
@@ -3312,33 +3133,10 @@ APPLESCRIPT
   } >>"$DEBUG_LOG" 2>&1 || true
 }
 
-dump_iterm_state() {
-  local label="$1"
-  {
-    printf '\n[%s] iterm-state %s\n' "$(date +%H:%M:%S)" "$label"
-    osascript <<'APPLESCRIPT'
-tell application "iTerm2"
-  set out to ""
-  set out to out & "window_count=" & (count of windows) & linefeed
-  repeat with w in windows
-    set out to out & "window " & (id of w as string)
-    try
-      set out to out & " current_session=" & (id of current session of w as string)
-    on error
-      set out to out & " current_session="
-    end try
-    set out to out & linefeed
-  end repeat
-  return out
-end tell
-APPLESCRIPT
-  } >>"$DEBUG_LOG" 2>&1 || true
-}
-
 run_spaces_logged() {
   local stdout_file="$1"
   shift
-  env DEBUG=1 "$MX_BIN" "$@" >"$stdout_file" 2>>"$APP_LOG"
+  env DEBUG=1 "$SPACES_CLI" "$@" >"$stdout_file" 2>>"$APP_LOG"
 }
 
 ensure_workspace_http_ready() {
@@ -3669,107 +3467,12 @@ run_launch_and_focus_assertions() {
   pass_case
 
   dump_workspace "$workspace_dir" "$dump_file"
-  if [[ "$host" == "iterm2" ]]; then
-    begin_case "$host: focus tracked iTerm2 tab with extra user tab present"
-    local frontend_window_id frontend_session_id backend_window_id backend_session_id
-    frontend_window_id="$(python3 - "$dump_file" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "frontend":
-        print(window["windowID"])
-        break
-PY
-)"
-    frontend_session_id="$(python3 - "$dump_file" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "frontend":
-        print(window["terminalTrackingID"] or "")
-        break
-PY
-)"
-    backend_window_id="$(python3 - "$dump_file" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "backend":
-        print(window["windowID"])
-        break
-PY
-)"
-    backend_session_id="$(python3 - "$dump_file" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "backend":
-        print(window["terminalTrackingID"] or "")
-        break
-PY
-)"
-    iterm_open_extra_tab "$frontend_window_id"
-    sleep 1
-    transition_pause "$host add extra iTerm2 tab"
-    local extra_tab_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
-    while (( SECONDS < extra_tab_deadline )); do
-      if [[ "$(iterm_front_session)" != "$frontend_session_id" ]]; then
-        break
-      fi
-      sleep 0.2
-    done
-    [[ "$(iterm_front_session)" != "$frontend_session_id" ]] || fail "expected extra iTerm2 tab to be selected"
-    run_spaces_logged /tmp/spaces-e2e-focus-frontend.log open frontend "$workspace_dir"
-    transition_pause "$host focus frontend terminal"
-    record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
-    frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
-    ensure_iterm_session_focus_after_cli_open "$workspace_dir" "frontend" "$frontend_session_id" /tmp/spaces-e2e-focus-frontend-retry.log
-    pass_case
-  elif [[ "$host" == "ghostty" ]]; then
-    begin_case "$host: focus tracked Ghostty tab with extra user tab present"
-    local frontend_terminal_id backend_terminal_id
-    frontend_terminal_id="$(python3 - "$dump_file" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "frontend":
-        print(window["terminalNativeID"] or "")
-        break
-PY
-)"
-    backend_terminal_id="$(python3 - "$dump_file" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "backend":
-        print(window["terminalNativeID"] or "")
-        break
-PY
-)"
-    run_spaces_logged /tmp/spaces-e2e-focus-frontend.log open frontend "$workspace_dir"
-    wait_for_condition "frontmost_app" "ghostty"
-    ghostty_open_extra_tab
-    sleep 1
-    transition_pause "$host add extra Ghostty tab"
-    [[ "$(ghostty_focused_terminal)" != "$frontend_terminal_id" ]] || fail "expected extra Ghostty tab to be selected"
-    run_spaces_logged /tmp/spaces-e2e-focus-frontend-2.log open frontend "$workspace_dir"
-    transition_pause "$host refocus frontend terminal"
-    record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
-    wait_for_condition "ghostty_focused_terminal" "$frontend_terminal_id"
-    pass_case
-  else
-    begin_case "$host: window issue modal comes frontmost from external app"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" hide-main-window >/tmp/spaces-e2e-hide-main-before-recovery-modal.json
+  begin_case "$host: window issue modal comes frontmost from external app"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" hide-main-window >/tmp/spaces-e2e-hide-main-before-recovery-modal.json
     activate_google_chrome
     transition_pause "$host seed chrome focus for window issue modal"
     wait_for_condition "frontmost_app" "Google Chrome"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" show-window-issue-modal --title "Process window not found" --detail "frontend is no longer open." >/tmp/spaces-e2e-show-window-issue-modal.json
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" show-window-issue-modal --title "Process window not found" --detail "frontend is no longer open." >/tmp/spaces-e2e-show-window-issue-modal.json
     if ! wait_for_spaces_modal_dialog_frontmost_optional; then
       activate_spaces_pid "$SPACES_PID"
       wait_for_spaces_modal_dialog_visible
@@ -3783,7 +3486,7 @@ PY
     local spaces_terminal_focus_request_id
     local spaces_terminal_focus_log=/tmp/spaces-e2e-focus-frontend.log
     spaces_terminal_focus_request_id="$(uuidgen)"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_terminal_focus_request_id" >"$spaces_terminal_focus_log" 2>&1
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_terminal_focus_request_id" >"$spaces_terminal_focus_log" 2>&1
     transition_pause "$host refocus frontend terminal"
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single" "$spaces_terminal_focus_request_id" "$spaces_terminal_focus_log"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
@@ -3804,7 +3507,7 @@ for window in data["windows"]:
             print(session_id)
 PY
 )"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" open-workspace-terminal --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-open-adhoc-terminal.json
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" open-workspace-terminal --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-open-adhoc-terminal.json
     transition_pause "$host open ad hoc Spaces terminal"
     local adhoc_session_id
     local adhoc_open_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
@@ -3828,7 +3531,7 @@ PY
       sleep 0.2
     done
     [[ -n "$adhoc_session_id" ]] || fail "expected ad hoc Spaces terminal session"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" close-terminal-session-window --session-id "$adhoc_session_id" >/tmp/spaces-e2e-close-adhoc-terminal.json
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" close-terminal-session-window --session-id "$adhoc_session_id" >/tmp/spaces-e2e-close-adhoc-terminal.json
     transition_pause "$host close ad hoc Spaces terminal"
     local adhoc_closed_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
     local adhoc_row_present=1
@@ -3867,7 +3570,7 @@ for process in data["runningProcesses"]:
 PY
 )"
     [[ -n "$frontend_session_before_close" ]] || fail "expected frontend Spaces terminal session"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" close-terminal-session-window --session-id "$frontend_session_before_close" >/tmp/spaces-e2e-close-frontend-session.json
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" close-terminal-session-window --session-id "$frontend_session_before_close" >/tmp/spaces-e2e-close-frontend-session.json
     transition_pause "$host close frontend Spaces terminal"
     wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
     dump_workspace "$workspace_dir" "$dump_file"
@@ -3884,15 +3587,13 @@ PY
     local spaces_reopen_request_id spaces_reopen_log
     spaces_reopen_request_id="$(uuidgen)"
     spaces_reopen_log=/tmp/spaces-e2e-refocus-frontend-after-close.log
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_reopen_request_id" >"$spaces_reopen_log" 2>&1
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_reopen_request_id" >"$spaces_reopen_log" 2>&1
     transition_pause "$host refocus frontend after close"
     record_process_focus_metric "terminal_close_recover.cli_window_focus.process_tracked_tab" "frontend" "$host" "single" "$spaces_reopen_request_id" "$spaces_reopen_log"
     wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
     wait_for_spaces_front_window_title "frontend"
     pass_case
-
-  fi
 
   local docs_shortcut_index=1
   local frontend_shortcut_index=3
@@ -3934,7 +3635,7 @@ PY
     local spaces_shortcut_refocus_request_id spaces_shortcut_refocus_log
     spaces_shortcut_refocus_request_id="$(uuidgen)"
     spaces_shortcut_refocus_log="/tmp/spaces-e2e-shortcut-refocus-frontend.log"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_shortcut_refocus_request_id" >"$spaces_shortcut_refocus_log" 2>&1
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_shortcut_refocus_request_id" >"$spaces_shortcut_refocus_log" 2>&1
     transition_pause "$host seed frontend terminal focus for shortcut follow-up"
     record_process_focus_metric "spaces_detail_ui.shortcut_refocus.process_tracked_tab" "frontend" "$host" "single" "$spaces_shortcut_refocus_request_id" "$spaces_shortcut_refocus_log"
   fi
@@ -3942,31 +3643,16 @@ PY
   sleep 0.5
   local frontend_focus_started_at frontend_focus_elapsed_ms
   frontend_focus_started_at="$(timestamp_ms)"
-  if [[ "$host" == "spaces" ]]; then
-    send_spaces_window_shortcut_with_ack "$frontend_shortcut_index"
-  else
-    run_spaces_logged /tmp/spaces-e2e-shortcut-open-frontend.log open frontend "$workspace_dir"
-  fi
+  send_spaces_window_shortcut_with_ack "$frontend_shortcut_index"
   transition_pause "$host shortcut focus frontend"
-  if [[ "$host" == "spaces" ]]; then
-    frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
-    KNOWN_SPACES_FRONTEND_SESSION_ID="$frontend_session_id"
-    wait_for_condition "spaces_front_window_identifier" "spaces-terminal:${frontend_session_id}"
-    frontend_focus_elapsed_ms="$(( $(timestamp_ms) - frontend_focus_started_at ))"
-    record_metric_sample "spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab" "$frontend_focus_elapsed_ms" "$host" "single"
-    wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
-    wait_for_spaces_front_window_title "frontend"
-    assert_shortcut_focus_surface_state
-  elif [[ "$host" == "iterm2" ]]; then
-    frontend_focus_elapsed_ms="$(( $(timestamp_ms) - frontend_focus_started_at ))"
-    record_metric_sample "spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab" "$frontend_focus_elapsed_ms" "$host" "single"
-    frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
-    ensure_iterm_session_focus_after_cli_open "$workspace_dir" "frontend" "$frontend_session_id" /tmp/spaces-e2e-shortcut-open-frontend-retry.log
-  elif [[ "$host" == "ghostty" ]]; then
-    frontend_focus_elapsed_ms="$(( $(timestamp_ms) - frontend_focus_started_at ))"
-    record_metric_sample "spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab" "$frontend_focus_elapsed_ms" "$host" "single"
-    wait_for_condition "ghostty_focused_terminal" "$frontend_terminal_id"
-  fi
+  frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
+  KNOWN_SPACES_FRONTEND_SESSION_ID="$frontend_session_id"
+  wait_for_condition "spaces_front_window_identifier" "spaces-terminal:${frontend_session_id}"
+  frontend_focus_elapsed_ms="$(( $(timestamp_ms) - frontend_focus_started_at ))"
+  record_metric_sample "spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab" "$frontend_focus_elapsed_ms" "$host" "single"
+  wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+  wait_for_spaces_front_window_title "frontend"
+  assert_shortcut_focus_surface_state
 
   if [[ "$host" == "spaces" ]]; then
     ui_show_workspace_detail "$workspace_dir" "$workspace_title"
@@ -4074,16 +3760,7 @@ PY
   transition_pause "$host seed docs focus for cycling"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   local cycle_target
-  if [[ "$host" == "iterm2" ]]; then
-    send_cycle_hotkey_with_ack next
-    transition_pause "$host cycle next"
-    wait_for_any_value "iterm_focused_session $frontend_window_id" "$frontend_session_id" "$backend_session_id"
-  elif [[ "$host" == "ghostty" ]]; then
-    send_cycle_hotkey_with_ack next
-    transition_pause "$host cycle next"
-    wait_for_any_value "ghostty_focused_terminal" "$frontend_terminal_id" "$backend_terminal_id"
-  else
-    measure_spaces_cycle_transition \
+  measure_spaces_cycle_transition \
       "$host" \
       "single" \
       "$workspace_dir" \
@@ -4197,7 +3874,6 @@ PY
       terminal:${adhoc_name}) ;;
       *) fail "agent to ad hoc cycle target: expected ${adhoc_name}, got '$cycle_target'" ;;
     esac
-  fi
   if [[ "$host" == "spaces" ]]; then
     assert_spaces_cpu_not_above "spaces_app.cpu_after_window_cycle" "$SPACES_SUSTAINED_CPU_BUDGET_PCT" "$host" "single"
   fi
@@ -4258,7 +3934,7 @@ PY
     assert_spaces_cpu_not_above "spaces_app.cpu_after_high_output_cycle" "$SPACES_SUSTAINED_CPU_BUDGET_PCT" "$host" "single"
     if [[ -n "$KNOWN_SPACES_NOISY_SESSION_ID" ]]; then
       env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
-        "$MX_E2E_BIN" terminate-terminal-session "$KNOWN_SPACES_NOISY_SESSION_ID" \
+        "$SPACES_E2E_CLI" terminate-terminal-session "$KNOWN_SPACES_NOISY_SESSION_ID" \
         >/tmp/spaces-e2e-terminate-high-output-session.json 2>>"$DEBUG_LOG" || true
       KNOWN_SPACES_NOISY_SESSION_ID=""
     fi
@@ -4266,7 +3942,7 @@ PY
       >/tmp/spaces-e2e-remove-high-output-process.json
     if [[ -n "$KNOWN_SPACES_AGENT_SESSION_ID" ]]; then
       env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
-        "$MX_E2E_BIN" terminate-terminal-session "$KNOWN_SPACES_AGENT_SESSION_ID" \
+        "$SPACES_E2E_CLI" terminate-terminal-session "$KNOWN_SPACES_AGENT_SESSION_ID" \
         >/tmp/spaces-e2e-terminate-agent-session.json 2>>"$DEBUG_LOG" || true
       KNOWN_SPACES_AGENT_SESSION_ID=""
     fi
@@ -4293,28 +3969,24 @@ PY
 )"
     local frontend_port
     frontend_port="$(workspace_named_port "$workspace_dir" "$APP_PORT_NAME")"
-    local frontend_session_name
-    frontend_session_name="spaces-${workspace_id}-frontend"
-    log_process_recovery_snapshot "before-kill" "$workspace_dir" "frontend" "$frontend_port" "$frontend_session_name" "$frontend_pid"
+    log_process_recovery_snapshot "before-kill" "$workspace_dir" "frontend" "$frontend_port" "$frontend_pid"
     kill_process_group "$frontend_pid"
     kill_listener_processes "$frontend_port"
-    tmux kill-session -t "$frontend_session_name" >/dev/null 2>&1 || true
     local dead_pid_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
     while (( SECONDS < dead_pid_deadline )); do
       if ! process_pid_is_alive "$frontend_pid" \
-        && ! lsof -tiTCP:"$frontend_port" -sTCP:LISTEN >/dev/null 2>&1 \
-        && ! tmux has-session -t "$frontend_session_name" >/dev/null 2>&1
+        && ! lsof -tiTCP:"$frontend_port" -sTCP:LISTEN >/dev/null 2>&1
       then
         break
       fi
       sleep 0.2
     done
-    log_process_recovery_snapshot "after-kill" "$workspace_dir" "frontend" "$frontend_port" "$frontend_session_name" "$frontend_pid"
+    log_process_recovery_snapshot "after-kill" "$workspace_dir" "frontend" "$frontend_port" "$frontend_pid"
     run_spaces_logged /tmp/spaces-e2e-recover.log start "$workspace_dir"
     transition_pause "$host recover dead process"
     local recovery_state recovered_pid recovered_status
-    log_process_recovery_snapshot "after-restart-command" "$workspace_dir" "frontend" "$frontend_port" "$frontend_session_name" "$frontend_pid"
-    recovery_state="$(wait_for_process_running_recovery "$workspace_dir" "frontend" "$frontend_pid" "$frontend_port" "$frontend_session_name")"
+    log_process_recovery_snapshot "after-restart-command" "$workspace_dir" "frontend" "$frontend_port" "$frontend_pid"
+    recovery_state="$(wait_for_process_running_recovery "$workspace_dir" "frontend" "$frontend_pid" "$frontend_port")"
     recovered_pid="${recovery_state%%$'\t'*}"
     recovered_status="${recovery_state#*$'\t'}"
     wait_for_tcp_listener_port "$frontend_port"
@@ -4360,7 +4032,7 @@ run_hotkey_visibility_profiling() {
   transition_pause "$host seed docs focus for app toggle profiling"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   wait_for_condition "frontmost_app" "Google Chrome"
-  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" hide-main-window >/tmp/spaces-e2e-hide-main-window.json
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" hide-main-window >/tmp/spaces-e2e-hide-main-window.json
   wait_for_condition "frontmost_app" "Google Chrome"
   wait_for_condition "spaces_main_window_visible" "0"
   for (( iteration = 1; iteration <= REAL_SYSTEM_PROFILE_REPETITIONS; iteration++ )); do
@@ -4438,7 +4110,7 @@ run_hotkey_visibility_profiling() {
     local spaces_toggle_focus_request_id
     local spaces_toggle_focus_log=/tmp/spaces-e2e-toggle-focus-frontend.log
     spaces_toggle_focus_request_id="$(uuidgen)"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_toggle_focus_request_id" >"$spaces_toggle_focus_log" 2>&1
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_toggle_focus_request_id" >"$spaces_toggle_focus_log" 2>&1
     transition_pause "$host seed frontend terminal focus for main window toggle assertions"
     record_process_focus_metric "terminal_toggle.hotkey.process_tracked_tab" "frontend" "$host" "single" "$spaces_toggle_focus_request_id" "$spaces_toggle_focus_log"
     wait_for_spaces_frontmost_ready
@@ -4457,57 +4129,30 @@ run_hotkey_visibility_profiling() {
     wait_for_condition "spaces_main_window_visible" "1"
     wait_for_condition "spaces_main_window_key" "1"
     wait_for_condition "spaces_built_in_terminal_focus_state" "none"
-    if host_available ghostty; then
-      activate_ghostty
-      transition_pause "$host seed untracked ghostty focus for main window toggle assertions"
-      wait_for_condition "frontmost_app" "ghostty"
-      wait_for_condition "spaces_main_window_visible" "1"
-      wait_for_condition "spaces_main_window_key" "0"
-      send_spaces_toggle_hotkey_with_ack
-      wait_for_spaces_frontmost_ready
-      wait_for_condition "spaces_front_window_title" "Spaces"
-      wait_for_condition "spaces_main_window_visible" "1"
-      wait_for_condition "spaces_main_window_key" "1"
-      activate_ghostty
-      transition_pause "$host keep ghostty focused while main window remains visible"
-      wait_for_condition "frontmost_app" "ghostty"
-      wait_for_condition "spaces_main_window_visible" "1"
-      wait_for_condition "spaces_main_window_key" "0"
-      send_spaces_toggle_hotkey_with_ack
-      wait_for_spaces_frontmost_ready
-      wait_for_condition "spaces_front_window_title" "Spaces"
-      wait_for_condition "spaces_main_window_visible" "1"
-      wait_for_condition "spaces_main_window_key" "1"
-      send_spaces_toggle_hotkey_with_ack
-      wait_for_condition "frontmost_app" "ghostty"
-      wait_for_condition "spaces_main_window_visible" "0"
-      wait_for_condition "spaces_main_window_key" "0"
-    else
-      activate_google_chrome
-      transition_pause "$host seed chrome focus for main window toggle assertions"
-      wait_for_condition "frontmost_app" "Google Chrome"
-      wait_for_condition "spaces_main_window_visible" "1"
-      wait_for_condition "spaces_main_window_key" "0"
-      send_spaces_toggle_hotkey_with_ack
-      wait_for_spaces_frontmost_ready
-      wait_for_condition "spaces_front_window_title" "Spaces"
-      wait_for_condition "spaces_main_window_visible" "1"
-      wait_for_condition "spaces_main_window_key" "1"
-      activate_google_chrome
-      transition_pause "$host keep chrome focused while main window remains visible"
-      wait_for_condition "frontmost_app" "Google Chrome"
-      wait_for_condition "spaces_main_window_visible" "1"
-      wait_for_condition "spaces_main_window_key" "0"
-      send_spaces_toggle_hotkey_with_ack
-      wait_for_spaces_frontmost_ready
-      wait_for_condition "spaces_front_window_title" "Spaces"
-      wait_for_condition "spaces_main_window_visible" "1"
-      wait_for_condition "spaces_main_window_key" "1"
-      send_spaces_toggle_hotkey_with_ack
-      wait_for_condition "frontmost_app" "Google Chrome"
-      wait_for_condition "spaces_main_window_visible" "0"
-      wait_for_condition "spaces_main_window_key" "0"
-    fi
+    activate_google_chrome
+    transition_pause "$host seed chrome focus for main window toggle assertions"
+    wait_for_condition "frontmost_app" "Google Chrome"
+    wait_for_condition "spaces_main_window_visible" "1"
+    wait_for_condition "spaces_main_window_key" "0"
+    send_spaces_toggle_hotkey_with_ack
+    wait_for_spaces_frontmost_ready
+    wait_for_condition "spaces_front_window_title" "Spaces"
+    wait_for_condition "spaces_main_window_visible" "1"
+    wait_for_condition "spaces_main_window_key" "1"
+    activate_google_chrome
+    transition_pause "$host keep chrome focused while main window remains visible"
+    wait_for_condition "frontmost_app" "Google Chrome"
+    wait_for_condition "spaces_main_window_visible" "1"
+    wait_for_condition "spaces_main_window_key" "0"
+    send_spaces_toggle_hotkey_with_ack
+    wait_for_spaces_frontmost_ready
+    wait_for_condition "spaces_front_window_title" "Spaces"
+    wait_for_condition "spaces_main_window_visible" "1"
+    wait_for_condition "spaces_main_window_key" "1"
+    send_spaces_toggle_hotkey_with_ack
+    wait_for_condition "frontmost_app" "Google Chrome"
+    wait_for_condition "spaces_main_window_visible" "0"
+    wait_for_condition "spaces_main_window_key" "0"
     pass_case
 
     begin_case "$host: toggle command palette independently of auxiliary terminal windows"
@@ -4517,7 +4162,7 @@ run_hotkey_visibility_profiling() {
     local spaces_palette_focus_request_id
     local spaces_palette_focus_log=/tmp/spaces-e2e-toggle-palette-focus-frontend.log
     spaces_palette_focus_request_id="$(uuidgen)"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_palette_focus_request_id" >"$spaces_palette_focus_log" 2>&1
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$spaces_palette_focus_request_id" >"$spaces_palette_focus_log" 2>&1
     transition_pause "$host seed frontend terminal focus for palette toggle assertions"
     record_process_focus_metric "terminal_toggle_palette.hotkey.process_tracked_tab" "frontend" "$host" "single" "$spaces_palette_focus_request_id" "$spaces_palette_focus_log"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
@@ -4527,7 +4172,7 @@ run_hotkey_visibility_profiling() {
     wait_for_condition "spaces_command_palette_visible" "1"
     wait_for_condition "spaces_command_palette_key" "1"
     wait_for_condition "spaces_built_in_terminal_focus_state" "none"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$(uuidgen)" >/tmp/spaces-e2e-toggle-palette-refocus-frontend.log 2>&1
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend --request-id "$(uuidgen)" >/tmp/spaces-e2e-toggle-palette-refocus-frontend.log 2>&1
     transition_pause "$host keep frontend terminal focused while palette remains visible"
     wait_for_condition "spaces_command_palette_visible" "1"
     wait_for_condition "spaces_command_palette_key" "0"
@@ -4581,14 +4226,8 @@ run_multi_workspace_focus_and_cycle_assertions() {
   log_debug "$host multi secondary launch complete"
   dump_workspace "$secondary_workspace_dir" "$secondary_dump"
   dump_chrome_state "$host multi after-both-launches"
-  if [[ "$host" == "iterm2" ]]; then
-    dump_iterm_state "$host multi after-both-launches"
-  fi
 
-  local primary_docs_window_id primary_frontend_window_id primary_frontend_session_id primary_frontend_terminal_id primary_backend_session_id primary_backend_terminal_id primary_workspace_id
-  local secondary_docs_window_id secondary_frontend_window_id secondary_frontend_session_id secondary_frontend_terminal_id secondary_backend_session_id secondary_backend_terminal_id secondary_workspace_id
-  primary_workspace_id="$(json_get "$primary_dump" "workspace.id")"
-  secondary_workspace_id="$(json_get "$secondary_dump" "workspace.id")"
+  local primary_docs_window_id secondary_docs_window_id
   primary_docs_window_id="$(python3 - "$primary_dump" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh:
@@ -4596,56 +4235,6 @@ with open(sys.argv[1]) as fh:
 for window in data["windows"]:
     if window["name"] == "docs":
         print(window.get("windowID") or "")
-        break
-PY
-)"
-  primary_frontend_window_id="$(python3 - "$primary_dump" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "frontend":
-        print(window.get("windowID") or "")
-        break
-PY
-)"
-  primary_frontend_session_id="$(python3 - "$primary_dump" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "frontend":
-        print(window.get("terminalTrackingID") or "")
-        break
-PY
-)"
-  primary_frontend_terminal_id="$(python3 - "$primary_dump" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "frontend":
-        print(window.get("terminalNativeID") or "")
-        break
-PY
-)"
-  primary_backend_session_id="$(python3 - "$primary_dump" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "backend":
-        print(window.get("terminalTrackingID") or "")
-        break
-PY
-)"
-  primary_backend_terminal_id="$(python3 - "$primary_dump" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "backend":
-        print(window.get("terminalNativeID") or "")
         break
 PY
 )"
@@ -4659,56 +4248,6 @@ for window in data["windows"]:
         break
 PY
 )"
-  secondary_frontend_window_id="$(python3 - "$secondary_dump" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "frontend":
-        print(window.get("windowID") or "")
-        break
-PY
-)"
-  secondary_frontend_session_id="$(python3 - "$secondary_dump" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "frontend":
-        print(window.get("terminalTrackingID") or "")
-        break
-PY
-)"
-  secondary_frontend_terminal_id="$(python3 - "$secondary_dump" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "frontend":
-        print(window.get("terminalNativeID") or "")
-        break
-PY
-)"
-  secondary_backend_session_id="$(python3 - "$secondary_dump" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "backend":
-        print(window.get("terminalTrackingID") or "")
-        break
-PY
-)"
-  secondary_backend_terminal_id="$(python3 - "$secondary_dump" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "backend":
-        print(window.get("terminalNativeID") or "")
-        break
-PY
-)"
 
   run_spaces_logged /tmp/spaces-e2e-multi-primary-focus.log open docs "$primary_workspace_dir"
   activate_google_chrome
@@ -4716,55 +4255,24 @@ PY
   log_debug "$host multi primary docs focus complete"
   wait_for_condition "frontmost_app" "Google Chrome"
   wait_for_condition "chrome_front_url" "$primary_docs_url"
-  local primary_cycle_next_started_at primary_cycle_previous_started_at secondary_cycle_next_started_at secondary_cycle_previous_started_at
-  if [[ "$host" == "spaces" ]]; then
-    measure_spaces_cycle_transition \
-      "$host" \
-      "primary" \
-      "$primary_workspace_dir" \
-      "$primary_docs_window_id" \
-      "browser_tracked_tab" \
-      "next" \
-      "$host primary cycle next" \
-      'process:*' 'terminal:*'
-  else
-    primary_cycle_next_started_at="$(timestamp_ms)"
-    send_cycle_hotkey_with_ack next
-    transition_pause "$host primary cycle next"
-    log_debug "$host multi primary cycle next sent"
-    if [[ "$host" == "iterm2" ]]; then
-      dump_iterm_state "$host multi after-primary-next"
-    fi
-    if [[ "$host" == "iterm2" ]]; then
-      wait_for_condition "frontmost_app" "iTerm2"
-      if ! wait_for_any_value_optional "iterm_front_session" "$primary_frontend_session_id" "$primary_backend_session_id"; then
-        wait_for_app_log_pattern "spaces: perf metric=window_cycle workspace=${primary_workspace_id} target=process:frontend success=1 .* direction=next" >/dev/null
-      fi
-    elif [[ "$host" == "ghostty" ]]; then
-      wait_for_any_value "ghostty_focused_terminal" "$primary_frontend_terminal_id" "$primary_backend_terminal_id"
-    else
-      wait_for_app_log_pattern 'spaces: perf metric=window_cycle workspace=.* target=.* success=1 .* direction=next' >/dev/null
-    fi
-    record_metric_sample "browser_tracked_tab.keyboard_cycle_next.process_tracked_tab" "$(( $(timestamp_ms) - primary_cycle_next_started_at ))" "$host" "primary"
-  fi
-  if [[ "$host" == "spaces" ]]; then
-    measure_spaces_cycle_transition \
-      "$host" \
-      "primary" \
-      "$primary_workspace_dir" \
-      "$primary_docs_window_id" \
-      "process_tracked_tab" \
-      "previous" \
-      "$host primary cycle previous" \
-      'browser:*'
-  else
-    primary_cycle_previous_started_at="$(timestamp_ms)"
-    send_cycle_hotkey_with_ack previous
-    transition_pause "$host primary cycle previous"
-    log_debug "$host multi primary cycle previous sent"
-    wait_for_condition "chrome_front_url" "$primary_docs_url"
-    record_metric_sample "process_tracked_tab.keyboard_cycle_previous.browser_tracked_tab" "$(( $(timestamp_ms) - primary_cycle_previous_started_at ))" "$host" "primary"
-  fi
+  measure_spaces_cycle_transition \
+    "$host" \
+    "primary" \
+    "$primary_workspace_dir" \
+    "$primary_docs_window_id" \
+    "browser_tracked_tab" \
+    "next" \
+    "$host primary cycle next" \
+    'process:*' 'terminal:*'
+  measure_spaces_cycle_transition \
+    "$host" \
+    "primary" \
+    "$primary_workspace_dir" \
+    "$primary_docs_window_id" \
+    "process_tracked_tab" \
+    "previous" \
+    "$host primary cycle previous" \
+    'browser:*'
 
   run_spaces_logged /tmp/spaces-e2e-multi-secondary-focus.log open docs "$secondary_workspace_dir"
   activate_google_chrome
@@ -4772,54 +4280,24 @@ PY
   log_debug "$host multi secondary docs focus complete"
   wait_for_condition "frontmost_app" "Google Chrome"
   wait_for_condition "chrome_front_url" "$secondary_docs_url"
-  if [[ "$host" == "spaces" ]]; then
-    measure_spaces_cycle_transition \
-      "$host" \
-      "secondary" \
-      "$secondary_workspace_dir" \
-      "$secondary_docs_window_id" \
-      "browser_tracked_tab" \
-      "next" \
-      "$host secondary cycle next" \
-      'process:*' 'terminal:*'
-  else
-    secondary_cycle_next_started_at="$(timestamp_ms)"
-    send_cycle_hotkey_with_ack next
-    transition_pause "$host secondary cycle next"
-    log_debug "$host multi secondary cycle next sent"
-    if [[ "$host" == "iterm2" ]]; then
-      dump_iterm_state "$host multi after-secondary-next"
-    fi
-    if [[ "$host" == "iterm2" ]]; then
-      wait_for_condition "frontmost_app" "iTerm2"
-      if ! wait_for_any_value_optional "iterm_front_session" "$secondary_frontend_session_id" "$secondary_backend_session_id"; then
-        wait_for_app_log_pattern "spaces: perf metric=window_cycle workspace=${secondary_workspace_id} target=process:frontend success=1 .* direction=next" >/dev/null
-      fi
-    elif [[ "$host" == "ghostty" ]]; then
-      wait_for_any_value "ghostty_focused_terminal" "$secondary_frontend_terminal_id" "$secondary_backend_terminal_id"
-    else
-      wait_for_app_log_pattern 'spaces: perf metric=window_cycle workspace=.* target=(process|terminal):.* success=1 .* direction=next' >/dev/null
-    fi
-    record_metric_sample "browser_tracked_tab.keyboard_cycle_next.process_tracked_tab" "$(( $(timestamp_ms) - secondary_cycle_next_started_at ))" "$host" "secondary"
-  fi
-  if [[ "$host" == "spaces" ]]; then
-    measure_spaces_cycle_transition \
-      "$host" \
-      "secondary" \
-      "$secondary_workspace_dir" \
-      "$secondary_docs_window_id" \
-      "process_tracked_tab" \
-      "previous" \
-      "$host secondary cycle previous" \
-      'browser:*'
-  else
-    secondary_cycle_previous_started_at="$(timestamp_ms)"
-    send_cycle_hotkey_with_ack previous
-    transition_pause "$host secondary cycle previous"
-    log_debug "$host multi secondary cycle previous sent"
-    wait_for_condition "chrome_front_url" "$secondary_docs_url"
-    record_metric_sample "process_tracked_tab.keyboard_cycle_previous.browser_tracked_tab" "$(( $(timestamp_ms) - secondary_cycle_previous_started_at ))" "$host" "secondary"
-  fi
+  measure_spaces_cycle_transition \
+    "$host" \
+    "secondary" \
+    "$secondary_workspace_dir" \
+    "$secondary_docs_window_id" \
+    "browser_tracked_tab" \
+    "next" \
+    "$host secondary cycle next" \
+    'process:*' 'terminal:*'
+  measure_spaces_cycle_transition \
+    "$host" \
+    "secondary" \
+    "$secondary_workspace_dir" \
+    "$secondary_docs_window_id" \
+    "process_tracked_tab" \
+    "previous" \
+    "$host secondary cycle previous" \
+    'browser:*'
 
   reset_fixture_runtime "$primary_workspace_dir"
   reset_fixture_runtime "$secondary_workspace_dir"
@@ -4971,8 +4449,8 @@ EOF
   pass_case
 
   begin_case "archive branch workspaces"
-  "$MX_E2E_BIN" archive-workspace --workspace-dir "$created_workspace_dir" >/tmp/spaces-e2e-archive-beacon-branch.json
-  "$MX_E2E_BIN" archive-workspace --workspace-dir "$scout_branch_workspace_dir" >/tmp/spaces-e2e-archive-scout-branch.json
+  "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$created_workspace_dir" >/tmp/spaces-e2e-archive-beacon-branch.json
+  "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$scout_branch_workspace_dir" >/tmp/spaces-e2e-archive-scout-branch.json
   wait_for_workspace_lookup "$WORKSPACE_TITLE" "$lookup_file"
   assert_equals "true" "$(json_get "$lookup_file" "isArchived")" "beacon branch workspace archived"
   pass_case

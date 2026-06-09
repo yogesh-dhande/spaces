@@ -52,8 +52,8 @@ final class ProcessOnExitTests: XCTestCase {
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "sleep 1", onExit: .notify)])
         let runningProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "sleep 1", terminalApp: "Terminal", windowID: nil,
-            terminalTrackingID: nil, terminalNativeID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: 2_000_000, status: .running, logPath: nil,
-            lastOutputAt: nil, startedAt: "2020-01-01T00:00:00Z", exitedAt: nil)
+            terminalTrackingID: nil, terminalNativeID: nil, pid: 2_000_000, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "2020-01-01T00:00:00Z", exitedAt: nil)
         try store.upsert(runningProcess: runningProcess)
 
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
@@ -65,29 +65,6 @@ final class ProcessOnExitTests: XCTestCase {
         XCTAssertEqual(deliveredNotifications.first?.body, "Process 'api' has exited")
     }
 
-    // Tests process on exit restart restarts process by arranging representative inputs and asserting the expected result.
-    func testProcessOnExitRestartRestartsProcess() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.processes.append(ProcessTemplate(name: "api", command: "npm start", onExit: .restart))
-        }
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm start", onExit: .restart)])
-        let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
-            pid: 9000, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: runningProcess)
-
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
-    }
     // Tests process template serializes on exit by arranging representative inputs and asserting the expected result.
     func testProcessTemplateSerializesOnExit() throws {
         let process = ProcessTemplate(name: "api", command: "npm start", onExit: .restart)

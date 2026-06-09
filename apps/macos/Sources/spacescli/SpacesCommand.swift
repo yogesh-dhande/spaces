@@ -473,7 +473,10 @@ struct OpenCommand: ParsableCommand {
 
 struct SignalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "signal", abstract: "Record an explicit lifecycle event for the current coding-agent terminal.")
+        commandName: "signal", abstract: "Record an explicit lifecycle event for the current coding-agent terminal.",
+        discussion:
+            "Events are accepted from tracked Spaces terminal sessions. Set SPACES_AGENT_LABEL to override the agent row label for custom hook integrations."
+    )
 
     @Argument(
         help: ArgumentHelp("Lifecycle event to record.", discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."))
@@ -495,25 +498,36 @@ struct SignalCommand: ParsableCommand {
         let agentContext = try resolveAgentInvocationContext(
             workspaceID: workspace.id, environment: environment, orchestrator: orchestrator, context: context)
         guard let agentContext else { return }
+        let existingAgent = try existingAgentSignalTarget(workspaceID: workspace.id, agentContext: agentContext, orchestrator: orchestrator)
+        let signalLabel = agentContext.label ?? agentSignalRuntimeLabel(agentContext: agentContext) ?? normalizedNonEmpty(existingAgent?.label)
+        let canRecordSignal = existingAgent != nil || type == .`init` || (type.establishesAgentFromEvidence && normalizedNonEmpty(signalLabel) != nil)
+        if !canRecordSignal {
+            try context.output.emit(
+                text: "Ignored agent \(type.rawValue): no active agent row\tworkspace=\(workspace.id)",
+                json: MutationResultPayload(message: "Agent \(type.rawValue) ignored.", resource: ["workspaceID": workspace.id]))
+            return
+        }
 
         switch type {
         case .`init`:
             try orchestrator.registerAgentWindow(
-                workspaceID: workspace.id, provider: agentContext.provider, label: agentContext.label,
-                terminalTrackingID: agentContext.terminalTrackingID, terminalNativeID: agentContext.terminalNativeID,
-                codexThreadID: agentContext.codexThreadID, yabaiWindowID: agentContext.yabaiWindowID, status: .idle, eventType: type.rawValue,
-                eventSource: "spaces_signal", environmentKeys: agentContext.environmentKeys)
+                workspaceID: workspace.id, provider: agentContext.provider, label: signalLabel, terminalTrackingID: agentContext.terminalTrackingID,
+                terminalNativeID: agentContext.terminalNativeID, codexThreadID: agentContext.codexThreadID, yabaiWindowID: agentContext.yabaiWindowID,
+                status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "spaces_signal",
+                environmentKeys: agentContext.environmentKeys)
         case .start, .waiting, .done:
             try orchestrator.updateAgentWindowStatus(
                 workspaceID: workspace.id, provider: agentContext.provider, terminalTrackingID: agentContext.terminalTrackingID,
                 codexThreadID: agentContext.codexThreadID, terminalNativeID: agentContext.terminalNativeID, yabaiWindowID: agentContext.yabaiWindowID,
-                label: agentContext.label, status: type.status, eventType: type.rawValue, eventSource: "spaces_signal",
+                label: signalLabel, status: type.status, eventType: type.rawValue, eventSource: "spaces_signal",
                 environmentKeys: agentContext.environmentKeys)
         case .exit:
+            guard let existingAgent else { return }
+            // Exit mutates the row resolved above; runtime labels can collide with reserved launcher names
+            // and are not proof that an ad-hoc session owns a configured launcher slot.
             try orchestrator.handleAgentExit(
-                workspaceID: workspace.id, provider: agentContext.provider, terminalTrackingID: agentContext.terminalTrackingID,
-                codexThreadID: agentContext.codexThreadID, terminalNativeID: agentContext.terminalNativeID, yabaiWindowID: agentContext.yabaiWindowID,
-                label: agentContext.label, eventType: type.rawValue, eventSource: "spaces_signal", environmentKeys: agentContext.environmentKeys)
+                existingAgent, terminalNativeID: agentContext.terminalNativeID, yabaiWindowID: agentContext.yabaiWindowID, eventType: type.rawValue,
+                eventSource: "spaces_signal", environmentKeys: agentContext.environmentKeys)
         }
 
         try context.output.emit(
@@ -540,6 +554,13 @@ enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
         case .waiting: .waiting
         case .done: .done
         case .exit: .idle
+        }
+    }
+
+    var establishesAgentFromEvidence: Bool {
+        switch self {
+        case .start, .waiting, .done: true
+        case .`init`, .exit: false
         }
     }
 }
@@ -570,6 +591,37 @@ func resolveAgentInvocationContext(workspaceID: String, environment: [String: St
         provider: resolvedProvider, label: inferredAgentLabel(environment: environment), terminalTrackingID: splitIdentity.sessionID,
         terminalNativeID: terminalNativeID, codexThreadID: environment["CODEX_THREAD_ID"], yabaiWindowID: resolvedYabaiWindowID,
         environmentKeys: environment.keys.sorted())
+}
+
+func existingAgentSignalTarget(workspaceID: String, agentContext: AgentInvocationContext, orchestrator: WorkspaceOrchestrator) throws
+    -> AgentWindowRecord?
+{
+    let terminalIDs = Set([agentContext.terminalTrackingID, agentContext.terminalNativeID].compactMap { normalizedNonEmpty($0) })
+    let codexThreadID = normalizedNonEmpty(agentContext.codexThreadID)
+    return try orchestrator.agentWindows(workspaceID: workspaceID).first { record in
+        guard record.provider == agentContext.provider else { return false }
+        if let recordTerminalID = normalizedNonEmpty(record.terminalTrackingID), terminalIDs.contains(recordTerminalID) { return true }
+        if let codexThreadID, normalizedNonEmpty(record.codexThreadID) == codexThreadID { return true }
+        return false
+    }
+}
+
+func agentSignalRuntimeLabel(agentContext: AgentInvocationContext) -> String? {
+    guard agentContext.provider == .spaces, let sessionID = normalizedNonEmpty(agentContext.terminalTrackingID ?? agentContext.terminalNativeID),
+        let paths = try? TerminalSessionPaths.forSession(id: sessionID)
+    else { return nil }
+    if let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths), launchConfiguration.kind == .agent {
+        return normalizedNonEmpty(launchConfiguration.title)
+    }
+    guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), let kind = runtimeState.foregroundDetectedAgentKind
+    else { return nil }
+    return normalizedNonEmpty(runtimeState.foregroundDisplayLabel) ?? kind.displayLabel
+}
+
+private func normalizedNonEmpty(_ value: String?) -> String? {
+    let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let trimmed, !trimmed.isEmpty else { return nil }
+    return trimmed
 }
 
 private func requireWorkspace(id: String, orchestrator: WorkspaceOrchestrator) throws -> WorkspaceRecord {
@@ -616,9 +668,10 @@ private func inferredAgentLabel(environment: [String: String]) -> String? {
     if let label = environment[WorkspaceOrchestrator.agentLabelEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
         return label
     }
-    if environment["CODEX_THREAD_ID"] != nil { return "Codex CLI" }
-    if environment["CODEX_MANAGED_BY_NPM"] != nil { return "Codex CLI" }
-    if environment["CLAUDE_CODE_ENTRYPOINT"] != nil { return "Claude Code CLI" }
+    if environment["CODEX_THREAD_ID"] != nil { return "codex cli" }
+    if environment["CODEX_MANAGED_BY_NPM"] != nil { return "codex cli" }
+    if environment["CLAUDE_CODE_ENTRYPOINT"] != nil { return "claude cli" }
+    if environment.keys.contains(where: { $0.uppercased().hasPrefix("OPENCODE") }) { return "opencode cli" }
 
     return nil
 }
@@ -634,7 +687,7 @@ private func splitTrackingIdentity(_ identity: TerminalTrackingIdentity?) -> (se
     switch identity {
     case .session(let id): return (id, nil)
     case .window(let id): return (nil, id)
-    case .tmux, nil: return (nil, nil)
+    case nil: return (nil, nil)
     }
 }
 

@@ -16,7 +16,7 @@ final class ErrorsTests: XCTestCase {
         XCTAssertEqual(WorkspaceError.gitCommandFailed(message: "fatal").errorDescription, "Git command failed: fatal")
         XCTAssertEqual(WorkspaceError.invalidArgument(message: "bad").errorDescription, "Invalid argument: bad")
         XCTAssertEqual(WorkspaceError.yabaiUnavailable(message: "missing").errorDescription, "yabai not available: missing")
-        XCTAssertEqual(WorkspaceError.dependencyMissing(message: "iTerm2").errorDescription, "Missing dependency: iTerm2")
+        XCTAssertEqual(WorkspaceError.dependencyMissing(message: "Spaces").errorDescription, "Missing dependency: Spaces")
         XCTAssertEqual(WorkspaceError.configError(message: "invalid").errorDescription, "Configuration error: invalid")
     }
 }

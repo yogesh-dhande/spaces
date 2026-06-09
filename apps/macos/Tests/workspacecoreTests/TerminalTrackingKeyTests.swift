@@ -7,8 +7,8 @@ import systembridge
     @Test func runningProcessFocusIdentityPrefersNativeSessionID() {
         let record = RunningProcessRecord(
             id: "process-1", workspaceID: "workspace-1", templateName: "frontend", command: "npm run dev", terminalApp: TerminalHost.spaces.appName,
-            windowID: 101, terminalTrackingID: nil, terminalNativeID: "native-session-1", terminalContainerID: nil, itermTabIndex: nil,
-            tmuxWindowID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            windowID: 101, terminalTrackingID: nil, terminalNativeID: "native-session-1", pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "now", exitedAt: nil)
 
         #expect(record.terminalFocusIdentity == .session("native-session-1"))
         #expect(record.terminalTrackingIdentity == .session("native-session-1"))
@@ -17,8 +17,7 @@ import systembridge
     @Test func windowFocusIdentityPrefersNativeSessionID() {
         let record = WindowRecord(
             id: "window-1", workspaceID: "workspace-1", app: TerminalHost.spaces.appName, name: "frontend", detail: "npm run dev", targetURL: nil,
-            windowID: 101, terminalTrackingID: nil, terminalNativeID: "native-session-2", terminalContainerID: nil, itermTabIndex: nil,
-            tmuxWindowID: nil, role: "terminal", orderIndex: 0, lastSeenAt: "now")
+            windowID: 101, terminalTrackingID: nil, terminalNativeID: "native-session-2", role: "terminal", orderIndex: 0, lastSeenAt: "now")
 
         #expect(record.terminalFocusIdentity == .session("native-session-2"))
         #expect(record.terminalTrackingIdentity == .session("native-session-2"))

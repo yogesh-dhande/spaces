@@ -190,6 +190,8 @@ private final class GhosttyHostManagedOutputPipe: @unchecked Sendable {
         return Int32(pid)
     }
 
+    func childPID() -> Int32? { hostPTY?.childPID() }
+
     func surfaceCellSize() -> (columns: Int, rows: Int)? {
         guard let session else { return hostPTY?.surfaceCellSize() ?? lastKnownSurfaceSize }
         let size = ghostty_session_size(session)

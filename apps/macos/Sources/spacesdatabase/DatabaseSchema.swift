@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public enum DatabaseSchema {
-    public static let currentVersion = 7
+    public static let currentVersion = 9
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "terminal metadata tables", requiresBackup: false) { database in
@@ -56,8 +56,13 @@ public enum DatabaseSchema {
             }
         },
         DatabaseMigrationStep(fromVersion: 6, toVersion: 7, description: "workspace setup result metadata", requiresBackup: false) { database in
-            try addColumnIfNeeded(table: "workspace_settings", column: "setup_exit_code", definition: "INTEGER", database: database)
-            try addColumnIfNeeded(table: "workspace_settings", column: "setup_log_path", definition: "TEXT", database: database)
+            try addWorkspaceSetupResultColumns(database: database)
+        },
+        DatabaseMigrationStep(fromVersion: 7, toVersion: 8, description: "terminal foreground process metadata", requiresBackup: false) { database in
+            try addTerminalForegroundRuntimeColumns(database: database)
+        },
+        DatabaseMigrationStep(fromVersion: 8, toVersion: 9, description: "legacy external terminal storage cleanup", requiresBackup: false) {
+            database in try dropLegacyExternalTerminalStorage(database: database)
         },
     ]
 
@@ -124,7 +129,14 @@ public enum DatabaseSchema {
               rows INTEGER,
               state TEXT NOT NULL,
               updated_at TEXT NOT NULL,
-              exited_at TEXT
+              exited_at TEXT,
+              foreground_pid INTEGER,
+              foreground_executable_path TEXT,
+              foreground_executable_name TEXT,
+              foreground_argv_json TEXT,
+              foreground_detected_agent_kind TEXT,
+              foreground_display_label TEXT,
+              foreground_display_command TEXT
             );
 
             CREATE TABLE IF NOT EXISTS terminal_clients (
@@ -529,6 +541,44 @@ public enum DatabaseSchema {
     private static func addColumnIfNeeded(table: String, column: String, definition: String, database: OpaquePointer) throws {
         guard try tableExists(table, database: database), try !columnExists(table: table, column: column, database: database) else { return }
         try executeBatch(sql: "ALTER TABLE \(table) ADD COLUMN \(column) \(definition);", database: database)
+    }
+
+    private static func addTerminalForegroundRuntimeColumns(database: OpaquePointer) throws {
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_pid", definition: "INTEGER", database: database)
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_executable_path", definition: "TEXT", database: database)
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_executable_name", definition: "TEXT", database: database)
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_argv_json", definition: "TEXT", database: database)
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_detected_agent_kind", definition: "TEXT", database: database)
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_display_label", definition: "TEXT", database: database)
+        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_display_command", definition: "TEXT", database: database)
+    }
+
+    private static func addWorkspaceSetupResultColumns(database: OpaquePointer) throws {
+        try addColumnIfNeeded(table: "workspace_settings", column: "setup_exit_code", definition: "INTEGER", database: database)
+        try addColumnIfNeeded(table: "workspace_settings", column: "setup_log_path", definition: "TEXT", database: database)
+    }
+
+    private static func dropLegacyExternalTerminalStorage(database: OpaquePointer) throws {
+        for column in [
+            "terminal_app", "window_id", "terminal_tracking_id", "terminal_native_id", "terminal_container_id", "iterm_tab_index", "tmux_window_id",
+        ] { try dropColumnIfNeeded(table: "running_processes", column: column, database: database) }
+        for column in ["native_id", "provider", "container_id"] {
+            try dropColumnIfNeeded(table: "runtime_targets", column: column, database: database)
+        }
+        for column in ["terminal_target_id", "terminal_tracking_id", "terminal_native_id", "yabai_window_id"] {
+            try dropColumnIfNeeded(table: "agent_sessions", column: column, database: database)
+        }
+        for table in ["agent_windows", "windows", "terminal_targets"] { try dropTableIfNeeded(table, database: database) }
+    }
+
+    private static func dropColumnIfNeeded(table: String, column: String, database: OpaquePointer) throws {
+        guard try tableExists(table, database: database), try columnExists(table: table, column: column, database: database) else { return }
+        try executeBatch(sql: "ALTER TABLE \(table) DROP COLUMN \(column);", database: database)
+    }
+
+    private static func dropTableIfNeeded(_ table: String, database: OpaquePointer) throws {
+        guard try tableExists(table, database: database) else { return }
+        try executeBatch(sql: "DROP TABLE \(table);", database: database)
     }
 
     private static func tableExists(_ table: String, database: OpaquePointer) throws -> Bool {

@@ -43,7 +43,7 @@ enum RowPrimitives {
         return slot
     }
 
-    // MARK: Type icon tile
+    // MARK: Type tile
 
     enum TypeKind: Sendable {
         case browser
@@ -53,22 +53,29 @@ enum RowPrimitives {
         case port
     }
 
+    @MainActor private static func typeColors(for kind: TypeKind) -> (background: NSColor, foreground: NSColor) {
+        switch kind {
+        case .browser, .project: return (Theme.iconBrowserBg, Theme.iconBrowserFg)
+        case .process: return (Theme.iconProcessBg, Theme.iconProcessFg)
+        case .agent: return (Theme.iconAgentBg, Theme.iconAgentFg)
+        case .port: return (Theme.iconPortBg, Theme.iconPortFg)
+        }
+    }
+
+    @MainActor private static func typeTileBackground(_ kind: TypeKind) -> ColoredBackgroundView {
+        let tile = ColoredBackgroundView()
+        tile.fillColor = typeColors(for: kind).background
+        tile.cornerRadius = 5
+        tile.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([tile.widthAnchor.constraint(equalToConstant: 22), tile.heightAnchor.constraint(equalToConstant: 22)])
+        return tile
+    }
+
     /// 22×22 rounded tile with a tinted background and an SF Symbol glyph.
     /// `symbol` is a system symbol name (e.g. "globe", "terminal", "cpu.fill").
     @MainActor static func typeIconTile(_ kind: TypeKind, symbol: String, accessibilityLabel: String? = nil) -> NSView {
-        let (bg, fg): (NSColor, NSColor) = {
-            switch kind {
-            case .browser, .project: (Theme.iconBrowserBg, Theme.iconBrowserFg)
-            case .process: (Theme.iconProcessBg, Theme.iconProcessFg)
-            case .agent: (Theme.iconAgentBg, Theme.iconAgentFg)
-            case .port: (Theme.iconPortBg, Theme.iconPortFg)
-            }
-        }()
-
-        let tile = ColoredBackgroundView()
-        tile.fillColor = bg
-        tile.cornerRadius = 5
-        tile.translatesAutoresizingMaskIntoConstraints = false
+        let fg = typeColors(for: kind).foreground
+        let tile = typeTileBackground(kind)
 
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: accessibilityLabel)?.withSymbolConfiguration(config)
@@ -80,8 +87,35 @@ enum RowPrimitives {
         tile.addSubview(imageView)
 
         NSLayoutConstraint.activate([
-            tile.widthAnchor.constraint(equalToConstant: 22), tile.heightAnchor.constraint(equalToConstant: 22),
             imageView.centerXAnchor.constraint(equalTo: tile.centerXAnchor), imageView.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+        ])
+        return tile
+    }
+
+    /// 22×22 rounded tile with centered compact text, used when a row needs a
+    /// neutral marker instead of a symbol or product logo.
+    @MainActor static func typeTextTile(_ kind: TypeKind, text: String, accessibilityLabel: String? = nil) -> NSView {
+        let fg = typeColors(for: kind).foreground
+        let tile = typeTileBackground(kind)
+        if let accessibilityLabel {
+            tile.setAccessibilityElement(true)
+            tile.setAccessibilityLabel(accessibilityLabel)
+            tile.setAccessibilityValue(text)
+        }
+
+        let label = NSTextField(labelWithString: text)
+        label.font = .monospacedSystemFont(ofSize: 9.5, weight: .semibold)
+        label.textColor = fg
+        label.alignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.translatesAutoresizingMaskIntoConstraints = false
+        tile.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: tile.centerXAnchor), label.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: tile.leadingAnchor, constant: 1),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: tile.trailingAnchor, constant: -1),
         ])
         return tile
     }

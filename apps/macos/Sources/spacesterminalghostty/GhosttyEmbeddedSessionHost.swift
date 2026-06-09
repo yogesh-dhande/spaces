@@ -87,6 +87,8 @@ extension TerminalGhosttyRendererHosting {
 
     func foregroundPID() -> Int32? { sessionDriver.foregroundPID() }
 
+    func childPID() -> Int32? { sessionDriver.childPID() }
+
     func surfaceCellSize() -> (columns: Int, rows: Int)? { sessionDriver.surfaceCellSize() }
 
     @discardableResult func resizeCellGrid(columns: Int, rows: Int) -> Bool { sessionDriver.resizeCellGrid(columns: columns, rows: rows) }
@@ -267,6 +269,8 @@ extension TerminalGhosttyRendererHosting {
     private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
     private var lastRuntimeStateWriteAt: Date?
     private var sessionStartedAt: Date?
+    private var foregroundPIDOverrideForTesting: Int32?
+    private var foregroundProcessResolver: (Int32) -> TerminalForegroundProcessSnapshot? = { TerminalForegroundProcessInspector.inspect(pid: $0) }
     private var didLogFirstOutput = false
     private let incomingOutputBuffer = IncomingOutputBuffer()
     private var inputStateBroadcastScheduled = false
@@ -759,17 +763,24 @@ extension TerminalGhosttyRendererHosting {
         guard !didTerminateCurrentRun else { return }
         guard started || !currentRuntimeStateIsExited() else { return }
         let now = Date()
-        let foregroundPID = rendererHostStorage.foregroundPID()
-        if let foregroundPID {
-            lastKnownChildPID = foregroundPID
-        } else if started, let lastKnownChildPID, !hasActiveAttachments(), !Self.isProcessAlive(pid: lastKnownChildPID) {
+        let liveChildPID = rendererHostStorage.childPID()
+        if let liveChildPID { lastKnownChildPID = liveChildPID }
+        let childPID = liveChildPID ?? lastKnownChildPID
+        let foregroundPID = observedForegroundPID()
+        if started, liveChildPID == nil, let lastKnownChildPID, !hasActiveAttachments(), !Self.isProcessAlive(pid: lastKnownChildPID) {
             handleSessionClosed()
             return
         }
+        let foregroundProcess = foregroundPID.flatMap(foregroundProcessResolver)
+        let foregroundAgent = foregroundProcess.flatMap(TerminalForegroundProcessInspector.classify)
         let state = TerminalSessionRuntimeState(
             sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
-            childPID: foregroundPID ?? lastKnownChildPID, state: .running, updatedAt: ISO8601DateFormatter().string(from: now), title: effectiveTitle,
-            workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows)
+            childPID: childPID ?? lastKnownChildPID, state: .running, updatedAt: ISO8601DateFormatter().string(from: now), title: effectiveTitle,
+            workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows,
+            foregroundPID: foregroundProcess?.pid, foregroundExecutablePath: foregroundProcess?.executablePath,
+            foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
+            foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
+            foregroundDisplayCommand: foregroundAgent?.displayCommand)
         let shouldPersist = force || shouldPersistRuntimeState(state, now: now)
         guard shouldPersist else { return }
         let previousSignature = lastPersistedRuntimeState.map(runtimeStateSignature(for:))
@@ -892,19 +903,21 @@ extension TerminalGhosttyRendererHosting {
 
         if metadataChanged { postSessionMetadataDidChange() }
 
-        if change.flags.contains(.foregroundProcess), let foregroundPID = rendererHostStorage.foregroundPID() { lastKnownChildPID = foregroundPID }
+        if change.flags.contains(.foregroundProcess) { _ = observedChildPID() }
         if change.flags.contains(.size), let size = rendererHostStorage.surfaceCellSize() { lastKnownSurfaceSize = size }
 
         if metadataChanged || !change.flags.intersection(.runtimeState).isEmpty { refreshRuntimeState(force: true) }
     }
 
     private func observedChildPID() -> Int32? {
-        if let foregroundPID = rendererHostStorage.foregroundPID() {
-            lastKnownChildPID = foregroundPID
-            return foregroundPID
+        if let childPID = rendererHostStorage.childPID() {
+            lastKnownChildPID = childPID
+            return childPID
         }
         return lastKnownChildPID
     }
+
+    private func observedForegroundPID() -> Int32? { foregroundPIDOverrideForTesting ?? rendererHostStorage.foregroundPID() }
 
     private func observedSurfaceSize() -> (columns: Int, rows: Int)? {
         if let size = rendererHostStorage.surfaceCellSize() {
@@ -1056,7 +1069,7 @@ extension TerminalGhosttyRendererHosting {
     }
 
     private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
-        "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
+        "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
     }
 
     private static func isProcessAlive(pid: Int32) -> Bool {
@@ -1312,6 +1325,10 @@ extension TerminalGhosttyRendererHosting {
     }
     func debugPersistRuntimeState(force: Bool = true) { refreshRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
+    func debugSetForegroundPIDForTesting(_ pid: Int32?) { foregroundPIDOverrideForTesting = pid }
+    func debugSetForegroundProcessResolverForTesting(_ resolver: @escaping (Int32) -> TerminalForegroundProcessSnapshot?) {
+        foregroundProcessResolver = resolver
+    }
     func debugSetLastKnownSurfaceSize(columns: Int, rows: Int) { lastKnownSurfaceSize = (columns, rows) }
     func debugHandleSessionClosed() { handleSessionClosed() }
     func debugMarkStartedForTesting() { started = true }
@@ -1466,6 +1483,10 @@ private final class GhosttyMainActorSyncBox<T>: @unchecked Sendable { var value:
     func debugCurrentRemoteSessionState(reason: String) -> GhosttyRemoteSessionStatePayload? { core.debugCurrentRemoteSessionState(reason: reason) }
     func debugPersistRuntimeState(force: Bool = true) { core.debugPersistRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { core.debugSetLastKnownChildPID(pid) }
+    func debugSetForegroundPIDForTesting(_ pid: Int32?) { core.debugSetForegroundPIDForTesting(pid) }
+    func debugSetForegroundProcessResolverForTesting(_ resolver: @escaping (Int32) -> TerminalForegroundProcessSnapshot?) {
+        core.debugSetForegroundProcessResolverForTesting(resolver)
+    }
     func debugHandleSessionClosed() { core.debugHandleSessionClosed() }
     func debugMarkStartedForTesting() { core.debugMarkStartedForTesting() }
 }

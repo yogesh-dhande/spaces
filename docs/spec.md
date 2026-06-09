@@ -89,7 +89,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Startup prerequisite checks may enrich command lookup from the user's login-shell PATH, but that lookup must stay bounded and fall back automatically to the inherited PATH plus standard package-manager locations so shell startup files cannot stall app launch indefinitely.
 - When command lookup is enriched from the login-shell PATH, the app's inherited `PATH` remains authoritative. Login-shell entries should only fill gaps that are missing from the launch environment, and built-in package-manager fallbacks should remain last.
 - During first-run setup, Spaces should treat its built-in terminal as the only supported terminal path and should not require any external terminal app.
-- Workspace processes should launch, stop, recover, and reopen without requiring tmux to be installed.
+- Workspace processes launch, stop, recover, and reopen through Spaces-owned built-in terminal sessions.
 - The slower yabai readiness step, including service-running and Accessibility validation, should be deferred until the setup flow is actually shown or another yabai-backed action needs it.
 - If a deferred yabai readiness check fails during startup, Spaces should switch into the setup flow at the yabai step instead of surfacing a raw shell error dialog.
 - If a blocking launch prerequisite fails, the main window shows a guided setup flow starting at the first failing step.
@@ -187,7 +187,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Editing workspace settings while a workspace is already running must not start or stop browser sessions or coding agents as part of save-time reconciliation. Process name and on-exit edits should update tracked running processes immediately, while command edits should require explicit confirmation to restart the affected running processes; canceling that prompt should leave the existing process configuration unchanged. New configured rows should appear immediately with their non-running status so the user can decide what to open or recover.
 - Process commands run as terminal-style shell command strings through the user's resolved login shell.
 - Process commands support normal shell behavior such as environment assignment, `cd x && y`, pipes, redirection, command substitution, and shell expansion.
-- Configured coding-agent launchers should run inside an interactive login shell so user shell PATH and tool initialization are available to commands such as `claude` or `codex`.
+- Configured coding-agent launchers should run inside an interactive login shell so user shell PATH and tool initialization are available to commands such as `claude`, `codex`, or `opencode`.
 - Configured coding-agent rows should support direct run, stop, and restart controls. Stop should close the tracked native terminal window when present, terminate the backing built-in terminal session, remove runtime state, and keep the configured launcher available. Restart should relaunch configured or claimed launcher rows and report a clear unsupported action for unconfigured live agents.
 - Built-in process and coding-agent terminal windows should keep compact runtime controls visible above the terminal surface. The native window title shows the runtime name, and the control row keeps valid run, stop, and restart icon actions right-aligned. Kept-open exited terminals should offer stop as a cleanup action and run or restart when the configured row still exists.
 - App-level configuration is changed in the app only, not through `spaces`.
@@ -294,8 +294,12 @@ Spaces focuses those windows; it does not decide their geometry.
 - `spaces signal` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
 - Agent events that cannot be reliably attributed to a terminal must be dropped, not guessed onto the frontmost window.
 - `init` should identify the originating terminal and either attach to an already tracked terminal row or create a new tracked terminal row for that coding agent.
+- Non-`init` signal events should update the existing agent row for the originating terminal. If no agent row exists, the event may establish one only when the signal context or current terminal runtime identifies the terminal as a coding agent; otherwise the event should be ignored.
 - Coding-agent rows should render after browser and process rows so non-agent shortcut ordering stays stable when agents appear or disappear.
 - Configured and ad-hoc coding agents should share the same `Coding Agents` section rather than rendering as separate launcher and runtime sections.
+- A Spaces-owned ad-hoc built-in terminal can appear in `Coding Agents` when its live foreground process is a known coding-agent command such as `codex`, `claude`, `claude-code`, or `opencode`. Once an agent row exists for that terminal session, foreground process changes do not demote or relabel it.
+- A signal-established ad-hoc agent row should remain in `Coding Agents` for its live terminal session even if the foreground process is a shell, wrapper, unknown command, or another known agent command. A live `spaces signal exit` records the session as idle instead of demoting it; Stop, terminal-session exit, and terminal cleanup own removal or completion.
+- Foreground process detection should not infer lifecycle state. `spaces signal` remains the source for agent status such as spinning, waiting, done, and exit.
 - Every tracked window row should have a unique visible name within its workspace. Two coding-agent rows must not share the same name.
 - Configured coding-agent launcher names are reserved within the workspace. An ad-hoc coding agent that reports the same label should be auto-renamed with a numeric suffix instead of colliding with the configured launcher slot.
 - Launching a configured coding agent is idempotent for its reserved slot: if that coding agent still has a live tracked terminal, Spaces should keep the existing row instead of deleting and recreating it.

@@ -2,7 +2,7 @@
 
 Multiplex your work. Not just the terminal.
 
-Native macOS app and CLI for orchestrating parallel coding sessions, plus a paired first-party iOS terminal client. Groups terminals, editors, browser windows, and CLI coding agents (Claude Code, Codex, etc.) into per-branch workspaces with isolated ports, environment, and process trees.
+Native macOS app and CLI for orchestrating parallel coding sessions, plus a paired first-party iOS terminal client. Groups terminals, editors, browser windows, and CLI coding agents (`claude`, `codex`, `opencode`, etc.) into per-branch workspaces with isolated ports, environment, and process trees.
 
 [usespaces.dev](https://usespaces.dev) · [Download](https://github.com/yogesh-dhande/spaces/releases/latest) · [Docs](https://usespaces.dev/docs)
 
