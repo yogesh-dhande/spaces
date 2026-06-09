@@ -851,11 +851,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let foregroundPID: Int32 = 42
         host.debugSetLastKnownChildPID(childPID)
         host.debugSetForegroundPIDForTesting(foregroundPID)
-        host.debugSetForegroundAgentResolverForTesting { pid in
-            let process = TerminalForegroundProcessSnapshot(
+        host.debugSetForegroundProcessResolverForTesting { pid in
+            TerminalForegroundProcessSnapshot(
                 pid: pid, executablePath: "/opt/homebrew/bin/codex", executableName: "codex", argv: ["codex", "--model", "gpt-5"])
-            return TerminalForegroundAgentSnapshot(
-                process: process, detectedAgentKind: .codex, displayLabel: "Codex", displayCommand: "codex --model gpt-5")
         }
 
         host.debugPersistRuntimeState()
@@ -864,7 +862,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(runtimeState.childPID, childPID)
         XCTAssertEqual(runtimeState.foregroundPID, foregroundPID)
         XCTAssertEqual(runtimeState.foregroundDetectedAgentKind, .codex)
-        XCTAssertEqual(runtimeState.foregroundDisplayLabel, "Codex")
+        XCTAssertEqual(runtimeState.foregroundDisplayLabel, "codex")
         XCTAssertEqual(runtimeState.foregroundDisplayCommand, "codex --model gpt-5")
     }
 
@@ -882,20 +880,25 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let childPID: Int32 = 900
         host.debugSetLastKnownChildPID(childPID)
         host.debugSetForegroundPIDForTesting(42)
-        host.debugSetForegroundAgentResolverForTesting { pid in
-            let process = TerminalForegroundProcessSnapshot(pid: pid, executablePath: "/opt/homebrew/bin/codex", argv: ["codex"])
-            return TerminalForegroundAgentSnapshot(process: process, detectedAgentKind: .codex, displayLabel: "Codex", displayCommand: "codex")
+        host.debugSetForegroundProcessResolverForTesting { pid in
+            TerminalForegroundProcessSnapshot(pid: pid, executablePath: "/opt/homebrew/bin/codex", argv: ["codex"])
         }
         host.debugPersistRuntimeState()
 
         host.debugSetForegroundPIDForTesting(43)
-        host.debugSetForegroundAgentResolverForTesting { _ in nil }
+        host.debugSetForegroundProcessResolverForTesting { pid in
+            TerminalForegroundProcessSnapshot(pid: pid, executablePath: "/bin/zsh", argv: ["zsh"])
+        }
         host.debugPersistRuntimeState()
 
         let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
         XCTAssertEqual(runtimeState.childPID, childPID)
-        XCTAssertNil(runtimeState.foregroundPID)
+        XCTAssertEqual(runtimeState.foregroundPID, 43)
+        XCTAssertEqual(runtimeState.foregroundExecutablePath, "/bin/zsh")
+        XCTAssertEqual(runtimeState.foregroundExecutableName, "zsh")
+        XCTAssertEqual(runtimeState.foregroundArgv, ["zsh"])
         XCTAssertNil(runtimeState.foregroundDetectedAgentKind)
+        XCTAssertNil(runtimeState.foregroundDisplayLabel)
         XCTAssertNil(runtimeState.foregroundDisplayCommand)
     }
 

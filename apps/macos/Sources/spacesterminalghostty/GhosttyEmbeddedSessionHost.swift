@@ -270,7 +270,7 @@ extension TerminalGhosttyRendererHosting {
     private var lastRuntimeStateWriteAt: Date?
     private var sessionStartedAt: Date?
     private var foregroundPIDOverrideForTesting: Int32?
-    private var foregroundAgentResolver: (Int32) -> TerminalForegroundAgentSnapshot? = { TerminalForegroundProcessInspector.detectedAgent(pid: $0) }
+    private var foregroundProcessResolver: (Int32) -> TerminalForegroundProcessSnapshot? = { TerminalForegroundProcessInspector.inspect(pid: $0) }
     private var didLogFirstOutput = false
     private let incomingOutputBuffer = IncomingOutputBuffer()
     private var inputStateBroadcastScheduled = false
@@ -771,13 +771,14 @@ extension TerminalGhosttyRendererHosting {
             handleSessionClosed()
             return
         }
-        let foregroundAgent = foregroundPID.flatMap(foregroundAgentResolver)
+        let foregroundProcess = foregroundPID.flatMap(foregroundProcessResolver)
+        let foregroundAgent = foregroundProcess.flatMap(TerminalForegroundProcessInspector.classify)
         let state = TerminalSessionRuntimeState(
             sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
             childPID: childPID ?? lastKnownChildPID, state: .running, updatedAt: ISO8601DateFormatter().string(from: now), title: effectiveTitle,
             workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows,
-            foregroundPID: foregroundAgent?.process.pid, foregroundExecutablePath: foregroundAgent?.process.executablePath,
-            foregroundExecutableName: foregroundAgent?.process.executableName, foregroundArgv: foregroundAgent?.process.argv,
+            foregroundPID: foregroundProcess?.pid, foregroundExecutablePath: foregroundProcess?.executablePath,
+            foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
             foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
             foregroundDisplayCommand: foregroundAgent?.displayCommand)
         let shouldPersist = force || shouldPersistRuntimeState(state, now: now)
@@ -1325,8 +1326,8 @@ extension TerminalGhosttyRendererHosting {
     func debugPersistRuntimeState(force: Bool = true) { refreshRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
     func debugSetForegroundPIDForTesting(_ pid: Int32?) { foregroundPIDOverrideForTesting = pid }
-    func debugSetForegroundAgentResolverForTesting(_ resolver: @escaping (Int32) -> TerminalForegroundAgentSnapshot?) {
-        foregroundAgentResolver = resolver
+    func debugSetForegroundProcessResolverForTesting(_ resolver: @escaping (Int32) -> TerminalForegroundProcessSnapshot?) {
+        foregroundProcessResolver = resolver
     }
     func debugSetLastKnownSurfaceSize(columns: Int, rows: Int) { lastKnownSurfaceSize = (columns, rows) }
     func debugHandleSessionClosed() { handleSessionClosed() }
@@ -1483,8 +1484,8 @@ private final class GhosttyMainActorSyncBox<T>: @unchecked Sendable { var value:
     func debugPersistRuntimeState(force: Bool = true) { core.debugPersistRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { core.debugSetLastKnownChildPID(pid) }
     func debugSetForegroundPIDForTesting(_ pid: Int32?) { core.debugSetForegroundPIDForTesting(pid) }
-    func debugSetForegroundAgentResolverForTesting(_ resolver: @escaping (Int32) -> TerminalForegroundAgentSnapshot?) {
-        core.debugSetForegroundAgentResolverForTesting(resolver)
+    func debugSetForegroundProcessResolverForTesting(_ resolver: @escaping (Int32) -> TerminalForegroundProcessSnapshot?) {
+        core.debugSetForegroundProcessResolverForTesting(resolver)
     }
     func debugHandleSessionClosed() { core.debugHandleSessionClosed() }
     func debugMarkStartedForTesting() { core.debugMarkStartedForTesting() }
