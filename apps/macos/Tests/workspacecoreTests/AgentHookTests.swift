@@ -1,4 +1,5 @@
 import XCTest
+import spacesterminalcore
 import systembridge
 
 @testable import workspacecore
@@ -245,17 +246,46 @@ final class AgentHookTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
-        _ = try orchestrator.registerAgentWindow(
+        let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", codexThreadID: "thread-1",
             yabaiWindowID: 202, status: .done)
 
-        let result = try orchestrator.handleAgentExit(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", codexThreadID: "thread-1", yabaiWindowID: 202,
-            label: "Codex CLI")
+        let result = try orchestrator.handleAgentExit(agent, terminalNativeID: "workspace-session", yabaiWindowID: 202)
 
         XCTAssertNil(result)
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+    }
+
+    func testHandleAgentExitKeepsLiveAdHocSpacesSessionIdleWithoutPersistingSignalWindowID() throws {
+        let store = try makeTemporaryStore()
+        let closeCapture = AgentHookTerminalCloseCapture()
+        let terminateCapture = AgentHookTerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowCloser: { closeCapture.sessionIDs.append($0) },
+            builtInTerminalSessionTerminator: { terminateCapture.sessionIDs.append($0) })
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let sessionID = UUID().uuidString
+        try writeLiveBuiltInTerminalSession(sessionID: sessionID, workspaceDirectory: workspace.dir)
+
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, terminalNativeID: sessionID,
+            codexThreadID: "thread-1", yabaiWindowID: 101, status: .done)
+
+        let result = try orchestrator.handleAgentExit(agent, terminalNativeID: sessionID, yabaiWindowID: 202)
+
+        let record = try XCTUnwrap(result)
+        XCTAssertEqual(record.status, .idle)
+        XCTAssertEqual(record.terminalTrackingID, sessionID)
+        XCTAssertNil(record.yabaiWindowID)
+        let storedAgent = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(storedAgent.terminalTrackingID, sessionID)
+        XCTAssertNil(storedAgent.yabaiWindowID)
+        let trackedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first)
+        XCTAssertEqual(trackedWindow.terminalTrackingID, sessionID)
+        XCTAssertNil(trackedWindow.windowID)
+        XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
+        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
     }
 
     func testHandleAgentExitKeepsClosedConfiguredSpacesAgentRow() throws {
@@ -269,22 +299,23 @@ final class AgentHookTests: XCTestCase {
         try store.setWorkspaceAgentLaunchers(
             workspaceID: workspace.id, launchers: [AgentLauncher(name: "Configured Agent", command: "configured-agent")])
 
-        _ = try orchestrator.registerAgentWindow(
+        let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Configured Agent", terminalTrackingID: "configured-session",
             terminalNativeID: "configured-session", codexThreadID: "thread-1", yabaiWindowID: 202, status: .idle,
             claimedLauncherName: "Configured Agent")
 
-        let result = try orchestrator.handleAgentExit(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "configured-session", codexThreadID: "thread-1",
-            terminalNativeID: "configured-session", yabaiWindowID: 202, label: "Configured Agent")
+        let result = try orchestrator.handleAgentExit(agent, terminalNativeID: "configured-session", yabaiWindowID: 303)
 
         let record = try XCTUnwrap(result)
         XCTAssertEqual(record.status, .done)
         XCTAssertEqual(record.terminalTrackingID, "configured-session")
+        XCTAssertNil(record.yabaiWindowID)
         XCTAssertEqual(record.claimedLauncherName, "Configured Agent")
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.terminalTrackingID, "configured-session")
+        XCTAssertNil(try store.agentWindows(workspaceID: workspace.id).first?.yabaiWindowID)
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).first?.terminalTrackingID, "configured-session")
+        XCTAssertNil(try store.windows(workspaceID: workspace.id).first?.windowID)
         XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
         XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
     }
@@ -342,6 +373,20 @@ final class AgentHookTests: XCTestCase {
         try store.upsert(workspace: workspace)
         return (project, workspace)
     }
+
+    private func writeLiveBuiltInTerminalSession(sessionID: String, workspaceDirectory: String) throws {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "shell", workingDirectory: workspaceDirectory, shell: "/bin/zsh",
+                command: nil, createdAt: "2026-06-06T00:00:00Z", workspaceID: nil, kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
+                updatedAt: "2026-06-06T00:00:01Z", title: "shell", workingDirectory: workspaceDirectory), paths: paths)
+        XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
+    }
+
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
         let original = ProcessInfo.processInfo.environment[name]
         setenv(name, value, 1)

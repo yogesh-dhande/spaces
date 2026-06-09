@@ -499,7 +499,7 @@ struct SignalCommand: ParsableCommand {
             workspaceID: workspace.id, environment: environment, orchestrator: orchestrator, context: context)
         guard let agentContext else { return }
         let existingAgent = try existingAgentSignalTarget(workspaceID: workspace.id, agentContext: agentContext, orchestrator: orchestrator)
-        let signalLabel = agentContext.label ?? normalizedNonEmpty(existingAgent?.label) ?? agentSignalRuntimeLabel(agentContext: agentContext)
+        let signalLabel = agentContext.label ?? agentSignalRuntimeLabel(agentContext: agentContext) ?? normalizedNonEmpty(existingAgent?.label)
         let canRecordSignal = existingAgent != nil || type == .`init` || (type.establishesAgentFromEvidence && normalizedNonEmpty(signalLabel) != nil)
         if !canRecordSignal {
             try context.output.emit(
@@ -522,10 +522,12 @@ struct SignalCommand: ParsableCommand {
                 label: signalLabel, status: type.status, eventType: type.rawValue, eventSource: "spaces_signal",
                 environmentKeys: agentContext.environmentKeys)
         case .exit:
+            guard let existingAgent else { return }
+            // Exit mutates the row resolved above; runtime labels can collide with reserved launcher names
+            // and are not proof that an ad-hoc session owns a configured launcher slot.
             try orchestrator.handleAgentExit(
-                workspaceID: workspace.id, provider: agentContext.provider, terminalTrackingID: agentContext.terminalTrackingID,
-                codexThreadID: agentContext.codexThreadID, terminalNativeID: agentContext.terminalNativeID, yabaiWindowID: agentContext.yabaiWindowID,
-                label: signalLabel, eventType: type.rawValue, eventSource: "spaces_signal", environmentKeys: agentContext.environmentKeys)
+                existingAgent, terminalNativeID: agentContext.terminalNativeID, yabaiWindowID: agentContext.yabaiWindowID, eventType: type.rawValue,
+                eventSource: "spaces_signal", environmentKeys: agentContext.environmentKeys)
         }
 
         try context.output.emit(

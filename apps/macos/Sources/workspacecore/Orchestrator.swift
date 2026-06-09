@@ -5970,12 +5970,16 @@ public final class WorkspaceOrchestrator {
         return try store.workspaceAgentLaunchers(workspaceID: workspaceID).contains { normalizedFocusName($0.name) == normalizedLabel }
     }
 
-    private func spacesAgentRecordIsConfiguredLauncher(workspaceID: String, record: AgentWindowRecord, fallbackLabel: String? = nil) throws -> Bool {
+    private func spacesAgentRecordIsConfiguredLauncher(workspaceID: String, record: AgentWindowRecord) throws -> Bool {
         guard record.provider == .spaces else { return false }
-        let launcherNames = Set(try store.workspaceAgentLaunchers(workspaceID: workspaceID).map { normalizedFocusName($0.name) })
-        guard !launcherNames.isEmpty else { return false }
-        let candidateNames = [record.claimedLauncherName, record.label, fallbackLabel].compactMap(sanitizedFocusName).map(normalizedFocusName)
-        return candidateNames.contains { launcherNames.contains($0) }
+        let launchers = try store.workspaceAgentLaunchers(workspaceID: workspaceID)
+        if let claimedLauncherID = sanitizedFocusName(record.claimedLauncherID) {
+            if launchers.contains(where: { $0.id == claimedLauncherID }) { return true }
+        }
+        if let claimedLauncherName = sanitizedFocusName(record.claimedLauncherName) {
+            return launchers.contains { normalizedFocusName($0.name) == normalizedFocusName(claimedLauncherName) }
+        }
+        return false
     }
 
     @discardableResult public func registerAgentWindow(
@@ -6120,46 +6124,66 @@ public final class WorkspaceOrchestrator {
     }
 
     @discardableResult public func handleAgentExit(
-        workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, codexThreadID: String? = nil,
-        terminalNativeID: String? = nil, yabaiWindowID: Int? = nil, label: String? = nil, eventType: String = "exit",
+        _ existing: AgentWindowRecord, terminalNativeID: String? = nil, yabaiWindowID: Int? = nil, eventType: String = "exit",
         eventSource: String = "orchestrator", environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord? {
-        guard
-            let existing = try matchingAgentWindow(
-                workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
-                label: label, provider: provider)
-        else { return nil }
         let resolvedWindowID =
             try matchedTrackedWindowForAgent(
-                workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
+                workspaceID: existing.workspaceID, provider: existing.provider, terminalTrackingID: existing.terminalTrackingID,
                 yabaiWindowID: yabaiWindowID ?? existing.yabaiWindowID ?? existing.windowID)?.windowID ?? yabaiWindowID ?? existing.yabaiWindowID
             ?? existing.windowID
-        if try spacesAgentRecordIsConfiguredLauncher(workspaceID: workspaceID, record: existing, fallbackLabel: label) {
-            return try updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
-                codexThreadID: codexThreadID ?? existing.codexThreadID, terminalNativeID: terminalNativeID ?? existing.terminalNativeID,
-                yabaiWindowID: resolvedWindowID, label: label ?? existing.label, status: .done, claimedLauncherName: existing.claimedLauncherName,
-                eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
+        if try spacesAgentRecordIsConfiguredLauncher(workspaceID: existing.workspaceID, record: existing) {
+            return try recordAgentExitStatus(
+                existing, status: .done, resolvedWindowID: resolvedWindowID, terminalNativeID: terminalNativeID, eventType: eventType,
+                eventSource: eventSource, environmentKeys: environmentKeys)
         }
-        if agentWindowIsOpen(resolvedWindowID) {
-            return try updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
-                codexThreadID: codexThreadID ?? existing.codexThreadID, terminalNativeID: terminalNativeID ?? existing.terminalNativeID,
-                yabaiWindowID: resolvedWindowID, label: label ?? existing.label, status: .idle, eventType: eventType, eventSource: eventSource,
-                environmentKeys: environmentKeys)
+        let sessionBackedSpacesAgent = builtInAgentSessionID(for: existing) != nil
+        let existingSessionIsLive = sessionBackedSpacesAgent && builtInAgentSessionIsStillLive(existing)
+        if existingSessionIsLive || (!sessionBackedSpacesAgent && agentWindowIsOpen(resolvedWindowID)) {
+            return try recordAgentExitStatus(
+                existing, status: .idle, resolvedWindowID: resolvedWindowID, terminalNativeID: terminalNativeID, eventType: eventType,
+                eventSource: eventSource, environmentKeys: environmentKeys)
         }
         appendAgentSessionEvent(
             agentSessionID: existing.id, eventType: eventType, source: eventSource,
             message: agentSessionEventMessage(
-                provider: existing.provider, label: label ?? existing.label, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
-                terminalNativeID: terminalNativeID ?? existing.terminalNativeID, codexThreadID: codexThreadID ?? existing.codexThreadID,
+                provider: existing.provider, label: existing.label, terminalTrackingID: existing.terminalTrackingID,
+                terminalNativeID: terminalNativeID ?? existing.terminalNativeID, codexThreadID: existing.codexThreadID,
                 yabaiWindowID: resolvedWindowID, environmentKeys: environmentKeys), createdAt: nowISO8601())
         terminateBuiltInTerminalSession(existing.terminalNativeID ?? existing.terminalTrackingID)
         try store.deleteAgentWindow(id: existing.id)
         try removeAdHocTrackedWindowForAgent(
-            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
+            workspaceID: existing.workspaceID, provider: existing.provider, terminalTrackingID: existing.terminalTrackingID,
             yabaiWindowID: resolvedWindowID)
         return nil
+    }
+
+    private func recordAgentExitStatus(
+        _ existing: AgentWindowRecord, status: AgentWindowStatus, resolvedWindowID: Int?, terminalNativeID: String?, eventType: String,
+        eventSource: String, environmentKeys: [String]?
+    ) throws -> AgentWindowRecord {
+        let now = nowISO8601()
+        // A signal's yabai window ID is just a focused-window snapshot; the Spaces
+        // terminal session ID is the durable ownership and focus identity.
+        let storedWindowID = builtInAgentSessionID(for: existing) == nil ? resolvedWindowID : nil
+        let terminalTarget: TerminalTargetRecord? =
+            if existing.terminalTarget != nil || storedWindowID != nil || existing.terminalTrackingID != nil {
+                TerminalTargetRecord(runtimeTargetID: existing.runtimeTargetID, windowID: storedWindowID, trackingID: existing.terminalTrackingID)
+            } else { nil }
+        let updated = AgentWindowRecord(
+            id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: existing.label,
+            runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget, sessionKey: existing.sessionKey,
+            claimedLauncherID: existing.claimedLauncherID, claimedLauncherName: existing.claimedLauncherName, status: status,
+            createdAt: existing.createdAt, updatedAt: now)
+        try store.upsertAgentWindow(updated)
+        appendAgentSessionEvent(
+            agentSessionID: updated.id, eventType: eventType, source: eventSource,
+            message: agentSessionEventMessage(
+                provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID,
+                terminalNativeID: terminalNativeID ?? updated.terminalNativeID, codexThreadID: updated.codexThreadID, yabaiWindowID: resolvedWindowID,
+                environmentKeys: environmentKeys), createdAt: now)
+        recordSignalForegroundIdentityIfAvailable(agent: updated, eventSource: eventSource, createdAt: now)
+        return updated
     }
 
     public func focusAgentWindow(_ record: AgentWindowRecord) throws {

@@ -549,6 +549,94 @@ final class MXCommandTests: XCTestCase {
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
     }
 
+    func testSignalExitIgnoresTrackedSpacesTerminalWithoutAgentRow() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dbPath = directory.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let workspace = try makeWorkspace(store: store)
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+
+        var output = ""
+        try withAgentSignalEnvironment(dbPath: dbPath, sessionID: "signal-exit-without-agent") {
+            try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+                output = try captureStandardOutput {
+                    let command = try SignalCommand.parse(["exit", workspace.dir])
+                    try command.run()
+                }
+            }
+        }
+
+        XCTAssertTrue(output.contains("Ignored agent exit: no active agent row"))
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+    }
+
+    func testSignalExitReportsRecordedWhenAdHocAgentRowIsDeleted() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dbPath = directory.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let workspace = try makeWorkspace(store: store)
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+        let sessionID = "signal-exit-deletes-agent"
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, terminalNativeID: sessionID, status: .done)
+
+        var output = ""
+        try withAgentSignalEnvironment(dbPath: dbPath, sessionID: sessionID) {
+            try withMockCommands(["yabai": Self.failingYabaiMock]) {
+                output = try captureStandardOutput {
+                    let command = try SignalCommand.parse(["exit", workspace.dir])
+                    try command.run()
+                }
+            }
+        }
+
+        XCTAssertTrue(output.contains("Agent exit: workspace=\(workspace.id)"))
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+    }
+
+    func testSignalExitDeletesAdHocAgentWhenRuntimeLabelMatchesConfiguredLauncher() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dbPath = directory.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let workspace = try makeWorkspace(store: store)
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
+        let sessionID = "signal-exit-runtime-label-reserved-by-launcher"
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let adHocAgent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, terminalNativeID: sessionID, status: .done)
+        XCTAssertEqual(adHocAgent.label, "Codex-2")
+        XCTAssertNil(adHocAgent.claimedLauncherName)
+
+        var output = ""
+        try withAgentSignalEnvironment(dbPath: dbPath, sessionID: sessionID) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "shell", workingDirectory: workspace.dir, shell: "/bin/zsh", command: nil,
+                    createdAt: "2026-06-06T00:00:00Z", workspaceID: workspace.id, kind: .shell), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:01Z", title: "shell", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex"), paths: paths)
+            try withMockCommands(["yabai": Self.failingYabaiMock]) {
+                output = try captureStandardOutput {
+                    let command = try SignalCommand.parse(["exit", workspace.dir])
+                    try command.run()
+                }
+            }
+        }
+
+        XCTAssertTrue(output.contains("Agent exit: workspace=\(workspace.id)"))
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+    }
+
     func testSignalStartUpdatesExistingAgentRow() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -661,6 +749,44 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(agent.terminalTrackingID, sessionID)
     }
 
+    func testSignalStartRefreshesStaleExistingLabelFromRuntimeAgent() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dbPath = directory.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let workspace = try makeWorkspace(store: store)
+        try FileManager.default.createDirectory(atPath: workspace.dir, withIntermediateDirectories: true)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let sessionID = "signal-start-stale-label-runtime-agent"
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, terminalNativeID: sessionID, status: .idle)
+
+        try withAgentSignalEnvironment(dbPath: dbPath, sessionID: sessionID) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "shell", workingDirectory: workspace.dir, shell: "/bin/zsh", command: nil,
+                    createdAt: "2026-06-06T00:00:00Z", workspaceID: workspace.id, kind: .shell), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:01Z", title: "shell", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/claude", foregroundExecutableName: "claude", foregroundArgv: ["claude"],
+                    foregroundDetectedAgentKind: .claude, foregroundDisplayLabel: "Claude", foregroundDisplayCommand: "claude"), paths: paths)
+            try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+                _ = try captureStandardOutput {
+                    let command = try SignalCommand.parse(["start", workspace.dir])
+                    try command.run()
+                }
+            }
+        }
+
+        let agent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(agent.label, "Claude")
+        XCTAssertEqual(agent.status, .spinning)
+        XCTAssertEqual(agent.terminalTrackingID, sessionID)
+    }
+
     private func makeTemporaryStore() throws -> SQLiteStore {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -703,6 +829,11 @@ final class MXCommandTests: XCTestCase {
           echo '{"id":106482,"pid":123,"app":"Ghostty","title":"✳ Claude Code","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}'
           exit 0
         fi
+        exit 1
+        """
+
+    private static let failingYabaiMock = """
+        #!/bin/bash
         exit 1
         """
 
