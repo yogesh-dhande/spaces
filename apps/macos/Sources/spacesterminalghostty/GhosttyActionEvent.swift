@@ -2,8 +2,24 @@ import Foundation
 import GhosttyKit
 
 public enum GhosttyActionEvent: Sendable, Equatable {
+    public enum OpenURLKind: Sendable, Equatable {
+        case unknown
+        case text
+        case html
+
+        init(_ kind: ghostty_action_open_url_kind_e) {
+            switch kind {
+            case GHOSTTY_ACTION_OPEN_URL_KIND_TEXT: self = .text
+            case GHOSTTY_ACTION_OPEN_URL_KIND_HTML: self = .html
+            default: self = .unknown
+            }
+        }
+    }
+
     case setTitle(String)
     case setWorkingDirectory(String)
+    case openURL(kind: OpenURLKind, value: String)
+    case mouseOverLink(String?)
     case startSearch(String?)
     case endSearch
     case searchTotal(Int?)
@@ -19,6 +35,14 @@ enum GhosttyActionEventParser {
         case GHOSTTY_ACTION_PWD:
             guard let pwd = action.action.pwd.pwd else { return nil }
             return .setWorkingDirectory(String(cString: pwd))
+        case GHOSTTY_ACTION_OPEN_URL:
+            let openURL = action.action.open_url
+            guard let value = string(pointer: openURL.url, count: Int(openURL.len)), !value.isEmpty else { return nil }
+            return .openURL(kind: GhosttyActionEvent.OpenURLKind(openURL.kind), value: value)
+        case GHOSTTY_ACTION_MOUSE_OVER_LINK:
+            let link = action.action.mouse_over_link
+            guard link.len > 0 else { return .mouseOverLink(nil) }
+            return .mouseOverLink(string(pointer: link.url, count: link.len))
         case GHOSTTY_ACTION_START_SEARCH:
             guard let needle = action.action.start_search.needle else { return .startSearch(nil) }
             let value = String(cString: needle)
@@ -32,5 +56,11 @@ enum GhosttyActionEventParser {
             return .searchSelected(selected >= 0 ? Int(selected) : nil)
         default: return nil
         }
+    }
+
+    private static func string(pointer: UnsafePointer<CChar>?, count: Int) -> String? {
+        guard let pointer, count > 0 else { return nil }
+        let data = Data(bytes: pointer, count: count)
+        return String(data: data, encoding: .utf8)
     }
 }

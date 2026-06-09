@@ -335,6 +335,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let windowTitle: String?
         let rendererSummary: String?
         let renderedOutput: String?
+        let visibleSurfaceOutput: String?
         let summary: String?
         let state: String?
         let showsTerminalSurface: Bool?
@@ -891,8 +892,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let debugState = controller?.debugStateDump()
         let payload = TerminalSessionWindowStateDump(
             sessionID: sessionID, requestedMode: requestedMode, found: controller != nil, windowTitle: debugState?.windowTitle,
-            rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput, summary: debugState?.summary,
-            state: debugState?.state, showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
+            rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput,
+            visibleSurfaceOutput: debugState?.visibleSurfaceOutput, summary: debugState?.summary, state: debugState?.state,
+            showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
             didClose: debugState?.didCloseWindow, surfaceColumns: debugState?.surfaceColumns, surfaceRows: debugState?.surfaceRows,
             windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
             searchVisible: debugState?.searchVisible, searchQuery: debugState?.searchQuery, searchTotal: debugState?.searchTotal,

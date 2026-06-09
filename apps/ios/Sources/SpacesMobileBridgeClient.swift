@@ -422,6 +422,52 @@ struct SpacesMobileBridgeClient: Sendable {
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
     }
 
+    func resolveTerminalLink(
+        sessionID: String,
+        link: String,
+        timeout: Duration = .seconds(6),
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileTerminalLinkMetadata {
+        let request = SpacesMobileBridgeRequest(
+            command: "resolveTerminalLink",
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity,
+            sessionID: sessionID,
+            terminalLink: link
+        )
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+        guard let metadata = response.terminalLinkMetadata else {
+            throw SpacesMobileBridgeClientError.requestFailed("The mobile bridge did not return terminal link metadata.")
+        }
+        return metadata
+    }
+
+    func readTerminalLinkChunk(
+        sessionID: String,
+        linkID: String,
+        offset: Int64,
+        limit: Int,
+        timeout: Duration = .seconds(6),
+        commandChannel: SpacesMobileBridgeCommandChannel? = nil
+    ) async throws -> SpacesMobileTerminalLinkChunk {
+        let request = SpacesMobileBridgeRequest(
+            command: "readTerminalLinkChunk",
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity,
+            sessionID: sessionID,
+            terminalLinkID: linkID,
+            chunkOffset: offset,
+            chunkLimit: limit
+        )
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+        guard let chunk = response.terminalLinkChunk else {
+            throw SpacesMobileBridgeClientError.requestFailed("The mobile bridge did not return terminal link data.")
+        }
+        return chunk
+    }
+
     func subscribe(
         sessionID: String,
         clientID: String,
@@ -541,7 +587,24 @@ actor SpacesMobileBridgeCommandChannel {
                 scrollHorizontal: request.scrollHorizontal,
                 scrollVertical: request.scrollVertical,
                 scrollMods: request.scrollMods,
-                appendNewline: request.appendNewline
+                appendNewline: request.appendNewline,
+                projectID: request.projectID,
+                workspaceID: request.workspaceID,
+                workspaceTitle: request.workspaceTitle,
+                branch: request.branch,
+                targetBranch: request.targetBranch,
+                directoryName: request.directoryName,
+                allowExistingBranchReuse: request.allowExistingBranchReuse,
+                processKey: request.processKey,
+                processID: request.processID,
+                processTemplateID: request.processTemplateID,
+                agentName: request.agentName,
+                agentID: request.agentID,
+                agentLauncherID: request.agentLauncherID,
+                terminalLink: request.terminalLink,
+                terminalLinkID: request.terminalLinkID,
+                chunkOffset: request.chunkOffset,
+                chunkLimit: request.chunkLimit
             )
         }
         let connection = try await connectIfNeeded(timeout: timeout)

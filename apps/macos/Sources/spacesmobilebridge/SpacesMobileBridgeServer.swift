@@ -20,6 +20,7 @@ extension SpacesMobilePairingStore: SpacesMobilePairingStoreProtocol {}
 public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll"]
     private static let streamRelayReadBufferSize = 256 * 1024
+    private static let defaultTerminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
 
     private struct NetworkShaper: Sendable {
         static let profileEnvironmentKey = "SPACES_MOBILE_BRIDGE_NETWORK_PROFILE"
@@ -146,6 +147,12 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         let heartbeatTimer: DispatchSourceTimer?
         let connection: NWConnection
         let sendSequencer: StreamSendSequencer
+    }
+
+    private struct TerminalLinkTransferAuthorization: Sendable {
+        let sessionID: String
+        let resolvedPath: String
+        let expiresAt: Date
     }
 
     private final class StreamSendSequencer: @unchecked Sendable {
@@ -311,12 +318,14 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private let queueKey = DispatchSpecificKey<Void>()
     private let stateLock = NSLock()
     private let networkShaper: NetworkShaper
+    private let terminalLinkTransferAuthorizationTTL: TimeInterval
     private let traceEnabled = ProcessInfo.processInfo.environment["SPACES_MOBILE_BRIDGE_TRACE"] == "1"
 
     private var listener: NWListener?
     private var requestConnections: [ObjectIdentifier: RequestConnection] = [:]
     private var streamRelays: [ObjectIdentifier: StreamRelay] = [:]
     private var streamRelaysClosingAfterFinalSend: Set<ObjectIdentifier> = []
+    private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var running = false
     private var acceptingRequests = false
 
@@ -332,6 +341,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         launchSpacesAppHandler = nil
         if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesMobilePairingStore() }
         networkShaper = NetworkShaper()
+        terminalLinkTransferAuthorizationTTL = Self.defaultTerminalLinkTransferAuthorizationTTL
         queue = DispatchQueue(label: "spaces.mobile.bridge")
         queue.setSpecific(key: queueKey, value: ())
     }
@@ -340,7 +350,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         host: String, port: Int, transportKey: String, pairingCoordinator: SpacesMobilePairingCoordinator = SpacesMobilePairingCoordinator(),
         pairingStoreProtocol: any SpacesMobilePairingStoreProtocol, onPairingSucceeded: (@Sendable (SpacesMobileClientApp) -> Void)? = nil,
         networkEnvironment: [String: String] = ProcessInfo.processInfo.environment,
-        launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)? = nil
+        launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)? = nil,
+        terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesMobileBridgeServer.defaultTerminalLinkTransferAuthorizationTTL
     ) {
         self.host = host
         self.port = port
@@ -350,6 +361,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         self.onPairingSucceeded = onPairingSucceeded
         self.launchSpacesAppHandler = launchSpacesAppHandler
         networkShaper = NetworkShaper(environment: networkEnvironment)
+        self.terminalLinkTransferAuthorizationTTL = terminalLinkTransferAuthorizationTTL
         queue = DispatchQueue(label: "spaces.mobile.bridge")
         queue.setSpecific(key: queueKey, value: ())
     }
@@ -366,6 +378,11 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     var requestConnectionCountForTesting: Int {
         if DispatchQueue.getSpecific(key: queueKey) != nil { return requestConnections.count }
         return queue.sync { requestConnections.count }
+    }
+
+    func terminalLinkTransferAuthorizationExpirationForTesting(linkID: String) -> Date? {
+        if DispatchQueue.getSpecific(key: queueKey) != nil { return terminalLinkTransferAuthorizations[linkID]?.expiresAt }
+        return queue.sync { terminalLinkTransferAuthorizations[linkID]?.expiresAt }
     }
 
     public func start(timeout: TimeInterval = 5) throws {
@@ -505,6 +522,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         case "clearScreen": return try handleTerminalControlRequest(request, command: "clearScreen")
         case "resize": return try handleTerminalControlRequest(request, command: "resize")
         case "scroll": return try handleTerminalControlRequest(request, command: "scroll")
+        case "resolveTerminalLink": return try handleResolveTerminalLinkRequest(request)
+        case "readTerminalLinkChunk": return try handleReadTerminalLinkChunkRequest(request)
         default: return SpacesMobileBridgeResponse(ok: false, message: "Unsupported mobile bridge command '\(request.command)'.")
         }
     }
@@ -893,6 +912,83 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         return SpacesMobileBridgeResponse(ok: true, message: "Loaded terminal state.", sessionState: payload)
     }
 
+    private func handleResolveTerminalLinkRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let sessionID = normalizedString(request.sessionID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing session ID.")
+        }
+        pruneTerminalLinkTransferAuthorizations(now: Date())
+        let metadata: SpacesMobileTerminalLinkMetadata
+        if canResolveTerminalLinkWithoutLocalState(request.terminalLink) {
+            metadata = try SpacesMobileTerminalLinkResolver.resolve(
+                sessionID: sessionID, link: request.terminalLink, workingDirectory: nil, workspaceRoots: [])
+        } else {
+            let workspaceRoots = try loadWorkspaceRoots()
+            metadata = try SpacesMobileTerminalLinkResolver.resolve(
+                sessionID: sessionID, link: request.terminalLink, workingDirectory: terminalWorkingDirectory(sessionID: sessionID),
+                workspaceRoots: workspaceRoots)
+        }
+        if metadata.source == .localFile {
+            let resolvedPath = try SpacesMobileTerminalLinkResolver.resolvedLocalFilePath(linkID: metadata.id)
+            authorizeTerminalLinkTransfer(linkID: metadata.id, sessionID: sessionID, resolvedPath: resolvedPath, now: Date())
+        }
+        return SpacesMobileBridgeResponse(ok: true, message: "Resolved terminal link.", terminalLinkMetadata: metadata)
+    }
+
+    private func handleReadTerminalLinkChunkRequest(_ request: SpacesMobileBridgeRequest) throws -> SpacesMobileBridgeResponse {
+        guard let sessionID = normalizedString(request.sessionID) else {
+            return SpacesMobileBridgeResponse(ok: false, message: "Missing session ID.")
+        }
+        guard let linkID = normalizedString(request.terminalLinkID) else { throw SpacesMobileTerminalLinkResolverError.invalidLinkID }
+        guard let authorization = try terminalLinkTransferAuthorization(linkID: linkID, sessionID: sessionID, now: Date()) else {
+            throw SpacesMobileTerminalLinkResolverError.invalidLinkID
+        }
+        let chunk = try SpacesMobileTerminalLinkResolver.readChunk(
+            sessionID: sessionID, linkID: linkID, offset: request.chunkOffset, limit: request.chunkLimit, workspaceRoots: [authorization.resolvedPath]
+        )
+        authorizeTerminalLinkTransfer(linkID: linkID, sessionID: sessionID, resolvedPath: authorization.resolvedPath, now: Date())
+        return SpacesMobileBridgeResponse(ok: true, message: "Read terminal link chunk.", terminalLinkChunk: chunk)
+    }
+
+    private func authorizeTerminalLinkTransfer(linkID: String, sessionID: String, resolvedPath: String, now: Date) {
+        terminalLinkTransferAuthorizations[linkID] = TerminalLinkTransferAuthorization(
+            sessionID: sessionID, resolvedPath: resolvedPath, expiresAt: now.addingTimeInterval(terminalLinkTransferAuthorizationTTL))
+    }
+
+    private func terminalLinkTransferAuthorization(linkID: String, sessionID: String, now: Date) throws -> TerminalLinkTransferAuthorization? {
+        pruneTerminalLinkTransferAuthorizations(now: now)
+        guard let authorization = terminalLinkTransferAuthorizations[linkID] else { return nil }
+        guard authorization.sessionID == sessionID else { throw SpacesMobileTerminalLinkResolverError.sessionMismatch }
+        return authorization
+    }
+
+    private func pruneTerminalLinkTransferAuthorizations(now: Date) {
+        terminalLinkTransferAuthorizations = terminalLinkTransferAuthorizations.filter { $0.value.expiresAt > now }
+    }
+
+    private func canResolveTerminalLinkWithoutLocalState(_ value: String?) -> Bool {
+        guard let link = normalizedString(value), let scheme = URL(string: link)?.scheme?.lowercased() else { return false }
+        return scheme != "file"
+    }
+
+    private func terminalWorkingDirectory(sessionID: String) throws -> String {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        if let workingDirectory = normalizedString((try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.workingDirectory) {
+            return workingDirectory
+        }
+        return try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).workingDirectory
+    }
+
+    private func loadWorkspaceRoots() throws -> [String] {
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let projects = try store.projects()
+        var roots = Set(projects.map(\.dir))
+        for project in projects {
+            let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+            roots.formUnion(workspaces.map(\.dir))
+        }
+        return Array(roots)
+    }
+
     private func handleSubscribeRequest(_ request: SpacesMobileBridgeRequest, connection: NWConnection) throws {
         guard let sessionID = request.sessionID else {
             sendResponse(SpacesMobileBridgeResponse(ok: false, message: "Missing session ID."), to: connection) { _ in connection.cancel() }
@@ -1148,6 +1244,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         for relay in Array(streamRelays.values) { closeStreamRelay(connection: relay.connection) }
         for connection in Array(requestConnections.values.map(\.connection)) { connection.cancel() }
         requestConnections.removeAll()
+        terminalLinkTransferAuthorizations.removeAll()
         listener?.stateUpdateHandler = nil
         listener?.newConnectionHandler = nil
         listener?.cancel()

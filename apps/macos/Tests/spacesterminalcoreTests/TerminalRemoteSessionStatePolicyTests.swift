@@ -29,7 +29,7 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.output, ownerKind: .remoteViewer))
         XCTAssertTrue(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.stateChange, ownerKind: .localWindow))
-        XCTAssertFalse(
+        XCTAssertTrue(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.stateChange, ownerKind: .remoteViewer))
         XCTAssertTrue(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.resize, ownerKind: .remoteViewer))

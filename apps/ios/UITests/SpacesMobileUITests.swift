@@ -36,6 +36,10 @@ final class SpacesMobileUITests: XCTestCase {
         try runTerminalTakeOverScenario()
     }
 
+    func testTerminalTapLocalImagePathOpensPreview() throws {
+        try runTerminalLinkPreviewScenario()
+    }
+
     func testAttachedAppConfigurationDoesNotRequireTransportKey() throws {
         let configURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: false)
         defer { try? FileManager.default.removeItem(at: configURL) }
@@ -211,6 +215,7 @@ final class SpacesMobileUITests: XCTestCase {
 
         try takeOverSessionFromList(
             in: app,
+            configuration: configuration,
             sessionID: configuration.sessionID,
             timeout: 20,
             context: "interrupt primary"
@@ -251,7 +256,13 @@ final class SpacesMobileUITests: XCTestCase {
 
         guard let secondarySessionID = configuration.secondarySessionID else { return }
         try returnToTerminalList(in: app)
-        try takeOverSessionFromList(in: app, sessionID: secondarySessionID, timeout: 20, context: "post-interrupt secondary")
+        try takeOverSessionFromList(
+            in: app,
+            configuration: configuration,
+            sessionID: secondarySessionID,
+            timeout: 20,
+            context: "post-interrupt secondary"
+        )
         let secondaryDetail = app.descendants(matching: .any)["terminal.detail.\(secondarySessionID)"]
         XCTAssertTrue(secondaryDetail.exists, "Secondary terminal detail disappeared after primary interrupt")
         XCTAssertFalse(app.staticTexts["This terminal session ended before a final render was available."].exists)
@@ -267,6 +278,36 @@ final class SpacesMobileUITests: XCTestCase {
             )
         }
         captureScreenshot(app, name: "post-interrupt-secondary-live", filePath: configuration.finalScreenshotPath)
+    }
+
+    private func runTerminalLinkPreviewScenario() throws {
+        let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
+        let app = launchConfiguredApp(configuration)
+        XCUIDevice.shared.orientation = .portrait
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+
+        try takeOverSessionFromList(
+            in: app,
+            configuration: configuration,
+            sessionID: configuration.sessionID,
+            timeout: 20,
+            context: "terminal link preview"
+        )
+        let linkText = configuration.terminalLinkText
+        XCTAssertFalse(linkText.isEmpty, "Missing terminal link text in UI test configuration")
+        XCTAssertTrue(
+            tapTerminalText(linkText, in: app, configuration: configuration, timeout: 20),
+            "Unable to tap terminal text \(linkText)"
+        )
+        XCTAssertTrue(
+            waitForE2EEvent(configuration: configuration, kind: "open_link", detailContains: linkText, timeout: 10),
+            "The terminal did not report opening \(linkText)"
+        )
+        XCTAssertTrue(
+            waitForLinkPreview(in: app, configuration: configuration, title: configuration.expectedLinkPreviewTitle, timeout: 20),
+            "The terminal link preview did not appear for \(linkText). \(previewStateDescription(configuration: configuration))"
+        )
+        captureScreenshot(app, name: "terminal-link-preview", filePath: configuration.linkPreviewScreenshotPath)
     }
 
     private func launchConfiguredApp(_ configuration: UITestConfiguration) -> XCUIApplication {
@@ -355,9 +396,114 @@ final class SpacesMobileUITests: XCTestCase {
     }
 
     private func terminalSurfaceElement(in app: XCUIApplication) -> XCUIElement? {
-        let surface = app.otherElements["terminal.surface"]
+        let surface = app.otherElements["terminal.surface"].firstMatch
         guard surface.exists, surface.frame.width > 1, surface.frame.height > 1 else { return nil }
         return surface
+    }
+
+    private func tapTerminalText(
+        _ target: String,
+        in app: XCUIApplication,
+        configuration: UITestConfiguration,
+        timeout: TimeInterval
+    ) -> Bool {
+        guard let dump = waitForRenderDump(configuration: configuration, timeout: timeout, predicate: { dump in
+            isOwnerReady(dump, expectedSessionID: configuration.sessionID) && dump.renderedText.contains(target)
+        }) else { return false }
+        let lines = dump.renderedText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let columns = dump.viewportColumns, columns > 0 else { return false }
+        let configuredRows = dump.viewportRows ?? lines.count
+        let rows = min(max(configuredRows, 1), max(lines.count, 1))
+        for (row, line) in lines.enumerated() where row < rows {
+            guard let range = line.range(of: target) else { continue }
+            let column = line.distance(from: line.startIndex, to: range.lowerBound)
+            let targetColumns = max(line.distance(from: range.lowerBound, to: range.upperBound), 1)
+            let tapColumn = min(Double(column) + Double(targetColumns) / 2, Double(columns) - 0.5)
+            let normalizedX = min(max(tapColumn / Double(columns), 0.01), 0.99)
+            let normalizedY = min(max((Double(row) + 0.5) / Double(rows), 0.01), 0.99)
+            if let surface = terminalSurfaceElement(in: app) {
+                surface.coordinate(withNormalizedOffset: CGVector(dx: normalizedX, dy: normalizedY)).tap()
+                return true
+            }
+            return tapTerminalSurfaceFallback(
+                in: app,
+                configuration: configuration,
+                normalizedX: normalizedX,
+                normalizedY: normalizedY
+            )
+        }
+        return false
+    }
+
+    private func tapTerminalSurfaceFallback(
+        in app: XCUIApplication,
+        configuration: UITestConfiguration,
+        normalizedX: Double,
+        normalizedY: Double
+    ) -> Bool {
+        let appFrame = app.frame
+        guard appFrame.width > 1, appFrame.height > 1 else { return false }
+
+        let terminalTextView = app.textViews.firstMatch
+        var frame =
+            terminalTextView.exists && terminalTextView.frame.width > 1 && terminalTextView.frame.height > 1
+            ? terminalTextView.frame
+            : appFrame
+        if frame == appFrame {
+            let ownerBadge = app.otherElements["terminal.ownerBadge"]
+            let ownerText = app.staticTexts["Owner"]
+            let chromeBottom = [ownerBadge, ownerText]
+                .filter { $0.exists && $0.frame.height > 1 }
+                .map(\.frame.maxY)
+                .max()
+            let terminalTop = max(chromeBottom.map { $0 + 8 } ?? (frame.minY + 48), frame.minY)
+            if terminalTop < frame.maxY - 1 {
+                frame = CGRect(x: frame.minX, y: terminalTop, width: frame.width, height: frame.maxY - terminalTop)
+            }
+        }
+
+        guard frame.width > 1, frame.height > 1 else { return false }
+        let point = CGPoint(
+            x: frame.minX + CGFloat(normalizedX) * frame.width,
+            y: frame.minY + CGFloat(normalizedY) * frame.height
+        )
+        let offset = CGVector(dx: point.x - appFrame.minX, dy: point.y - appFrame.minY)
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0)).withOffset(offset).tap()
+        return true
+    }
+
+    private func waitForLinkPreview(
+        in app: XCUIApplication,
+        configuration: UITestConfiguration,
+        title: String,
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if hasVisibleLinkPreview(in: app, title: title) { return true }
+            if let dump = latestRenderDump(configuration: configuration) {
+                if dump.hasLinkPreview(title: title, mediaKind: "image") { return true }
+                if dump.hasLinkPreviewError, !hasVisibleLinkPreview(in: app, title: title) { return false }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        if hasVisibleLinkPreview(in: app, title: title) { return true }
+        guard let dump = latestRenderDump(configuration: configuration) else { return false }
+        return dump.hasLinkPreview(title: title, mediaKind: "image")
+    }
+
+    private func hasVisibleLinkPreview(in app: XCUIApplication, title: String) -> Bool {
+        app.descendants(matching: .any)["terminal.linkPreview"].exists
+            || (!title.isEmpty && app.navigationBars[title].exists)
+            || app.buttons["Open In"].exists
+    }
+
+    private func previewStateDescription(configuration: UITestConfiguration) -> String {
+        guard let dump = latestRenderDump(configuration: configuration) else { return "No render dump was available." }
+        if let error = dump.linkPreviewErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
+            return "Preview error: \(error)"
+        }
+        return "Latest preview state: preparing=\(dump.isPreparingLinkPreview) title=\(dump.linkPreviewTitle ?? "") mediaKind=\(dump.linkPreviewMediaKind ?? "")."
     }
 
     private static func terminalSurfaceInkMetrics(from pngData: Data, isFullAppScreenshot: Bool) -> TerminalSurfaceInkMetrics? {
@@ -437,6 +583,7 @@ final class SpacesMobileUITests: XCTestCase {
             try returnToTerminalList(in: app)
             try takeOverSessionFromList(
                 in: app,
+                configuration: configuration,
                 sessionID: sessionID,
                 timeout: 20,
                 context: "list cycle \(index + 1)"
@@ -481,6 +628,7 @@ final class SpacesMobileUITests: XCTestCase {
 
     private func takeOverSessionFromList(
         in app: XCUIApplication,
+        configuration: UITestConfiguration,
         sessionID: String,
         timeout: TimeInterval,
         context: String
@@ -501,8 +649,17 @@ final class SpacesMobileUITests: XCTestCase {
             XCTFail("Timed out waiting for owner state after taking over session \(sessionID) during \(context)")
             return
         }
-        XCTAssertTrue(waitForOwnerReadyState(in: app, timeout: 10), "Owner-ready badge did not return promptly after taking over session \(sessionID) during \(context)")
-        assertOwnerReadyStable(in: app, duration: 1, context: "after taking over session \(sessionID) during \(context)")
+        XCTAssertTrue(
+            waitForOwnerReadyState(in: app, configuration: configuration, sessionID: sessionID, timeout: 10),
+            "Owner-ready state did not return promptly after taking over session \(sessionID) during \(context)"
+        )
+        assertOwnerReadyStable(
+            in: app,
+            configuration: configuration,
+            sessionID: sessionID,
+            duration: 1,
+            context: "after taking over session \(sessionID) during \(context)"
+        )
     }
 
     private func performScrollback(in app: XCUIApplication, configuration: UITestConfiguration) {
@@ -575,11 +732,13 @@ final class SpacesMobileUITests: XCTestCase {
     private func waitForOwnerState(
         in app: XCUIApplication,
         configuration: UITestConfiguration,
+        sessionID: String? = nil,
         timeout: TimeInterval
     ) -> Bool {
+        let expectedSessionID = sessionID ?? configuration.sessionID
         if configuration.renderDumpPath != nil {
             return waitForRenderDump(configuration: configuration, timeout: timeout) { dump in
-                dump.sessionID == configuration.sessionID
+                dump.sessionID == expectedSessionID
                     && dump.isOwner
                     && (dump.showsTerminalSurface || dump.renderMode.hasPrefix("owner") || dump.renderMode == "ghostty-mirror")
             } != nil
@@ -601,11 +760,13 @@ final class SpacesMobileUITests: XCTestCase {
     private func waitForOwnerReadyState(
         in app: XCUIApplication,
         configuration: UITestConfiguration,
+        sessionID: String? = nil,
         timeout: TimeInterval
     ) -> Bool {
+        let expectedSessionID = sessionID ?? configuration.sessionID
         if configuration.renderDumpPath != nil {
             return waitForRenderDump(configuration: configuration, timeout: timeout) { dump in
-                isOwnerReady(dump, configuration: configuration)
+                isOwnerReady(dump, expectedSessionID: expectedSessionID)
             } != nil
         }
         return waitForOwnerReadyState(in: app, timeout: timeout)
@@ -623,6 +784,7 @@ final class SpacesMobileUITests: XCTestCase {
     private func assertOwnerReadyStable(
         in app: XCUIApplication,
         configuration: UITestConfiguration,
+        sessionID: String? = nil,
         duration: TimeInterval,
         context: String
     ) {
@@ -630,13 +792,14 @@ final class SpacesMobileUITests: XCTestCase {
             assertOwnerReadyStable(in: app, duration: duration, context: context)
             return
         }
+        let expectedSessionID = sessionID ?? configuration.sessionID
         let deadline = Date().addingTimeInterval(duration)
         while Date() < deadline {
             guard let dump = latestRenderDump(configuration: configuration) else {
                 XCTFail("Missing render dump \(context)")
                 return
             }
-            XCTAssertTrue(isOwnerReady(dump, configuration: configuration), "Owner-ready render dump regressed \(context): \(dump)")
+            XCTAssertTrue(isOwnerReady(dump, expectedSessionID: expectedSessionID), "Owner-ready render dump regressed \(context): \(dump)")
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
     }
@@ -682,8 +845,8 @@ final class SpacesMobileUITests: XCTestCase {
         return try? JSONDecoder().decode(UITestRenderDump.self, from: data)
     }
 
-    private func isOwnerReady(_ dump: UITestRenderDump, configuration: UITestConfiguration) -> Bool {
-        dump.sessionID == configuration.sessionID
+    private func isOwnerReady(_ dump: UITestRenderDump, expectedSessionID: String) -> Bool {
+        dump.sessionID == expectedSessionID
             && dump.isOwner
             && dump.showsTerminalSurface
             && dump.isInputSurfaceReady
@@ -832,6 +995,9 @@ private struct UITestConfiguration: Decodable {
     let finalMacRetakeoverObservedPath: String?
     let postFinalMacRetakeoverScreenshotPath: String?
     let finalScreenshotPath: String?
+    let terminalLinkText: String
+    let expectedLinkPreviewTitle: String
+    let linkPreviewScreenshotPath: String?
     let expectedInterruptedText: String
     let expectedSecondaryText: String
     let scrollbackSwipeCount: Int
@@ -876,6 +1042,9 @@ private struct UITestConfiguration: Decodable {
         case finalMacRetakeoverObservedPath
         case postFinalMacRetakeoverScreenshotPath
         case finalScreenshotPath
+        case terminalLinkText
+        case expectedLinkPreviewTitle
+        case linkPreviewScreenshotPath
         case expectedInterruptedText
         case expectedSecondaryText
         case scrollbackSwipeCount
@@ -927,6 +1096,9 @@ private struct UITestConfiguration: Decodable {
         finalMacRetakeoverObservedPath = try container.decodeIfPresent(String.self, forKey: .finalMacRetakeoverObservedPath)
         postFinalMacRetakeoverScreenshotPath = try container.decodeIfPresent(String.self, forKey: .postFinalMacRetakeoverScreenshotPath)
         finalScreenshotPath = try container.decodeIfPresent(String.self, forKey: .finalScreenshotPath)
+        terminalLinkText = try container.decodeIfPresent(String.self, forKey: .terminalLinkText) ?? ""
+        expectedLinkPreviewTitle = try container.decodeIfPresent(String.self, forKey: .expectedLinkPreviewTitle) ?? terminalLinkText
+        linkPreviewScreenshotPath = try container.decodeIfPresent(String.self, forKey: .linkPreviewScreenshotPath)
         expectedInterruptedText = try container.decodeIfPresent(String.self, forKey: .expectedInterruptedText) ?? ""
         expectedSecondaryText = try container.decodeIfPresent(String.self, forKey: .expectedSecondaryText) ?? ""
         scrollbackSwipeCount = try container.decodeIfPresent(Int.self, forKey: .scrollbackSwipeCount) ?? 0
@@ -970,8 +1142,14 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
     let isBusy: Bool
     let isPreparingInput: Bool
     let isInputSurfaceReady: Bool
+    let viewportColumns: Int?
+    let viewportRows: Int?
     let snapshotText: String?
     let errorMessage: String?
+    let isPreparingLinkPreview: Bool
+    let linkPreviewTitle: String?
+    let linkPreviewMediaKind: String?
+    let linkPreviewErrorMessage: String?
     let visibleText: String
     let renderedText: String
     let renderStateKey: String
@@ -984,8 +1162,14 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         case isBusy
         case isPreparingInput
         case isInputSurfaceReady
+        case viewportColumns
+        case viewportRows
         case snapshotText
         case errorMessage
+        case isPreparingLinkPreview
+        case linkPreviewTitle
+        case linkPreviewMediaKind
+        case linkPreviewErrorMessage
         case visibleText
         case renderedText
         case renderStateKey
@@ -1000,8 +1184,14 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         isBusy = try container.decode(Bool.self, forKey: .isBusy)
         isPreparingInput = try container.decode(Bool.self, forKey: .isPreparingInput)
         isInputSurfaceReady = try container.decode(Bool.self, forKey: .isInputSurfaceReady)
+        viewportColumns = try container.decodeIfPresent(Int.self, forKey: .viewportColumns)
+        viewportRows = try container.decodeIfPresent(Int.self, forKey: .viewportRows)
         snapshotText = try container.decodeIfPresent(String.self, forKey: .snapshotText)
         errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
+        isPreparingLinkPreview = try container.decodeIfPresent(Bool.self, forKey: .isPreparingLinkPreview) ?? false
+        linkPreviewTitle = try container.decodeIfPresent(String.self, forKey: .linkPreviewTitle)
+        linkPreviewMediaKind = try container.decodeIfPresent(String.self, forKey: .linkPreviewMediaKind)
+        linkPreviewErrorMessage = try container.decodeIfPresent(String.self, forKey: .linkPreviewErrorMessage)
         visibleText = try container.decode(String.self, forKey: .visibleText)
         renderedText = try container.decode(String.self, forKey: .renderedText)
         renderStateKey = try container.decode(String.self, forKey: .renderStateKey)
@@ -1016,6 +1206,18 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         return !errorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    var hasLinkPreviewError: Bool {
+        guard let linkPreviewErrorMessage else { return false }
+        return !linkPreviewErrorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func hasLinkPreview(title expectedTitle: String, mediaKind expectedMediaKind: String) -> Bool {
+        guard !isPreparingLinkPreview else { return false }
+        guard linkPreviewMediaKind == expectedMediaKind else { return false }
+        guard let linkPreviewTitle else { return false }
+        return expectedTitle.isEmpty || linkPreviewTitle == expectedTitle
+    }
+
     var description: String {
         [
             "sessionID=\(sessionID)",
@@ -1025,7 +1227,12 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
             "isBusy=\(isBusy)",
             "isPreparingInput=\(isPreparingInput)",
             "isInputSurfaceReady=\(isInputSurfaceReady)",
+            "viewport=\(viewportColumns.map(String.init) ?? "?")x\(viewportRows.map(String.init) ?? "?")",
             "errorMessage=\(errorMessage ?? "")",
+            "isPreparingLinkPreview=\(isPreparingLinkPreview)",
+            "linkPreviewTitle=\(linkPreviewTitle ?? "")",
+            "linkPreviewMediaKind=\(linkPreviewMediaKind ?? "")",
+            "linkPreviewErrorMessage=\(linkPreviewErrorMessage ?? "")",
             "visibleText=\(visibleText)",
             "snapshotTextLength=\(snapshotText?.count ?? 0)",
             "renderedTextLength=\(renderedText.count)",

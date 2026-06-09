@@ -21,7 +21,7 @@ public enum TerminalRemoteSessionStatePolicy {
             return ownerKind == .localWindow || ownerKind == .remoteViewer
         case TerminalRemoteSessionStateReason.resize: return ownerKind == .localWindow || ownerKind == .remoteViewer
         case TerminalRemoteSessionStateReason.output: return ownerKind == .localWindow || ownerKind == .remoteViewer
-        case TerminalRemoteSessionStateReason.stateChange: return ownerKind == .localWindow
+        case TerminalRemoteSessionStateReason.stateChange: return ownerKind == .localWindow || ownerKind == .remoteViewer
         case TerminalRemoteSessionStateReason.scroll: return true
         case TerminalRemoteSessionStateReason.clearScreen: return true
         case TerminalRemoteSessionStateReason.terminated: return true

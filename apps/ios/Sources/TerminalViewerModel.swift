@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 import Observation
 import UIKit
@@ -21,6 +22,17 @@ private enum TerminalViewerRenderMode: String {
     case ownerBootstrapping
     case ownerLive = "ghostty-mirror"
     case ended
+}
+
+private enum TerminalLinkPreviewRequestError: Error {
+    case stale
+}
+
+struct TerminalLinkPreview: Identifiable, Equatable {
+    let id: String
+    let url: URL
+    let title: String
+    let mediaKind: SpacesMobileTerminalLinkMediaKind
 }
 
 @MainActor @Observable final class TerminalViewerModel {
@@ -56,9 +68,17 @@ private enum TerminalViewerRenderMode: String {
             trace("error_message value=\(sanitizedTraceDetail(errorMessage ?? "nil"))")
         }
     }
+    var isPreparingLinkPreview = false
+    var linkPreviewErrorMessage: String?
+    var linkPreview: TerminalLinkPreview?
+    private var linkPreviewRequestGeneration: UInt64 = 0
+    @ObservationIgnored private var externalLinkPreviewDownloadTask: Task<URL, Error>?
 
     private let bridgeClient: SpacesMobileBridgeClient
     private var commandChannel: SpacesMobileBridgeCommandChannel
+    @ObservationIgnored private let openExternalURL: @MainActor (URL) -> Void
+    @ObservationIgnored private let remoteMediaDownloader: @Sendable (URL) async throws -> URL
+    @ObservationIgnored private let linkPreviewCacheDirectory: URL
     private let remoteClient: TerminalClient
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var streamHandle: SpacesMobileBridgeStreamHandle?
@@ -108,17 +128,28 @@ private enum TerminalViewerRenderMode: String {
     private static let postResizeStateSettleStep: Duration = .milliseconds(50)
     private static let postResizeStateSettleIterations = 6
     private static let dismissalDetachTimeout: Duration = .seconds(3)
+    private static let linkPreviewChunkLimit = 256 * 1024
 
     init(
         session: SpacesMobileTerminalSessionSummary,
         settings: SpacesMobileConnectionSettings,
-        onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void
+        onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
+        bridgeClient: SpacesMobileBridgeClient? = nil,
+        openExternalURL: @escaping @MainActor (URL) -> Void = { UIApplication.shared.open($0) },
+        remoteMediaDownloader: @escaping @Sendable (URL) async throws -> URL = TerminalViewerModel.defaultRemoteMediaDownloader,
+        linkPreviewCacheDirectory: URL? = nil
     ) {
         self.session = session
         self.settings = settings
         self.onAuthenticationRequired = onAuthenticationRequired
-        bridgeClient = SpacesMobileBridgeClient(settings: settings)
-        commandChannel = bridgeClient.makeCommandChannel()
+        let resolvedBridgeClient = bridgeClient ?? SpacesMobileBridgeClient(settings: settings)
+        self.bridgeClient = resolvedBridgeClient
+        commandChannel = resolvedBridgeClient.makeCommandChannel()
+        self.openExternalURL = openExternalURL
+        self.remoteMediaDownloader = remoteMediaDownloader
+        self.linkPreviewCacheDirectory =
+            linkPreviewCacheDirectory
+            ?? FileManager.default.temporaryDirectory.appendingPathComponent("SpacesTerminalLinkPreviews", isDirectory: true)
         remoteClient = TerminalClient(
             kind: .remoteViewer,
             identity: TerminalClientIdentity(
@@ -129,6 +160,34 @@ private enum TerminalViewerRenderMode: String {
             ),
             connectedAt: ISO8601DateFormatter().string(from: Date())
         )
+    }
+
+    nonisolated static func defaultRemoteMediaDownloader(_ url: URL) async throws -> URL {
+        let (downloadedURL, response) = try await URLSession.shared.download(from: url)
+        do {
+            return try validatedRemoteMediaDownloadURL(downloadedURL, response: response)
+        } catch {
+            try? FileManager.default.removeItem(at: downloadedURL)
+            throw error
+        }
+    }
+
+    nonisolated static func validatedRemoteMediaDownloadURL(_ downloadedURL: URL, response: URLResponse) throws -> URL {
+        guard response.url?.scheme?.lowercased() == "https" else {
+            throw SpacesMobileBridgeClientError.requestFailed("The media link redirected to a non-HTTPS URL.")
+        }
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SpacesMobileBridgeClientError.requestFailed("The media link did not return an HTTP response.")
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw SpacesMobileBridgeClientError.requestFailed("The media link returned HTTP status \(httpResponse.statusCode).")
+        }
+        guard let mimeType = httpResponse.mimeType?.trimmingCharacters(in: .whitespacesAndNewlines), !mimeType.isEmpty,
+            SpacesMobileTerminalLinkClassifier.mediaKind(contentType: mimeType, pathExtension: nil) != nil
+        else {
+            throw SpacesMobileBridgeClientError.requestFailed("The media link did not return image or video content.")
+        }
+        return downloadedURL
     }
 
     var title: String { latestState?.title ?? session.title }
@@ -247,6 +306,10 @@ private enum TerminalViewerRenderMode: String {
         needsOwnershipSynchronizationAfterCurrentRun = false
         ownerRenderEpochState = nil
         renderUpdateBaseline = nil
+        invalidateLinkPreviewRequests()
+        isPreparingLinkPreview = false
+        linkPreviewErrorMessage = nil
+        linkPreview = nil
         ownerRecoveryGraceDeadline = nil
         reportedOwnerReadyEpochID = nil
         reportedOwnerNonblankEpochID = nil
@@ -379,6 +442,44 @@ private enum TerminalViewerRenderMode: String {
 
     func flushPendingScroll() {
         scrollCoalescer.flush()
+    }
+
+    func dismissLinkPreview() {
+        invalidateLinkPreviewRequests()
+        isPreparingLinkPreview = false
+        linkPreviewErrorMessage = nil
+        linkPreview = nil
+    }
+
+    func openTerminalLink(_ link: String) async {
+        let normalizedLink = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedLink.isEmpty else { return }
+        let requestGeneration = beginLinkPreviewRequest()
+        isPreparingLinkPreview = true
+        linkPreviewErrorMessage = nil
+        defer { completeLinkPreviewRequest(requestGeneration) }
+
+        do {
+            let previewCommandChannel = bridgeClient.makeCommandChannel()
+            defer { Task { await previewCommandChannel.close() } }
+            let metadata = try await bridgeClient.resolveTerminalLink(
+                sessionID: session.id,
+                link: normalizedLink,
+                commandChannel: previewCommandChannel)
+            try Task.checkCancellation()
+            try ensureCurrentLinkPreviewRequest(requestGeneration)
+            try await handleResolvedTerminalLink(
+                metadata,
+                commandChannel: previewCommandChannel,
+                requestGeneration: requestGeneration)
+        } catch {
+            if error is TerminalLinkPreviewRequestError { return }
+            if Task.isCancelled { return }
+            guard isCurrentLinkPreviewRequest(requestGeneration) else { return }
+            if handleAuthenticationFailure(error) { return }
+            guard linkPreview == nil else { return }
+            linkPreviewErrorMessage = error.localizedDescription
+        }
     }
 
     func recordRenderedText(_ text: String) {
@@ -569,6 +670,177 @@ private enum TerminalViewerRenderMode: String {
         guard !Self.isTransientInputTransportError(error) else { return }
         if handleAuthenticationFailure(error) { return }
         errorMessage = error.localizedDescription
+    }
+
+    private func handleResolvedTerminalLink(
+        _ metadata: SpacesMobileTerminalLinkMetadata,
+        commandChannel: SpacesMobileBridgeCommandChannel,
+        requestGeneration: UInt64
+    ) async throws {
+        try ensureCurrentLinkPreviewRequest(requestGeneration)
+        switch metadata.source {
+        case .externalURL:
+            guard let externalURLValue = metadata.externalURL, let url = URL(string: externalURLValue) else {
+                throw SpacesMobileBridgeClientError.requestFailed("The terminal link URL is invalid.")
+            }
+            guard let mediaKind = metadata.mediaKind else {
+                try ensureCurrentLinkPreviewRequest(requestGeneration)
+                openExternalURL(url)
+                return
+            }
+            let localURL = try await downloadExternalPreview(metadata: metadata, url: url, requestGeneration: requestGeneration)
+            try ensureCurrentLinkPreviewRequest(requestGeneration)
+            linkPreviewErrorMessage = nil
+            linkPreview = TerminalLinkPreview(id: metadata.id, url: localURL, title: metadata.displayName, mediaKind: mediaKind)
+        case .localFile:
+            guard let mediaKind = metadata.mediaKind else {
+                throw SpacesMobileBridgeClientError.requestFailed("Only image and video files can be previewed on iOS.")
+            }
+            let localURL = try await downloadLocalPreview(
+                metadata: metadata,
+                commandChannel: commandChannel,
+                requestGeneration: requestGeneration)
+            try ensureCurrentLinkPreviewRequest(requestGeneration)
+            linkPreviewErrorMessage = nil
+            linkPreview = TerminalLinkPreview(id: metadata.id, url: localURL, title: metadata.displayName, mediaKind: mediaKind)
+        }
+    }
+
+    private func downloadExternalPreview(
+        metadata: SpacesMobileTerminalLinkMetadata,
+        url: URL,
+        requestGeneration: UInt64
+    ) async throws -> URL {
+        try ensureCurrentLinkPreviewRequest(requestGeneration)
+        let downloadTask = Task { try await remoteMediaDownloader(url) }
+        externalLinkPreviewDownloadTask = downloadTask
+        defer {
+            if isCurrentLinkPreviewRequest(requestGeneration) {
+                externalLinkPreviewDownloadTask = nil
+            }
+        }
+
+        let downloadedURL: URL
+        do {
+            downloadedURL = try await downloadTask.value
+        } catch {
+            if error is CancellationError { throw TerminalLinkPreviewRequestError.stale }
+            throw error
+        }
+        var didMoveDownloadedFile = false
+        defer {
+            if !didMoveDownloadedFile {
+                try? FileManager.default.removeItem(at: downloadedURL)
+            }
+        }
+        try ensureCurrentLinkPreviewRequest(requestGeneration)
+        let localURL = try previewCacheURL(for: metadata)
+        try ensureCurrentLinkPreviewRequest(requestGeneration)
+        try? FileManager.default.removeItem(at: localURL)
+        try ensureCurrentLinkPreviewRequest(requestGeneration)
+        try FileManager.default.moveItem(at: downloadedURL, to: localURL)
+        didMoveDownloadedFile = true
+        try ensureCurrentLinkPreviewRequest(requestGeneration)
+        cleanupStalePreviewCache()
+        return localURL
+    }
+
+    private func downloadLocalPreview(
+        metadata: SpacesMobileTerminalLinkMetadata,
+        commandChannel: SpacesMobileBridgeCommandChannel,
+        requestGeneration: UInt64
+    ) async throws -> URL {
+        try ensureCurrentLinkPreviewRequest(requestGeneration)
+        let localURL = try previewCacheURL(for: metadata)
+        try Data().write(to: localURL, options: .atomic)
+        let handle = try FileHandle(forWritingTo: localURL)
+        var didCompleteTransfer = false
+        defer {
+            if !didCompleteTransfer {
+                try? FileManager.default.removeItem(at: localURL)
+            }
+        }
+        defer { try? handle.close() }
+
+        var offset: Int64 = 0
+        while true {
+            try ensureCurrentLinkPreviewRequest(requestGeneration)
+            let chunk = try await bridgeClient.readTerminalLinkChunk(
+                sessionID: session.id,
+                linkID: metadata.id,
+                offset: offset,
+                limit: Self.linkPreviewChunkLimit,
+                commandChannel: commandChannel)
+            try ensureCurrentLinkPreviewRequest(requestGeneration)
+            guard chunk.offset == offset, let data = Data(base64Encoded: chunk.base64Data) else {
+                throw SpacesMobileBridgeClientError.requestFailed("The terminal link transfer returned invalid data.")
+            }
+            guard data.count == chunk.byteCount else {
+                throw SpacesMobileBridgeClientError.requestFailed("The terminal link transfer returned an invalid chunk size.")
+            }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            offset += Int64(chunk.byteCount)
+            if chunk.isFinal { break }
+        }
+
+        try ensureCurrentLinkPreviewRequest(requestGeneration)
+        cleanupStalePreviewCache()
+        didCompleteTransfer = true
+        return localURL
+    }
+
+    private func previewCacheURL(for metadata: SpacesMobileTerminalLinkMetadata) throws -> URL {
+        try FileManager.default.createDirectory(at: linkPreviewCacheDirectory, withIntermediateDirectories: true)
+        let fallbackExtension = URL(fileURLWithPath: metadata.displayName).pathExtension
+        let fileExtension = SpacesMobileTerminalLinkClassifier.preferredFilenameExtension(
+            contentType: metadata.contentType,
+            fallback: fallbackExtension)
+        let identity = Data("\(session.id)\u{0}\(metadata.id)".utf8)
+        let digest = SHA256.hash(data: identity).map { String(format: "%02x", $0) }.joined()
+        return linkPreviewCacheDirectory.appendingPathComponent("\(digest).\(fileExtension)")
+    }
+
+    private func beginLinkPreviewRequest() -> UInt64 {
+        linkPreviewRequestGeneration &+= 1
+        cancelExternalLinkPreviewDownload()
+        return linkPreviewRequestGeneration
+    }
+
+    private func invalidateLinkPreviewRequests() {
+        linkPreviewRequestGeneration &+= 1
+        cancelExternalLinkPreviewDownload()
+    }
+
+    private func cancelExternalLinkPreviewDownload() {
+        externalLinkPreviewDownloadTask?.cancel()
+        externalLinkPreviewDownloadTask = nil
+    }
+
+    private func completeLinkPreviewRequest(_ requestGeneration: UInt64) {
+        guard isCurrentLinkPreviewRequest(requestGeneration) else { return }
+        isPreparingLinkPreview = false
+    }
+
+    private func isCurrentLinkPreviewRequest(_ requestGeneration: UInt64) -> Bool {
+        linkPreviewRequestGeneration == requestGeneration
+    }
+
+    private func ensureCurrentLinkPreviewRequest(_ requestGeneration: UInt64) throws {
+        guard isCurrentLinkPreviewRequest(requestGeneration) else { throw TerminalLinkPreviewRequestError.stale }
+    }
+
+    private func cleanupStalePreviewCache(now: Date = Date()) {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: linkPreviewCacheDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey])
+        else { return }
+        let cutoff = now.addingTimeInterval(-24 * 60 * 60)
+        for file in files {
+            let values = try? file.resourceValues(forKeys: [.contentModificationDateKey])
+            guard let modifiedAt = values?.contentModificationDate, modifiedAt < cutoff else { continue }
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 
     private func replaceCommandChannel() {
@@ -1088,6 +1360,10 @@ private enum TerminalViewerRenderMode: String {
         ownershipSynchronizationTask = nil
         reportedOwnerReadyEpochID = nil
         needsOwnershipSynchronizationAfterCurrentRun = false
+        invalidateLinkPreviewRequests()
+        isPreparingLinkPreview = false
+        linkPreviewErrorMessage = nil
+        linkPreview = nil
         isOwnershipSynchronizationScheduled = false
         isSynchronizingOwnership = false
         streamHandle?.cancel()

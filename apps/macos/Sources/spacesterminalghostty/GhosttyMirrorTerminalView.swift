@@ -75,12 +75,20 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     private var searchSelected: Int?
     private var submittedSearchQuery: String?
     private var suppressedFocusOnlyMouseButtonNumbers = Set<Int>()
+    private var hoveredLink: String? {
+        didSet {
+            guard hoveredLink != oldValue else { return }
+            window?.invalidateCursorRects(for: self)
+            if hoveredLink != nil { NSCursor.pointingHand.set() }
+        }
+    }
     var debugBindingActionHandler: (@MainActor (String) -> Bool)?
     private(set) var debugRecordedBindingActions: [String] = []
     var debugMouseEventHandler: (@MainActor (String) -> Bool)?
     private(set) var debugRecordedMouseEvents: [String] = []
     var debugRenderFrameApplyHandler: (@MainActor (GhosttyRenderFrame, String) -> Bool)?
     private(set) var debugRenderFrameApplyCount = 0
+    var debugOpenURLHandler: (@MainActor (URL) -> Bool)?
 
     var acceptsTerminalInput = false { didSet { restoreFirstResponderIfWindowReady() } }
     var onSendText: SendTextHandler?
@@ -155,6 +163,11 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
         mouseTrackingArea = trackingArea
     }
 
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: hoveredLink == nil ? .iBeam : .pointingHand)
+    }
+
     override func mouseDown(with event: NSEvent) {
         if suppressesFocusOnlyMousePress(for: event) { return }
         focusWindow()
@@ -203,6 +216,7 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     override func otherMouseDragged(with event: NSEvent) { sendMousePosition(event) }
 
     override func mouseExited(with event: NSEvent) {
+        hoveredLink = nil
         guard let surface = mirrorSurface() else { return }
         guard NSEvent.pressedMouseButtons == 0 else { return }
         ghostty_surface_mouse_pos(surface, -1, -1, Self.ghosttyMouseModifiers(for: event.modifierFlags))
@@ -303,6 +317,8 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
 
     func applyActionEvent(_ event: GhosttyActionEvent) {
         switch event {
+        case .openURL(_, let value): _ = GhosttyTerminalLinkOpener.open(value, openURL: debugOpenURLHandler)
+        case .mouseOverLink(let value): hoveredLink = value
         case .startSearch(let needle): showSearchOverlay(query: needle, submitSeededQuery: needle != nil)
         case .endSearch: hideSearchOverlay()
         case .searchTotal(let total):
@@ -647,7 +663,7 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     private func appliedRenderFrameIdentity(for frame: GhosttyRenderFrame) -> AppliedRenderFrameIdentity {
         AppliedRenderFrameIdentity(
             renderStateKey: renderStateKey, version: frame.version, sessionRevision: frame.sessionRevision, ownerEpoch: frame.ownerEpoch,
-            columns: frame.columns, rows: frame.rows, snapshot: frame.sessionRevision == nil ? frame.snapshot : nil)
+            columns: frame.columns, rows: frame.rows, snapshot: frame.snapshot)
     }
 
     private func withCFrame(_ frame: GhosttyRenderFrame, _ body: (UnsafePointer<ghostty_render_frame_s>) -> Bool) -> Bool {
@@ -833,4 +849,5 @@ public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
     var debugSearchStatusVisible: Bool { !searchStatusLabel.isHidden }
     var debugSearchUpBindingAction: String { Self.searchUpBindingAction }
     var debugSearchDownBindingAction: String { Self.searchDownBindingAction }
+    var debugHoveredLink: String? { hoveredLink }
 }

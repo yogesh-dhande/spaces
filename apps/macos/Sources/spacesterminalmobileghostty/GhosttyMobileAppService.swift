@@ -5,6 +5,47 @@ import Foundation
     import GhosttyKit
     import UIKit
 
+    public enum GhosttyMobileActionEvent: Sendable, Equatable {
+        public enum OpenURLKind: Sendable, Equatable {
+            case unknown
+            case text
+            case html
+
+            init(_ kind: ghostty_action_open_url_kind_e) {
+                switch kind {
+                case GHOSTTY_ACTION_OPEN_URL_KIND_TEXT: self = .text
+                case GHOSTTY_ACTION_OPEN_URL_KIND_HTML: self = .html
+                default: self = .unknown
+                }
+            }
+        }
+
+        case openURL(kind: OpenURLKind, value: String)
+        case mouseOverLink(String?)
+    }
+
+    enum GhosttyMobileActionEventParser {
+        static func parse(_ action: ghostty_action_s) -> GhosttyMobileActionEvent? {
+            switch action.tag {
+            case GHOSTTY_ACTION_OPEN_URL:
+                let openURL = action.action.open_url
+                guard let value = string(pointer: openURL.url, count: Int(openURL.len)), !value.isEmpty else { return nil }
+                return .openURL(kind: GhosttyMobileActionEvent.OpenURLKind(openURL.kind), value: value)
+            case GHOSTTY_ACTION_MOUSE_OVER_LINK:
+                let link = action.action.mouse_over_link
+                guard link.len > 0 else { return .mouseOverLink(nil) }
+                return .mouseOverLink(string(pointer: link.url, count: link.len))
+            default: return nil
+            }
+        }
+
+        private static func string(pointer: UnsafePointer<CChar>?, count: Int) -> String? {
+            guard let pointer, count > 0 else { return nil }
+            let data = Data(bytes: pointer, count: count)
+            return String(data: data, encoding: .utf8)
+        }
+    }
+
     @MainActor public final class GhosttyMobileAppService {
         public static let shared = GhosttyMobileAppService()
 
@@ -13,6 +54,7 @@ import Foundation
         private var config: ghostty_config_t?
         private var initialized = false
         private var retainedStandardInputWriteDescriptor: Int32?
+        private var surfaceActionHandlers: [UInt: @MainActor (GhosttyMobileActionEvent) -> Void] = [:]
 
         private init() {}
 
@@ -48,6 +90,20 @@ import Foundation
             ghostty_app_tick(app)
         }
 
+        public func registerActionHandler(for surface: ghostty_surface_t, handler: @escaping @MainActor (GhosttyMobileActionEvent) -> Void) {
+            surfaceActionHandlers[surfaceKey(surface)] = handler
+        }
+
+        public func unregisterActionHandler(for surface: ghostty_surface_t?) {
+            guard let surface else { return }
+            surfaceActionHandlers.removeValue(forKey: surfaceKey(surface))
+        }
+
+        private func handleAction(_ event: GhosttyMobileActionEvent, surfaceKey: UInt) {
+            guard let handler = surfaceActionHandlers[surfaceKey] else { return }
+            handler(event)
+        }
+
         private func startApp(config: ghostty_config_t) throws {
             var runtimeConfig = Self.makeRuntimeConfig()
 
@@ -64,7 +120,17 @@ import Foundation
             runtimeConfig.userdata = nil
             runtimeConfig.supports_selection_clipboard = false
             runtimeConfig.wakeup_cb = { _ in Task { @MainActor in GhosttyMobileAppService.shared.tick() } }
-            runtimeConfig.action_cb = { _, _, _ in true }
+            runtimeConfig.action_cb = { _, target, action in
+                guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
+                guard let event = GhosttyMobileActionEventParser.parse(action) else { return true }
+                let surfaceKey = UInt(bitPattern: target.target.surface)
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated { GhosttyMobileAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
+                } else {
+                    Task { @MainActor in GhosttyMobileAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
+                }
+                return true
+            }
             runtimeConfig.read_clipboard_cb = { _, _, _ in false }
             runtimeConfig.confirm_read_clipboard_cb = { _, _, _, _ in }
             runtimeConfig.write_clipboard_cb = { _, _, content, len, _ in
@@ -75,6 +141,8 @@ import Foundation
             runtimeConfig.close_surface_cb = { _, _ in }
             return runtimeConfig
         }
+
+        private func surfaceKey(_ surface: ghostty_surface_t) -> UInt { UInt(bitPattern: surface) }
 
         public static func resolveResourcesPath(
             environment: [String: String] = ProcessInfo.processInfo.environment, bundleResourceURL: URL?, fileManager: FileManager = .default,

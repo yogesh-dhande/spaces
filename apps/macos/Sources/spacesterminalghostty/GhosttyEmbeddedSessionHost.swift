@@ -856,7 +856,10 @@ extension TerminalGhosttyRendererHosting {
         switch event {
         case .setTitle(let title): currentTitle = Self.normalizedSessionMetadataValue(title)
         case .setWorkingDirectory(let path): currentWorkingDirectory = Self.normalizedSessionMetadataValue(path)
-        case .startSearch, .endSearch, .searchTotal, .searchSelected: return
+        case .openURL(_, let value):
+            _ = GhosttyTerminalLinkOpener.open(value)
+            return
+        case .mouseOverLink, .startSearch, .endSearch, .searchTotal, .searchSelected: return
         }
         postSessionMetadataDidChange()
         refreshRuntimeState(force: true)
@@ -974,7 +977,7 @@ extension TerminalGhosttyRendererHosting {
     }
 
     private func scheduleScreenStateChangeBroadcast(revision: UInt64) {
-        guard activeOwnerClient()?.kind == .localWindow else { return }
+        guard activeOwnerClient() != nil else { return }
         pendingScreenStateChangeBroadcastRevision = max(pendingScreenStateChangeBroadcastRevision ?? revision, revision)
         guard !screenStateChangeBroadcastScheduled else { return }
         screenStateChangeBroadcastScheduled = true

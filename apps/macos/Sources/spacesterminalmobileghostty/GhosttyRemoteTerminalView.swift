@@ -91,13 +91,15 @@ import Foundation
         public let onSendText: @MainActor (String) -> Void
         public let onSendKey: @MainActor (String) -> Void
         public let onSendScroll: @MainActor (Double, Double, Int32) -> Void
+        public let onOpenLink: @MainActor (String) -> Void
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
             isVisible: Bool, acceptsInput: Bool, isBusy: Bool, onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
             onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
             onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void, onSendText: @escaping @MainActor (String) -> Void,
-            onSendKey: @escaping @MainActor (String) -> Void, onSendScroll: @escaping @MainActor (Double, Double, Int32) -> Void = { _, _, _ in }
+            onSendKey: @escaping @MainActor (String) -> Void, onSendScroll: @escaping @MainActor (Double, Double, Int32) -> Void = { _, _, _ in },
+            onOpenLink: @escaping @MainActor (String) -> Void = { _ in }
         ) {
             self.ownerEpoch = ownerEpoch
             self.endedRender = endedRender
@@ -112,6 +114,7 @@ import Foundation
             self.onSendText = onSendText
             self.onSendKey = onSendKey
             self.onSendScroll = onSendScroll
+            self.onOpenLink = onOpenLink
         }
 
         public func makeUIView(context: Context) -> GhosttyRemoteTerminalHostView { GhosttyRemoteTerminalHostView() }
@@ -123,6 +126,7 @@ import Foundation
             hostView.onSendText = { text in _ = Task { @MainActor in onSendText(text) } }
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
             hostView.onSendScroll = { horizontal, vertical, scrollMods in _ = Task { @MainActor in onSendScroll(horizontal, vertical, scrollMods) } }
+            hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
             hostView.onRenderedTextChanged = onRenderedTextChanged.map { callback in { text in _ = Task { @MainActor in callback(text) } } }
             hostView.setTerminalVisible(isVisible)
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
@@ -161,6 +165,12 @@ import Foundation
                 case .option: return "Option"
                 }
             }
+        }
+
+        enum TapActivationResult: String, Equatable {
+            case ignored
+            case openedLink
+            case focused
         }
 
         struct AccessoryToolbarButtonLabels: Equatable {
@@ -213,16 +223,20 @@ import Foundation
         private var lastMomentumTimestamp: CFTimeInterval = 0
         private var pendingAccessoryModifiers: Set<AccessoryModifier> = []
         private var suppressesSoftwareKeyboard = false
+        private var tapLinkProbeDepth = 0
+        private var openedLinkDuringTapProbe = false
+        private var hoveredLinkDuringTapProbe: String?
         private var surfaceViewportSizeOverrideForTesting: (columns: Int, rows: Int)?
         var userInterfaceIdiomOverrideForTesting: UIUserInterfaceIdiom?
         private var keyboardOccludedHeightOverrideForTesting: CGFloat?
         private let suppressedSoftwareKeyboardInputView = UIView(frame: .zero)
-        private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput))
+        private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput(_:)))
         private lazy var scrollPanRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan))
         private lazy var terminalAccessoryView = TerminalAccessoryToolbar(
             onText: { [weak self] text in self?.sendAccessoryText(text) }, onKey: { [weak self] key in self?.sendAccessoryKey(key) },
             onModifier: { [weak self] modifier in self?.toggleAccessoryModifier(modifier) },
             onKeyboardToggle: { [weak self] in self?.toggleAccessorySoftwareKeyboard() })
+        var debugTapLinkHandlerForTesting: ((CGPoint) -> Bool)?
 
         public private(set) var acceptsTerminalInput = false
         public var onInputReadinessChanged: ((Bool) -> Void)?
@@ -231,6 +245,7 @@ import Foundation
         public var onSendText: ((String) -> Void)?
         public var onSendKey: ((String) -> Void)?
         public var onSendScroll: ((Double, Double, Int32) -> Void)?
+        public var onOpenLink: ((String) -> Void)?
         public var onRenderedTextChanged: ((String) -> Void)? {
             didSet {
                 guard onRenderedTextChanged == nil else {
@@ -338,6 +353,7 @@ import Foundation
             currentRenderedSnapshot = nil
             lastSurfaceGeometry = nil
             if let mirror {
+                if let surface = ghostty_mirror_surface(mirror) { GhosttyMobileAppService.shared.unregisterActionHandler(for: surface) }
                 retireMirror(mirror)
                 self.mirror = nil
             }
@@ -350,6 +366,7 @@ import Foundation
 
         private func retireMirror(_ mirror: ghostty_mirror_t) {
             if let surface = ghostty_mirror_surface(mirror) {
+                GhosttyMobileAppService.shared.unregisterActionHandler(for: surface)
                 ghostty_surface_set_focus(surface, false)
                 ghostty_surface_set_occlusion(surface, false)
             }
@@ -477,9 +494,15 @@ import Foundation
             return mods
         }
 
-        @objc private func handleTapToActivateInput() {
-            guard acceptsTerminalInput else { return }
+        @objc private func handleTapToActivateInput(_ recognizer: UITapGestureRecognizer) {
+            _ = handleTapToActivateInput(at: recognizer.location(in: self))
+        }
+
+        @discardableResult private func handleTapToActivateInput(at location: CGPoint) -> TapActivationResult {
+            if openTerminalLink(at: location) { return .openedLink }
+            guard acceptsTerminalInput else { return .ignored }
             becomeFirstResponder()
+            return .focused
         }
 
         @objc private func handleScrollPan(_ recognizer: UIPanGestureRecognizer) {
@@ -659,6 +682,9 @@ import Foundation
                 guard mirror != nil else { throw GhosttyMobileAppServiceError.configuration("ghostty_mirror_new failed") }
                 lastSurfaceGeometry = nil
                 updateSurfaceGeometry()
+                if let surface = mirrorSurface() {
+                    GhosttyMobileAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.handleActionEvent(event) }
+                }
                 emitHostRenderEvent("host_view_mirror_create_end", dedupeKey: lastRenderKey)
             } catch { ghosttyRemoteTerminalTrace("mirror_create_failed error=\(error)") }
         }
@@ -674,6 +700,61 @@ import Foundation
         private func mirrorSurface() -> ghostty_surface_t? {
             guard let mirror else { return nil }
             return ghostty_mirror_surface(mirror)
+        }
+
+        private func handleActionEvent(_ event: GhosttyMobileActionEvent) {
+            switch event {
+            case .openURL(_, let value):
+                if tapLinkProbeDepth > 0 { openedLinkDuringTapProbe = true }
+                onOpenLink?(value)
+            case .mouseOverLink(let value):
+                guard tapLinkProbeDepth > 0 else { return }
+                hoveredLinkDuringTapProbe = Self.normalizedTerminalLink(value)
+            }
+        }
+
+        private func openTerminalLink(at location: CGPoint) -> Bool {
+            if let debugTapLinkHandlerForTesting { return debugTapLinkHandlerForTesting(location) }
+            guard let surface = mirrorSurface() else { return false }
+            guard !ghostty_surface_mouse_captured(surface) else { return false }
+            let position = Self.ghosttyMousePosition(for: location)
+            let mods = Self.linkActivationMouseModifiers()
+            tapLinkProbeDepth += 1
+            openedLinkDuringTapProbe = false
+            hoveredLinkDuringTapProbe = nil
+            defer {
+                tapLinkProbeDepth -= 1
+                hoveredLinkDuringTapProbe = nil
+            }
+            ghostty_surface_mouse_pos(surface, position.x, position.y, mods)
+            ghostty_surface_refresh(surface)
+            GhosttyMobileAppService.shared.tick()
+            if openHoveredLinkDuringTapProbe() { return true }
+            _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
+            _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods)
+            ghostty_surface_refresh(surface)
+            GhosttyMobileAppService.shared.tick()
+            let openedLink = openedLinkDuringTapProbe
+            openedLinkDuringTapProbe = false
+            return openedLink
+        }
+
+        private func openHoveredLinkDuringTapProbe() -> Bool {
+            guard let link = hoveredLinkDuringTapProbe else { return false }
+            openedLinkDuringTapProbe = true
+            onOpenLink?(link)
+            return true
+        }
+
+        private static func ghosttyMousePosition(for location: CGPoint) -> (x: Double, y: Double) {
+            (Double(max(location.x, 0)), Double(max(location.y, 0)))
+        }
+
+        private static func linkActivationMouseModifiers() -> ghostty_input_mods_e { ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue) }
+
+        private static func normalizedTerminalLink(_ value: String?) -> String? {
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+            return value
         }
 
         private func updateSurfaceGeometry() {
@@ -1001,6 +1082,27 @@ import Foundation
         private var terminalUserInterfaceIdiom: UIUserInterfaceIdiom { userInterfaceIdiomOverrideForTesting ?? traitCollection.userInterfaceIdiom }
 
         func surfaceHostFrameForTesting() -> CGRect { surfaceHostView.frame }
+
+        func debugTapToActivateInputForTesting(at location: CGPoint = CGPoint(x: 1, y: 1)) -> TapActivationResult {
+            handleTapToActivateInput(at: location)
+        }
+
+        func debugApplyActionEventForTesting(_ event: GhosttyMobileActionEvent) { handleActionEvent(event) }
+
+        @discardableResult func debugApplyActionEventsDuringTapProbeForTesting(_ events: [GhosttyMobileActionEvent]) -> Bool {
+            tapLinkProbeDepth += 1
+            openedLinkDuringTapProbe = false
+            hoveredLinkDuringTapProbe = nil
+            defer {
+                tapLinkProbeDepth -= 1
+                hoveredLinkDuringTapProbe = nil
+            }
+            for event in events { handleActionEvent(event) }
+            if openHoveredLinkDuringTapProbe() { return true }
+            let openedLink = openedLinkDuringTapProbe
+            openedLinkDuringTapProbe = false
+            return openedLink
+        }
 
         private final class TerminalAccessoryToolbar: UIView {
             private static let toolbarHeight = GhosttyRemoteTerminalHostView.accessoryToolbarHeight

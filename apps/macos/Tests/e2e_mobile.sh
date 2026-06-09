@@ -29,8 +29,10 @@ USER_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$USER_HOME/.config}"
 E2E_GHOSTTY_XDG_CONFIG_HOME="${SPACES_MOBILE_GHOSTTY_XDG_CONFIG_HOME:-$USER_XDG_CONFIG_HOME}"
 FIXTURE_LINE_COUNT=520
 SCROLLBACK_SWIPE_COUNT=2
+TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-spaces-mobile-link-preview.png}"
+TERMINAL_LINK_PREVIEW_PATH="${SPACES_MOBILE_E2E_LINK_PREVIEW_PATH:-/tmp/$TERMINAL_LINK_PREVIEW_IMAGE_NAME}"
 
-SCENARIOS=(codex codex-resume-reopen roundtrip scrollback two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard app-recovery)
+SCENARIOS=(codex codex-resume-reopen roundtrip scrollback terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard app-recovery)
 SELECTED_SCENARIOS=()
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
 DEMO_PORT="${SPACES_MOBILE_DEMO_PORT:-}"
@@ -78,6 +80,7 @@ Scenarios:
   codex-resume-reopen
   roundtrip
   scrollback
+  terminal-link-preview
   two-session
   ctrl-c-final-frame
   ctrl-c-final-frame-codex-survivor
@@ -581,7 +584,7 @@ write_ui_test_config() {
   local scenario="$1"
   local session_id="$2"
   local secondary_session_id="${3:-}"
-  python3 - "$DEMO_ROOT" "$scenario" "$session_id" "$secondary_session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$MOBILE_UDID" "$MOBILE_DEVICE_KEY" "$MOBILE_ARTIFACT_NAME" "$UI_TEST_CONFIG" "$DEFAULT_UI_TEST_CONFIG" "$BUNDLE_ID" "$SCROLLBACK_SWIPE_COUNT" <<'PY'
+  python3 - "$DEMO_ROOT" "$scenario" "$session_id" "$secondary_session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$MOBILE_UDID" "$MOBILE_DEVICE_KEY" "$MOBILE_ARTIFACT_NAME" "$UI_TEST_CONFIG" "$DEFAULT_UI_TEST_CONFIG" "$BUNDLE_ID" "$SCROLLBACK_SWIPE_COUNT" "$TERMINAL_LINK_PREVIEW_IMAGE_NAME" "$TERMINAL_LINK_PREVIEW_PATH" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -600,6 +603,8 @@ from pathlib import Path
     default_config_raw,
     bundle_id,
     scrollback_swipe_count_raw,
+    terminal_link_preview_image_name,
+    terminal_link_preview_path,
 ) = sys.argv[1:]
 
 demo_root = Path(demo_root_raw)
@@ -647,6 +652,9 @@ payload = {
     "finalMacRetakeoverObservedPath": None,
     "postFinalMacRetakeoverScreenshotPath": None,
     "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final.png"),
+    "terminalLinkText": "",
+    "expectedLinkPreviewTitle": "",
+    "linkPreviewScreenshotPath": None,
     "expectedInterruptedText": "",
     "expectedSecondaryText": "",
     "scrollbackSwipeCount": 0,
@@ -700,6 +708,14 @@ elif scenario == "scrollback":
         "scrollbackSwipeCount": scrollback_swipe_count,
         "minimumVisibleTerminalInkBands": 3,
         "maximumTerminalTopBlankRatio": 0.20,
+    })
+elif scenario == "terminal-link-preview":
+    payload.update({
+        "terminalLinkText": terminal_link_preview_path,
+        "expectedLinkPreviewTitle": terminal_link_preview_image_name,
+        "linkPreviewScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-preview.png"),
+        "minimumVisibleTerminalInkBands": 2,
+        "maximumTerminalTopBlankRatio": 0.30,
     })
 elif scenario == "two-session":
     payload.update({
@@ -1452,6 +1468,22 @@ def contains_command_output(text: str, command_text: str, output_text: str) -> b
         and any(line.strip() == output_text for line in lines)
     )
 
+def assert_prompt_rendered_after_output(label: str, text: str, output_text: str) -> None:
+    lines = [line.rstrip() for line in text.splitlines()]
+    for index, line in enumerate(lines):
+        if line.strip() != output_text:
+            continue
+        for next_line in lines[index + 1:]:
+            stripped = next_line.strip()
+            if not stripped:
+                continue
+            if output_text in stripped or "printf " in stripped or "echo " in stripped:
+                continue
+            if re.search(r"%\s*$", next_line):
+                return
+        raise RuntimeError(f"{label} did not render the next shell prompt after {output_text!r}:\n{text}")
+    raise RuntimeError(f"{label} did not render output marker {output_text!r}:\n{text}")
+
 def mobile_rendered_text(payload: dict) -> str:
     return payload.get("renderedText") or ""
 
@@ -1503,7 +1535,7 @@ def assert_render_output_sane(label: str, text: str) -> None:
 def mac_owner_render_contains(payload: dict, *markers: str) -> bool:
     if payload.get("found") is not True:
         return False
-    rendered_text = payload.get("renderedOutput") or payload.get("visibleText") or ""
+    rendered_text = payload.get("visibleSurfaceOutput") or payload.get("renderedOutput") or payload.get("visibleText") or ""
     if not all(marker in rendered_text for marker in markers):
         return False
     renderer_summary = payload.get("rendererSummary") or ""
@@ -1608,6 +1640,14 @@ with ui_test_log.open("w") as ui_test_output:
         if not expected_render_text:
             raise RuntimeError(f"Unable to derive canonical Mac owner render text:\n{json.dumps(mac_owner_payload, indent=2)}")
         assert_render_output_sane("Mac owner before takeover", expected_render_text)
+        mac_visible_text = mac_owner_payload.get("visibleSurfaceOutput") or ""
+        if not mac_visible_text:
+            raise RuntimeError(f"Mac owner before takeover did not report visible surface text:\n{json.dumps(mac_owner_payload, indent=2)}")
+        assert_prompt_rendered_after_output(
+            "Mac owner before takeover",
+            mac_visible_text,
+            "__roundtrip_mac_before_takeover_two__",
+        )
 
         write_marker(proceed_takeover_path, "go\n")
 
@@ -2127,6 +2167,35 @@ if post_ready_snapshot_exports:
 PY
 
   printf 'Mobile scenario passed: scrollback\n'
+}
+
+write_terminal_link_preview_fixture() {
+  python3 - "$TERMINAL_LINK_PREVIEW_PATH" <<'PY'
+import base64
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_bytes(base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+))
+PY
+}
+
+run_terminal_link_preview_scenario() {
+  begin_scenario "terminal-link-preview"
+  write_terminal_link_preview_fixture
+  local command_text
+  local quoted_link_path
+  printf -v quoted_link_path '%q' "$TERMINAL_LINK_PREVIEW_PATH"
+  command_text="printf '__spaces_mobile_link_preview__\\n%s\\n' $quoted_link_path; exec /bin/zsh -l"
+  local session_id
+  session_id="$(new_terminal_session "e2e-terminal-link-preview" "$command_text")"
+  track_current_scenario_session "$session_id"
+  write_ui_test_config "terminal-link-preview" "$session_id"
+  run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testTerminalTapLocalImagePathOpensPreview"
+  printf 'Mobile scenario passed: terminal-link-preview\n'
 }
 
 run_two_session_scenario() {
@@ -2836,6 +2905,9 @@ run_selected_scenarios() {
         ;;
       scrollback)
         run_scrollback_scenario
+        ;;
+      terminal-link-preview)
+        run_terminal_link_preview_scenario
         ;;
       two-session)
         run_two_session_scenario
