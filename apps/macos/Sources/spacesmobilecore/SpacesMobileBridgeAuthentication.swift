@@ -1,5 +1,8 @@
 import Foundation
-import Network
+
+#if canImport(Network)
+    import Network
+#endif
 
 public enum SpacesMobileBridgeAuthentication {
     public static func recoveryMessage(for error: Error) -> String? {
@@ -23,8 +26,10 @@ public enum SpacesMobileBridgeAuthentication {
 
     private static func isTransportAuthenticationFailure(_ error: Error) -> Bool {
         if error is SpacesMobileBridgeTransportError { return true }
-        guard let networkError = error as? NWError else { return false }
-        if case .tls = networkError { return true }
+        #if canImport(Network)
+            guard let networkError = error as? NWError else { return false }
+            if case .tls = networkError { return true }
+        #endif
         return false
     }
 }

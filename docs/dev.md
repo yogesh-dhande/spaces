@@ -153,7 +153,25 @@ The mobile suite builds the macOS debug products once, builds the iOS app and UI
 
 The daemon-hosted mobile bridge is the first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spaces mobile serve` remains available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spaces mobile request` so local scripts use the same TLS-PSK transport as the iOS app. Standalone bridge processes reject daemon-only recovery commands such as `launchSpacesApp`.
 
-Remote compute-host E2E coverage uses a reachable host running a matching `spacesd`. The SwiftPM `spacesd` target carries Apple terminal/TLS dependencies, so app-level remote E2E uses another Mac, a loopback remote profile that binds the remote listener on a separate profile root, or a matching Linux daemon artifact produced outside the macOS package. Compute-host bootstrap, status, and test automation belongs in `spacese2e` so the product `spaces` CLI remains workspace-oriented. Use `upsert-compute-host` and `list-compute-hosts` to seed and inspect host records, `set-project-default-compute-host` and `set-workspace-compute-host-override` to exercise selection precedence, and `plan-workspace-runtime` to inspect the stable binding, daemon target, Remote SSH URI, and runtime manifest for a workspace.
+Remote compute-host E2E coverage uses a reachable host running a matching `spacesd`. App-level remote E2E uses another Mac, a loopback remote profile that binds the remote listener on a separate profile root, or the Ubuntu 24.04 x86_64 daemon artifact published as `spacesd-ubuntu-24.04-x86_64.tar.gz`. Compute-host bootstrap, status, and test automation belongs in `spacese2e` so the product `spaces` CLI remains workspace-oriented. Use `upsert-compute-host` and `list-compute-hosts` to seed and inspect host records, `set-project-default-compute-host` and `set-workspace-compute-host-override` to exercise selection precedence, and `plan-workspace-runtime` to inspect the stable binding, daemon target, Remote SSH URI, and runtime manifest for a workspace.
+
+Build the Linux daemon artifact from a Linux x86_64 environment:
+
+```bash
+docker run --rm --platform linux/amd64 \
+  -v "$PWD":/workspace \
+  -w /workspace \
+  swift:6.2-noble \
+  bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh'
+```
+
+The archive contains a `bin/spacesd` wrapper, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. Install it on the remote host by extracting the archive and putting its `bin` directory on the SSH PATH:
+
+```bash
+sudo tar -xzf spacesd-ubuntu-24.04-x86_64.tar.gz -C /opt
+sudo ln -sfn /opt/spacesd-ubuntu-24.04-x86_64 /opt/spacesd
+sudo ln -sfn /opt/spacesd/bin/spacesd /usr/local/bin/spacesd
+```
 
 For a real SSH smoke that exercises bootstrap, pinned-TLS status, runtime planning, remote terminal launch, and workspace stop through production orchestration:
 
@@ -164,7 +182,6 @@ apps/macos/.build/debug/spacese2e remote-compute-host-smoke \
   --host-id lab-host \
   --ssh-host <ssh-host-or-alias> \
   --ssh-user <ssh-user> \
-  --workspace-root '$HOME/.spaces/workspaces' \
   --daemon-host <direct-daemon-ip-or-dns-name>
 ```
 

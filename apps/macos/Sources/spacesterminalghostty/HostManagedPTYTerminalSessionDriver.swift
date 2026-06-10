@@ -137,7 +137,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         var windowSize = winsize(
             ws_row: UInt16(resolvedRows), ws_col: UInt16(resolvedColumns), ws_xpixel: UInt16(clamping: pixelWidth),
             ws_ypixel: UInt16(clamping: pixelHeight))
-        return ioctl(fd, TIOCSWINSZ, &windowSize) == 0
+        return ioctl(fd, UInt(TIOCSWINSZ), &windowSize) == 0
     }
 
     func childPID() -> Int32? {
@@ -154,7 +154,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         lock.unlock()
         guard fd >= 0 else { return nil }
         var foregroundProcessGroup: Int32 = 0
-        let foregroundProcessID = ioctl(fd, TIOCGPGRP, &foregroundProcessGroup) == 0 ? foregroundProcessGroup : nil
+        let foregroundProcessID = ioctl(fd, UInt(TIOCGPGRP), &foregroundProcessGroup) == 0 ? foregroundProcessGroup : nil
         return Self.resolvedForegroundPID(foregroundProcessGroup: foregroundProcessID, childPID: childPID)
     }
 

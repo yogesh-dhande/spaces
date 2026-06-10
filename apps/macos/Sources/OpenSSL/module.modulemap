@@ -1,0 +1,6 @@
+module OpenSSL [system] {
+    header "openssl_shim.h"
+    link "ssl"
+    link "crypto"
+    export *
+}

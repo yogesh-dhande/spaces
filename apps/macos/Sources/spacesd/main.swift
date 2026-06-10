@@ -52,7 +52,7 @@ import spacesterminalghostty
             remoteServerLoadError = error
             return nil
         }
-        fputs("spacesd: remote listener fingerprint=\(identity.certificateFingerprint)\n", stderr)
+        writeStandardError("spacesd: remote listener fingerprint=\(identity.certificateFingerprint)\n")
         return TerminalServiceTLSServer(host: host, port: port, authToken: authToken, identity: identity, queue: serverQueue) { [weak self] request in
             Self.runOnMainActorSynchronously {
                 guard let self else { return TerminalServiceResponse(ok: false, message: "spacesd is shutting down.") }
@@ -219,7 +219,7 @@ import spacesterminalghostty
     private func runShellCommand(
         _ workspaceCommand: TerminalServiceWorkspaceCommandRequest, logPath: String, manifest: TerminalServiceWorkspaceRuntimeManifest?
     ) throws -> TerminalServiceCommandResult {
-        FileManager.default.createFile(atPath: logPath, contents: nil)
+        _ = FileManager.default.createFile(atPath: logPath, contents: nil)
         let logHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: logPath))
         defer { try? logHandle.close() }
 
@@ -466,7 +466,7 @@ import spacesterminalghostty
     }
 
     private func connectUnixSocket(path: String) throws -> Int32 {
-        let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
+        let socketFD = socket(AF_UNIX, streamSocketType, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         try setNoSIGPIPE(socketFD)
         var address = try makeUnixSocketAddress(path: path)
@@ -490,7 +490,7 @@ import spacesterminalghostty
         let utf8Path = path.utf8CString
         guard utf8Path.count <= maxLength else { throw POSIXError(.ENAMETOOLONG) }
         withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
-            _ = utf8Path.withUnsafeBufferPointer { buffer in memcpy(pointer, buffer.baseAddress, buffer.count) }
+            utf8Path.withUnsafeBufferPointer { buffer in if let baseAddress = buffer.baseAddress { memcpy(pointer, baseAddress, buffer.count) } }
         }
         return address
     }
@@ -503,6 +503,14 @@ import spacesterminalghostty
             }
         #else
             _ = fileDescriptor
+        #endif
+    }
+
+    private var streamSocketType: Int32 {
+        #if canImport(Glibc)
+            Int32(SOCK_STREAM.rawValue)
+        #else
+            SOCK_STREAM
         #endif
     }
 
@@ -662,12 +670,12 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
 
 @main struct SpacesDaemonMain {
     static func main() {
-        if ProcessInfo.processInfo.environment["SPACESD_PRINT_CERTIFICATE_FINGERPRINT"] == "1" {
+        if environmentValue("SPACESD_PRINT_CERTIFICATE_FINGERPRINT") == "1" {
             do {
                 print(try TerminalServiceTLSIdentityStore.loadOrCreate().certificateFingerprint)
                 return
             } catch {
-                fputs("spacesd: \(error)\n", stderr)
+                writeStandardError("spacesd: \(error)\n")
                 exit(1)
             }
         }
@@ -683,7 +691,7 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
                 try MainActor.assumeIsolated { try controller.start() }
                 app.run()
             } catch {
-                fputs("spacesd: \(error)\n", stderr)
+                writeStandardError("spacesd: \(error)\n")
                 exit(1)
             }
         #else
@@ -693,9 +701,16 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
                 RunLoop.main.run()
                 MainActor.assumeIsolated { controller.shutdown() }
             } catch {
-                fputs("spacesd: \(error)\n", stderr)
+                writeStandardError("spacesd: \(error)\n")
                 exit(1)
             }
         #endif
     }
+}
+
+private func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
+
+private func environmentValue(_ name: String) -> String? {
+    guard let rawValue = getenv(name) else { return nil }
+    return String(cString: rawValue)
 }

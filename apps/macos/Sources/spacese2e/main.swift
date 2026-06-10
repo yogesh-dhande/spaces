@@ -1649,6 +1649,7 @@ private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path
 private func normalizeRemoteRoot(_ path: String) -> String {
     let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmed == "/" { return "/" }
+    if trimmed == "$HOME" || trimmed.hasPrefix("$HOME/") || trimmed == "~" || trimmed.hasPrefix("~/") { return trimmed }
     return "/" + trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 }
 

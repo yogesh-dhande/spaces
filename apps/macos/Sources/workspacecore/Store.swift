@@ -1,8 +1,13 @@
 import Foundation
-import SQLite3
 import spacesdatabase
 import spacesterminalcore
 import systembridge
+
+#if os(Linux)
+    import CSQLite3
+#else
+    import SQLite3
+#endif
 
 public final class SQLiteStore {
     private let db: OpaquePointer

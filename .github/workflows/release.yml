@@ -26,7 +26,33 @@ permissions:
   contents: write
 
 jobs:
+  linux-spacesd-artifact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Build and smoke Linux spacesd artifact
+        run: |
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD":/workspace \
+            -w /workspace \
+            swift:6.2-noble \
+            bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh'
+
+      - name: Upload Linux spacesd artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spacesd-ubuntu-24.04-x86_64
+          path: |
+            dist/linux/spacesd-ubuntu-24.04-x86_64.tar.gz
+            dist/linux/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256
+
   release:
+    needs: linux-spacesd-artifact
     runs-on: macos-15
     steps:
       - name: Checkout
@@ -198,16 +224,33 @@ jobs:
           channelId: live
           projectId: spaces-a1814
 
+      - name: Download Linux spacesd artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: spacesd-ubuntu-24.04-x86_64
+          path: dist/linux
+
+      - name: Verify Linux spacesd artifact
+        run: |
+          cd dist/linux
+          shasum -a 256 -c spacesd-ubuntu-24.04-x86_64.tar.gz.sha256
+          tar -tzf spacesd-ubuntu-24.04-x86_64.tar.gz >/dev/null
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           release_title="Spaces ${{ steps.version.outputs.version }}"
+          release_assets=(
+            "$DMG_PATH"
+            "dist/linux/spacesd-ubuntu-24.04-x86_64.tar.gz"
+            "dist/linux/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
+          )
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" --title "$release_title"
-            gh release upload "$GITHUB_REF_NAME" "$DMG_PATH" --clobber
+            gh release upload "$GITHUB_REF_NAME" "${release_assets[@]}" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "$DMG_PATH" \
+            gh release create "$GITHUB_REF_NAME" "${release_assets[@]}" \
               --title "$release_title" \
               --generate-notes
           fi

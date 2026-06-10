@@ -3,7 +3,9 @@
 #include <dlfcn.h>
 #include <ghostty/vt.h>
 #include <limits.h>
+#if defined(__APPLE__)
 #include <mach-o/dyld.h>
+#endif
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,9 +93,15 @@ static void *spaces_ghostty_vt_dlopen_path(const char *path) {
 static void *spaces_ghostty_vt_dlopen_in_directory(const char *directory) {
     if (directory == NULL || directory[0] == '\0') return NULL;
     const char *names[] = {
+#if defined(__APPLE__)
         "libghostty-vt.dylib",
         "libghostty-vt.0.dylib",
         "libghostty-vt.0.1.0.dylib",
+#else
+        "libghostty-vt.so",
+        "libghostty-vt.so.0",
+        "libghostty-vt.so.0.1.0",
+#endif
         NULL,
     };
 
@@ -126,16 +134,26 @@ static bool spaces_ghostty_vt_parent_directory(char *path) {
     return true;
 }
 
-static void *spaces_ghostty_vt_dlopen_near_executable(void) {
-    uint32_t executable_path_size = 0;
-    _NSGetExecutablePath(NULL, &executable_path_size);
-    if (executable_path_size == 0) return NULL;
+static bool spaces_ghostty_vt_current_executable_path(char *buffer, size_t buffer_size) {
+    if (buffer == NULL || buffer_size == 0) return false;
+#if defined(__APPLE__)
+    uint32_t executable_path_size = (uint32_t)buffer_size;
+    return _NSGetExecutablePath(buffer, &executable_path_size) == 0;
+#elif defined(__linux__)
+    ssize_t count = readlink("/proc/self/exe", buffer, buffer_size - 1);
+    if (count < 0 || (size_t)count >= buffer_size) return false;
+    buffer[count] = '\0';
+    return true;
+#else
+    return false;
+#endif
+}
 
-    char *executable_path = (char *)malloc(executable_path_size);
-    if (executable_path == NULL) return NULL;
+static void *spaces_ghostty_vt_dlopen_near_executable(void) {
+    char executable_path[PATH_MAX];
     void *handle = NULL;
 
-    if (_NSGetExecutablePath(executable_path, &executable_path_size) == 0) {
+    if (spaces_ghostty_vt_current_executable_path(executable_path, sizeof(executable_path))) {
         char resolved_path[PATH_MAX];
         const char *source_path = executable_path;
         if (realpath(executable_path, resolved_path) != NULL) source_path = resolved_path;
@@ -154,7 +172,6 @@ static void *spaces_ghostty_vt_dlopen_near_executable(void) {
         }
     }
 
-    free(executable_path);
     return handle;
 }
 
@@ -174,8 +191,13 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
 
     if (handle == NULL) {
         const char *cwd_candidates[] = {
+#if defined(__APPLE__)
             "apps/macos/.local/ghosttyvt/lib/libghostty-vt.dylib",
             ".local/ghosttyvt/lib/libghostty-vt.dylib",
+#else
+            "apps/macos/.local/ghosttyvt/lib/libghostty-vt.so",
+            ".local/ghosttyvt/lib/libghostty-vt.so",
+#endif
             NULL,
         };
         for (size_t i = 0; cwd_candidates[i] != NULL; i++) {
@@ -185,46 +207,57 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     }
 
     if (handle == NULL) {
-        uint32_t executable_path_size = 0;
-        _NSGetExecutablePath(NULL, &executable_path_size);
-        if (executable_path_size > 0) {
-            char *executable_path = (char *)malloc(executable_path_size);
-            if (executable_path != NULL && _NSGetExecutablePath(executable_path, &executable_path_size) == 0) {
-                char resolved_path[PATH_MAX];
-                if (realpath(executable_path, resolved_path) != NULL) {
-                    char candidate[PATH_MAX];
-                    size_t length = strlen(resolved_path);
-                    for (int depth = 0; depth < 8 && length > 1 && handle == NULL; depth++) {
-                        while (length > 1 && resolved_path[length - 1] != '/') length--;
-                        if (length > 1) resolved_path[length - 1] = '\0';
-                        snprintf(
-                            candidate,
-                            sizeof(candidate),
-                            "%s/apps/macos/.local/ghosttyvt/lib/libghostty-vt.dylib",
-                            resolved_path
-                        );
-                        handle = dlopen(candidate, RTLD_NOW | RTLD_LOCAL);
-                        if (handle != NULL) break;
-                        snprintf(
-                            candidate,
-                            sizeof(candidate),
-                            "%s/.local/ghosttyvt/lib/libghostty-vt.dylib",
-                            resolved_path
-                        );
-                        handle = dlopen(candidate, RTLD_NOW | RTLD_LOCAL);
-                    }
+        char executable_path[PATH_MAX];
+        if (spaces_ghostty_vt_current_executable_path(executable_path, sizeof(executable_path))) {
+            char resolved_path[PATH_MAX];
+            if (realpath(executable_path, resolved_path) != NULL) {
+                char candidate[PATH_MAX];
+                size_t length = strlen(resolved_path);
+                for (int depth = 0; depth < 8 && length > 1 && handle == NULL; depth++) {
+                    while (length > 1 && resolved_path[length - 1] != '/') length--;
+                    if (length > 1) resolved_path[length - 1] = '\0';
+                    snprintf(
+                        candidate,
+                        sizeof(candidate),
+#if defined(__APPLE__)
+                        "%s/apps/macos/.local/ghosttyvt/lib/libghostty-vt.dylib",
+#else
+                        "%s/apps/macos/.local/ghosttyvt/lib/libghostty-vt.so",
+#endif
+                        resolved_path
+                    );
+                    handle = dlopen(candidate, RTLD_NOW | RTLD_LOCAL);
+                    if (handle != NULL) break;
+                    snprintf(
+                        candidate,
+                        sizeof(candidate),
+#if defined(__APPLE__)
+                        "%s/.local/ghosttyvt/lib/libghostty-vt.dylib",
+#else
+                        "%s/.local/ghosttyvt/lib/libghostty-vt.so",
+#endif
+                        resolved_path
+                    );
+                    handle = dlopen(candidate, RTLD_NOW | RTLD_LOCAL);
                 }
             }
-            free(executable_path);
         }
     }
 
     if (handle == NULL) {
+#if defined(__APPLE__)
         handle = dlopen("libghostty-vt.dylib", RTLD_NOW | RTLD_LOCAL);
+#else
+        handle = dlopen("libghostty-vt.so", RTLD_NOW | RTLD_LOCAL);
+#endif
     }
 
     if (handle == NULL) {
+#if defined(__APPLE__)
         handle = dlopen("libghostty-vt.0.dylib", RTLD_NOW | RTLD_LOCAL);
+#else
+        handle = dlopen("libghostty-vt.so.0", RTLD_NOW | RTLD_LOCAL);
+#endif
     }
 
     if (handle == NULL) return false;

@@ -1,6 +1,9 @@
 import Foundation
-import UniformTypeIdentifiers
 import spacesterminalcore
+
+#if canImport(UniformTypeIdentifiers)
+    import UniformTypeIdentifiers
+#endif
 
 public enum SpacesMobileFirstPartyPolicy { public static let allowedBundleID = "dev.usespaces.spacesmobile" }
 
@@ -468,10 +471,18 @@ public struct SpacesMobileTerminalLinkChunk: Codable, Sendable, Equatable {
 public enum SpacesMobileTerminalLinkClassifier {
     public static func mediaKind(contentType: String?, pathExtension: String?) -> SpacesMobileTerminalLinkMediaKind? {
         let trimmedContentType = contentType?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmedContentType, !trimmedContentType.isEmpty, let type = UTType(mimeType: trimmedContentType) { return mediaKind(for: type) }
+        #if canImport(UniformTypeIdentifiers)
+            if let trimmedContentType, !trimmedContentType.isEmpty, let type = UTType(mimeType: trimmedContentType) { return mediaKind(for: type) }
+        #else
+            if let trimmedContentType, !trimmedContentType.isEmpty, let kind = mediaKind(forContentType: trimmedContentType) { return kind }
+        #endif
 
         let trimmedExtension = pathExtension?.trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines))
-        if let trimmedExtension, !trimmedExtension.isEmpty, let type = UTType(filenameExtension: trimmedExtension) { return mediaKind(for: type) }
+        #if canImport(UniformTypeIdentifiers)
+            if let trimmedExtension, !trimmedExtension.isEmpty, let type = UTType(filenameExtension: trimmedExtension) { return mediaKind(for: type) }
+        #else
+            if let trimmedExtension, !trimmedExtension.isEmpty, let kind = mediaKind(forPathExtension: trimmedExtension) { return kind }
+        #endif
 
         return nil
     }
@@ -479,24 +490,65 @@ public enum SpacesMobileTerminalLinkClassifier {
     public static func preferredContentType(pathExtension: String?) -> String? {
         let trimmedExtension = pathExtension?.trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines))
         guard let trimmedExtension, !trimmedExtension.isEmpty else { return nil }
-        return UTType(filenameExtension: trimmedExtension)?.preferredMIMEType
+        #if canImport(UniformTypeIdentifiers)
+            return UTType(filenameExtension: trimmedExtension)?.preferredMIMEType
+        #else
+            return preferredContentTypesByExtension[trimmedExtension.lowercased()]
+        #endif
     }
 
     public static func preferredFilenameExtension(contentType: String?, fallback: String?) -> String {
-        if let contentType = contentType?.trimmingCharacters(in: .whitespacesAndNewlines), !contentType.isEmpty,
-            let preferred = UTType(mimeType: contentType)?.preferredFilenameExtension
-        {
-            return preferred
-        }
+        #if canImport(UniformTypeIdentifiers)
+            if let contentType = contentType?.trimmingCharacters(in: .whitespacesAndNewlines), !contentType.isEmpty,
+                let preferred = UTType(mimeType: contentType)?.preferredFilenameExtension
+            {
+                return preferred
+            }
+        #else
+            if let contentType = contentType?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !contentType.isEmpty,
+                let preferred = preferredExtensionsByContentType[contentType]
+            {
+                return preferred
+            }
+        #endif
         let fallback = fallback?.trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines)) ?? ""
         return fallback.isEmpty ? "dat" : fallback
     }
 
-    private static func mediaKind(for type: UTType) -> SpacesMobileTerminalLinkMediaKind? {
-        if type.conforms(to: .image) { return .image }
-        if type.conforms(to: .movie) || type.conforms(to: .video) { return .video }
-        return nil
-    }
+    #if canImport(UniformTypeIdentifiers)
+        private static func mediaKind(for type: UTType) -> SpacesMobileTerminalLinkMediaKind? {
+            if type.conforms(to: .image) { return .image }
+            if type.conforms(to: .movie) || type.conforms(to: .video) { return .video }
+            return nil
+        }
+    #else
+        private static let imageExtensions: Set<String> = ["avif", "bmp", "gif", "heic", "heif", "jpg", "jpeg", "png", "tif", "tiff", "webp"]
+        private static let videoExtensions: Set<String> = ["m4v", "mov", "mp4", "mpeg", "mpg", "webm"]
+        private static let preferredContentTypesByExtension: [String: String] = [
+            "avif": "image/avif", "bmp": "image/bmp", "gif": "image/gif", "heic": "image/heic", "heif": "image/heif", "jpg": "image/jpeg",
+            "jpeg": "image/jpeg", "m4v": "video/x-m4v", "mov": "video/quicktime", "mp4": "video/mp4", "mpeg": "video/mpeg", "mpg": "video/mpeg",
+            "png": "image/png", "tif": "image/tiff", "tiff": "image/tiff", "webm": "video/webm", "webp": "image/webp",
+        ]
+        private static let preferredExtensionsByContentType: [String: String] = [
+            "image/avif": "avif", "image/bmp": "bmp", "image/gif": "gif", "image/heic": "heic", "image/heif": "heif", "image/jpeg": "jpg",
+            "image/jpg": "jpg", "image/png": "png", "image/tiff": "tiff", "image/webp": "webp", "video/mp4": "mp4", "video/mpeg": "mpeg",
+            "video/quicktime": "mov", "video/webm": "webm", "video/x-m4v": "m4v",
+        ]
+
+        private static func mediaKind(forContentType contentType: String) -> SpacesMobileTerminalLinkMediaKind? {
+            let lowercased = contentType.lowercased()
+            if lowercased.hasPrefix("image/") { return .image }
+            if lowercased.hasPrefix("video/") { return .video }
+            return nil
+        }
+
+        private static func mediaKind(forPathExtension pathExtension: String) -> SpacesMobileTerminalLinkMediaKind? {
+            let lowercased = pathExtension.lowercased()
+            if imageExtensions.contains(lowercased) { return .image }
+            if videoExtensions.contains(lowercased) { return .video }
+            return nil
+        }
+    #endif
 }
 
 public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {

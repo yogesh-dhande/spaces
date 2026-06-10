@@ -20,6 +20,7 @@ apps/web/public/releases/*
 !apps/web/public/releases/.gitkeep
 
 # Release artifacts
+/dist/
 *.zip
 .env
 apps/macos/.local/

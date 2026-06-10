@@ -1,8 +1,14 @@
 import Foundation
 
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
+
 public enum TerminalControlClient {
     public static func send(request: TerminalControlRequest, socketPath: String, timeout: TimeInterval = 5) throws -> TerminalControlResponse {
-        let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
+        let socketFD = socket(AF_UNIX, streamSocketType, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(socketFD) }
 
@@ -20,19 +26,21 @@ public enum TerminalControlClient {
 
         let payload = try TerminalControlCodec.encodeRequest(request)
         try writeAll(data: payload, to: socketFD)
-        shutdown(socketFD, SHUT_WR)
+        shutdownSocketWrite(socketFD)
 
         let responseData = try readAll(from: socketFD)
         return try TerminalControlCodec.decodeResponse(responseData)
     }
 
     public static func send(request: TerminalControlRequest, host: String, port: Int, timeout: TimeInterval = 5) throws -> TerminalControlResponse {
-        let socketFD = socket(AF_INET, SOCK_STREAM, 0)
+        let socketFD = socket(AF_INET, streamSocketType, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(socketFD) }
 
         var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #if canImport(Darwin)
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #endif
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = in_port_t(UInt16(port).bigEndian)
         guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else { throw POSIXError(.EADDRNOTAVAIL) }
@@ -50,7 +58,7 @@ public enum TerminalControlClient {
 
         let payload = try TerminalControlCodec.encodeRequest(request)
         try writeAll(data: payload, to: socketFD)
-        shutdown(socketFD, SHUT_WR)
+        shutdownSocketWrite(socketFD)
 
         let responseData = try readAll(from: socketFD)
         return try TerminalControlCodec.decodeResponse(responseData)
@@ -63,7 +71,7 @@ public enum TerminalControlClient {
         let utf8Path = path.utf8CString
         guard utf8Path.count <= maxLength else { throw POSIXError(.ENAMETOOLONG) }
         withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
-            _ = utf8Path.withUnsafeBufferPointer { buffer in memcpy(pointer, buffer.baseAddress, buffer.count) }
+            utf8Path.withUnsafeBufferPointer { buffer in if let baseAddress = buffer.baseAddress { memcpy(pointer, baseAddress, buffer.count) } }
         }
         return address
     }
@@ -93,12 +101,32 @@ public enum TerminalControlClient {
         }
         return data
     }
+
+    private static func shutdownSocketWrite(_ fileDescriptor: Int32) {
+        #if canImport(Darwin)
+            shutdown(fileDescriptor, SHUT_WR)
+        #else
+            shutdown(fileDescriptor, Int32(SHUT_WR))
+        #endif
+    }
+
+    private static var streamSocketType: Int32 {
+        #if canImport(Glibc)
+            Int32(SOCK_STREAM.rawValue)
+        #else
+            SOCK_STREAM
+        #endif
+    }
 }
 
 extension timeval {
     fileprivate init(_ seconds: TimeInterval) {
         let wholeSeconds = Int(seconds.rounded(.down))
-        let microseconds = Int32((seconds - TimeInterval(wholeSeconds)) * 1_000_000)
+        #if canImport(Glibc)
+            let microseconds = Int((seconds - TimeInterval(wholeSeconds)) * 1_000_000)
+        #else
+            let microseconds = Int32((seconds - TimeInterval(wholeSeconds)) * 1_000_000)
+        #endif
         self.init(tv_sec: wholeSeconds, tv_usec: microseconds)
     }
 }

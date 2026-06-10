@@ -1,6 +1,11 @@
-import Darwin
 import Dispatch
 import Foundation
+
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
 
 public final class TerminalControlServer {
     private let socketPath: String
@@ -19,7 +24,7 @@ public final class TerminalControlServer {
 
     public func start() throws {
         try removeSocketIfPresent()
-        let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
+        let socketFD = socket(AF_UNIX, Self.streamSocketType, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
 
         var yes: Int32 = 1
@@ -83,7 +88,7 @@ public final class TerminalControlServer {
                 if let data = try? TerminalControlCodec.encodeResponse(fallback) { try? Self.writeAll(data: data, to: clientFD) }
             }
 
-            shutdown(clientFD, SHUT_RDWR)
+            Self.shutdownSocket(clientFD)
             close(clientFD)
         }
     }
@@ -105,7 +110,7 @@ public final class TerminalControlServer {
         let utf8Path = path.utf8CString
         guard utf8Path.count <= maxLength else { throw POSIXError(.ENAMETOOLONG) }
         withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
-            _ = utf8Path.withUnsafeBufferPointer { buffer in memcpy(pointer, buffer.baseAddress, buffer.count) }
+            utf8Path.withUnsafeBufferPointer { buffer in if let baseAddress = buffer.baseAddress { memcpy(pointer, baseAddress, buffer.count) } }
         }
         return address
     }
@@ -146,5 +151,21 @@ public final class TerminalControlServer {
             data.append(buffer, count: count)
         }
         return data
+    }
+
+    private static func shutdownSocket(_ fileDescriptor: Int32) {
+        #if canImport(Darwin)
+            shutdown(fileDescriptor, SHUT_RDWR)
+        #else
+            shutdown(fileDescriptor, Int32(SHUT_RDWR))
+        #endif
+    }
+
+    private static var streamSocketType: Int32 {
+        #if canImport(Glibc)
+            Int32(SOCK_STREAM.rawValue)
+        #else
+            SOCK_STREAM
+        #endif
     }
 }

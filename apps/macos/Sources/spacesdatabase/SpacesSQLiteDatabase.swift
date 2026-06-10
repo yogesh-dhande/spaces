@@ -1,5 +1,10 @@
 import Foundation
-import SQLite3
+
+#if os(Linux)
+    import CSQLite3
+#else
+    import SQLite3
+#endif
 
 public final class SpacesSQLiteDatabase {
     private let db: OpaquePointer

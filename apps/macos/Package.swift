@@ -5,6 +5,175 @@ import PackageDescription
 let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let ghosttyVTIncludeDirectory = "\(packageDirectory)/.local/ghosttyvt/include"
 
+#if os(Linux)
+let systemLibraryTargets: [Target] = [
+    .systemLibrary(name: "CSQLite3", pkgConfig: "sqlite3"),
+    .systemLibrary(name: "OpenSSL", pkgConfig: "openssl"),
+]
+let spacesDatabaseExtraDependencies: [Target.Dependency] = [.target(name: "CSQLite3")]
+let spacesTerminalCoreExtraDependencies: [Target.Dependency] = [.target(name: "OpenSSL")]
+let spacesTerminalCoreExtraLinkerSettings: [LinkerSetting] = [.linkedLibrary("ssl"), .linkedLibrary("crypto")]
+let workspaceCoreExtraDependencies: [Target.Dependency] = [.target(name: "CSQLite3")]
+#else
+let systemLibraryTargets: [Target] = []
+let spacesDatabaseExtraDependencies: [Target.Dependency] = []
+let spacesTerminalCoreExtraDependencies: [Target.Dependency] = []
+let spacesTerminalCoreExtraLinkerSettings: [LinkerSetting] = []
+let workspaceCoreExtraDependencies: [Target.Dependency] = []
+#endif
+
+let supportTargets: [Target] = [
+    .binaryTarget(
+        name: "GhosttyKit",
+        path: ".local/ghosttykit/GhosttyKit.xcframework"
+    ),
+    .target(
+        name: "ghosttyvtshim",
+        cSettings: [
+            .unsafeFlags(["-I", ghosttyVTIncludeDirectory])
+        ]
+    ),
+    .target(
+        name: "spacesdatabase",
+        dependencies: spacesDatabaseExtraDependencies,
+        linkerSettings: [.linkedLibrary("sqlite3")]
+    ),
+    .target(name: "systembridge"),
+    .target(name: "spacesruntimecore"),
+]
+
+let terminalTargets: [Target] = [
+    .target(
+        name: "spacesterminalcore",
+        dependencies: [
+            "spacesdatabase",
+            "ghosttyvtshim",
+        ] + spacesTerminalCoreExtraDependencies,
+        linkerSettings: spacesTerminalCoreExtraLinkerSettings
+    ),
+    .target(name: "spacesmobilecore", dependencies: ["spacesterminalcore"]),
+    .target(
+        name: "spacesmobilebridge",
+        dependencies: ["spacesmobilecore", "workspacecore", "spacesterminalcore"]
+    ),
+    .target(
+        name: "spacesterminalghostty",
+        dependencies: [
+            "spacesterminalcore",
+            "ghosttyvtshim",
+            .target(name: "GhosttyKit", condition: .when(platforms: [.macOS])),
+        ],
+        linkerSettings: [.linkedLibrary("c++", .when(platforms: [.macOS])), .linkedLibrary("util", .when(platforms: [.linux]))]
+    ),
+    .target(
+        name: "spacesterminalmobileghostty",
+        dependencies: ["spacesterminalcore", "GhosttyKit"],
+        linkerSettings: [.linkedLibrary("c++", .when(platforms: [.iOS, .macOS]))]
+    ),
+    .target(
+        name: "spacesterminalui",
+        dependencies: ["spacesterminalcore", "spacesterminalghostty"]
+    ),
+]
+
+let appTargets: [Target] = [
+    .target(
+        name: "workspacecore",
+        dependencies: [
+            "spacesdatabase",
+            "systembridge",
+            "spacesterminalcore",
+        ] + workspaceCoreExtraDependencies + [
+            .product(name: "Yams", package: "Yams"),
+        ],
+        linkerSettings: [.linkedLibrary("sqlite3")]
+    ),
+    .target(
+        name: "spacesui",
+        dependencies: [
+            "workspacecore",
+            "systembridge",
+            "spacesmobilebridge",
+            "spacesterminalui",
+            .product(name: "Sparkle", package: "Sparkle"),
+        ]
+    ),
+    .target(
+        name: "spacescli",
+        dependencies: [
+            "spacesmobilebridge",
+            "spacesmobilecore",
+            "workspacecore",
+            "spacesterminalcore",
+            "spacesterminalghostty",
+            "systembridge",
+            .product(name: "ArgumentParser", package: "swift-argument-parser")
+        ]
+    ),
+]
+
+let executableTargets: [Target] = [
+    .executableTarget(
+        name: "spacese2e",
+        dependencies: [
+            "workspacecore",
+            "systembridge",
+            "spacesmobilebridge",
+            "spacesmobilecore",
+            .product(name: "ArgumentParser", package: "swift-argument-parser")
+        ],
+        path: "Sources/spacese2e"
+    ),
+    .executableTarget(
+        name: "spacesd",
+        dependencies: [
+            "spacesterminalcore",
+            "spacesterminalghostty",
+            "spacesmobilecore",
+            "spacesruntimecore",
+            .target(name: "spacesmobilebridge", condition: .when(platforms: [.macOS])),
+        ],
+        path: "Sources/spacesd"
+    ),
+    .executableTarget(name: "spaces", dependencies: ["spacescli"], path: "Sources/spaces"),
+    .executableTarget(
+        name: "SpacesApp",
+        dependencies: ["spacesui"],
+        path: "Sources/SpacesApp",
+        exclude: ["Info.plist"],
+        resources: [.copy("AppIcon.icns")],
+        linkerSettings: [
+            .unsafeFlags([
+                "-Xlinker", "-sectcreate",
+                "-Xlinker", "__TEXT",
+                "-Xlinker", "__info_plist",
+                "-Xlinker", "Sources/SpacesApp/Info.plist",
+                "-Xlinker", "-rpath",
+                "-Xlinker", "@executable_path/../Frameworks"
+            ])
+        ]
+    ),
+]
+
+let testTargets: [Target] = [
+    .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore"]),
+    .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
+    .testTarget(name: "spacesruntimecoreTests", dependencies: ["spacesruntimecore"]),
+    .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
+    .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore"]),
+    .testTarget(name: "spacesuiTests", dependencies: ["spacesui"]),
+    .testTarget(
+        name: "spacescliTests",
+        dependencies: [
+            "spacescli",
+            "spacesmobilebridge",
+            .product(name: "ArgumentParser", package: "swift-argument-parser")
+        ]
+    )
+]
+
+let packageTargets: [Target] = systemLibraryTargets + supportTargets + terminalTargets + appTargets + executableTargets + testTargets
+
 let package = Package(
     name: "spaces",
     platforms: [
@@ -34,123 +203,5 @@ let package = Package(
         .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.2"),
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.1")
     ],
-    targets: [
-        .binaryTarget(
-            name: "GhosttyKit",
-            path: ".local/ghosttykit/GhosttyKit.xcframework"
-        ),
-        .target(
-            name: "ghosttyvtshim",
-            cSettings: [
-                .unsafeFlags(["-I", ghosttyVTIncludeDirectory])
-            ]
-        ),
-        .target(
-            name: "spacesdatabase",
-            linkerSettings: [.linkedLibrary("sqlite3")]
-        ),
-        .target(name: "systembridge"),
-        .target(name: "spacesterminalcore", dependencies: ["spacesdatabase", "ghosttyvtshim"]),
-        .target(name: "spacesmobilecore", dependencies: ["spacesterminalcore"]),
-        .target(
-            name: "spacesmobilebridge",
-            dependencies: ["spacesmobilecore", "workspacecore", "spacesterminalcore"]
-        ),
-        .target(name: "spacesruntimecore"),
-        .target(
-            name: "spacesterminalghostty",
-            dependencies: ["spacesterminalcore", "ghosttyvtshim", "GhosttyKit"],
-            linkerSettings: [.linkedLibrary("c++"), .linkedLibrary("util", .when(platforms: [.linux]))]
-        ),
-        .target(
-            name: "spacesterminalmobileghostty",
-            dependencies: ["spacesterminalcore", "GhosttyKit"],
-            linkerSettings: [.linkedLibrary("c++")]
-        ),
-        .target(
-            name: "spacesterminalui",
-            dependencies: ["spacesterminalcore", "spacesterminalghostty"]
-        ),
-        .target(
-            name: "workspacecore",
-            dependencies: ["spacesdatabase", "systembridge", "spacesterminalcore", .product(name: "Yams", package: "Yams")],
-            linkerSettings: [.linkedLibrary("sqlite3")]
-        ),
-        .target(
-            name: "spacesui",
-            dependencies: [
-                "workspacecore",
-                "systembridge",
-                "spacesmobilebridge",
-                "spacesterminalui",
-                .product(name: "Sparkle", package: "Sparkle"),
-            ]
-        ),
-        .target(
-            name: "spacescli",
-            dependencies: [
-                "spacesmobilebridge",
-                "spacesmobilecore",
-                "workspacecore",
-                "spacesterminalcore",
-                "spacesterminalghostty",
-                "systembridge",
-                .product(name: "ArgumentParser", package: "swift-argument-parser")
-            ]
-        ),
-        .executableTarget(
-            name: "spacese2e",
-            dependencies: [
-                "workspacecore",
-                "systembridge",
-                "spacesmobilebridge",
-                "spacesmobilecore",
-                .product(name: "ArgumentParser", package: "swift-argument-parser")
-            ],
-            path: "Sources/spacese2e"
-        ),
-        .executableTarget(
-            name: "spacesd",
-            dependencies: [
-                "spacesterminalcore",
-                "spacesterminalghostty",
-                "spacesmobilecore",
-                "spacesruntimecore",
-                .target(name: "spacesmobilebridge", condition: .when(platforms: [.macOS])),
-            ],
-            path: "Sources/spacesd"
-        ),
-        .executableTarget(name: "spaces", dependencies: ["spacescli"], path: "Sources/spaces"),
-        .executableTarget(
-            name: "SpacesApp",
-            dependencies: ["spacesui"],
-            path: "Sources/SpacesApp",
-            exclude: ["Info.plist"],
-            resources: [.copy("AppIcon.icns")],
-            linkerSettings: [
-                .unsafeFlags([
-                    "-Xlinker", "-sectcreate",
-                    "-Xlinker", "__TEXT",
-                    "-Xlinker", "__info_plist",
-                    "-Xlinker", "Sources/SpacesApp/Info.plist",
-                    "-Xlinker", "-rpath",
-                    "-Xlinker", "@executable_path/../Frameworks"
-                ])
-            ]
-        ),
-        .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore"]),
-        .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
-        .testTarget(name: "spacesruntimecoreTests", dependencies: ["spacesruntimecore"]),
-        .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
-        .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore"]),
-        .testTarget(name: "spacesuiTests", dependencies: ["spacesui"]),
-        .testTarget(
-            name: "spacescliTests",
-            dependencies: [
-                "spacescli",
-                "spacesmobilebridge",
-                .product(name: "ArgumentParser", package: "swift-argument-parser")
-            ]
-        )
-    ]
+    targets: packageTargets
 )

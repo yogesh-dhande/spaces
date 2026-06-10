@@ -1,8 +1,13 @@
-import SQLite3
 import XCTest
 
 @testable import spacesdatabase
 @testable import workspacecore
+
+#if os(Linux)
+    import CSQLite3
+#else
+    import SQLite3
+#endif
 
 private final class SQLiteCommitThread: Thread {
     private let database: OpaquePointer

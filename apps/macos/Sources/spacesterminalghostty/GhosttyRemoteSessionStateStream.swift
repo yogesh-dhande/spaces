@@ -1,7 +1,12 @@
-import Darwin
 import Dispatch
 import Foundation
 import spacesterminalcore
+
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
 
 final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
     fileprivate static let ioBufferSize = 256 * 1024
@@ -23,7 +28,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
 
     func start() throws {
         try removeSocketIfPresent()
-        let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
+        let socketFD = socket(AF_UNIX, Self.streamSocketType, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
 
         var yes: Int32 = 1
@@ -144,7 +149,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
         let utf8Path = path.utf8CString
         guard utf8Path.count <= maxLength else { throw POSIXError(.ENAMETOOLONG) }
         withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
-            _ = utf8Path.withUnsafeBufferPointer { buffer in memcpy(pointer, buffer.baseAddress, buffer.count) }
+            utf8Path.withUnsafeBufferPointer { buffer in if let baseAddress = buffer.baseAddress { memcpy(pointer, baseAddress, buffer.count) } }
         }
         return address
     }
@@ -156,10 +161,14 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
     }
 
     fileprivate static func setNoSIGPIPE(_ fileDescriptor: Int32) throws {
-        var yes: Int32 = 1
-        guard setsockopt(fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
+        #if canImport(Darwin)
+            var yes: Int32 = 1
+            guard setsockopt(fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        #else
+            _ = fileDescriptor
+        #endif
     }
 
     private static func applySocketTimeouts(_ fileDescriptor: Int32) {
@@ -196,6 +205,14 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
             return true
         } catch { return false }
     }
+
+    fileprivate static var streamSocketType: Int32 {
+        #if canImport(Glibc)
+            Int32(SOCK_STREAM.rawValue)
+        #else
+            SOCK_STREAM
+        #endif
+    }
 }
 
 final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
@@ -224,7 +241,7 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
 
     func start() throws {
         guard socketFD < 0 else { return }
-        let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
+        let socketFD = socket(AF_UNIX, GhosttyRemoteSessionStateStreamServer.streamSocketType, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         try GhosttyRemoteSessionStateStreamServer.setNoSIGPIPE(socketFD)
         GhosttyRemoteSessionStateStreamServer.applySocketBuffers(socketFD)
@@ -261,7 +278,7 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         eventDeliveryScheduled = false
         eventLock.unlock()
         source?.cancel()
-        shutdown(socketFD, SHUT_RDWR)
+        Self.shutdownSocket(socketFD)
         Task { @MainActor [onDisconnect] in onDisconnect() }
     }
 
@@ -331,12 +348,24 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         default: return false
         }
     }
+
+    private static func shutdownSocket(_ fileDescriptor: Int32) {
+        #if canImport(Darwin)
+            shutdown(fileDescriptor, SHUT_RDWR)
+        #else
+            shutdown(fileDescriptor, Int32(SHUT_RDWR))
+        #endif
+    }
 }
 
 extension timeval {
     fileprivate init(seconds: TimeInterval) {
         let wholeSeconds = Int(seconds.rounded(.down))
-        let microseconds = Int32((seconds - TimeInterval(wholeSeconds)) * 1_000_000)
+        #if canImport(Glibc)
+            let microseconds = Int((seconds - TimeInterval(wholeSeconds)) * 1_000_000)
+        #else
+            let microseconds = Int32((seconds - TimeInterval(wholeSeconds)) * 1_000_000)
+        #endif
         self.init(tv_sec: wholeSeconds, tv_usec: microseconds)
     }
 }

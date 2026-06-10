@@ -1,0 +1,377 @@
+#if os(Linux)
+    import Dispatch
+    import Foundation
+    import Glibc
+    import ghosttyvtshim
+    import spacesterminalcore
+
+    enum GhosttyLinuxHeadlessSessionError: LocalizedError {
+        case vtSessionUnavailable
+        case snapshotUnavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .vtSessionUnavailable: "libghostty-vt is not available for the headless terminal session."
+            case .snapshotUnavailable: "Unable to export a headless terminal render frame."
+            }
+        }
+    }
+
+    @MainActor public final class GhosttyEmbeddedSessionCore {
+        private static let maxScrollback = 20_000
+
+        public let launchConfiguration: TerminalSessionLaunchConfiguration
+        public let paths: TerminalSessionPaths
+
+        private let controlQueue: DispatchQueue
+        private let stateStreamQueue: DispatchQueue
+        private let ptyDriver: HostManagedPTYTerminalSessionDriver
+        private var controlServer: TerminalControlServer?
+        private var stateStreamServer: GhosttyRemoteSessionStateStreamServer?
+        private var outputHandle: FileHandle?
+        private var outputByteCount = 0
+        private nonisolated(unsafe) var vtSession: OpaquePointer?
+        private var started = false
+        private var terminating = false
+        private var lastRuntimeState: TerminalSessionRuntimeState?
+        private var lastKnownChildPID: Int32?
+        private var terminalSize: (columns: Int, rows: Int) = (80, 24)
+        private var ownerEpoch: UInt64 = 0
+        private var screenStateRevision: UInt64 = 0
+        private let onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)?
+
+        public init(
+            launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
+            requestSurfaceRefreshAction _: (@MainActor () -> Void)? = nil, onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)? = nil
+        ) {
+            self.launchConfiguration = launchConfiguration
+            self.paths = paths
+            self.onSessionClosed = onSessionClosed
+            controlQueue = DispatchQueue(label: "spaces.terminal.session-host.control.\(launchConfiguration.sessionID)")
+            stateStreamQueue = DispatchQueue(label: "spaces.terminal.session-host.state-stream.\(launchConfiguration.sessionID)")
+            ptyDriver = HostManagedPTYTerminalSessionDriver(launchConfiguration: launchConfiguration)
+        }
+
+        deinit { if let vtSession { spaces_ghostty_vt_session_free(vtSession) } }
+
+        public func startIfNeeded() throws {
+            guard !started else { return }
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            try ensureOutputHandle()
+            guard
+                let vtSession = spaces_ghostty_vt_session_new(
+                    UInt16(clamping: terminalSize.columns), UInt16(clamping: terminalSize.rows), Self.maxScrollback)
+            else { throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable }
+            self.vtSession = vtSession
+            started = true
+            terminating = false
+            writeRuntimeState(state: .starting)
+            ptyDriver.setOutputHandler { [weak self] data in Task { @MainActor [weak self] in self?.handleOutput(data) } }
+            ptyDriver.setSessionClosedHandler { [weak self] in self?.handleSessionClosed() }
+            do {
+                try ptyDriver.startIfNeeded()
+                try startControlServer()
+                try startStateStreamServer()
+                writeRuntimeState(state: .running)
+                broadcastCurrentState(reason: TerminalRemoteSessionStateReason.initial)
+            } catch {
+                terminate()
+                throw error
+            }
+        }
+
+        public func terminate() {
+            guard started || vtSession != nil || controlServer != nil || stateStreamServer != nil else { return }
+            terminating = true
+            let finalPayload = makeStatePayload(reason: TerminalRemoteSessionStateReason.terminated, state: .exited)
+            if let finalPayload { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths) }
+            controlServer?.stop()
+            controlServer = nil
+            TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
+            stateStreamServer?.stop()
+            stateStreamServer = nil
+            GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
+            ptyDriver.setOutputHandler(nil)
+            ptyDriver.setSessionClosedHandler(nil)
+            ptyDriver.terminate()
+            if let vtSession {
+                spaces_ghostty_vt_session_free(vtSession)
+                self.vtSession = nil
+            }
+            writeRuntimeState(state: .exited)
+            try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: nowISO8601())
+            try? outputHandle?.synchronize()
+            try? outputHandle?.close()
+            outputHandle = nil
+            started = false
+            terminating = false
+        }
+
+        private func handleSessionClosed() {
+            guard !terminating else { return }
+            terminate()
+            onSessionClosed?(self)
+        }
+
+        private func handleOutput(_ data: Data) {
+            guard started, !data.isEmpty else { return }
+            do {
+                try outputHandle?.write(contentsOf: data)
+                outputByteCount += data.count
+            } catch {}
+            writeVTRenderer(data)
+            writeRuntimeState(state: .running)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.output)
+        }
+
+        private func ensureOutputHandle() throws {
+            _ = FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
+            outputByteCount = Int(try handle.seekToEnd())
+            outputHandle = handle
+        }
+
+        private func startControlServer() throws {
+            let server = TerminalControlServer(socketPath: paths.controlSocketPath, queue: controlQueue) { [weak self] request in
+                Self.runOnMainActorSynchronously {
+                    guard let self else { return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.") }
+                    return self.handleControlRequest(request)
+                }
+            }
+            try server.start()
+            controlServer = server
+        }
+
+        private func startStateStreamServer() throws {
+            let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: stateStreamQueue) { [weak self] in
+                Self.runOnMainActorSynchronously { self?.makeStatePayload(reason: TerminalRemoteSessionStateReason.initial) }
+            }
+            try server.start()
+            stateStreamServer = server
+        }
+
+        private func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            switch request.command {
+            case "attach": return attach(request)
+            case "detach": return detach(request)
+            case "heartbeat": return heartbeat(request)
+            case "takeover": return takeover(request)
+            case "send": return send(request)
+            case "key": return key(request)
+            case "clearScreen": return clearScreen(request)
+            case "resize": return resize(request)
+            case "scroll": return scroll(request)
+            default: return TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
+            }
+        }
+
+        private func attach(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard let client = request.client else { return TerminalControlResponse(ok: false, message: "Missing client payload.") }
+            let mode = request.attachmentMode ?? .viewer
+            do {
+                let previousOwner = activeOwnerClientID()
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths, attachedAt: nowISO8601())
+                if mode == .owner, previousOwner != client.id { advanceOwnerEpoch() }
+                writeRuntimeState(state: .running)
+                broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
+                return TerminalControlResponse(ok: true, message: "Attached \(mode.rawValue) client.")
+            } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+        }
+
+        private func detach(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
+            do {
+                let detachedOwner = activeOwnerClientID() == clientID
+                try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: nowISO8601())
+                if detachedOwner { advanceOwnerEpoch() }
+                writeRuntimeState(state: .running)
+                broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
+                return TerminalControlResponse(ok: true, message: "Detached terminal client.")
+            } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+        }
+
+        private func heartbeat(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
+            do {
+                try TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+                return TerminalControlResponse(ok: true, message: "Refreshed terminal client lease.")
+            } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+        }
+
+        private func takeover(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
+            do {
+                try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+                let previousOwner = activeOwnerClientID()
+                try TerminalSessionPersistence.transferOwnership(
+                    sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: nowISO8601())
+                if previousOwner != clientID { advanceOwnerEpoch() }
+                writeRuntimeState(state: .running)
+                broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
+                return TerminalControlResponse(ok: true, message: "Transferred terminal ownership.")
+            } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+        }
+
+        private func send(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard ownerRequestIsCurrent(request) else { return TerminalControlResponse(ok: false, message: "Only the active owner can send input.") }
+            guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
+            let payload = text + (request.appendNewline ? "\n" : "")
+            ptyDriver.sendRawBytes(Data(payload.utf8))
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.input)
+            return TerminalControlResponse(ok: true, message: "Sent input.")
+        }
+
+        private func key(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard ownerRequestIsCurrent(request) else { return TerminalControlResponse(ok: false, message: "Only the active owner can send input.") }
+            guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
+                return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
+            }
+            ptyDriver.sendRawBytes(Data(bytes))
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.input)
+            return TerminalControlResponse(ok: true, message: "Sent key.")
+        }
+
+        private func clearScreen(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard ownerRequestIsCurrent(request) else {
+                return TerminalControlResponse(ok: false, message: "Only the active owner can clear the terminal.")
+            }
+            writeVTRenderer(Data("\u{001B}[H\u{001B}[2J\u{001B}[3J".utf8))
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.clearScreen)
+            return TerminalControlResponse(ok: true, message: "Cleared terminal screen and scrollback.")
+        }
+
+        private func resize(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard ownerRequestIsCurrent(request) else {
+                return TerminalControlResponse(ok: false, message: "Only the active owner can resize the terminal.")
+            }
+            guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
+                return TerminalControlResponse(ok: false, message: "Missing terminal size.")
+            }
+            terminalSize = (columns, rows)
+            _ = ptyDriver.resizeCellGrid(columns: columns, rows: rows)
+            recreateVTRenderer(columns: columns, rows: rows)
+            writeRuntimeState(state: .running)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize)
+            return TerminalControlResponse(ok: true, message: "Resized terminal.")
+        }
+
+        private func scroll(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard ownerRequestIsCurrent(request) else {
+                return TerminalControlResponse(ok: false, message: "Only the active owner can scroll the terminal.")
+            }
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.scroll)
+            return TerminalControlResponse(ok: true, message: "Scrolled terminal.")
+        }
+
+        private func ownerRequestIsCurrent(_ request: TerminalControlRequest) -> Bool {
+            guard let clientID = request.clientID, activeOwnerClientID() == clientID else { return false }
+            guard let requestedOwnerEpoch = request.ownerEpoch else { return true }
+            return requestedOwnerEpoch == ownerEpoch
+        }
+
+        private func activeOwnerClientID() -> String? {
+            ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).first { $0.mode == .owner }?.clientID
+        }
+
+        private func advanceOwnerEpoch() { ownerEpoch &+= 1 }
+
+        private func writeVTRenderer(_ data: Data) {
+            guard let vtSession, !data.isEmpty else { return }
+            data.withUnsafeBytes { rawBuffer in
+                _ = spaces_ghostty_vt_session_write(vtSession, rawBuffer.bindMemory(to: UInt8.self).baseAddress, rawBuffer.count)
+            }
+            screenStateRevision &+= 1
+        }
+
+        private func recreateVTRenderer(columns: Int, rows: Int) {
+            if let vtSession { spaces_ghostty_vt_session_free(vtSession) }
+            vtSession = spaces_ghostty_vt_session_new(UInt16(clamping: columns), UInt16(clamping: rows), Self.maxScrollback)
+            guard let vtSession, let data = try? Data(contentsOf: URL(fileURLWithPath: paths.outputPath)), !data.isEmpty else { return }
+            data.withUnsafeBytes { rawBuffer in
+                _ = spaces_ghostty_vt_session_write(vtSession, rawBuffer.bindMemory(to: UInt8.self).baseAddress, rawBuffer.count)
+            }
+            screenStateRevision &+= 1
+        }
+
+        private func writeRuntimeState(state: TerminalSessionState) {
+            let liveChildPID = ptyDriver.childPID()
+            if let liveChildPID { lastKnownChildPID = liveChildPID }
+            let runtimeState = TerminalSessionRuntimeState(
+                sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
+                childPID: liveChildPID ?? lastKnownChildPID, state: state, updatedAt: nowISO8601(),
+                exitedAt: state.isInteractive ? nil : nowISO8601(), title: launchConfiguration.title,
+                workingDirectory: launchConfiguration.workingDirectory, columns: terminalSize.columns, rows: terminalSize.rows,
+                foregroundPID: ptyDriver.foregroundPID())
+            try? TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+            lastRuntimeState = runtimeState
+        }
+
+        private func broadcastCurrentState(reason: String) {
+            guard let payload = makeStatePayload(reason: reason) else { return }
+            try? TerminalSessionPersistence.writeRemoteSessionState(payload, paths: paths)
+            stateStreamServer?.broadcast(payload)
+        }
+
+        private func makeStatePayload(reason: String, state: TerminalSessionState? = nil) -> GhosttyRemoteSessionStatePayload? {
+            let runtimeState: TerminalSessionRuntimeState
+            if let state {
+                writeRuntimeState(state: state)
+                runtimeState = lastRuntimeState ?? fallbackRuntimeState(state: state)
+            } else {
+                runtimeState = lastRuntimeState ?? fallbackRuntimeState(state: started ? .running : .exited)
+            }
+            let renderUpdate = try? GhosttyRenderUpdateBinaryCodec.encode(.full(try renderFrame(), fallbackReason: "linux_headless_full_frame"))
+            return GhosttyRemoteSessionStatePayload(
+                sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: nowISO8601(), sessionStateRevision: nil, sessionStateFlags: nil,
+                screenStateRevision: screenStateRevision, runtimeState: runtimeState,
+                attachmentSnapshot: (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot(),
+                title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory, outputByteCount: outputByteCount,
+                outputEndByteOffset: outputByteCount, renderUpdate: renderUpdate)
+        }
+
+        private func renderFrame() throws -> GhosttyRenderFrame {
+            guard let vtSession else { throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable }
+            var rawSnapshot = SpacesGhosttyVtSnapshot()
+            guard spaces_ghostty_vt_session_copy_snapshot(vtSession, &rawSnapshot) else { throw GhosttyLinuxHeadlessSessionError.snapshotUnavailable }
+            defer { spaces_ghostty_vt_snapshot_free(&rawSnapshot) }
+            let cells: [GhosttyTerminalSnapshot.Cell]
+            if let rawCells = rawSnapshot.cells, rawSnapshot.cell_count > 0 {
+                cells = UnsafeBufferPointer(start: rawCells, count: rawSnapshot.cell_count).map {
+                    GhosttyTerminalSnapshot.Cell(
+                        codepoint: $0.codepoint, foregroundRGB: $0.foreground_rgb, backgroundRGB: $0.background_rgb, flags: $0.flags)
+                }
+            } else {
+                cells = []
+            }
+            let snapshot = GhosttyTerminalSnapshot(
+                columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows), cursorColumn: Int(rawSnapshot.cursor_column),
+                cursorRow: Int(rawSnapshot.cursor_row), cursorVisible: rawSnapshot.cursor_visible,
+                defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells)
+            return GhosttyRenderFrame(sessionRevision: screenStateRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
+        }
+
+        private func fallbackRuntimeState(state: TerminalSessionState) -> TerminalSessionRuntimeState {
+            TerminalSessionRuntimeState(
+                sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: lastKnownChildPID,
+                state: state, updatedAt: nowISO8601(), exitedAt: state.isInteractive ? nil : nowISO8601(), title: launchConfiguration.title,
+                workingDirectory: launchConfiguration.workingDirectory, columns: terminalSize.columns, rows: terminalSize.rows)
+        }
+
+        private func nowISO8601() -> String { GhosttyRemoteSessionStateTimestamp.string(from: Date()) }
+
+        nonisolated private static func runOnMainActorSynchronously<T: Sendable>(_ work: @MainActor @Sendable @escaping () -> T) -> T {
+            if Thread.isMainThread { return MainActor.assumeIsolated(work) }
+            let semaphore = DispatchSemaphore(value: 0)
+            nonisolated(unsafe) var result: T?
+            Task { @MainActor in
+                result = work()
+                semaphore.signal()
+            }
+            semaphore.wait()
+            guard let result else { fatalError("MainActor synchronous task completed without a result.") }
+            return result
+        }
+    }
+#endif

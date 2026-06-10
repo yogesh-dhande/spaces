@@ -1,6 +1,11 @@
 import Foundation
-import Network
-import Security
+
+#if canImport(Network)
+    import Network
+#endif
+#if canImport(Security)
+    import Security
+#endif
 
 public enum SpacesMobileBridgeTransportRole: Sendable {
     case server
@@ -22,23 +27,25 @@ public enum SpacesMobileBridgeTransportError: LocalizedError, Equatable {
 public enum SpacesMobileBridgeTransport {
     public static let pskIdentity = "spaces-mobile-v1"
 
-    public static func parameters(transportKey: String, role: SpacesMobileBridgeTransportRole) throws -> NWParameters {
-        let keyData = try decodeTransportKey(transportKey)
-        let identityData = Data(pskIdentity.utf8)
-        let tlsOptions = NWProtocolTLS.Options()
-        let securityOptions = tlsOptions.securityProtocolOptions
-        sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
-        sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
-        sec_protocol_options_set_peer_authentication_required(securityOptions, false)
-        sec_protocol_options_add_pre_shared_key(securityOptions, dispatchData(from: keyData), dispatchData(from: identityData))
-        switch role {
-        case .server: sec_protocol_options_set_tls_pre_shared_key_identity_hint(securityOptions, dispatchData(from: identityData))
-        case .client:
-            sec_protocol_options_set_pre_shared_key_selection_block(
-                securityOptions, { _, _, complete in complete(dispatchData(from: identityData)) }, DispatchQueue.global(qos: .userInitiated))
+    #if canImport(Network) && canImport(Security)
+        public static func parameters(transportKey: String, role: SpacesMobileBridgeTransportRole) throws -> NWParameters {
+            let keyData = try decodeTransportKey(transportKey)
+            let identityData = Data(pskIdentity.utf8)
+            let tlsOptions = NWProtocolTLS.Options()
+            let securityOptions = tlsOptions.securityProtocolOptions
+            sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
+            sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
+            sec_protocol_options_set_peer_authentication_required(securityOptions, false)
+            sec_protocol_options_add_pre_shared_key(securityOptions, dispatchData(from: keyData), dispatchData(from: identityData))
+            switch role {
+            case .server: sec_protocol_options_set_tls_pre_shared_key_identity_hint(securityOptions, dispatchData(from: identityData))
+            case .client:
+                sec_protocol_options_set_pre_shared_key_selection_block(
+                    securityOptions, { _, _, complete in complete(dispatchData(from: identityData)) }, DispatchQueue.global(qos: .userInitiated))
+            }
+            return NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
         }
-        return NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
-    }
+    #endif
 
     public static func decodeTransportKey(_ value: String) throws -> Data {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -55,7 +62,9 @@ public enum SpacesMobileBridgeTransport {
             of: "=", with: "")
     }
 
-    private static func dispatchData(from data: Data) -> dispatch_data_t {
-        data.withUnsafeBytes { rawBuffer in DispatchData(bytes: rawBuffer) as dispatch_data_t }
-    }
+    #if canImport(Network) && canImport(Security)
+        private static func dispatchData(from data: Data) -> dispatch_data_t {
+            data.withUnsafeBytes { rawBuffer in DispatchData(bytes: rawBuffer) as dispatch_data_t }
+        }
+    #endif
 }
