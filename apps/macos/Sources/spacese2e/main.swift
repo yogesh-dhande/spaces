@@ -25,8 +25,10 @@ struct SpacesE2ECommand: ParsableCommand {
             RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self, CycleWorkspaceWindowCommand.self,
             FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self,
             SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
-            StartTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, OpenMobilePairingWindowCommand.self, RecordScreenCommand.self,
-            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            StartTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, UpsertComputeHostCommand.self, ListComputeHostsCommand.self,
+            SetProjectDefaultComputeHostCommand.self, SetWorkspaceComputeHostOverrideCommand.self, PlanWorkspaceRuntimeCommand.self,
+            OpenMobilePairingWindowCommand.self, RecordScreenCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
+            DragApplicationWindowCommand.self,
         ])
 }
 
@@ -268,7 +270,8 @@ private struct OpenMobilePairingWindowCommand: ParsableCommand {
             MobilePairingWindowPayload(
                 host: status.host, port: status.port, bonjourServiceName: status.bonjourServiceName, pairingLink: window.linkString,
                 pairingCode: window.code, pairingNonce: window.nonce, transportKey: link.transportKey,
-                expiresAt: ISO8601DateFormatter().string(from: window.expiresAt), message: response.message))
+                certificateFingerprint: link.certificateFingerprint, expiresAt: ISO8601DateFormatter().string(from: window.expiresAt),
+                message: response.message))
     }
 }
 
@@ -435,6 +438,112 @@ private struct StopFixturesCommand: ParsableCommand {
         }
 
         try emitJSON(["stoppedWorkspaces": stoppedWorkspaces])
+    }
+}
+
+private struct UpsertComputeHostCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "upsert-compute-host")
+
+    @Option(name: .long) var id: String
+    @Option(name: .long) var name: String
+    @Option(name: .long) var sshHost: String
+    @Option(name: .long) var sshUser: String?
+    @Option(name: .long) var sshPort: Int?
+    @Option(name: .long) var workspaceRoot: String
+    @Option(name: .long) var daemonHost: String
+    @Option(name: .long) var daemonPort: Int
+    @Option(name: .long) var certificateFingerprint: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let hostID = try required(id, label: "id")
+        let now = nowISO8601()
+        let existing = try orchestrator.store.computeHost(id: hostID)
+        let host = ComputeHostRecord(
+            id: hostID, name: try required(name, label: "name"), sshHost: try required(sshHost, label: "ssh-host"),
+            sshUser: normalizedOptional(sshUser), sshPort: try validOptionalPort(sshPort, label: "ssh-port"),
+            workspaceRoot: normalizeRemoteRoot(try required(workspaceRoot, label: "workspace-root")),
+            daemonEndpoint: SpacesDaemonEndpoint(
+                host: try required(daemonHost, label: "daemon-host"), port: try validPort(daemonPort, label: "daemon-port"),
+                certificateFingerprint: try required(certificateFingerprint, label: "certificate-fingerprint")),
+            createdAt: existing?.createdAt ?? now, updatedAt: now)
+        try orchestrator.upsertComputeHost(host)
+        try emitJSON(computeHostPayload(host))
+    }
+}
+
+private struct ListComputeHostsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list-compute-hosts")
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        try emitJSON(ComputeHostListPayload(hosts: try orchestrator.listComputeHosts().map(computeHostPayload)))
+    }
+}
+
+private struct SetProjectDefaultComputeHostCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "set-project-default-compute-host")
+
+    @Option(name: .long) var projectDir: String
+    @Option(name: .long) var hostID: String?
+    @Flag(name: .long) var local = false
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        guard local != (normalizedOptional(hostID) != nil) else { throw ValidationError("Pass exactly one of --host-id or --local.") }
+        let normalizedProjectDir = normalizePath(projectDir)
+        guard let project = try orchestrator.project(dir: normalizedProjectDir) else {
+            throw ValidationError("Project not found at: \(normalizedProjectDir)")
+        }
+        let resolvedHostID = local ? nil : normalizedOptional(hostID)
+        try orchestrator.setProjectDefaultComputeHost(projectID: project.id, hostID: resolvedHostID)
+        guard let updated = try orchestrator.project(id: project.id) else { throw ValidationError("Project disappeared: \(project.id)") }
+        try emitJSON(ProjectComputeHostPayload(projectID: updated.id, projectDir: updated.dir, defaultComputeHostID: updated.defaultComputeHostID))
+    }
+}
+
+private struct SetWorkspaceComputeHostOverrideCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "set-workspace-compute-host-override")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var hostID: String?
+    @Flag(name: .long) var inherit = false
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        guard inherit != (normalizedOptional(hostID) != nil) else { throw ValidationError("Pass exactly one of --host-id or --inherit.") }
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let resolvedHostID = inherit ? nil : normalizedOptional(hostID)
+        try orchestrator.setWorkspaceComputeHostOverride(workspaceID: workspace.id, hostID: resolvedHostID)
+        guard let updated = try orchestrator.store.workspace(id: workspace.id) else {
+            throw ValidationError("Workspace disappeared: \(workspace.id)")
+        }
+        try emitJSON(
+            WorkspaceComputeHostOverridePayload(
+                workspaceID: updated.id, workspaceDir: updated.dir, computeHostOverrideID: updated.computeHostOverrideID))
+    }
+}
+
+private struct PlanWorkspaceRuntimeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "plan-workspace-runtime")
+
+    @Option(name: .long) var workspaceDir: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let plan = try orchestrator.workspaceRuntimePlan(workspaceID: workspace.id)
+        try emitJSON(
+            WorkspaceRuntimePlanPayload(
+                projectID: plan.project.id, workspace: workspaceSummaryPayload(plan.workspace),
+                selection: computeHostSelectionPayload(plan.selection), daemonTarget: daemonTargetPayload(plan.daemonTarget),
+                binding: plan.binding.map(workspaceComputeBindingPayload), manifest: plan.manifest, remoteSSHURI: plan.remoteSSHURI))
     }
 }
 
@@ -1113,8 +1222,78 @@ private struct MobilePairingWindowPayload: Codable {
     let pairingCode: String
     let pairingNonce: String
     let transportKey: String
+    let certificateFingerprint: String
     let expiresAt: String
     let message: String
+}
+
+private struct ComputeHostListPayload: Codable { let hosts: [ComputeHostPayload] }
+
+private struct ComputeHostPayload: Codable {
+    let id: String
+    let name: String
+    let kind: String
+    let sshHost: String
+    let sshUser: String?
+    let sshPort: Int?
+    let workspaceRoot: String
+    let daemonHost: String
+    let daemonPort: Int
+    let certificateFingerprint: String
+    let createdAt: String
+    let updatedAt: String
+}
+
+private struct ProjectComputeHostPayload: Codable {
+    let projectID: String
+    let projectDir: String
+    let defaultComputeHostID: String?
+}
+
+private struct WorkspaceComputeHostOverridePayload: Codable {
+    let workspaceID: String
+    let workspaceDir: String
+    let computeHostOverrideID: String?
+}
+
+private struct WorkspaceRuntimePlanPayload: Codable {
+    let projectID: String
+    let workspace: WorkspaceSummaryPayload
+    let selection: ComputeHostSelectionPayload
+    let daemonTarget: SpacesDaemonConnectionTargetPayload
+    let binding: WorkspaceComputeBindingPayload?
+    let manifest: WorkspaceRuntimeManifest
+    let remoteSSHURI: String?
+}
+
+private struct ComputeHostSelectionPayload: Codable {
+    let location: String
+    let computeHostID: String?
+    let displayName: String
+    let host: ComputeHostPayload?
+}
+
+private struct SpacesDaemonConnectionTargetPayload: Codable {
+    let transport: String
+    let computeHostID: String?
+    let displayName: String
+    let socketPath: String?
+    let endpoint: SpacesDaemonEndpointPayload?
+}
+
+private struct SpacesDaemonEndpointPayload: Codable {
+    let host: String
+    let port: Int
+    let certificateFingerprint: String
+}
+
+private struct WorkspaceComputeBindingPayload: Codable {
+    let workspaceID: String
+    let hostID: String
+    let remotePath: String
+    let branch: String?
+    let createdAt: String
+    let updatedAt: String
 }
 
 private struct WorkspaceSummaryPayload: Codable {
@@ -1266,6 +1445,41 @@ private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: S
         notes: workspace.notes)
 }
 
+private func workspaceSummaryPayload(_ workspace: WorkspaceRecord) -> WorkspaceSummaryPayload {
+    WorkspaceSummaryPayload(
+        id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+        notes: workspace.notes)
+}
+
+private func computeHostPayload(_ host: ComputeHostRecord) -> ComputeHostPayload {
+    ComputeHostPayload(
+        id: host.id, name: host.name, kind: host.kind.rawValue, sshHost: host.sshHost, sshUser: host.sshUser, sshPort: host.sshPort,
+        workspaceRoot: host.workspaceRoot, daemonHost: host.daemonEndpoint.host, daemonPort: host.daemonEndpoint.port,
+        certificateFingerprint: host.daemonEndpoint.certificateFingerprint, createdAt: host.createdAt, updatedAt: host.updatedAt)
+}
+
+private func computeHostSelectionPayload(_ selection: ComputeHostSelection) -> ComputeHostSelectionPayload {
+    switch selection {
+    case .localMac: return ComputeHostSelectionPayload(location: "local", computeHostID: nil, displayName: selection.displayName, host: nil)
+    case .remote(let host):
+        return ComputeHostSelectionPayload(
+            location: "remote", computeHostID: host.id, displayName: selection.displayName, host: computeHostPayload(host))
+    }
+}
+
+private func daemonTargetPayload(_ target: SpacesDaemonConnectionTarget) -> SpacesDaemonConnectionTargetPayload {
+    SpacesDaemonConnectionTargetPayload(
+        transport: target.transport.rawValue, computeHostID: target.computeHostID, displayName: target.displayName, socketPath: target.socketPath,
+        endpoint: target.endpoint.map { SpacesDaemonEndpointPayload(host: $0.host, port: $0.port, certificateFingerprint: $0.certificateFingerprint) }
+    )
+}
+
+private func workspaceComputeBindingPayload(_ binding: WorkspaceComputeBinding) -> WorkspaceComputeBindingPayload {
+    WorkspaceComputeBindingPayload(
+        workspaceID: binding.workspaceID, hostID: binding.hostID, remotePath: binding.remotePath, branch: binding.branch,
+        createdAt: binding.createdAt, updatedAt: binding.updatedAt)
+}
+
 /// Shared JSON encoder for the shell harness.
 private func emitJSON<T: Encodable>(_ value: T) throws {
     let encoder = JSONEncoder()
@@ -1281,6 +1495,34 @@ private func makeOrchestrator() throws -> WorkspaceOrchestrator { try WorkspaceO
 /// Normalizes filesystem paths before lookups so shell callers can pass either
 /// relative or absolute values safely.
 private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
+
+private func normalizeRemoteRoot(_ path: String) -> String {
+    let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed == "/" { return "/" }
+    return "/" + trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+}
+
+private func normalizedOptional(_ value: String?) -> String? {
+    guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+    return value
+}
+
+private func required(_ value: String, label: String) throws -> String {
+    guard let normalized = normalizedOptional(value) else { throw ValidationError("Missing \(label).") }
+    return normalized
+}
+
+private func validPort(_ port: Int, label: String) throws -> Int {
+    guard (1...65_535).contains(port) else { throw ValidationError("\(label) must be between 1 and 65535.") }
+    return port
+}
+
+private func validOptionalPort(_ port: Int?, label: String) throws -> Int? {
+    guard let port else { return nil }
+    return try validPort(port, label: label)
+}
+
+private func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
 
 private func terminalShellPath(_ explicitPath: String?) -> String {
     if let explicitPath = explicitPath?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitPath.isEmpty { return explicitPath }

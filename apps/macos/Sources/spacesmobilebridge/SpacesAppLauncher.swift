@@ -32,8 +32,8 @@ struct SpacesAppExecutableResolver {
         }
 
         switch serviceExecutableURL.path {
-        case "/usr/local/bin/SpacesTerminalService": candidates.append("/Applications/Spaces.app/Contents/MacOS/SpacesApp")
-        case homeDirectoryURL.appendingPathComponent(".local/bin/SpacesTerminalService", isDirectory: false).standardizedFileURL.path:
+        case "/usr/local/bin/spacesd": candidates.append("/Applications/Spaces.app/Contents/MacOS/SpacesApp")
+        case homeDirectoryURL.appendingPathComponent(".local/bin/spacesd", isDirectory: false).standardizedFileURL.path:
             candidates.append(
                 homeDirectoryURL.appendingPathComponent("Applications/Spaces.app/Contents/MacOS/SpacesApp", isDirectory: false).standardizedFileURL
                     .path)
@@ -64,7 +64,7 @@ enum SpacesAppLaunchError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .serviceExecutableNotFound: "Unable to resolve the running SpacesTerminalService executable path."
+        case .serviceExecutableNotFound: "Unable to resolve the running spacesd executable path."
         case .executableNotFound(let candidates): "Unable to find SpacesApp. Tried: \(candidates.joined(separator: ", "))"
         case .leaseNotAcquired(let executablePath, let timeoutSeconds):
             "SpacesApp launched from \(executablePath) but did not acquire the profile app-owner lease within \(Self.format(timeoutSeconds)) seconds."
@@ -134,7 +134,7 @@ struct SpacesAppLauncher {
         var environment = environmentProvider()
         environment[SpacesProfile.databasePathEnvironmentVariable] = profile.databasePath
         environment[SpacesProfile.runtimeDirectoryEnvironmentVariable] = profile.runtimeDirectory
-        environment["SPACES_TERMINAL_SERVICE_EXECUTABLE"] = serviceExecutablePath
+        environment["SPACESD_EXECUTABLE"] = serviceExecutablePath
         return environment
     }
 

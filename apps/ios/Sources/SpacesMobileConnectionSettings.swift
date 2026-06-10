@@ -9,6 +9,7 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
     var port: Int = defaultPort
     var authToken: String = ""
     var transportKey: String = ""
+    var certificateFingerprint: String = ""
     var installationID: String = UUID().uuidString.uppercased()
 
     var trimmedHost: String { host.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -20,9 +21,13 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         let trimmed = transportKey.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
+    var trimmedCertificateFingerprint: String? {
+        let trimmed = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 
     var isValid: Bool { !trimmedHost.isEmpty && (1...65535).contains(port) }
-    var isPaired: Bool { trimmedAuthToken != nil && trimmedTransportKey != nil }
+    var isPaired: Bool { trimmedAuthToken != nil && trimmedTransportKey != nil && trimmedCertificateFingerprint != nil }
 
     static var defaultHost: String {
         SpacesMobileBridgeEndpointDefaults.loopbackHost
@@ -33,6 +38,7 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         case port
         case authToken
         case transportKey
+        case certificateFingerprint
         case installationID
     }
 
@@ -46,6 +52,10 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         if migrated.trimmedTransportKey == nil {
             migrated.authToken = ""
         }
+        if migrated.trimmedCertificateFingerprint == nil {
+            migrated.authToken = ""
+            migrated.transportKey = ""
+        }
         return migrated
     }
 
@@ -55,6 +65,7 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         port = try container.decodeIfPresent(Int.self, forKey: .port) ?? Self.defaultPort
         authToken = try container.decodeIfPresent(String.self, forKey: .authToken) ?? ""
         transportKey = try container.decodeIfPresent(String.self, forKey: .transportKey) ?? ""
+        certificateFingerprint = try container.decodeIfPresent(String.self, forKey: .certificateFingerprint) ?? ""
         installationID = try container.decodeIfPresent(String.self, forKey: .installationID) ?? UUID().uuidString.uppercased()
     }
 
@@ -64,6 +75,7 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         try container.encode(port, forKey: .port)
         try container.encode(authToken, forKey: .authToken)
         try container.encode(transportKey, forKey: .transportKey)
+        try container.encode(certificateFingerprint, forKey: .certificateFingerprint)
         try container.encode(installationID, forKey: .installationID)
     }
 }

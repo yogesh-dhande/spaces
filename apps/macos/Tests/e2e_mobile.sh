@@ -8,7 +8,7 @@ cd "$ROOT_DIR"
 DEMO_SCRIPT="$ROOT_DIR/apps/macos/Tests/run_mobile_terminal_demo.sh"
 SPACES_CLI_BIN="${SPACES_CLI:-$ROOT_DIR/apps/macos/.build/debug/spaces}"
 SPACES_E2E_BIN="${SPACES_E2E:-$ROOT_DIR/apps/macos/.build/debug/spacese2e}"
-TERMINAL_SERVICE_BIN="${SPACES_TERMINAL_SERVICE_EXECUTABLE:-$ROOT_DIR/apps/macos/.build/debug/SpacesTerminalService}"
+TERMINAL_SERVICE_BIN="${SPACESD_EXECUTABLE:-$ROOT_DIR/apps/macos/.build/debug/spacesd}"
 TERMINAL_CREATE_TIMEOUT="${SPACES_MOBILE_E2E_TERMINAL_CREATE_TIMEOUT:-60}"
 DEFAULT_UI_TEST_CONFIG="/tmp/spaces-mobile-ui-test-config.json"
 BUNDLE_ID="dev.usespaces.spacesmobile"
@@ -155,8 +155,8 @@ demo_env() {
     XDG_CONFIG_HOME="$E2E_GHOSTTY_XDG_CONFIG_HOME" \
     SPACES_DB_PATH="$DB_PATH" \
     SPACES_RUNTIME_DIR="$RUNTIME_DIR" \
-    SPACES_TERMINAL_SERVICE_EXECUTABLE="$TERMINAL_SERVICE_BIN" \
-    SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
+    SPACESD_EXECUTABLE="$TERMINAL_SERVICE_BIN" \
+    SPACESD_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
     SPACES_MOBILE_BRIDGE_HOST="${SPACES_MOBILE_DEMO_BIND_HOST:-0.0.0.0}" \
     SPACES_MOBILE_BRIDGE_PORT="$BRIDGE_PORT" \
     "$@"
@@ -224,9 +224,9 @@ cleanup() {
   fi
   terminate_pid_if_command_matches "$DEMO_APP_PID" "demo app" "SpacesApp"
   if [[ "$DEMO_BRIDGE_PID" != "$DEMO_TERMINAL_SERVICE_PID" ]]; then
-    terminate_pid_if_command_matches "$DEMO_BRIDGE_PID" "demo bridge" "SpacesTerminalService"
+    terminate_pid_if_command_matches "$DEMO_BRIDGE_PID" "demo bridge" "spacesd"
   fi
-  terminate_pid_if_command_matches "$DEMO_TERMINAL_SERVICE_PID" "terminal service" "SpacesTerminalService"
+  terminate_pid_if_command_matches "$DEMO_TERMINAL_SERVICE_PID" "spacesd" "spacesd"
   if [[ -n "$IPAD_UDID" ]]; then
     xcrun simctl terminate "$IPAD_UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
   fi
@@ -394,7 +394,7 @@ start_demo() {
     SPACES_MOBILE_DEMO_IPHONE_NAME="$demo_iphone_name" \
     SPACES_MOBILE_DEMO_IPAD_NAME="$demo_ipad_name" \
     SPACES_MOBILE_DEMO_PORT="$DEMO_PORT" \
-    SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
+    SPACESD_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
     CODEX_HOME="$E2E_CODEX_HOME" \
     XDG_CONFIG_HOME="$E2E_GHOSTTY_XDG_CONFIG_HOME" \
     "$DEMO_SCRIPT" >"$DEMO_STDOUT_LOG" 2>&1 &
@@ -623,6 +623,7 @@ payload = {
     "port": bridge_port,
     "authToken": mobile_pairing["authToken"],
     "transportKey": mobile_pairing["transportKey"],
+    "certificateFingerprint": mobile_pairing["certificateFingerprint"],
     "installationID": mobile_pairing["installationID"],
     "renderDumpPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-render.json"),
     "eventLogPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-events.jsonl"),
@@ -2329,16 +2330,16 @@ with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
         "SELECT reason, payload_json FROM terminal_remote_session_states WHERE session_id = ?",
         (session_id,),
     ).fetchone()
-require(process_is_alive(expected_service_pid), f"Terminal service pid {expected_service_pid} exited after ctrl+c.")
+require(process_is_alive(expected_service_pid), f"spacesd pid {expected_service_pid} exited after ctrl+c.")
 require(primary_state and primary_state[0] == "exited", f"Primary session did not exit after ctrl+c: {primary_state!r}")
 require(
     primary_state[1] == expected_service_pid,
-    f"Primary session was closed by a different terminal service pid. expected={expected_service_pid} row={primary_state!r}",
+    f"Primary session was closed by a different spacesd pid. expected={expected_service_pid} row={primary_state!r}",
 )
 require(secondary_state and secondary_state[0] == "running", f"Secondary session did not remain running: {secondary_state!r}")
 require(
     secondary_state[1] == expected_service_pid,
-    f"Secondary session moved to a different terminal service pid. expected={expected_service_pid} row={secondary_state!r}",
+    f"Secondary session moved to a different spacesd pid. expected={expected_service_pid} row={secondary_state!r}",
 )
 require(
     secondary_state[2] and process_is_alive(int(secondary_state[2])),
@@ -2468,7 +2469,7 @@ run_ctrl_c_final_frame_scenario() {
   expected_service_pid="$(
     sqlite3 "$DB_PATH" "SELECT service_pid FROM terminal_runtime_states WHERE session_id = '$secondary_session_id' LIMIT 1;"
   )"
-  [[ -n "$expected_service_pid" ]] || fail "Unable to resolve terminal service pid before Ctrl+C scenario."
+  [[ -n "$expected_service_pid" ]] || fail "Unable to resolve spacesd pid before Ctrl+C scenario."
   write_ui_test_config "$scenario" "$session_id" "$secondary_session_id"
   run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testTerminalInterruptShowsFinalFrameAndKeepsSecondSessionLive"
   assert_ctrl_c_final_frame_scenario "$session_id" "$secondary_session_id" "$expected_service_pid" >>"$SCENARIO_LOG" 2>&1 || fail "Ctrl+C final-frame assertions failed."
@@ -2695,7 +2696,7 @@ env = os.environ | {
     "HOME": str(demo_root / "home"),
     "SPACES_DB_PATH": str(db_path),
     "SPACES_RUNTIME_DIR": str(runtime_root),
-    "SPACES_TERMINAL_SERVICE_EXECUTABLE": terminal_service_bin,
+    "SPACESD_EXECUTABLE": terminal_service_bin,
 }
 client_app = {
     "installationID": pairing["installationID"],
@@ -2794,7 +2795,7 @@ def assert_session_live(expected_service_pid: int, label: str) -> None:
     state, service_pid, child_pid = session_runtime_state()
     require(state == "running", f"{label}: session state is not running: {state!r}")
     require(service_pid == expected_service_pid, f"{label}: service pid changed from {expected_service_pid} to {service_pid}.")
-    require(process_is_alive(service_pid), f"{label}: terminal service pid {service_pid} is not alive.")
+    require(process_is_alive(service_pid), f"{label}: spacesd pid {service_pid} is not alive.")
     require(child_pid is not None and process_is_alive(child_pid), f"{label}: session child pid is not alive: {child_pid!r}")
 
 def terminate_app_owner(owner: dict) -> None:

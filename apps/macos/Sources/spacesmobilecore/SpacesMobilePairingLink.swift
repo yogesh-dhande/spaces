@@ -10,14 +10,16 @@ public struct SpacesMobilePairingLink: Codable, Sendable, Equatable {
     public let nonce: String
     public let code: String
     public let transportKey: String
+    public let certificateFingerprint: String
     public let name: String
 
-    public init(host: String, port: Int, nonce: String, code: String, transportKey: String, name: String) {
+    public init(host: String, port: Int, nonce: String, code: String, transportKey: String, certificateFingerprint: String, name: String) {
         self.host = host
         self.port = port
         self.nonce = nonce
         self.code = code
         self.transportKey = transportKey
+        self.certificateFingerprint = certificateFingerprint
         self.name = name
     }
 
@@ -28,7 +30,7 @@ public struct SpacesMobilePairingLink: Codable, Sendable, Equatable {
         components.queryItems = [
             URLQueryItem(name: "v", value: Self.version), URLQueryItem(name: "host", value: host), URLQueryItem(name: "port", value: String(port)),
             URLQueryItem(name: "nonce", value: nonce), URLQueryItem(name: "code", value: code), URLQueryItem(name: "psk", value: transportKey),
-            URLQueryItem(name: "name", value: name),
+            URLQueryItem(name: "fp", value: certificateFingerprint), URLQueryItem(name: "name", value: name),
         ]
         return components.url ?? URL(string: "\(Self.scheme)://\(Self.host)")!
     }
@@ -58,8 +60,10 @@ public struct SpacesMobilePairingLink: Codable, Sendable, Equatable {
         guard let nonce = trimmed(values["nonce"]) else { throw SpacesMobilePairingLinkError.missingField("nonce") }
         guard let code = trimmed(values["code"]) else { throw SpacesMobilePairingLinkError.missingField("code") }
         guard let transportKey = trimmed(values["psk"]) else { throw SpacesMobilePairingLinkError.missingField("psk") }
+        guard let certificateFingerprint = trimmed(values["fp"]) else { throw SpacesMobilePairingLinkError.missingField("fp") }
         let name = trimmed(values["name"]) ?? "Spaces"
-        return Self(host: host, port: port, nonce: nonce, code: code, transportKey: transportKey, name: name)
+        return Self(
+            host: host, port: port, nonce: nonce, code: code, transportKey: transportKey, certificateFingerprint: certificateFingerprint, name: name)
     }
 
     private static func trimmed(_ value: String?) -> String? {

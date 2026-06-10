@@ -95,7 +95,9 @@ struct TerminalCommandCommand: ParsableCommand {
                 IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
             ], options: [.deliverImmediately])
 
-        print("Started terminal session \(session.id)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tcwd=\(session.workingDirectory)")
+        print(
+            "Started terminal session \(session.id)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tlocation=local\tcwd=\(session.workingDirectory)"
+        )
     }
 }
 
@@ -267,6 +269,7 @@ func mobileStatusLines(
 
 func mobileStatusLines(status: SpacesMobileBridgeStatus) -> [String] {
     var lines = ["Spaces mobile bridge", "port=\(status.port)", "bonjour=\(status.bonjourServiceName)\ttype=\(status.bonjourServiceType)"]
+    lines.append("fingerprint=\(status.certificateFingerprint)")
     if status.networkAddresses.isEmpty {
         lines.append("addresses=(none)")
     } else {
@@ -427,8 +430,10 @@ struct StartCommand: ParsableCommand {
         try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: false, background: true)
 
         let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
+        let computeHost = try orchestrator.effectiveComputeHost(workspaceID: workspace.id)
         try context.output.emit(
-            text: "Workspace is running \(workspace.id)", json: MutationResultPayload(message: "Workspace is running.", resource: updatedWorkspace))
+            text: "Workspace is running \(workspace.id)\thost=\(computeHost.displayName)",
+            json: MutationResultPayload(message: "Workspace is running.", resource: updatedWorkspace))
     }
 }
 
@@ -445,8 +450,10 @@ struct RestartCommand: ParsableCommand {
         try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true, background: true)
 
         let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
+        let computeHost = try orchestrator.effectiveComputeHost(workspaceID: workspace.id)
         try context.output.emit(
-            text: "Workspace restarted \(workspace.id)", json: MutationResultPayload(message: "Workspace restarted.", resource: updatedWorkspace))
+            text: "Workspace restarted \(workspace.id)\thost=\(computeHost.displayName)",
+            json: MutationResultPayload(message: "Workspace restarted.", resource: updatedWorkspace))
     }
 }
 

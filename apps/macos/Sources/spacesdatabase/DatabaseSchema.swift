@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public enum DatabaseSchema {
-    public static let currentVersion = 9
+    public static let currentVersion = 10
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "terminal metadata tables", requiresBackup: false) { database in
@@ -64,7 +64,46 @@ public enum DatabaseSchema {
         DatabaseMigrationStep(fromVersion: 8, toVersion: 9, description: "legacy external terminal storage cleanup", requiresBackup: false) {
             database in try dropLegacyExternalTerminalStorage(database: database)
         },
+        DatabaseMigrationStep(fromVersion: 9, toVersion: 10, description: "compute host selection and workspace bindings", requiresBackup: false) {
+            database in
+            try executeBatch(sql: computeHostSchemaSQL, database: database)
+            try addColumnIfNeeded(table: "projects", column: "default_compute_host_id", definition: "TEXT", database: database)
+            try addColumnIfNeeded(table: "workspaces", column: "compute_host_override_id", definition: "TEXT", database: database)
+        },
     ]
+
+    static let computeHostSchemaSQL = """
+            CREATE TABLE IF NOT EXISTS compute_hosts (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL UNIQUE,
+              kind TEXT NOT NULL,
+              ssh_host TEXT NOT NULL,
+              ssh_user TEXT,
+              ssh_port INTEGER,
+              workspace_root TEXT NOT NULL,
+              daemon_host TEXT NOT NULL,
+              daemon_port INTEGER NOT NULL,
+              daemon_certificate_fingerprint TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_compute_bindings (
+              workspace_id TEXT NOT NULL,
+              host_id TEXT NOT NULL,
+              remote_path TEXT NOT NULL,
+              branch TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (workspace_id, host_id),
+              UNIQUE (host_id, remote_path),
+              FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+              FOREIGN KEY (host_id) REFERENCES compute_hosts(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS workspace_compute_bindings_host_idx
+            ON workspace_compute_bindings(host_id);
+        """
 
     static let configuredProcessTerminalSessionIdentityBackfillSQL = """
             UPDATE running_processes
@@ -308,7 +347,9 @@ public enum DatabaseSchema {
               default_branch TEXT,
               is_collapsed INTEGER NOT NULL DEFAULT 0,
               setup_script TEXT,
-              stop_script TEXT
+              stop_script TEXT,
+              default_compute_host_id TEXT,
+              FOREIGN KEY (default_compute_host_id) REFERENCES compute_hosts(id) ON DELETE SET NULL
             );
 
             CREATE TABLE IF NOT EXISTS project_port_definitions (
@@ -363,6 +404,8 @@ public enum DatabaseSchema {
               is_running INTEGER NOT NULL,
               last_launched_at TEXT,
               notes TEXT,
+              compute_host_override_id TEXT,
+              FOREIGN KEY (compute_host_override_id) REFERENCES compute_hosts(id) ON DELETE SET NULL,
               FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
@@ -461,6 +504,8 @@ public enum DatabaseSchema {
               project_id TEXT NOT NULL,
               FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
+
+            \(computeHostSchemaSQL)
 
             CREATE TABLE IF NOT EXISTS runtime_targets (
               id TEXT PRIMARY KEY,

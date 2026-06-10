@@ -310,6 +310,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private let host: String
     private let port: Int
     private let transportKey: String
+    private let certificateFingerprint: String
     private let pairingCoordinator: SpacesMobilePairingCoordinator
     private let pairingStore: any SpacesMobilePairingStoreProtocol
     private let onPairingSucceeded: (@Sendable (SpacesMobileClientApp) -> Void)?
@@ -330,12 +331,14 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     private var acceptingRequests = false
 
     public init(
-        host: String, port: Int, transportKey: String, pairingCoordinator: SpacesMobilePairingCoordinator = SpacesMobilePairingCoordinator(),
-        pairingStore: SpacesMobilePairingStore? = nil, onPairingSucceeded: (@Sendable (SpacesMobileClientApp) -> Void)? = nil
+        host: String, port: Int, transportKey: String, certificateFingerprint: String = SpacesMobileBridgeSettings.generateCertificateFingerprint(),
+        pairingCoordinator: SpacesMobilePairingCoordinator = SpacesMobilePairingCoordinator(), pairingStore: SpacesMobilePairingStore? = nil,
+        onPairingSucceeded: (@Sendable (SpacesMobileClientApp) -> Void)? = nil
     ) throws {
         self.host = host
         self.port = port
         self.transportKey = transportKey
+        self.certificateFingerprint = certificateFingerprint
         self.pairingCoordinator = pairingCoordinator
         self.onPairingSucceeded = onPairingSucceeded
         launchSpacesAppHandler = nil
@@ -347,7 +350,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
     }
 
     init(
-        host: String, port: Int, transportKey: String, pairingCoordinator: SpacesMobilePairingCoordinator = SpacesMobilePairingCoordinator(),
+        host: String, port: Int, transportKey: String, certificateFingerprint: String = SpacesMobileBridgeSettings.generateCertificateFingerprint(),
+        pairingCoordinator: SpacesMobilePairingCoordinator = SpacesMobilePairingCoordinator(),
         pairingStoreProtocol: any SpacesMobilePairingStoreProtocol, onPairingSucceeded: (@Sendable (SpacesMobileClientApp) -> Void)? = nil,
         networkEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)? = nil,
@@ -356,6 +360,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         self.host = host
         self.port = port
         self.transportKey = transportKey
+        self.certificateFingerprint = certificateFingerprint
         self.pairingCoordinator = pairingCoordinator
         self.pairingStore = pairingStoreProtocol
         self.onPairingSucceeded = onPairingSucceeded
@@ -474,7 +479,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         -> SpacesMobilePairingWindow
     {
         pairingCoordinator.openWindow(
-            host: linkHost, port: listeningPort > 0 ? listeningPort : port, transportKey: transportKey, name: name, duration: duration)
+            host: linkHost, port: listeningPort > 0 ? listeningPort : port, transportKey: transportKey,
+            certificateFingerprint: certificateFingerprint, name: name, duration: duration)
     }
 
     public func openPairingWindow(
@@ -482,8 +488,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         nonce: String? = nil
     ) -> SpacesMobilePairingWindow {
         pairingCoordinator.openWindow(
-            host: linkHost, port: listeningPort > 0 ? listeningPort : port, transportKey: transportKey, name: name, duration: duration, code: code,
-            nonce: nonce)
+            host: linkHost, port: listeningPort > 0 ? listeningPort : port, transportKey: transportKey,
+            certificateFingerprint: certificateFingerprint, name: name, duration: duration, code: code, nonce: nonce)
     }
 
     public func pairingWindowSnapshot() -> SpacesMobilePairingWindowSnapshot? { pairingCoordinator.snapshot() }

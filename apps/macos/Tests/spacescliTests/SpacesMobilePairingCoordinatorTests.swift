@@ -51,13 +51,16 @@ final class SpacesMobilePairingCoordinatorTests: XCTestCase {
 
     func testPairingLinkBuildAndParseRoundTrips() throws {
         let key = SpacesMobileBridgeSettings.generateTransportKey()
-        let link = SpacesMobilePairingLink(host: "mac.local", port: 47_847, nonce: "NONCE", code: "12345678", transportKey: key, name: "Spaces Mac")
+        let link = SpacesMobilePairingLink(
+            host: "mac.local", port: 47_847, nonce: "NONCE", code: "12345678", transportKey: key, certificateFingerprint: "SHA256:test",
+            name: "Spaces Mac")
 
         XCTAssertEqual(try SpacesMobilePairingLink.parse(link.absoluteString), link)
     }
 
     func testPairingLinkParseRejectsDuplicateQueryKeys() {
-        let link = "spacesmobile://pair?v=1&host=mac.local&host=other.local&port=47847&nonce=NONCE&code=12345678&psk=transport&name=Mac"
+        let link =
+            "spacesmobile://pair?v=1&host=mac.local&host=other.local&port=47847&nonce=NONCE&code=12345678&psk=transport&fp=SHA256:test&name=Mac"
 
         XCTAssertThrowsError(try SpacesMobilePairingLink.parse(link)) { error in XCTAssertEqual(error as? SpacesMobilePairingLinkError, .invalidLink)
         }

@@ -30,6 +30,8 @@ final class StoreTests: XCTestCase {
         let version = try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state")
         let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
         let projectColumns = try readTableColumns(dbURL: dbURL, table: "projects")
+        let computeHostColumns = try readTableColumns(dbURL: dbURL, table: "compute_hosts")
+        let workspaceComputeBindingColumns = try readTableColumns(dbURL: dbURL, table: "workspace_compute_bindings")
         let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
         let workspacePortColumns = try readTableColumns(dbURL: dbURL, table: "workspace_ports")
         let workspacePortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_port_definitions")
@@ -54,7 +56,11 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
+        XCTAssertTrue(workspaceColumns.contains("compute_host_override_id"))
         XCTAssertTrue(projectColumns.contains("is_collapsed"))
+        XCTAssertTrue(projectColumns.contains("default_compute_host_id"))
+        XCTAssertTrue(computeHostColumns.contains("daemon_certificate_fingerprint"))
+        XCTAssertTrue(workspaceComputeBindingColumns.contains("remote_path"))
         XCTAssertFalse(workspaceProcessColumns.contains("execution_mode"))
         XCTAssertFalse(projectProcessColumns.contains("execution_mode"))
         XCTAssertTrue(runningProcessColumns.contains("template_id"))
@@ -105,7 +111,7 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(agentSessionColumns.contains("terminal_tracking_id"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_native_id"))
         XCTAssertFalse(agentSessionColumns.contains("yabai_window_id"))
-        XCTAssertEqual(workspaceForeignKeys, 1)
+        XCTAssertEqual(workspaceForeignKeys, 2)
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "windows"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "agent_windows"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "terminal_targets"))
@@ -242,6 +248,58 @@ final class StoreTests: XCTestCase {
             try readRows(
                 dbURL: dbURL, sql: "SELECT id, workspace_id, provider, label, runtime_target_id, terminal_session_id, session_key FROM agent_sessions"
             ), [["agent-1", "workspace-1", "spaces", "Codex", "runtime-1", "session-1", "thread-1"]])
+    }
+
+    func testVersionNineDatabaseAddsComputeHostSchemaWithoutDroppingWorkspaces() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("v9-compute-hosts.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
+                  is_git INTEGER NOT NULL,
+                  default_branch TEXT,
+                  is_collapsed INTEGER NOT NULL DEFAULT 0,
+                  setup_script TEXT,
+                  stop_script TEXT
+                );
+                CREATE TABLE workspaces (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  dir TEXT NOT NULL,
+                  dirname TEXT,
+                  branch TEXT,
+                  target_branch TEXT,
+                  is_default INTEGER NOT NULL,
+                  is_archived INTEGER NOT NULL,
+                  is_hidden INTEGER NOT NULL DEFAULT 0,
+                  is_running INTEGER NOT NULL,
+                  last_launched_at TEXT,
+                  notes TEXT,
+                  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO projects(id, name, dir, is_git, default_branch, is_collapsed)
+                VALUES ('project-1', 'Project', '/tmp/project', 1, 'main', 0);
+                INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running)
+                VALUES ('workspace-1', 'project-1', 'Feature', '/tmp/project/.worktrees/feature', 'feature', 'feature', 'main', 0, 0, 0, 0);
+                INSERT INTO migration_state(current_version) VALUES (9);
+                """)
+
+        _ = try SQLiteStore(path: dbURL.path)
+
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "projects").contains("default_compute_host_id"))
+        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "workspaces").contains("compute_host_override_id"))
+        XCTAssertTrue(try tableExists(dbURL: dbURL, table: "compute_hosts"))
+        XCTAssertTrue(try tableExists(dbURL: dbURL, table: "workspace_compute_bindings"))
+        XCTAssertEqual(try readRows(dbURL: dbURL, sql: "SELECT id, name, dir FROM projects"), [["project-1", "Project", "/tmp/project"]])
+        XCTAssertEqual(
+            try readRows(dbURL: dbURL, sql: "SELECT id, title, dir FROM workspaces"), [["workspace-1", "Feature", "/tmp/project/.worktrees/feature"]])
     }
 
     // Tests opening a current-version database is a no-op by arranging a fresh current DB and asserting no migration backup is created on reopen.

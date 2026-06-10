@@ -9,7 +9,7 @@ import XCTest
             let root = try makeTemporaryDirectory()
             defer { try? FileManager.default.removeItem(at: root) }
             let cli = root.appendingPathComponent("spaces", isDirectory: false)
-            let service = root.appendingPathComponent("SpacesTerminalService", isDirectory: false)
+            let service = root.appendingPathComponent("spacesd", isDirectory: false)
             try makeExecutableFile(at: cli)
             try makeExecutableFile(at: service)
 
@@ -26,7 +26,7 @@ import XCTest
             try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
             let appExecutable = macOS.appendingPathComponent("SpacesApp", isDirectory: false)
-            let service = resources.appendingPathComponent("SpacesTerminalService", isDirectory: false)
+            let service = resources.appendingPathComponent("spacesd", isDirectory: false)
             try makeExecutableFile(at: appExecutable)
             try makeExecutableFile(at: service)
 
@@ -53,14 +53,14 @@ import XCTest
         }
 
         func testCreateSessionRequestTimeoutUsesPositiveEnvironmentOverride() {
-            XCTAssertEqual(TerminalService.createSessionRequestTimeout(environment: ["SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT": "45"]), 45)
-            XCTAssertEqual(TerminalService.createSessionRequestTimeout(environment: ["SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT": "0"]), 30)
+            XCTAssertEqual(TerminalService.createSessionRequestTimeout(environment: ["SPACESD_CREATE_TIMEOUT": "45"]), 45)
+            XCTAssertEqual(TerminalService.createSessionRequestTimeout(environment: ["SPACESD_CREATE_TIMEOUT": "0"]), 30)
             XCTAssertEqual(TerminalService.createSessionRequestTimeout(environment: [:]), 30)
         }
 
         private func makeTemporaryDirectory() throws -> URL {
             let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent(
-                "spaces-terminal-service-tests-\(UUID().uuidString)", isDirectory: true)
+                "spacesd-tests-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             return root
         }

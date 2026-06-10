@@ -250,6 +250,7 @@ struct ConnectionSettingsView: View {
             pairedSettings.host = pairingLink.host
             pairedSettings.port = pairingLink.port
             pairedSettings.transportKey = pairingLink.transportKey
+            pairedSettings.certificateFingerprint = pairingLink.certificateFingerprint
             let bridgeClient = SpacesMobileBridgeClient(settings: pairedSettings)
             let commandChannel = bridgeClient.makeCommandChannel()
             let issuedAuthToken: String

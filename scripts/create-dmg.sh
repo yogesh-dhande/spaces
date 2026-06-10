@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [ $# -ne 4 ]; then
-  echo "Usage: $0 <Spaces-app-path> <spaces-cli-path> <terminal-service-path> <version>"
+  echo "Usage: $0 <Spaces-app-path> <spaces-cli-path> <spacesd-path> <version>"
   exit 1
 fi
 
 SPACES_APP="$1"
 SPACES_CLI="$2"
-TERMINAL_SERVICE="$3"
+SPACESD="$3"
 VERSION="$4"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASES_DIR="$REPO_ROOT/dist/releases/$VERSION"
@@ -25,7 +25,7 @@ temp_dmg=""
 trap 'rm -rf "$staging"; [ -n "$temp_dmg" ] && rm -f "$temp_dmg"' EXIT
 
 app_bundle="$staging/Spaces.app"
-"$REPO_ROOT/scripts/create-app-bundle.sh" "$SPACES_APP" "$SPACES_CLI" "$TERMINAL_SERVICE" "$app_bundle"
+"$REPO_ROOT/scripts/create-app-bundle.sh" "$SPACES_APP" "$SPACES_CLI" "$SPACESD" "$app_bundle"
 
 # Create installer helper script used by the DMG wizard app.
 installer_script="$staging/.install-spaces.sh"
@@ -81,13 +81,13 @@ case "$MODE" in
     APP_PATH="/Applications/Spaces.app"
     CLI_DIR="/usr/local/bin"
     CLI_PATH="$CLI_DIR/spaces"
-    SERVICE_PATH="$CLI_DIR/SpacesTerminalService"
+    SERVICE_PATH="$CLI_DIR/spacesd"
     /bin/mkdir -p /Applications /usr/local/bin
     /bin/rm -rf "$APP_PATH"
     /usr/bin/ditto "$SOURCE_APP" "$APP_PATH"
     /usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
     /bin/cp "$APP_PATH/Contents/Resources/spaces" "$CLI_PATH"
-    /bin/cp "$APP_PATH/Contents/Resources/SpacesTerminalService" "$SERVICE_PATH"
+    /bin/cp "$APP_PATH/Contents/Resources/spacesd" "$SERVICE_PATH"
     /bin/chmod 755 "$CLI_PATH"
     /bin/chmod 755 "$SERVICE_PATH"
     copy_ghostty_vt_dylibs
@@ -100,14 +100,14 @@ case "$MODE" in
     CLI_DIR="$HOME/.local/bin"
     APP_PATH="$APP_DIR/Spaces.app"
     CLI_PATH="$CLI_DIR/spaces"
-    SERVICE_PATH="$CLI_DIR/SpacesTerminalService"
+    SERVICE_PATH="$CLI_DIR/spacesd"
     PATH_HINT=""
     /bin/mkdir -p "$APP_DIR" "$CLI_DIR"
     /bin/rm -rf "$APP_PATH"
     /usr/bin/ditto "$SOURCE_APP" "$APP_PATH"
     /usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
     /bin/cp "$APP_PATH/Contents/Resources/spaces" "$CLI_PATH"
-    /bin/cp "$APP_PATH/Contents/Resources/SpacesTerminalService" "$SERVICE_PATH"
+    /bin/cp "$APP_PATH/Contents/Resources/spacesd" "$SERVICE_PATH"
     /bin/chmod 755 "$CLI_PATH"
     /bin/chmod 755 "$SERVICE_PATH"
     copy_ghostty_vt_dylibs
@@ -161,7 +161,7 @@ on run
     set helperScript to quoted form of (dmgRoot & "/.install-spaces.sh")
 
     try
-        display dialog "Spaces installs the app, the required spaces CLI, and the terminal service together. Continue to install them now?" buttons {"Cancel", "Install"} default button "Install" cancel button "Cancel" with icon note
+        display dialog "Spaces installs the app, the required spaces CLI, and the spacesd daemon together. Continue to install them now?" buttons {"Cancel", "Install"} default button "Install" cancel button "Cancel" with icon note
     on error number -128
         return
     end try
@@ -188,7 +188,7 @@ on run
     end try
 
     set {appPath, cliPath, servicePath, pathHint} to parseInstallResult(installOutput)
-    set successText to "Spaces installed successfully.\n\nApp: " & appPath & "\nCLI: " & cliPath & "\nTerminal service: " & servicePath
+    set successText to "Spaces installed successfully.\n\nApp: " & appPath & "\nCLI: " & cliPath & "\nspacesd daemon: " & servicePath
     if pathHint is not "" then
         set successText to successText & "\n\nAdd this to your shell profile if the command is not found:\n" & pathHint
     end if

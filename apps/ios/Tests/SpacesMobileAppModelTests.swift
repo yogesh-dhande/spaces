@@ -275,6 +275,7 @@
             var settings = SpacesMobileConnectionSettings()
             settings.authToken = "auth-token"
             settings.transportKey = "transport-key"
+            settings.certificateFingerprint = "SHA256:test"
             settings.installationID = "INSTALLATION-LAUNCH"
             let client = SpacesMobileBridgeClient(settings: settings) { request in
                 await recorder.append(request)
@@ -297,6 +298,7 @@
             var settings = SpacesMobileConnectionSettings()
             settings.authToken = "auth-token"
             settings.transportKey = "transport-key"
+            settings.certificateFingerprint = "SHA256:test"
             let client = SpacesMobileBridgeClient(settings: settings) { request in
                 await recorder.append(request)
                 await gate.markStarted()
@@ -327,6 +329,7 @@
             var settings = SpacesMobileConnectionSettings()
             settings.authToken = "auth-token"
             settings.transportKey = "transport-key"
+            settings.certificateFingerprint = "SHA256:test"
             let client = SpacesMobileBridgeClient(settings: settings) { _ in
                 SpacesMobileBridgeResponse(ok: false, message: "Unable to find SpacesApp.")
             }

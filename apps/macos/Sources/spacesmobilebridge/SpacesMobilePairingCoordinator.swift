@@ -47,12 +47,14 @@ public final class SpacesMobilePairingCoordinator: @unchecked Sendable {
     public init() {}
 
     public func openWindow(
-        host: String, port: Int, transportKey: String, name: String, now: Date = Date(), duration: TimeInterval = defaultWindowDuration,
-        code overrideCode: String? = nil, nonce overrideNonce: String? = nil
+        host: String, port: Int, transportKey: String, certificateFingerprint: String = SpacesMobileBridgeSettings.generateCertificateFingerprint(),
+        name: String, now: Date = Date(), duration: TimeInterval = defaultWindowDuration, code overrideCode: String? = nil,
+        nonce overrideNonce: String? = nil
     ) -> SpacesMobilePairingWindow {
         let code = overrideCode ?? Self.generatePairingCode()
         let nonce = overrideNonce ?? UUID().uuidString.uppercased()
-        let link = SpacesMobilePairingLink(host: host, port: port, nonce: nonce, code: code, transportKey: transportKey, name: name)
+        let link = SpacesMobilePairingLink(
+            host: host, port: port, nonce: nonce, code: code, transportKey: transportKey, certificateFingerprint: certificateFingerprint, name: name)
         let window = SpacesMobilePairingWindow(nonce: nonce, code: code, expiresAt: now.addingTimeInterval(duration), link: link)
         lock.lock()
         activeWindow = ActiveWindow(window: window, failedAttempts: 0, isConsumed: false)

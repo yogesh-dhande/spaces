@@ -41,6 +41,9 @@ private enum SpacesMobileSettingsStore {
         if let transportKey = trimmed(environment["SPACES_MOBILE_TEST_TRANSPORT_KEY"]) {
             resolved.transportKey = transportKey
         }
+        if let certificateFingerprint = trimmed(environment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"]) {
+            resolved.certificateFingerprint = certificateFingerprint
+        }
         if let installationID = trimmed(environment["SPACES_MOBILE_TEST_INSTALLATION_ID"]) {
             resolved.installationID = installationID
         }

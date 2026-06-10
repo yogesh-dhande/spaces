@@ -35,9 +35,7 @@ import Foundation
                 throw error
             }
             guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
-            guard let session = response.session else {
-                throw TerminalServiceError.requestFailed("Terminal service did not return a session summary.")
-            }
+            guard let session = response.session else { throw TerminalServiceError.requestFailed("spacesd did not return a session summary.") }
             TerminalPerformance.logMetric(
                 "terminal_service_create_session", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
@@ -197,15 +195,15 @@ import Foundation
         }
 
         private static func shouldUseXCTestCompatibilityBackend() -> Bool {
-            isRunningUnderXCTest() && ProcessInfo.processInfo.environment["SPACES_TERMINAL_SERVICE_EXECUTABLE"] == nil
+            isRunningUnderXCTest() && ProcessInfo.processInfo.environment["SPACESD_EXECUTABLE"] == nil
         }
 
         static func createSessionRequestTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
-            positiveTimeout(environment["SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT"], defaultValue: 30)
+            positiveTimeout(environment["SPACESD_CREATE_TIMEOUT"], defaultValue: 30)
         }
 
         static func createSessionRPCResponseTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
-            positiveTimeout(environment["SPACES_TERMINAL_SERVICE_CREATE_RPC_TIMEOUT"], defaultValue: 2)
+            positiveTimeout(environment["SPACESD_CREATE_RPC_TIMEOUT"], defaultValue: 2)
         }
 
         private static func positiveTimeout(_ rawValue: String?, defaultValue: TimeInterval) -> TimeInterval {
@@ -304,14 +302,13 @@ import Foundation
             let bundledResourceDirectory = currentExecutableDirectory.deletingLastPathComponent().appendingPathComponent(
                 "Resources", isDirectory: true)
             let candidates = [
-                environment["SPACES_TERMINAL_SERVICE_EXECUTABLE"],
-                currentExecutableDirectory.appendingPathComponent("SpacesTerminalService", isDirectory: false).path(),
-                Bundle.main.resourceURL?.appendingPathComponent("SpacesTerminalService", isDirectory: false).path(),
-                bundledResourceDirectory.appendingPathComponent("SpacesTerminalService", isDirectory: false).path(),
-                currentDirectory.appendingPathComponent("apps/macos/.build/debug/SpacesTerminalService", isDirectory: false).path(),
-                currentDirectory.appendingPathComponent("apps/macos/.build/release/SpacesTerminalService", isDirectory: false).path(),
-                currentDirectory.appendingPathComponent(".build/debug/SpacesTerminalService", isDirectory: false).path(),
-                currentDirectory.appendingPathComponent(".build/release/SpacesTerminalService", isDirectory: false).path(),
+                environment["SPACESD_EXECUTABLE"], currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(),
+                Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(),
+                bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(),
+                currentDirectory.appendingPathComponent("apps/macos/.build/debug/spacesd", isDirectory: false).path(),
+                currentDirectory.appendingPathComponent("apps/macos/.build/release/spacesd", isDirectory: false).path(),
+                currentDirectory.appendingPathComponent(".build/debug/spacesd", isDirectory: false).path(),
+                currentDirectory.appendingPathComponent(".build/release/spacesd", isDirectory: false).path(),
             ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
 
             for candidate in candidates where fileManager.isExecutableFile(atPath: candidate) {
@@ -342,9 +339,9 @@ import Foundation
 
         public var errorDescription: String? {
             switch self {
-            case .executableNotFound: "The SpacesTerminalService executable is required to run built-in terminal sessions."
+            case .executableNotFound: "The spacesd executable is required to run built-in terminal sessions."
             case .requestFailed(let message): message
-            case .serviceStartupTimedOut(let path): "Timed out waiting for SpacesTerminalService to start from \(path)."
+            case .serviceStartupTimedOut(let path): "Timed out waiting for spacesd to start from \(path)."
             }
         }
     }

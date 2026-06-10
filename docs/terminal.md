@@ -11,9 +11,10 @@ This document describes the built-in terminal runtime in Spaces: what owns a ses
 - Spaces terminal sessions own process lifetime directly.
 
 ## Ownership Model
-- `SpacesTerminalService` owns built-in terminal sessions, including workspace terminals, built-in process windows, built-in coding-agent windows, mobile-visible sessions, and sessions created through `spaces terminal ...`.
-- The service is a per-user background executable started on demand by first-party clients and can outlive `SpacesApp`.
+- `spacesd` owns built-in terminal sessions, including workspace terminals, built-in process windows, built-in coding-agent windows, mobile-visible sessions, and sessions created through `spaces terminal ...`.
+- The service is a per-profile background executable started on demand by first-party clients and can outlive `SpacesApp`.
 - First-party clients attach through SQLite-backed session metadata, the per-session control socket, and the render-frame stream.
+- The Mac daemon remains authoritative for project/workspace metadata and workspace creation, while the daemon selected by a workspace compute binding owns that workspace's PTYs and render streams.
 
 ## Session Boundary
 Each session keeps canonical metadata in SQLite and runtime-only files under `<profile-root>/runtime/terminal/sessions/<session-id>/`.
@@ -35,6 +36,13 @@ The session directory keeps:
 Each live session also participates in a service-level control path:
 - `/tmp/spaces-terminal-sockets/service-<profile-hash>.sock` is the profile-scoped service command socket used for session creation, listing, and termination.
 
+## Local and Remote Daemons
+- Local Mac workspaces use the same `spacesd` protocol as remote compute-host workspaces.
+- Remote `spacesd` owns remote PTYs, headless Ghostty sessions, render-frame export, terminal input, resize, scroll, file-link preview chunks, remote process execution, and clone or worktree preparation for its bound workspaces.
+- Remote hosts expose `spacesd` on their configured private/LAN/VPN listener for direct iOS terminal traffic. Mac `spacesd` uses SSH for bootstrap and control setup and sends the runtime manifest before launch.
+- Browser sessions remain Mac-opened. Remote processes bind remote ports, and Mac `spacesd` maps named browser URLs to local forwarded ports.
+- Terminal link preview resolution runs in the owning daemon. Local or remote file previews stream as authorized chunks from that daemon; direct HTTPS media downloads remain client-side.
+
 ## Service Runtime
 - `GhosttyEmbeddedSessionHost` is the service-owned runtime for `ghostty-embedded`.
 - It owns one live libghostty-backed session, writes `output.log`, refreshes SQLite runtime state, enforces owner-only input or resize, and expires stale remote leases from SQLite client rows.
@@ -49,13 +57,13 @@ Each live session also participates in a service-level control path:
 - App shutdown does not terminate service-owned terminal sessions. The quit prompt offers a destructive stop-all option for users who want to end every live service session before quitting.
 
 ## First-Party Clients
-- `spaces terminal command` creates sessions through `SpacesTerminalService`.
+- `spaces terminal command` creates sessions through `spacesd`.
 - `spaces terminal list` reads live session summaries from the service abstraction.
 - `spaces terminal show` asks `SpacesApp` to open a native owner-seeking window for an existing session ID.
 - `spaces terminal send`, `key`, and `takeover` still operate on the per-session control socket that the service owns.
-- `SpacesTerminalService` publishes the first-party TLS-PSK bridge consumed by the iOS client. `spaces mobile status` starts the service if needed and prints address details, while `spaces mobile serve` remains available for standalone harnesses and opens an ephemeral pairing window. Standalone bridges reject daemon-only recovery commands such as `launchSpacesApp`.
-- The daemon bridge can service the authenticated `launchSpacesApp` recovery command while `SpacesTerminalService` remains alive. The command launches `SpacesApp` for the current profile only when the profile has no live app-owner lease, so service-owned sessions and the bridge process continue without restart.
-- `SpacesMobile` discovers the bridge through Bonjour or accepts manual host entry, shows workspaces with mobile-controllable process, coding-agent, and workspace-terminal rows, keeps one selected terminal detail at a time, auto-attempts takeover for live opened sessions, renders the owner path from service-published Ghostty render frames, and renders ended sessions from persisted final Ghostty state.
+- `spacesd` publishes the first-party TLS-PSK bridge consumed by the iOS client. `spaces mobile status` starts the service if needed and prints address details, while `spaces mobile serve` remains available for standalone harnesses and opens an ephemeral pairing window. Standalone bridges reject daemon-only recovery commands such as `launchSpacesApp`.
+- The daemon bridge can service the authenticated `launchSpacesApp` recovery command while `spacesd` remains alive. The command launches `SpacesApp` for the current profile only when the profile has no live app-owner lease, so service-owned sessions and the bridge process continue without restart.
+- `SpacesMobile` discovers the Mac bridge through Bonjour or accepts manual host entry, reads workspace metadata from Mac `spacesd`, connects terminal detail streams to the local or remote daemon that owns the selected session, keeps one selected terminal detail at a time, auto-attempts takeover for live opened sessions, renders the owner path from service-published Ghostty render frames, and renders ended sessions from persisted final Ghostty state.
 - Workspace process launch, built-in coding-agent launch, app-opened workspace terminals, CLI-created sessions, and mobile-visible sessions use the service-owned path.
 
 ## macOS Window Behavior
@@ -79,13 +87,13 @@ Each live session also participates in a service-level control path:
 - The VT bridge feeds `spaces terminal tail` and diagnostics. Terminal UI rendering does not use VT replay, snapshot-to-VT encoding, or `output.log`.
 
 ## Mobile Bridge
-- `SpacesTerminalService` starts the first-party TLS-PSK bridge for the iOS client on launch. The default listener binds all IPv4 interfaces on port `47847`; if another Spaces profile already owns that port, the daemon persists a deterministic profile-specific fallback port so paired devices keep reconnecting to a stable endpoint.
+- `spacesd` starts the first-party TLS-PSK bridge for the iOS client on launch. The default listener binds all IPv4 interfaces on port `47847`; if another Spaces profile already owns that port, the daemon persists a deterministic profile-specific fallback port so paired devices keep reconnecting to a stable endpoint.
 - The bridge settings live under the terminal root in `mobile-bridge.json`; the active bridge port and profile transport key persist there, and the transport key rotates when all mobile pairings are reset.
-- `spaces mobile status` shows the active port, Bonjour service name, and reachable IPv4 addresses. `spaces mobile serve --host ... --port ... --pairing-code ...` runs the bridge as a standalone process, opens a five-minute pairing window, and prints the full pairing link, code, expiry, host, and port. Harnesses that need to issue bridge JSON use `spaces mobile request` with the pairing link or transport key so they exercise the same TLS-PSK transport as the iOS app. Standalone bridge processes do not service `launchSpacesApp` because they do not own the terminal-service executable context.
+- `spaces mobile status` shows the active port, Bonjour service name, endpoint fingerprint, and reachable IPv4 addresses. `spaces mobile serve --host ... --port ... --pairing-code ...` runs the bridge as a standalone process, opens a five-minute pairing window, and prints the full pairing link, code, expiry, host, port, and endpoint fingerprint. Harnesses that need to issue bridge JSON use `spaces mobile request` with the pairing link or transport key so they exercise the same TLS-PSK transport as the iOS app. Standalone bridge processes do not service `launchSpacesApp` because they do not own the spacesd executable context.
 - The Mac sidebar mobile connection action opens a compact panel with endpoint details, a five-minute QR/deep-link pairing window, copy-link action, countdown, paired devices, revoke controls, and reset-all pairing rotation.
 - The service advertises `_spaces-mobile._tcp.` with Bonjour so the iOS connection sheet can offer nearby Macs without requiring the user to type an IP address.
 - The bridge serves workspace and terminal overview data plus authenticated attach, subscribe, takeover, send, key, workspace-creation, workspace-terminal, process, and coding-agent lifecycle requests over the same session boundary.
-- The daemon bridge also serves the authenticated `launchSpacesApp` recovery request. It checks the current profile app-owner lease before spawning, returns success immediately when `SpacesApp` already owns the profile, and otherwise starts the resolved `SpacesApp` executable with `SPACES_DB_PATH`, `SPACES_RUNTIME_DIR`, and `SPACES_TERMINAL_SERVICE_EXECUTABLE` set for the current profile and service executable.
+- The daemon bridge also serves the authenticated `launchSpacesApp` recovery request. It checks the current profile app-owner lease before spawning, returns success immediately when `SpacesApp` already owns the profile, and otherwise starts the resolved `SpacesApp` executable with `SPACES_DB_PATH`, `SPACES_RUNTIME_DIR`, and `SPACESD_EXECUTABLE` set for the current profile and service executable.
 - Mobile workspace terminals are persistent service-owned sessions created at the workspace root. The bridge uses the workspace terminal reservation and finish flow with no native macOS window opener, so the session is immediately visible to iOS without presenting a Mac terminal window. Stop requests terminate ad hoc workspace terminal sessions through the same workspacecore path used for native window close.
 - Mobile process actions reuse the same configured-process recovery and running-process stop or restart behavior as the macOS app. A configured process without a live runtime is launched from its saved workspace settings; a live row is stopped or restarted by running-process identity.
 - Mobile coding-agent actions use the workspace agent lifecycle path. Stopping a Spaces-backed agent closes any tracked native terminal window, terminates the backing service session, removes the runtime row, and leaves the configured launcher in settings. Restarting is available for configured launchers and claimed launcher rows; unconfigured live agents can stop but cannot restart.
@@ -94,7 +102,7 @@ Each live session also participates in a service-level control path:
 - The bridge `state` endpoint returns live service state for interactive sessions and the persisted final `terminated` payload for ended sessions. Ended-session `subscribe` requests send that same final payload and complete so stale clients do not report a missing live stream. Attach, takeover, input, resize, and scroll control remain live-session-only operations.
 - The iOS terminal detail view resolves the selected session back to the latest mobile overview runtime row while it is visible. Its trailing `...` menu reuses the app model's run, stop, and restart mutations, and swaps to a replacement session when run or restart returns one.
 - Standalone bridge runs used by latency harnesses can apply test-only response and stream shaping through `SPACES_MOBILE_BRIDGE_NETWORK_PROFILE`; the app-supervised bridge path uses the default local profile.
-- Pairing is first-party policy-gated: the Mac bridge issues a per-install auth token after one-time code and nonce verification inside an open pairing window, and persists the paired installation alongside device metadata and the expected iOS bundle identifier.
+- Pairing is first-party policy-gated: the Mac bridge issues a per-install auth token after one-time code and nonce verification inside an open pairing window, and persists the paired installation alongside device metadata, daemon endpoint fingerprint, and the expected iOS bundle identifier.
 - Every later request must use the profile transport key at the TLS layer and present the stored auth token plus allowed bundle identity in the request, so an unpaired or non-first-party client is rejected before it can browse or control sessions.
 - Remote attachments are lease-based. Host time stamps the lease, and only client-identified activity refreshes that specific remote lease.
 - The mobile bridge is an internal first-party transport seam, not a stable third-party public API.

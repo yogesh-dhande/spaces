@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../../.. && pwd)"
 spaces_cli="${SPACES_CLI:-$repo_root/apps/macos/.build/debug/spaces}"
-terminal_service="${SPACES_TERMINAL_SERVICE_EXECUTABLE:-$repo_root/apps/macos/.build/debug/SpacesTerminalService}"
+terminal_service="${SPACESD_EXECUTABLE:-$repo_root/apps/macos/.build/debug/spacesd}"
 
 if [[ ! -x "$spaces_cli" ]]; then
   echo "spaces CLI not found at $spaces_cli" >&2
@@ -11,14 +11,14 @@ if [[ ! -x "$spaces_cli" ]]; then
 fi
 
 if [[ ! -x "$terminal_service" ]]; then
-  echo "SpacesTerminalService not found at $terminal_service" >&2
+  echo "spacesd not found at $terminal_service" >&2
   exit 1
 fi
 
 temp_root="$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-bridge-profile.XXXXXX")"
 export SPACES_DB_PATH="$temp_root/spaces.db"
 export SPACES_RUNTIME_DIR="$temp_root/runtime"
-export SPACES_TERMINAL_SERVICE_EXECUTABLE="$terminal_service"
+export SPACESD_EXECUTABLE="$terminal_service"
 mkdir -p "$SPACES_RUNTIME_DIR"
 service_log="$temp_root/terminal-service.log"
 bridge_log="$temp_root/mobile-bridge.log"
@@ -46,7 +46,7 @@ while [[ $SECONDS -lt $service_deadline ]]; do
 done
 
 if [[ ! -S "$service_socket" ]]; then
-  echo "Timed out waiting for SpacesTerminalService socket." >&2
+  echo "Timed out waiting for spacesd socket." >&2
   cat "$service_log" >&2 || true
   exit 1
 fi

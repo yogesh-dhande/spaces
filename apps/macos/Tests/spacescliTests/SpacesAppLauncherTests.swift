@@ -9,7 +9,7 @@ import spacesmobilecore
 
 final class SpacesAppLauncherTests: XCTestCase {
     func testResolverReturnsDevelopmentSiblingExecutable() throws {
-        let servicePath = "/tmp/spaces-build/debug/SpacesTerminalService"
+        let servicePath = "/tmp/spaces-build/debug/spacesd"
         let expected = "/tmp/spaces-build/debug/SpacesApp"
         let resolver = SpacesAppExecutableResolver(isExecutableFile: { $0 == expected })
 
@@ -20,7 +20,7 @@ final class SpacesAppLauncherTests: XCTestCase {
     }
 
     func testResolverReturnsBundledAppExecutable() throws {
-        let servicePath = "/Applications/Spaces.app/Contents/Resources/SpacesTerminalService"
+        let servicePath = "/Applications/Spaces.app/Contents/Resources/spacesd"
         let expected = "/Applications/Spaces.app/Contents/MacOS/SpacesApp"
         let resolver = SpacesAppExecutableResolver(isExecutableFile: { $0 == expected })
 
@@ -36,7 +36,7 @@ final class SpacesAppLauncherTests: XCTestCase {
         let expected = "/Applications/Spaces.app/Contents/MacOS/SpacesApp"
         let resolver = SpacesAppExecutableResolver(isExecutableFile: { $0 == expected })
 
-        let resolution = try resolver.resolve(serviceExecutablePath: "/usr/local/bin/SpacesTerminalService")
+        let resolution = try resolver.resolve(serviceExecutablePath: "/usr/local/bin/spacesd")
 
         XCTAssertEqual(resolution.executableURL.path, expected)
         XCTAssertEqual(resolution.attemptedCandidates, ["/usr/local/bin/SpacesApp", "/Applications/Spaces.app/Contents/MacOS/SpacesApp"])
@@ -47,7 +47,7 @@ final class SpacesAppLauncherTests: XCTestCase {
         let expected = "/Users/tester/Applications/Spaces.app/Contents/MacOS/SpacesApp"
         let resolver = SpacesAppExecutableResolver(homeDirectoryURL: home, isExecutableFile: { $0 == expected })
 
-        let resolution = try resolver.resolve(serviceExecutablePath: "/Users/tester/.local/bin/SpacesTerminalService")
+        let resolution = try resolver.resolve(serviceExecutablePath: "/Users/tester/.local/bin/spacesd")
 
         XCTAssertEqual(resolution.executableURL.path, expected)
         XCTAssertEqual(
@@ -57,7 +57,7 @@ final class SpacesAppLauncherTests: XCTestCase {
     func testResolverReportsMissingAppWithAttemptedCandidates() throws {
         let resolver = SpacesAppExecutableResolver(isExecutableFile: { _ in false })
 
-        XCTAssertThrowsError(try resolver.resolve(serviceExecutablePath: "/usr/local/bin/SpacesTerminalService")) { error in
+        XCTAssertThrowsError(try resolver.resolve(serviceExecutablePath: "/usr/local/bin/spacesd")) { error in
             guard case SpacesAppLaunchError.executableNotFound(let candidates) = error else { return XCTFail("Unexpected error: \(error)") }
             XCTAssertEqual(candidates, ["/usr/local/bin/SpacesApp", "/Applications/Spaces.app/Contents/MacOS/SpacesApp"])
             XCTAssertTrue(error.localizedDescription.contains("/usr/local/bin/SpacesApp"))
@@ -100,7 +100,7 @@ final class SpacesAppLauncherTests: XCTestCase {
             currentAppOwner: { _ in
                 ownerChecks += 1
                 return didStartProcess && ownerChecks >= 2 ? owner : nil
-            }, serviceExecutablePathProvider: { "/tmp/build/SpacesTerminalService" },
+            }, serviceExecutablePathProvider: { "/tmp/build/spacesd" },
             environmentProvider: { ["SPACES_DB_PATH": "/stale/spaces.db", "CUSTOM": "1"] },
             startProcess: { url, environment in
                 didStartProcess = true
@@ -116,7 +116,7 @@ final class SpacesAppLauncherTests: XCTestCase {
         XCTAssertEqual(startedURL?.path, executablePath)
         XCTAssertEqual(startedEnvironment?[SpacesProfile.databasePathEnvironmentVariable], profile.databasePath)
         XCTAssertEqual(startedEnvironment?[SpacesProfile.runtimeDirectoryEnvironmentVariable], profile.runtimeDirectory)
-        XCTAssertEqual(startedEnvironment?["SPACES_TERMINAL_SERVICE_EXECUTABLE"], "/tmp/build/SpacesTerminalService")
+        XCTAssertEqual(startedEnvironment?["SPACESD_EXECUTABLE"], "/tmp/build/spacesd")
         XCTAssertEqual(startedEnvironment?["CUSTOM"], "1")
     }
 
@@ -125,7 +125,7 @@ final class SpacesAppLauncherTests: XCTestCase {
         var startCount = 0
         let launcher = SpacesAppLauncher(
             resolver: SpacesAppExecutableResolver(isExecutableFile: { $0 == "/tmp/build/SpacesApp" }), profileProvider: { profile },
-            currentAppOwner: { _ in nil }, serviceExecutablePathProvider: { "/tmp/build/SpacesTerminalService" },
+            currentAppOwner: { _ in nil }, serviceExecutablePathProvider: { "/tmp/build/spacesd" },
             startProcess: { _, _ in
                 startCount += 1
                 return 123

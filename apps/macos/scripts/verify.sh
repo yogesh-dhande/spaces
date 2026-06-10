@@ -72,7 +72,7 @@ stop_current_profile_runtime_for_tests() {
     return
   fi
 
-  echo "Stopping current Spaces profile app and terminal service before SwiftPM coverage..."
+  echo "Stopping current Spaces profile app and spacesd daemon before SwiftPM coverage..."
   (
     spaces_profile_stop_running_app "$cli" "${SPACES_VERIFY_PROFILE_STOP_TIMEOUT:-20}"
     spaces_profile_stop_terminal_service "$cli" "${SPACES_VERIFY_PROFILE_STOP_TIMEOUT:-20}"

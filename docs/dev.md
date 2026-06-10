@@ -39,7 +39,7 @@ scripts/verify.sh
 `scripts/format-staged-swift.sh` formats staged macOS Swift source and test files in place and re-stages them.
 `scripts/lint.sh` runs `scripts/format-staged-swift.sh` and then `SwiftLint` when `swiftlint` is available.
 `scripts/coverage.sh` runs SwiftPM tests serially because several tests intentionally mutate process-wide environment variables while exercising profile-sensitive paths. Set `SPACES_TEST_PARALLEL=1` to opt into parallel coverage; auto-detected workers are capped at `8` unless you override it with `SPACES_TEST_WORKERS` or change the cap with `SPACES_TEST_MAX_AUTO_WORKERS`. When the debug CLI exists, coverage exports that CLI's repo-local profile before tests so profile-sensitive tests do not read the installed database. Coverage also points `XDG_CONFIG_HOME` at an empty build-local directory so Ghostty tests do not load a developer's personal Ghostty config.
-`scripts/verify.sh` is the canonical sequential local verification path: staged formatting and lint, build, repo-local profile export, current-profile app and terminal-service shutdown, coverage, then iOS unit tests. The profile shutdown is scoped to the repo-local profile so native Ghostty tests do not contend with a running debug app; set `SPACES_VERIFY_KEEP_PROFILE_RUNTIME=1` to leave that runtime running. The iOS unit pass prefers an available non-booted iPhone simulator so it does not attach to a simulator already owned by mobile E2E; set `SPACES_IOS_TEST_DESTINATION` to override the destination, or `SPACES_IOS_DERIVED_DATA` to override its DerivedData directory.
+`scripts/verify.sh` is the canonical sequential local verification path: staged formatting and lint, build, repo-local profile export, current-profile app and spacesd shutdown, coverage, then iOS unit tests. The profile shutdown is scoped to the repo-local profile so native Ghostty tests do not contend with a running debug app; set `SPACES_VERIFY_KEEP_PROFILE_RUNTIME=1` to leave that runtime running. The iOS unit pass prefers an available non-booted iPhone simulator so it does not attach to a simulator already owned by mobile E2E; set `SPACES_IOS_TEST_DESTINATION` to override the destination, or `SPACES_IOS_DERIVED_DATA` to override its DerivedData directory.
 `scripts/swiftpm.sh` also uses a fail-fast lock around SwiftPM itself so overlapping build, test, or coverage commands stop immediately with a clear message instead of silently contending on the shared `.build` directory.
 
 Useful local entry points:
@@ -53,7 +53,7 @@ apps/macos/.build/debug/spaces update --notes "Ready for review"
 apps/macos/.build/debug/spaces restart
 ```
 
-Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only the running app instance and terminal service for that same profile before it relaunches.
+Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only the running app instance and spacesd daemon for that same profile before it relaunches.
 
 For manual worktree-local shell sessions, export the same derived profile before launching the app, CLI, or E2E helper:
 
@@ -110,7 +110,7 @@ pkill -x SpacesApp 2>/dev/null || true
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
 ```
 
-When the app launches built-in Spaces terminals itself, `SpacesTerminalService` owns the session and native owner windows attach through the service control socket. Use the normal app flows:
+When the app launches built-in Spaces terminals itself, `spacesd` owns the session and native owner windows attach through the service control socket. Use the normal app flows:
 - Open a workspace terminal from the workspace detail pane.
 - Launch a workspace process while the configured terminal host is `Spaces`.
 - Launch a coding agent from the workspace detail pane.
@@ -149,9 +149,45 @@ For maintained simulator E2E coverage of the mobile terminal path:
 apps/macos/Tests/e2e_mobile.sh
 ```
 
-The mobile suite builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack, and then runs the selected scenarios with `test-without-building` against that shared stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, `--keep-root` to preserve the shared demo root, and `--port <port>` to pin the daemon bridge port. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again. The `app-recovery` scenario kills only the current-profile `SpacesApp` owner, sends `launchSpacesApp` through the authenticated daemon bridge, and verifies the terminal service PID and live session remain stable.
+The mobile suite builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack, and then runs the selected scenarios with `test-without-building` against that shared stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, `--keep-root` to preserve the shared demo root, and `--port <port>` to pin the daemon bridge port. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again. The `app-recovery` scenario kills only the current-profile `SpacesApp` owner, sends `launchSpacesApp` through the authenticated daemon bridge, and verifies the spacesd daemon PID and live session remain stable.
 
 The daemon-hosted mobile bridge is the first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spaces mobile serve` remains available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spaces mobile request` so local scripts use the same TLS-PSK transport as the iOS app. Standalone bridge processes reject daemon-only recovery commands such as `launchSpacesApp`.
+
+Remote compute-host E2E coverage uses a reachable host running a matching `spacesd`. The SwiftPM `spacesd` target is macOS-scoped, so app-level remote E2E uses another Mac or a loopback remote profile that binds the remote listener on a separate profile root. Compute-host bootstrap, status, and test automation belongs in `spacese2e` so the product `spaces` CLI remains workspace-oriented. Use `upsert-compute-host` and `list-compute-hosts` to seed and inspect host records, `set-project-default-compute-host` and `set-workspace-compute-host-override` to exercise selection precedence, and `plan-workspace-runtime` to inspect the stable binding, daemon target, Remote SSH URI, and runtime manifest for a workspace.
+
+A remote daemon listener uses pinned TLS. Print the daemon certificate fingerprint with the same profile environment used to run the listener:
+
+```bash
+export SPACES_DB_PATH=/tmp/spaces-remote/spaces.db
+export SPACES_RUNTIME_DIR=/tmp/spaces-remote/runtime
+SPACESD_PRINT_CERTIFICATE_FINGERPRINT=1 <path-to-spacesd>
+```
+
+Start the remote listener with the configured private/LAN/VPN bind address and a shared token:
+
+```bash
+export SPACESD_LISTEN_HOST=0.0.0.0
+export SPACESD_LISTEN_PORT=7443
+export SPACESD_AUTH_TOKEN=<shared-token>
+<path-to-spacesd>
+```
+
+Register that endpoint from the Mac-side profile. The host-specific token environment key is the uppercased compute host ID with non-alphanumeric characters replaced by `_`:
+
+```bash
+eval "$(apps/macos/.build/debug/spaces profile show --shell)"
+export SPACESD_AUTH_TOKEN_LAB_MAC=<shared-token>
+apps/macos/.build/debug/spacese2e upsert-compute-host \
+  --id lab-mac \
+  --name "Lab Mac" \
+  --ssh-host <ssh-host> \
+  --workspace-root /tmp/spaces-remote/workspaces \
+  --daemon-host <remote-ip-or-dns-name> \
+  --daemon-port 7443 \
+  --certificate-fingerprint 'SHA256:<fingerprint-hex>'
+```
+
+The Mac-side host record can be created through the app. Open Remote Hosts from the sidebar, enter the SSH host and SSH user, optionally set a display name, and use Advanced only for SSH port or workspace folder overrides. The remote Mac must accept non-interactive SSH from the Mac and have `spacesd` discoverable on the SSH PATH. Connect resolves the SSH host, creates a stable remote profile under `~/.spaces/compute-hosts/<host-id>`, creates the workspace root, starts the remote listener with an internally selected port, stores the auth token in Keychain, saves the returned certificate fingerprint, and verifies the direct pinned-TLS endpoint before saving the host. Project settings can select the host as the project default, and workspace detail can select a workspace-specific override. Manual daemon host, daemon port, and certificate fingerprint fields are available only through `spacese2e` setup commands.
 
 For focused terminal latency probes:
 
@@ -504,15 +540,15 @@ scripts/release-and-deploy.sh <version> [build-number]
 
 This workflow:
 - syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
-- builds universal `arm64` + `x86_64` release binaries for the app, CLI, and `SpacesTerminalService`
-- code-signs the app, CLI, and terminal service
+- builds universal `arm64` + `x86_64` release binaries for the app, CLI, and `spacesd`
+- code-signs the app, CLI, and spacesd daemon
 - creates a signed manual-download DMG
 - creates a Sparkle-served `Spaces.app` zip archive
 - updates `dist/updates/stable/appcast.xml` plus any Sparkle delta files
 - stages the Sparkle feed and Sparkle archives into `apps/web/public/releases`
 - builds the static site so Firebase can serve `https://usespaces.dev/releases/*`
 - optionally notarizes the DMG when `NOTARIZE=1`
-- verifies the final DMG signature plus the bundled installer, app, CLI, and terminal service before publish
+- verifies the final DMG signature plus the bundled installer, app, CLI, and spacesd daemon before publish
 - publishes the DMG to GitHub Releases
 
 Important environment variables:
@@ -531,7 +567,7 @@ Important environment variables:
 
 For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
 
-Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, and one stable `appcast.xml`, all backed by those universal binaries. The app bundle carries `spaces` and `SpacesTerminalService` in `Contents/Resources`; the DMG installer also copies both executables to the selected CLI install directory so installed CLI commands can start the terminal service without extra environment variables.
+Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, and one stable `appcast.xml`, all backed by those universal binaries. The app bundle carries `spaces` and `spacesd` in `Contents/Resources`; the DMG installer also copies both executables to the selected CLI install directory so installed CLI commands can start the spacesd daemon without extra environment variables.
 
 ## Website Deploy
 

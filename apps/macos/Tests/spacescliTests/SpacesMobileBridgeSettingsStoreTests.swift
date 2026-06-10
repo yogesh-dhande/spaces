@@ -5,7 +5,7 @@ import spacesmobilecore
 @testable import spacesmobilebridge
 
 final class SpacesMobileBridgeSettingsStoreTests: XCTestCase {
-    func testLoadOrCreatePersistsStableDefaultEndpointAndTransportKey() throws {
+    func testLoadOrCreatePersistsStableDefaultEndpointAndDaemonIdentity() throws {
         try withTemporaryProfile { _ in
             let store = SpacesMobileBridgeSettingsStore()
 
@@ -17,15 +17,18 @@ final class SpacesMobileBridgeSettingsStoreTests: XCTestCase {
             XCTAssertEqual(reloaded, created)
             XCTAssertFalse(created.transportKey.isEmpty)
             XCTAssertNoThrow(try SpacesMobileBridgeTransport.decodeTransportKey(created.transportKey))
+            XCTAssertTrue(created.certificateFingerprint.hasPrefix("SHA256:"))
         }
     }
 
-    func testEnvironmentOverridesEndpointAndTransportKeyWithoutChangingStoredDefaults() throws {
+    func testEnvironmentOverridesEndpointAndDaemonIdentityWithoutChangingStoredDefaults() throws {
         try withTemporaryProfile { _ in
             let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+            let certificateFingerprint = "SHA256:test-fingerprint"
             let environment = [
                 SpacesMobileBridgeDefaults.hostEnvironmentVariable: "127.0.0.1", SpacesMobileBridgeDefaults.portEnvironmentVariable: "51234",
                 SpacesMobileBridgeDefaults.transportKeyEnvironmentVariable: transportKey,
+                SpacesMobileBridgeDefaults.certificateFingerprintEnvironmentVariable: certificateFingerprint,
             ]
             let overridden = try SpacesMobileBridgeSettingsStore(environment: environment).loadOrCreate()
             let stored = try SpacesMobileBridgeSettingsStore().loadOrCreate()
@@ -33,9 +36,11 @@ final class SpacesMobileBridgeSettingsStoreTests: XCTestCase {
             XCTAssertEqual(overridden.host, "127.0.0.1")
             XCTAssertEqual(overridden.port, 51_234)
             XCTAssertEqual(overridden.transportKey, transportKey)
+            XCTAssertEqual(overridden.certificateFingerprint, certificateFingerprint)
             XCTAssertEqual(stored.host, SpacesMobileBridgeDefaults.host)
             XCTAssertEqual(stored.port, SpacesMobileBridgeDefaults.port)
             XCTAssertNotEqual(stored.transportKey, transportKey)
+            XCTAssertNotEqual(stored.certificateFingerprint, certificateFingerprint)
         }
     }
 

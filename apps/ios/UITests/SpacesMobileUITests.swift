@@ -48,6 +48,7 @@ final class SpacesMobileUITests: XCTestCase {
             "host": "127.0.0.1",
             "port": 47_847,
             "authToken": "token",
+            "certificateFingerprint": "SHA256:test",
             "installationID": "installation",
             "attachToExistingApp": true,
         ]
@@ -324,6 +325,7 @@ final class SpacesMobileUITests: XCTestCase {
             app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
             app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
             app.launchEnvironment["SPACES_MOBILE_TEST_TRANSPORT_KEY"] = configuration.transportKey
+            app.launchEnvironment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"] = configuration.certificateFingerprint
             app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
             app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
             if let secondarySessionID = configuration.secondarySessionID {
@@ -1007,6 +1009,7 @@ private struct UITestConfiguration: Decodable {
     let port: Int
     let authToken: String
     let transportKey: String
+    let certificateFingerprint: String
     let installationID: String
     let renderDumpPath: String?
     let eventLogPath: String?
@@ -1054,6 +1057,7 @@ private struct UITestConfiguration: Decodable {
         case port
         case authToken
         case transportKey
+        case certificateFingerprint
         case installationID
         case renderDumpPath
         case eventLogPath
@@ -1105,8 +1109,10 @@ private struct UITestConfiguration: Decodable {
         authToken = try container.decode(String.self, forKey: .authToken)
         if attachToExistingApp {
             transportKey = try container.decodeIfPresent(String.self, forKey: .transportKey) ?? ""
+            certificateFingerprint = try container.decodeIfPresent(String.self, forKey: .certificateFingerprint) ?? ""
         } else {
             transportKey = try container.decode(String.self, forKey: .transportKey)
+            certificateFingerprint = try container.decode(String.self, forKey: .certificateFingerprint)
         }
         installationID = try container.decode(String.self, forKey: .installationID)
         renderDumpPath = try container.decodeIfPresent(String.self, forKey: .renderDumpPath)

@@ -257,14 +257,14 @@ final class SpacesCommandTests: XCTestCase {
                 ok: true, message: "Loaded mobile bridge status.",
                 status: SpacesMobileBridgeStatus(
                     host: "0.0.0.0", port: 47_847, bonjourServiceName: "Spaces Mac", bonjourServiceType: "_spaces-mobile._tcp.",
-                    networkAddresses: ["192.168.1.20"]))
+                    networkAddresses: ["192.168.1.20"], certificateFingerprint: "SHA256:test"))
         })
 
         XCTAssertEqual(
             lines,
             [
-                "Spaces mobile bridge", "port=47847", "bonjour=Spaces Mac\ttype=_spaces-mobile._tcp.", "addresses=192.168.1.20:47847",
-                "iphone=Open Mobile Connection in the Mac app to show a QR code or pairing link.",
+                "Spaces mobile bridge", "port=47847", "bonjour=Spaces Mac\ttype=_spaces-mobile._tcp.", "fingerprint=SHA256:test",
+                "addresses=192.168.1.20:47847", "iphone=Open Mobile Connection in the Mac app to show a QR code or pairing link.",
             ])
     }
 

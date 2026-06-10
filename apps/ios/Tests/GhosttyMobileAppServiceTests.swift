@@ -96,6 +96,7 @@
             settings.port = 12345
             settings.authToken = "token"
             settings.transportKey = "transport-key"
+            settings.certificateFingerprint = "SHA256:test"
             return settings
         }
 

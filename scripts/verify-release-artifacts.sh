@@ -104,8 +104,8 @@ require_universal_binary \
   "$mountpoint/Spaces.app/Contents/Resources/spaces" \
   "Spaces.app bundled CLI"
 require_universal_binary \
-  "$mountpoint/Spaces.app/Contents/Resources/SpacesTerminalService" \
-  "Spaces.app bundled terminal service"
+  "$mountpoint/Spaces.app/Contents/Resources/spacesd" \
+  "Spaces.app bundled spacesd daemon"
 
 ghostty_vt_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.dylib"
 ghostty_vt_real_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.0.1.0.dylib"

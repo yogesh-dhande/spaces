@@ -46,7 +46,8 @@ import spacesmobilecore
         let status = try settingsStore.status()
         return SpacesMobileBridgeStatus(
             host: status.host, port: server?.listeningPort ?? status.port, bonjourServiceName: status.bonjourServiceName,
-            bonjourServiceType: status.bonjourServiceType, networkAddresses: status.networkAddresses)
+            bonjourServiceType: status.bonjourServiceType, networkAddresses: status.networkAddresses,
+            certificateFingerprint: status.certificateFingerprint)
     }
 
     private var isDisabled: Bool {
@@ -93,14 +94,20 @@ import spacesmobilecore
     }
 
     private func startBridgeServer(settings: SpacesMobileBridgeSettings) throws -> SpacesMobileBridgeServer {
-        do { return try startBridgeServer(host: settings.host, port: settings.port, transportKey: settings.transportKey) } catch {
+        do {
+            return try startBridgeServer(
+                host: settings.host, port: settings.port, transportKey: settings.transportKey, certificateFingerprint: settings.certificateFingerprint
+            )
+        } catch {
             guard settings.port != 0 else { throw error }
             let configuredPortError = error
             log("mobile bridge configured port \(settings.port) unavailable; retrying on a stable profile port")
             var fallbackError = configuredPortError
             for fallbackPort in try settingsStore.stableFallbackPorts() where fallbackPort != settings.port {
                 do {
-                    let fallbackServer = try startBridgeServer(host: settings.host, port: fallbackPort, transportKey: settings.transportKey)
+                    let fallbackServer = try startBridgeServer(
+                        host: settings.host, port: fallbackPort, transportKey: settings.transportKey,
+                        certificateFingerprint: settings.certificateFingerprint)
                     do { _ = try settingsStore.updatePort(fallbackPort) } catch {
                         fallbackServer.stop()
                         throw error
@@ -113,11 +120,11 @@ import spacesmobilecore
         }
     }
 
-    private func startBridgeServer(host: String, port: Int, transportKey: String) throws -> SpacesMobileBridgeServer {
+    private func startBridgeServer(host: String, port: Int, transportKey: String, certificateFingerprint: String) throws -> SpacesMobileBridgeServer {
         let appLauncher = SpacesAppLauncher()
         let createdServer = SpacesMobileBridgeServer(
-            host: host, port: port, transportKey: transportKey, pairingStoreProtocol: try SpacesMobilePairingStore(),
-            launchSpacesAppHandler: { try appLauncher.launchIfNeeded() })
+            host: host, port: port, transportKey: transportKey, certificateFingerprint: certificateFingerprint,
+            pairingStoreProtocol: try SpacesMobilePairingStore(), launchSpacesAppHandler: { try appLauncher.launchIfNeeded() })
         do {
             try createdServer.start()
             return createdServer
@@ -199,7 +206,7 @@ import spacesmobilecore
     }
 
     private func log(_ message: String) {
-        fputs("spaces-terminal-service: \(message)\n", stderr)
+        fputs("spacesd: \(message)\n", stderr)
         fflush(stderr)
     }
 

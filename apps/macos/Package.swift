@@ -24,7 +24,7 @@ let package = Package(
         .library(name: "spacesui", targets: ["spacesui"]),
         .library(name: "spacescli", targets: ["spacescli"]),
         .executable(name: "spacese2e", targets: ["spacese2e"]),
-        .executable(name: "SpacesTerminalService", targets: ["SpacesTerminalService"]),
+        .executable(name: "spacesd", targets: ["spacesd"]),
         .executable(name: "spaces", targets: ["spaces"]),
         .executable(name: "SpacesApp", targets: ["SpacesApp"])
     ],
@@ -108,9 +108,9 @@ let package = Package(
             path: "Sources/spacese2e"
         ),
         .executableTarget(
-            name: "SpacesTerminalService",
-            dependencies: ["spacesterminalcore", "spacesterminalghostty", "spacesmobilebridge"],
-            path: "Sources/SpacesTerminalService"
+            name: "spacesd",
+            dependencies: ["spacesterminalcore", "spacesterminalghostty", "spacesmobilebridge", "workspacecore"],
+            path: "Sources/spacesd"
         ),
         .executableTarget(name: "spaces", dependencies: ["spacescli"], path: "Sources/spaces"),
         .executableTarget(

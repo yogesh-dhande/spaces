@@ -87,7 +87,7 @@ PY
   for pid in $pids; do
     local command
     command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-    [[ "$command" == *"SpacesTerminalService"* ]] || continue
+    [[ "$command" == *"spacesd"* ]] || continue
     kill "$pid" >/dev/null 2>&1 || true
   done
 
@@ -108,7 +108,7 @@ PY
   for pid in $pids; do
     local command
     command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-    [[ "$command" == *"SpacesTerminalService"* ]] || continue
+    [[ "$command" == *"spacesd"* ]] || continue
     kill -9 "$pid" >/dev/null 2>&1 || true
   done
   rm -f "$service_socket" >/dev/null 2>&1 || true

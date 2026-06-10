@@ -15,6 +15,7 @@ public enum SpacesMobileBridgeDefaults {
     public static let hostEnvironmentVariable = "SPACES_MOBILE_BRIDGE_HOST"
     public static let portEnvironmentVariable = "SPACES_MOBILE_BRIDGE_PORT"
     public static let transportKeyEnvironmentVariable = "SPACES_MOBILE_TRANSPORT_KEY"
+    public static let certificateFingerprintEnvironmentVariable = "SPACESD_CERTIFICATE_FINGERPRINT"
 
     public static func isWildcardHost(_ host: String) -> Bool {
         let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -26,14 +27,17 @@ public struct SpacesMobileBridgeSettings: Codable, Equatable, Sendable {
     public var host: String
     public var port: Int
     public var transportKey: String
+    public var certificateFingerprint: String
 
     public init(
         host: String = SpacesMobileBridgeDefaults.host, port: Int = SpacesMobileBridgeDefaults.port,
-        transportKey: String = SpacesMobileBridgeSettings.generateTransportKey()
+        transportKey: String = SpacesMobileBridgeSettings.generateTransportKey(),
+        certificateFingerprint: String = SpacesMobileBridgeSettings.generateCertificateFingerprint()
     ) {
         self.host = host
         self.port = port
         self.transportKey = transportKey
+        self.certificateFingerprint = certificateFingerprint
     }
 
     public static func generateTransportKey() -> String {
@@ -49,6 +53,7 @@ public struct SpacesMobileBridgeSettings: Codable, Equatable, Sendable {
         case port
         case pairingCode
         case transportKey
+        case certificateFingerprint
     }
 
     public init(from decoder: any Decoder) throws {
@@ -56,6 +61,7 @@ public struct SpacesMobileBridgeSettings: Codable, Equatable, Sendable {
         host = try container.decodeIfPresent(String.self, forKey: .host) ?? SpacesMobileBridgeDefaults.host
         port = try container.decodeIfPresent(Int.self, forKey: .port) ?? SpacesMobileBridgeDefaults.port
         transportKey = try container.decodeIfPresent(String.self, forKey: .transportKey) ?? Self.generateTransportKey()
+        certificateFingerprint = try container.decodeIfPresent(String.self, forKey: .certificateFingerprint) ?? Self.generateCertificateFingerprint()
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -63,6 +69,14 @@ public struct SpacesMobileBridgeSettings: Codable, Equatable, Sendable {
         try container.encode(host, forKey: .host)
         try container.encode(port, forKey: .port)
         try container.encode(transportKey, forKey: .transportKey)
+        try container.encode(certificateFingerprint, forKey: .certificateFingerprint)
+    }
+
+    public static func generateCertificateFingerprint() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let data = status == errSecSuccess ? Data(bytes) : Data((UUID().uuidString + UUID().uuidString).utf8.prefix(32))
+        return "SHA256:\(SpacesMobileBridgeTransport.encodeTransportKey(data))"
     }
 }
 
@@ -72,13 +86,17 @@ public struct SpacesMobileBridgeStatus: Codable, Equatable, Sendable {
     public let bonjourServiceName: String
     public let bonjourServiceType: String
     public let networkAddresses: [String]
+    public let certificateFingerprint: String
 
-    public init(host: String, port: Int, bonjourServiceName: String, bonjourServiceType: String, networkAddresses: [String]) {
+    public init(
+        host: String, port: Int, bonjourServiceName: String, bonjourServiceType: String, networkAddresses: [String], certificateFingerprint: String
+    ) {
         self.host = host
         self.port = port
         self.bonjourServiceName = bonjourServiceName
         self.bonjourServiceType = bonjourServiceType
         self.networkAddresses = networkAddresses
+        self.certificateFingerprint = certificateFingerprint
     }
 }
 
@@ -121,7 +139,7 @@ public final class SpacesMobileBridgeSettingsStore {
         if fileManager.fileExists(atPath: path) {
             let data = try Data(contentsOf: URL(fileURLWithPath: path))
             storedSettings = try JSONDecoder().decode(SpacesMobileBridgeSettings.self, from: data)
-            if try !storedSettingsFileHasTransportKey(data: data) { try save(storedSettings) }
+            if try !storedSettingsFileHasCurrentIdentityFields(data: data) { try save(storedSettings) }
         } else {
             storedSettings = SpacesMobileBridgeSettings()
             try save(storedSettings)
@@ -133,7 +151,8 @@ public final class SpacesMobileBridgeSettingsStore {
         let settings = try loadOrCreate()
         return SpacesMobileBridgeStatus(
             host: settings.host, port: settings.port, bonjourServiceName: try Self.bonjourServiceName(),
-            bonjourServiceType: SpacesMobileBridgeDefaults.bonjourServiceType, networkAddresses: SpacesMobileBridgeNetworkInterfaces.ipv4Addresses())
+            bonjourServiceType: SpacesMobileBridgeDefaults.bonjourServiceType, networkAddresses: SpacesMobileBridgeNetworkInterfaces.ipv4Addresses(),
+            certificateFingerprint: settings.certificateFingerprint)
     }
 
     @discardableResult public func rotateTransportKey() throws -> SpacesMobileBridgeSettings {
@@ -160,10 +179,12 @@ public final class SpacesMobileBridgeSettingsStore {
         try data.write(to: url, options: [.atomic])
     }
 
-    private func storedSettingsFileHasTransportKey(data: Data) throws -> Bool {
+    private func storedSettingsFileHasCurrentIdentityFields(data: Data) throws -> Bool {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
-        guard let value = object["transportKey"] as? String else { return false }
-        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard let transportKey = object["transportKey"] as? String else { return false }
+        guard let certificateFingerprint = object["certificateFingerprint"] as? String else { return false }
+        return !transportKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func settingsPath() throws -> String {
@@ -179,6 +200,9 @@ public final class SpacesMobileBridgeSettingsStore {
         }
         if let transportKey = trimmed(environment[SpacesMobileBridgeDefaults.transportKeyEnvironmentVariable]) {
             resolved.transportKey = transportKey
+        }
+        if let certificateFingerprint = trimmed(environment[SpacesMobileBridgeDefaults.certificateFingerprintEnvironmentVariable]) {
+            resolved.certificateFingerprint = certificateFingerprint
         }
         return resolved
     }

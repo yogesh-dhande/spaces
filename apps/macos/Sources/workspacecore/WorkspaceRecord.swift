@@ -14,10 +14,11 @@ public struct WorkspaceRecord: Codable, Sendable {
     public let isRunning: Bool
     public let lastLaunchedAt: String?
     public let notes: String?
+    public let computeHostOverrideID: String?
 
     public init(
         id: String, projectID: String, title: String, dir: String, dirname: String?, branch: String?, targetBranch: String? = nil, isDefault: Bool,
-        isArchived: Bool, isHidden: Bool = false, isRunning: Bool, lastLaunchedAt: String?, notes: String? = nil
+        isArchived: Bool, isHidden: Bool = false, isRunning: Bool, lastLaunchedAt: String?, notes: String? = nil, computeHostOverrideID: String? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -32,5 +33,6 @@ public struct WorkspaceRecord: Codable, Sendable {
         self.isRunning = isRunning
         self.lastLaunchedAt = lastLaunchedAt
         self.notes = notes
+        self.computeHostOverrideID = computeHostOverrideID
     }
 }

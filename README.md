@@ -65,8 +65,9 @@ Coding agents emit `spaces signal` events from their terminals so the GUI knows 
 ## How it works
 
 - [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
-- Built-in process and ad hoc terminals run through `SpacesTerminalService`, so sessions survive app quits and lifetime, takeover, and `spaces terminal` controls share one service-owned boundary.
-- The first-party iOS client discovers the Mac bridge advertised by the terminal service, pairs through a Mac-approved QR/deep link, browses live Spaces terminal sessions, auto-takes ownership when opening one for live rendering, and can ask the still-running service to launch the Mac app after an app quit or crash.
+- Built-in process and ad hoc terminals run through `spacesd`, so sessions survive app quits and lifetime, takeover, and `spaces terminal` controls share one daemon-owned boundary.
+- Compute host selection resolves through workspace override, project default, then the local Mac, with stable per-workspace bindings for remote worktrees and pinned-TLS `spacesd` execution on the selected host.
+- The first-party iOS client discovers the Mac bridge advertised by `spacesd`, pairs through a Mac-approved QR/deep link, browses live Spaces terminal sessions, auto-takes ownership when opening one for live rendering, and can ask the still-running daemon to launch the Mac app after an app quit or crash.
 - Browser sessions automate Google Chrome so you can quickly switch to view output without typing the URL or clicking through tabs.
 
 ## Requirements

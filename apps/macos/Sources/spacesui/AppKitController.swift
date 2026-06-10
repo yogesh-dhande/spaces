@@ -48,6 +48,27 @@ private final class CommandPalettePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+@MainActor private final class ComputeHostFormRefs {
+    let hostField: NSTextField
+    let sshUserField: NSTextField
+    let sshPortField: NSTextField
+    let displayNameField: NSTextField
+    let workspaceRootField: NSTextField
+    var editingHostID: String?
+
+    init(
+        hostField: NSTextField, sshUserField: NSTextField, displayNameField: NSTextField, sshPortField: NSTextField, workspaceRootField: NSTextField,
+        editingHostID: String? = nil
+    ) {
+        self.hostField = hostField
+        self.sshUserField = sshUserField
+        self.displayNameField = displayNameField
+        self.sshPortField = sshPortField
+        self.workspaceRootField = workspaceRootField
+        self.editingHostID = editingHostID
+    }
+}
+
 protocol ProcessLifecyclePolicyController {
     func disableAutomaticTermination(_ reason: String)
     func disableSuddenTermination()
@@ -244,6 +265,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var commandPaletteMainWindowVisibility: Bool?
     private var mobileConnectionPanel: NSPanel?
     private var mobileConnectionTimer: Timer?
+    private var remoteHostsPanel: NSPanel?
+    private var remoteHostAdvancedVisible = false
+    private var remoteHostStatusByID: [String: String] = [:]
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private lazy var updaterController: SPUStandardUpdaterController? = {
@@ -291,6 +315,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var inlineWorkspaceFieldTagByObjectID: [ObjectIdentifier: Int] = [:]
     private var inlineWorkspaceLabelTagByObjectID: [ObjectIdentifier: Int] = [:]
     private var inlineWorkspaceOutsideClickMonitor: Any?
+    private var computeHostFormRefsByTag: [Int: ComputeHostFormRefs] = [:]
     private var activeAddWorkspaceFormTag: Int?
     private var activeAddProjectFormTag: Int?
     private var preparedGitProjectDiscardTasksByURL: [String: PreparedGitProjectDiscardEntry] = [:]
@@ -1153,6 +1178,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return trimmed
     }
 
+    static func computeHostIDCandidate(name: String?, sshHost: String?, daemonHost: String?) -> String {
+        let source = trimmedNonEmpty(name) ?? trimmedNonEmpty(sshHost) ?? trimmedNonEmpty(daemonHost) ?? "remote-host"
+        var scalars: [UnicodeScalar] = []
+        var lastWasSeparator = false
+        for scalar in source.lowercased().unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) {
+                scalars.append(scalar)
+                lastWasSeparator = false
+            } else if !lastWasSeparator {
+                scalars.append("-")
+                lastWasSeparator = true
+            }
+        }
+        let slug = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return slug.isEmpty ? "remote-host" : slug
+    }
+
+    static func normalizedRemoteWorkspaceRoot(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stripped = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return stripped.isEmpty ? "/" : "/\(stripped)"
+    }
+
     private static func terminalSessionIsRunning(sessionID: String) -> Bool {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
             let state = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
@@ -1596,7 +1644,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             do {
                 _ = try TerminalService.ensureRunning(timeout: 5)
                 Task { @MainActor [weak self] in self?.logStartupProfile("terminal_service_prewarmed") }
-            } catch { if Self.hotkeyDebugEnabled() { fputs("spaces: terminal service prewarm failed: \(error)\n", stderr) } }
+            } catch { if Self.hotkeyDebugEnabled() { fputs("spaces: spacesd prewarm failed: \(error)\n", stderr) } }
         }
     }
 
@@ -3022,6 +3070,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let mobileButton = sidebarRowIconButton(
             symbol: "iphone.gen3.radiowaves.left.and.right", tooltip: "Mobile connection", action: #selector(showMobileConnection))
+        mobileButton.setAccessibilityIdentifier("sidebar-mobile-connection")
+        let remoteHostsButton = sidebarRowIconButton(
+            symbol: "externaldrive.connected.to.line.below", tooltip: "Remote hosts", action: #selector(showRemoteHosts))
+        remoteHostsButton.setAccessibilityIdentifier("sidebar-remote-hosts")
         let settingsButton = sidebarRowIconButton(symbol: "gearshape", tooltip: "User settings", action: #selector(showSettings))
         let reloadButton = sidebarRowIconButton(symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped))
 
@@ -3034,6 +3086,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(iconView)
         stack.addArrangedSubview(NSView())
         stack.addArrangedSubview(mobileButton)
+        stack.addArrangedSubview(remoteHostsButton)
         stack.addArrangedSubview(settingsButton)
         stack.addArrangedSubview(reloadButton)
 
@@ -3658,6 +3711,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showingAlerts = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
+        computeHostFormRefsByTag.removeAll()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         let placeholder = NSTextField(labelWithString: message)
         placeholder.font = .systemFont(ofSize: 14)
@@ -4055,11 +4109,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(pulseCard)
         constrainFormFieldToFillWidth(pulseCard, in: stack)
 
-        // --- Mobile section ---
-        let mobileCard = settingsMobileSection()
-        stack.addArrangedSubview(mobileCard)
-        constrainFormFieldToFillWidth(mobileCard, in: stack)
-
         // --- Keyboard shortcuts section ---
         let shortcutContainer = buildShortcutRowsContainer()
         let shortcutCard = formSectionCard(
@@ -4128,20 +4177,214 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return row
     }
 
-    private func settingsMobileSection() -> NSView {
-        let response: SpacesMobileBridgeControlResponse? = { try? SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService(timeout: 2) }()
-        let devices = response?.devices ?? []
-        let resetButton = actionButton(
-            title: "Reset All Pairings", symbol: "trash", tooltip: "Remove all paired mobile devices and rotate the transport key",
-            action: #selector(resetAllMobilePairings), primary: false)
-        var rows: [NSView] = [
-            settingsSettingRow(
-                name: "Paired devices",
-                hint: response == nil ? "Mobile bridge status unavailable" : "\(devices.count) device\(devices.count == 1 ? "" : "s") paired",
-                control: resetButton)
-        ]
-        if !devices.isEmpty { rows.append(contentsOf: devices.map { mobileDeviceRow($0) }) }
-        return formSectionCard(icon: "iphone", title: "Mobile", contentViews: rows)
+    private func computeHostTextField(placeholder: String, value: String) -> NSTextField {
+        let field = NSTextField(string: value)
+        field.placeholderString = placeholder
+        field.font = .systemFont(ofSize: 12)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+
+    private func computeHostPopup(includeInheritItemTitle inheritTitle: String? = nil) -> NSPopUpButton {
+        let popup = NSPopUpButton()
+        popup.autoenablesItems = false
+        if let inheritTitle {
+            popup.addItem(withTitle: inheritTitle)
+            popup.itemArray.last?.representedObject = "__inherit__"
+        } else {
+            popup.addItem(withTitle: "Local Mac")
+            popup.itemArray.last?.representedObject = ""
+        }
+        let hosts = (try? orchestrator.listComputeHosts()) ?? []
+        if !hosts.isEmpty { popup.menu?.addItem(.separator()) }
+        for host in hosts {
+            popup.addItem(withTitle: host.name)
+            popup.itemArray.last?.representedObject = host.id
+        }
+        popup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return popup
+    }
+
+    private func selectComputeHostItem(in popup: NSPopUpButton, hostID: String?, localTitle: String) {
+        if let hostID, let item = popup.itemArray.first(where: { ($0.representedObject as? String) == hostID }) {
+            popup.select(item)
+            return
+        }
+        if let item = popup.itemArray.first(where: { ($0.representedObject as? String) == "" }) {
+            item.title = localTitle
+            popup.select(item)
+        } else {
+            popup.selectItem(at: 0)
+        }
+    }
+
+    private func selectedComputeHostID(from popup: NSPopUpButton) -> String? {
+        guard let value = popup.selectedItem?.representedObject as? String, !value.isEmpty, value != "__inherit__" else { return nil }
+        return value
+    }
+
+    private func populateComputeHostForm(_ refs: ComputeHostFormRefs, host: ComputeHostRecord) {
+        refs.editingHostID = host.id
+        refs.hostField.stringValue = host.sshHost
+        refs.sshUserField.stringValue = host.sshUser ?? ""
+        refs.displayNameField.stringValue = host.name
+        refs.sshPortField.stringValue = host.sshPort.map(String.init) ?? ""
+        refs.workspaceRootField.stringValue = host.workspaceRoot
+    }
+
+    private func clearComputeHostForm(_ refs: ComputeHostFormRefs) {
+        refs.editingHostID = nil
+        refs.hostField.stringValue = ""
+        refs.sshUserField.stringValue = ""
+        refs.displayNameField.stringValue = ""
+        refs.sshPortField.stringValue = ""
+        refs.workspaceRootField.stringValue = ComputeHostDraftBuilder.defaultWorkspaceRoot
+    }
+
+    private func computeHostDraft(from refs: ComputeHostFormRefs) throws -> ComputeHostDraft {
+        guard let host = Self.trimmedNonEmpty(refs.hostField.stringValue) else { throw WorkspaceError.invalidArgument(message: "Host is required.") }
+        let sshPort = try optionalComputeHostPort(refs.sshPortField.stringValue, label: "SSH port")
+        return ComputeHostDraft(
+            host: host, sshUser: Self.trimmedNonEmpty(refs.sshUserField.stringValue),
+            displayName: Self.trimmedNonEmpty(refs.displayNameField.stringValue), sshPort: sshPort,
+            workspaceRoot: Self.trimmedNonEmpty(refs.workspaceRootField.stringValue))
+    }
+
+    private func computeHostPort(_ value: String, label: String) throws -> Int {
+        guard let portString = Self.trimmedNonEmpty(value), let port = Int(portString), (1...65_535).contains(port) else {
+            throw WorkspaceError.invalidArgument(message: "\(label) must be a number from 1 to 65535.")
+        }
+        return port
+    }
+
+    private func optionalComputeHostPort(_ value: String, label: String) throws -> Int? {
+        guard Self.trimmedNonEmpty(value) != nil else { return nil }
+        return try computeHostPort(value, label: label)
+    }
+
+    private func testComputeHostConnection(host: ComputeHostRecord, authToken: String?, sender: NSButton) {
+        sender.isEnabled = false
+        Task { @MainActor [weak self, weak sender] in
+            let result = await Self.testComputeHostConnection(host: host, authToken: authToken)
+            sender?.isEnabled = true
+            guard let self else { return }
+            switch result {
+            case .success:
+                remoteHostStatusByID[host.id] = "Reachable"
+                refreshVisibleRemoteHostsPanel()
+                showInfoMessage(title: "Remote host reachable", message: "\(host.name) responded over pinned TLS.")
+            case .failure(let error):
+                remoteHostStatusByID[host.id] = "Unreachable"
+                refreshVisibleRemoteHostsPanel()
+                showError(error)
+            }
+        }
+    }
+
+    nonisolated private static func testComputeHostConnection(host: ComputeHostRecord, authToken: String?) async -> Result<Void, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let response = try TerminalServiceClient.sendPinnedTLS(
+                    request: TerminalServiceRequest(command: "ping"), host: host.daemonEndpoint.host, port: host.daemonEndpoint.port,
+                    authToken: authToken, certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: 10)
+                guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                return .success(())
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    private func startComputeHostConnection(host: ComputeHostRecord, authToken: String, sender: NSButton, refs: ComputeHostFormRefs?) {
+        sender.isEnabled = false
+        Task { @MainActor [weak self, weak sender] in
+            let result = await Self.startComputeHostConnection(host: host, authToken: authToken)
+            sender?.isEnabled = true
+            guard let self else { return }
+            switch result {
+            case .success(let result):
+                do {
+                    try orchestrator.upsertComputeHost(result.host)
+                    try ComputeHostCredentialStore.saveAuthToken(authToken, hostID: result.host.id)
+                    remoteHostStatusByID[result.host.id] = "Reachable"
+                    if let refs { clearComputeHostForm(refs) }
+                    refreshVisibleRemoteHostsPanel()
+                    let started = result.outcome.processID.map { " Started pid \($0)." } ?? ""
+                    showInfoMessage(
+                        title: "Remote host ready", message: "\(result.host.name) responded over pinned TLS.\(started) Log: \(result.outcome.logPath)"
+                    )
+                } catch { showError(error) }
+            case .failure(let error):
+                remoteHostStatusByID[host.id] = "Unreachable"
+                refreshVisibleRemoteHostsPanel()
+                showError(error)
+            }
+        }
+    }
+
+    private func connectRemoteHost(
+        draft: ComputeHostDraft, existingHost: ComputeHostRecord?, authToken: String, sender: NSButton, refs: ComputeHostFormRefs
+    ) {
+        sender.isEnabled = false
+        Task { @MainActor [weak self, weak sender] in
+            let result = await Self.connectRemoteHost(draft: draft, existingHost: existingHost, authToken: authToken)
+            sender?.isEnabled = true
+            guard let self else { return }
+            switch result {
+            case .success(let result):
+                do {
+                    try orchestrator.upsertComputeHost(result.host)
+                    try ComputeHostCredentialStore.saveAuthToken(authToken, hostID: result.host.id)
+                    remoteHostStatusByID[result.host.id] = "Reachable"
+                    clearComputeHostForm(refs)
+                    refreshVisibleRemoteHostsPanel()
+                    let started = result.outcome.processID.map { " Started pid \($0)." } ?? ""
+                    showInfoMessage(
+                        title: "Remote host ready", message: "\(result.host.name) responded over pinned TLS.\(started) Log: \(result.outcome.logPath)"
+                    )
+                } catch { showError(error) }
+            case .failure(let error): showError(error)
+            }
+        }
+    }
+
+    nonisolated private static func connectRemoteHost(draft: ComputeHostDraft, existingHost: ComputeHostRecord?, authToken: String) async -> Result<
+        ComputeHostBootstrapResult, Error
+    > {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let resolvedSSH = (try? SSHConfigurationResolver().resolve(host: draft.host)) ?? SSHResolvedConfiguration()
+                let prepared = try ComputeHostDraftBuilder.prepare(
+                    draft: draft, resolvedSSH: resolvedSSH, existing: existingHost, authToken: authToken)
+                return .success(try startAndValidateComputeHost(host: prepared.host, authToken: authToken))
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func startComputeHostConnection(host: ComputeHostRecord, authToken: String) async -> Result<
+        ComputeHostBootstrapResult, Error
+    > {
+        await Task.detached(priority: .userInitiated) {
+            do { return .success(try startAndValidateComputeHost(host: host, authToken: authToken)) } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func startAndValidateComputeHost(host: ComputeHostRecord, authToken: String) throws -> ComputeHostBootstrapResult {
+        let outcome = try ComputeHostBootstrapper().startSpacesDaemon(host: host, authToken: authToken)
+        var updatedHost = host
+        updatedHost.workspaceRoot = outcome.workspaceRoot
+        updatedHost.daemonEndpoint = SpacesDaemonEndpoint(
+            host: outcome.daemonHost, port: outcome.daemonPort, certificateFingerprint: outcome.certificateFingerprint)
+        do {
+            let response = try TerminalServiceClient.sendPinnedTLS(
+                request: TerminalServiceRequest(command: "ping"), host: updatedHost.daemonEndpoint.host, port: updatedHost.daemonEndpoint.port,
+                authToken: authToken, certificateFingerprint: updatedHost.daemonEndpoint.certificateFingerprint, timeout: 10)
+            guard response.ok else {
+                throw ComputeHostReachabilityError(
+                    host: updatedHost.daemonEndpoint.host, port: updatedHost.daemonEndpoint.port, underlyingDescription: response.message)
+            }
+        } catch let error as ComputeHostReachabilityError { throw error } catch {
+            throw ComputeHostReachabilityError(host: updatedHost.daemonEndpoint.host, port: updatedHost.daemonEndpoint.port, underlying: error)
+        }
+        return ComputeHostBootstrapResult(host: updatedHost, authToken: authToken, outcome: outcome)
     }
 
     private func buildShortcutRowsContainer() -> NSView {
@@ -4315,6 +4558,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             self?.presentProjectAgentLauncherRemoveConfirmation(launcher: launcher, confirm: confirm)
         }
 
+        if let fullProject {
+            let computeSection = projectComputeHostSection(project: fullProject)
+            stack.addArrangedSubview(computeSection)
+            constrainFormFieldToFillWidth(computeSection, in: stack)
+        }
+
         for section in [
             setupScriptSection.view, portsSection.view, processesSection.view, browserSessionsSection.view, agentLaunchersSection.view,
             stopScriptSection.view,
@@ -4378,6 +4627,44 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         registerDirtyTracking(
             setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
+    }
+
+    private func projectComputeHostSection(project: ProjectRecord) -> NSView {
+        let popup = computeHostPopup()
+        popup.identifier = NSUserInterfaceItemIdentifier(project.id)
+        popup.target = self
+        popup.action = #selector(projectDefaultComputeHostChanged(_:))
+        popup.setAccessibilityIdentifier("project-settings-compute-host")
+        selectComputeHostItem(in: popup, hostID: project.defaultComputeHostID, localTitle: "Local Mac")
+        return formSectionCard(
+            icon: "cpu", title: "Compute", subtitle: "Choose where this project's workspaces launch by default.",
+            contentViews: [settingsSettingRow(name: "Default host", hint: "Workspace overrides take precedence when set.", control: popup)])
+    }
+
+    private func workspaceComputeHostRow(projectID: String, workspaceID: String) -> NSView? {
+        guard let project = try? orchestrator.store.project(id: projectID), let workspace = try? orchestrator.store.workspace(id: workspaceID) else {
+            return nil
+        }
+        let projectDefaultName: String
+        if let defaultHostID = project.defaultComputeHostID, let host = try? orchestrator.store.computeHost(id: defaultHostID) {
+            projectDefaultName = host.name
+        } else {
+            projectDefaultName = "Local Mac"
+        }
+        let popup = computeHostPopup(includeInheritItemTitle: "Use project default (\(projectDefaultName))")
+        popup.identifier = NSUserInterfaceItemIdentifier(workspaceID)
+        popup.target = self
+        popup.action = #selector(workspaceComputeHostOverrideChanged(_:))
+        popup.setAccessibilityIdentifier("workspace-detail-compute-host")
+        if let overrideID = workspace.computeHostOverrideID,
+            let item = popup.itemArray.first(where: { ($0.representedObject as? String) == overrideID })
+        {
+            popup.select(item)
+        } else {
+            popup.selectItem(at: 0)
+        }
+        let effective = (try? orchestrator.effectiveComputeHost(workspaceID: workspaceID).displayName) ?? projectDefaultName
+        return settingsSettingRow(name: "Compute host", hint: "Effective host: \(effective)", control: popup)
     }
 
     private func formSectionCard(
@@ -5088,6 +5375,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let inlineNotesRow = makeInlineWorkspaceMetadataEditRow(
             workspaceID: workspace.id, field: .notes, icon: "info.circle", labelText: "Notes", value: workspace.notes ?? "",
             placeholder: "Optional workspace context", isEditable: true)
+        let computeHostRow = workspaceComputeHostRow(projectID: project.id, workspaceID: workspace.id)
 
         // --- Action buttons (icon-only) ---
         let iconSymbolConfig = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
@@ -5178,6 +5466,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         stack.addArrangedSubview(headerAndActionsRow)
         stack.addArrangedSubview(inlineNotesRow)
+        if let computeHostRow {
+            stack.addArrangedSubview(computeHostRow)
+            constrainFormFieldToFillWidth(computeHostRow, in: stack)
+            stack.setCustomSpacing(20, after: computeHostRow)
+        }
         for section in Self.orderedWorkspaceDetailSections(
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
             portsSection: portsSection, stopScriptSection: stopScriptSection)
@@ -6912,6 +7205,215 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func reloadTapped() { reloadData() }
 
+    @objc private func showRemoteHosts() { presentRemoteHostsPanel() }
+
+    private func presentRemoteHostsPanel() {
+        let panel: NSPanel
+        if let existing = remoteHostsPanel {
+            panel = existing
+        } else {
+            let created = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 620), styleMask: [.titled, .closable, .utilityWindow], backing: .buffered,
+                defer: false)
+            created.title = "Remote Hosts"
+            created.isReleasedWhenClosed = false
+            created.minSize = NSSize(width: 500, height: 480)
+            created.center()
+            remoteHostsPanel = created
+            panel = created
+        }
+        panel.contentView = buildRemoteHostsPanelContent()
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func refreshVisibleRemoteHostsPanel() {
+        guard let panel = remoteHostsPanel, panel.isVisible else { return }
+        panel.contentView = buildRemoteHostsPanelContent()
+    }
+
+    private func buildRemoteHostsPanelContent() -> NSView {
+        computeHostFormRefsByTag.removeAll()
+
+        let root = NSView()
+        root.translatesAutoresizingMaskIntoConstraints = false
+        root.wantsLayer = true
+        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = content
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(stack)
+
+        let title = NSTextField(labelWithString: "Remote Hosts")
+        title.font = .systemFont(ofSize: 17, weight: .semibold)
+        title.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        stack.addArrangedSubview(title)
+
+        let connectSection = remoteHostConnectSection()
+        stack.addArrangedSubview(connectSection)
+        constrainFormFieldToFillWidth(connectSection, in: stack)
+
+        let savedSection = remoteHostSavedHostsSection()
+        stack.addArrangedSubview(savedSection)
+        constrainFormFieldToFillWidth(savedSection, in: stack)
+
+        let bottomSpacer = NSView()
+        bottomSpacer.translatesAutoresizingMaskIntoConstraints = false
+        bottomSpacer.setContentHuggingPriority(.defaultLow, for: .vertical)
+        bottomSpacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        stack.addArrangedSubview(bottomSpacer)
+        constrainFormFieldToFillWidth(bottomSpacer, in: stack)
+
+        root.addSubview(scroll)
+        let contentBottomFollowsStack = content.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: 24)
+        contentBottomFollowsStack.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: root.topAnchor), scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            content.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            content.bottomAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.bottomAnchor),
+            content.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -24), contentBottomFollowsStack,
+        ])
+        return root
+    }
+
+    private func remoteHostConnectSection() -> NSView {
+        let hostField = computeHostTextField(placeholder: "lab-mac.local", value: "")
+        hostField.setAccessibilityIdentifier("remote-hosts-host")
+        let sshUserField = computeHostTextField(placeholder: NSUserName(), value: "")
+        sshUserField.setAccessibilityIdentifier("remote-hosts-ssh-user")
+        let displayNameField = computeHostTextField(placeholder: "Lab Mac", value: "")
+        displayNameField.setAccessibilityIdentifier("remote-hosts-display-name")
+        let sshPortField = computeHostTextField(placeholder: "22", value: "")
+        sshPortField.setAccessibilityIdentifier("remote-hosts-ssh-port")
+        let workspaceRootField = computeHostTextField(
+            placeholder: ComputeHostDraftBuilder.defaultWorkspaceRoot, value: ComputeHostDraftBuilder.defaultWorkspaceRoot)
+        workspaceRootField.setAccessibilityIdentifier("remote-hosts-workspace-folder")
+
+        let refs = ComputeHostFormRefs(
+            hostField: hostField, sshUserField: sshUserField, displayNameField: displayNameField, sshPortField: sshPortField,
+            workspaceRootField: workspaceRootField)
+        let tag = UUID().uuidString.hashValue
+        computeHostFormRefsByTag[tag] = refs
+
+        let connectButton = actionButton(
+            title: "Connect", symbol: "bolt.horizontal.circle", tooltip: "Connect over SSH and validate spacesd access",
+            action: #selector(connectRemoteHostForm(_:)), primary: true)
+        connectButton.tag = tag
+        connectButton.setAccessibilityIdentifier("remote-hosts-connect")
+
+        let disclosureSymbol = remoteHostAdvancedVisible ? "chevron.down" : "chevron.right"
+        let advancedButton = actionButton(
+            title: "Advanced", symbol: disclosureSymbol, tooltip: "Show SSH port and workspace folder options",
+            action: #selector(toggleRemoteHostAdvanced), primary: false)
+        advancedButton.setAccessibilityIdentifier("remote-hosts-advanced")
+
+        let fields: [NSView] = [
+            labeledInputRow(label: "Host", input: hostField, labelWidth: 112),
+            labeledInputRow(label: "SSH user", input: sshUserField, labelWidth: 112),
+            labeledInputRow(label: "Display name", input: displayNameField, labelWidth: 112),
+        ]
+        var rows = fields
+        rows.append(advancedButton)
+        if remoteHostAdvancedVisible {
+            rows.append(labeledInputRow(label: "SSH port", input: sshPortField, labelWidth: 112))
+            rows.append(labeledInputRow(label: "Workspace folder", input: workspaceRootField, labelWidth: 112))
+        }
+        rows.append(mobilePanelButtonRow([connectButton]))
+        return mobilePanelSection(icon: "externaldrive.connected.to.line.below", title: "Connect to a Mac or VM", rows: rows)
+    }
+
+    private func remoteHostSavedHostsSection() -> NSView {
+        let hosts = (try? orchestrator.listComputeHosts()) ?? []
+        let rows: [NSView]
+        if hosts.isEmpty { rows = [helpTextLabel("No remote hosts are configured.")] } else { rows = hosts.map { remoteHostRow($0) } }
+        return mobilePanelSection(icon: "externaldrive.badge.checkmark", title: "Saved Hosts", rows: rows)
+    }
+
+    private func remoteHostRow(_ host: ComputeHostRecord) -> NSView {
+        let titleLabel = NSTextField(labelWithString: host.name)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.maximumNumberOfLines = 1
+
+        let status = remoteHostStatusByID[host.id] ?? "Saved"
+        let detailLabel = NSTextField(labelWithString: "\(remoteHostSSHSummary(host)) · \(status)")
+        detailLabel.font = .systemFont(ofSize: 11)
+        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.lineBreakMode = .byTruncatingTail
+        detailLabel.maximumNumberOfLines = 1
+
+        let textStack = NSStackView()
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.addArrangedSubview(titleLabel)
+        textStack.addArrangedSubview(detailLabel)
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let checkButton = actionButton(
+            title: "Check", symbol: "checkmark.seal", tooltip: "Check direct spacesd reachability", action: #selector(testSavedComputeHost(_:)),
+            primary: false)
+        checkButton.identifier = NSUserInterfaceItemIdentifier(host.id)
+        checkButton.setAccessibilityIdentifier("remote-hosts-check-\(host.id)")
+
+        let reconnectButton = actionButton(
+            title: "Reconnect", symbol: "arrow.triangle.2.circlepath", tooltip: "Reconnect over SSH and validate spacesd access",
+            action: #selector(startSavedComputeHost(_:)), primary: false)
+        reconnectButton.identifier = NSUserInterfaceItemIdentifier(host.id)
+        reconnectButton.setAccessibilityIdentifier("remote-hosts-reconnect-\(host.id)")
+
+        let editButton = actionButton(
+            title: "Edit", symbol: "pencil", tooltip: "Edit this remote host", action: #selector(editComputeHost(_:)), primary: false)
+        editButton.identifier = NSUserInterfaceItemIdentifier(host.id)
+        editButton.setAccessibilityIdentifier("remote-hosts-edit-\(host.id)")
+
+        let removeButton = actionButton(
+            title: "Remove", symbol: "trash", tooltip: "Remove this remote host", action: #selector(removeSavedComputeHost(_:)), primary: false)
+        removeButton.identifier = NSUserInterfaceItemIdentifier(host.id)
+        removeButton.setAccessibilityIdentifier("remote-hosts-remove-\(host.id)")
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.addArrangedSubview(textStack)
+        row.addArrangedSubview(checkButton)
+        row.addArrangedSubview(reconnectButton)
+        row.addArrangedSubview(editButton)
+        row.addArrangedSubview(removeButton)
+        return row
+    }
+
+    private func remoteHostSSHSummary(_ host: ComputeHostRecord) -> String {
+        let authority = [host.sshUser, host.sshHost].compactMap { Self.trimmedNonEmpty($0) }.joined(separator: "@")
+        guard let sshPort = host.sshPort else { return authority.isEmpty ? host.sshHost : authority }
+        return "\(authority.isEmpty ? host.sshHost : authority):\(sshPort)"
+    }
+
+    @objc private func toggleRemoteHostAdvanced() {
+        remoteHostAdvancedVisible.toggle()
+        refreshVisibleRemoteHostsPanel()
+    }
+
     @objc private func showMobileConnection() {
         presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService() }
     }
@@ -7410,6 +7912,77 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let g = Int((rgb.greenComponent * 255).rounded())
         let b = Int((rgb.blueComponent * 255).rounded())
         do { try orchestrator.setWindowFocusPulseColor(r: r, g: g, b: b) } catch { showError(error) }
+    }
+
+    @objc private func editComputeHost(_ sender: NSButton) {
+        guard let hostID = sender.identifier?.rawValue, let host = try? orchestrator.store.computeHost(id: hostID),
+            let refs = computeHostFormRefsByTag.values.first
+        else { return }
+        if !remoteHostAdvancedVisible {
+            remoteHostAdvancedVisible = true
+            refreshVisibleRemoteHostsPanel()
+            guard let refreshedRefs = computeHostFormRefsByTag.values.first else { return }
+            populateComputeHostForm(refreshedRefs, host: host)
+            return
+        }
+        populateComputeHostForm(refs, host: host)
+    }
+
+    @objc private func connectRemoteHostForm(_ sender: NSButton) {
+        commitEditing()
+        guard let refs = computeHostFormRefsByTag[sender.tag] else { return }
+        do {
+            let draft = try computeHostDraft(from: refs)
+            let existingHost = try refs.editingHostID.flatMap { try orchestrator.store.computeHost(id: $0) }
+            let token =
+                try existingHost.flatMap { try ComputeHostCredentialStore.authToken(hostID: $0.id) } ?? ComputeHostCredentialStore.generateAuthToken()
+            connectRemoteHost(draft: draft, existingHost: existingHost, authToken: token, sender: sender, refs: refs)
+        } catch { showError(error) }
+    }
+
+    @objc private func testSavedComputeHost(_ sender: NSButton) {
+        guard let hostID = sender.identifier?.rawValue else { return }
+        do {
+            guard let host = try orchestrator.store.computeHost(id: hostID) else {
+                throw WorkspaceError.invalidArgument(message: "Compute host not found.")
+            }
+            testComputeHostConnection(host: host, authToken: try ComputeHostCredentialStore.authToken(hostID: host.id), sender: sender)
+        } catch { showError(error) }
+    }
+
+    @objc private func startSavedComputeHost(_ sender: NSButton) {
+        guard let hostID = sender.identifier?.rawValue else { return }
+        do {
+            guard let host = try orchestrator.store.computeHost(id: hostID) else {
+                throw WorkspaceError.invalidArgument(message: "Compute host not found.")
+            }
+            let token = try ComputeHostCredentialStore.authToken(hostID: host.id) ?? ComputeHostCredentialStore.generateAuthToken()
+            startComputeHostConnection(host: host, authToken: token, sender: sender, refs: nil)
+        } catch { showError(error) }
+    }
+
+    @objc private func removeSavedComputeHost(_ sender: NSButton) {
+        guard let hostID = sender.identifier?.rawValue else { return }
+        do {
+            try orchestrator.deleteComputeHost(id: hostID)
+            remoteHostStatusByID.removeValue(forKey: hostID)
+            refreshVisibleRemoteHostsPanel()
+        } catch { showError(error) }
+    }
+
+    @objc private func projectDefaultComputeHostChanged(_ sender: NSPopUpButton) {
+        guard let projectID = sender.identifier?.rawValue else { return }
+        do { try orchestrator.setProjectDefaultComputeHost(projectID: projectID, hostID: selectedComputeHostID(from: sender)) } catch {
+            showError(error)
+        }
+    }
+
+    @objc private func workspaceComputeHostOverrideChanged(_ sender: NSPopUpButton) {
+        guard let workspaceID = sender.identifier?.rawValue else { return }
+        do {
+            try orchestrator.setWorkspaceComputeHostOverride(workspaceID: workspaceID, hostID: selectedComputeHostID(from: sender))
+            if let (project, workspace) = findWorkspace(id: workspaceID) { showWorkspaceDetail(project: project, workspace: workspace) }
+        } catch { showError(error) }
     }
 
     @objc private func addProject() { showAddProjectForm() }

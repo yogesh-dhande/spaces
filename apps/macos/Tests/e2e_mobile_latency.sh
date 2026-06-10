@@ -7,7 +7,7 @@ REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 source "$SCRIPT_DIR/terminal_harness_lock.sh"
 
 SPACES_CLI="${SPACES_CLI:-$APP_ROOT/.build/debug/spaces}"
-TERMINAL_SERVICE="${SPACES_TERMINAL_SERVICE_EXECUTABLE:-$APP_ROOT/.build/debug/SpacesTerminalService}"
+TERMINAL_SERVICE="${SPACESD_EXECUTABLE:-$APP_ROOT/.build/debug/spacesd}"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-latency.XXXXXX")}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
 RUNTIME_DIR="${SPACES_RUNTIME_DIR:-$WORK_ROOT/runtime}"
@@ -51,7 +51,7 @@ fail() {
   printf 'FAIL: %s\n' "$*" >&2
   KEEP_ROOT=1
   if [[ -f "$SERVICE_LOG" ]]; then
-    printf '\nTerminal service log tail:\n' >&2
+    printf '\nspacesd log tail:\n' >&2
     tail -n 160 "$SERVICE_LOG" >&2 || true
   fi
   if [[ -f "$BRIDGE_LOG" ]]; then
@@ -135,13 +135,13 @@ parse_args "$@"
 [[ "$NETWORK_PROFILE" == "local" || "$NETWORK_PROFILE" == "ios-constrained" ]] || fail "--network-profile must be local or ios-constrained"
 [[ "$SAMPLES" =~ ^[0-9]+$ && "$SAMPLES" -gt 0 ]] || fail "--samples must be a positive integer"
 [[ -x "$SPACES_CLI" ]] || fail "spaces CLI not found at $SPACES_CLI"
-[[ -x "$TERMINAL_SERVICE" ]] || fail "SpacesTerminalService not found at $TERMINAL_SERVICE"
+[[ -x "$TERMINAL_SERVICE" ]] || fail "spacesd not found at $TERMINAL_SERVICE"
 
 mkdir -p "$(dirname "$DB_PATH")" "$RUNTIME_DIR"
 touch "$PERF_JSONL"
 export SPACES_DB_PATH="$DB_PATH"
 export SPACES_RUNTIME_DIR="$RUNTIME_DIR"
-export SPACES_TERMINAL_SERVICE_EXECUTABLE="$TERMINAL_SERVICE"
+export SPACESD_EXECUTABLE="$TERMINAL_SERVICE"
 export SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERF_JSONL"
 
 "$TERMINAL_SERVICE" >"$SERVICE_LOG" 2>&1 &
@@ -153,7 +153,7 @@ while [[ $SECONDS -lt $service_deadline ]]; do
   [[ -S "$service_socket" ]] && break
   sleep 0.1
 done
-[[ -S "$service_socket" ]] || fail "timed out waiting for terminal service socket"
+[[ -S "$service_socket" ]] || fail "timed out waiting for spacesd socket"
 
 bridge_env=(SPACES_MOBILE_BRIDGE_NETWORK_PROFILE="$NETWORK_PROFILE")
 if [[ "$NETWORK_PROFILE" == "ios-constrained" ]]; then
