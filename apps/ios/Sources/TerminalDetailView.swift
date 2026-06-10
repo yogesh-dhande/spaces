@@ -1,3 +1,4 @@
+import QuickLook
 import SwiftUI
 import spacesterminalmobileghostty
 import spacesmobilecore
@@ -90,6 +91,9 @@ struct TerminalDetailView: View {
                             },
                             onSendScroll: { horizontal, vertical, scrollMods in
                                 sendTerminalScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+                            },
+                            onOpenLink: { link in
+                                openTerminalLink(link)
                             }
                         )
                         .accessibilityIdentifier("terminal.surface")
@@ -106,6 +110,9 @@ struct TerminalDetailView: View {
                     statusShell
                         .onAppear { renderedText = "" }
                 }
+            }
+            .overlay(alignment: .bottom) {
+                linkPreviewBannerOverlay
             }
 
             if let errorMessage = model.errorMessage {
@@ -125,8 +132,29 @@ struct TerminalDetailView: View {
         .onChange(of: model.shouldPresentLiveSurface) { shouldPresentLiveSurface in
             writeE2EEventIfNeeded(kind: "surface_visibility", detail: shouldPresentLiveSurface ? "visible" : "hidden")
         }
+        .sheet(
+            item: Binding(
+                get: { model.linkPreview },
+                set: { preview in
+                    if preview == nil { model.dismissLinkPreview() }
+                })
+        ) { preview in
+            TerminalLinkPreviewSheet(preview: preview)
+        }
         .onDisappear { model.stop() }
         .accessibilityIdentifier("terminal.detail.\(session.id)")
+    }
+
+    private var linkPreviewBannerOverlay: some View {
+        VStack(spacing: 0) {
+            if model.isPreparingLinkPreview {
+                previewStatusBanner("Preparing preview…")
+            }
+            if let previewErrorMessage = model.linkPreviewErrorMessage {
+                errorBanner(previewErrorMessage)
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     private func sendTerminalText(_ text: String) {
@@ -143,6 +171,11 @@ struct TerminalDetailView: View {
     private func sendTerminalScroll(horizontal: Double, vertical: Double, scrollMods: Int32) {
         writeE2EEventIfNeeded(kind: "send_scroll", detail: "\(horizontal),\(vertical)")
         Task { await model.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods) }
+    }
+
+    private func openTerminalLink(_ link: String) {
+        writeE2EEventIfNeeded(kind: "open_link", detail: link)
+        Task { await model.openTerminalLink(link) }
     }
 
     private var topOverlay: some View {
@@ -371,6 +404,23 @@ struct TerminalDetailView: View {
             .accessibilityIdentifier("terminal.errorBanner")
     }
 
+    private func previewStatusBanner(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(.white.opacity(0.9))
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.86))
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.32))
+        .accessibilityIdentifier("terminal.previewStatus")
+    }
+
     private var e2eDumpStateKey: String {
         [
             model.title,
@@ -384,6 +434,10 @@ struct TerminalDetailView: View {
             model.isPreparingInput ? "preparing" : "prepared",
             model.isInputSurfaceReady ? "inputReady" : "inputPending",
             model.errorMessage ?? "",
+            model.isPreparingLinkPreview ? "previewPreparing" : "previewIdle",
+            model.linkPreview?.title ?? "",
+            model.linkPreview?.mediaKind.rawValue ?? "",
+            model.linkPreviewErrorMessage ?? "",
             shouldCaptureRenderedText ? renderedText : "",
         ].joined(separator: "|")
     }
@@ -413,6 +467,10 @@ struct TerminalDetailView: View {
                 snapshotRows: model.snapshotRows,
                 snapshotText: model.snapshotText,
                 errorMessage: model.errorMessage,
+                isPreparingLinkPreview: model.isPreparingLinkPreview,
+                linkPreviewTitle: model.linkPreview?.title,
+                linkPreviewMediaKind: model.linkPreview?.mediaKind,
+                linkPreviewErrorMessage: model.linkPreviewErrorMessage,
                 visibleText: model.visibleText,
                 renderedText: renderedText,
                 renderStateKey: model.renderStateKey,
@@ -476,5 +534,59 @@ private struct E2ECommandRequest: Decodable {
             "text=\(text ?? "")",
             "key=\(key ?? "")",
         ].joined(separator: " ")
+    }
+}
+
+private struct TerminalLinkPreviewSheet: View {
+    let preview: TerminalLinkPreview
+
+    var body: some View {
+        NavigationStack {
+            TerminalQuickLookPreview(url: preview.url)
+                .ignoresSafeArea(edges: .bottom)
+                .accessibilityIdentifier("terminal.linkPreview")
+                .navigationTitle(preview.title)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        ShareLink(item: preview.url) {
+                            Label("Open In", systemImage: "square.and.arrow.up")
+                        }
+                    }
+                }
+        }
+    }
+}
+
+private struct TerminalQuickLookPreview: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(url: url)
+    }
+
+    func makeUIViewController(context: Context) -> QLPreviewController {
+        let controller = QLPreviewController()
+        controller.dataSource = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ controller: QLPreviewController, context: Context) {
+        context.coordinator.url = url
+        controller.reloadData()
+    }
+
+    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        var url: URL
+
+        init(url: URL) {
+            self.url = url
+        }
+
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
+
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> any QLPreviewItem {
+            url as NSURL
+        }
     }
 }

@@ -129,6 +129,10 @@ struct SpacesMobileE2ERenderDump: Codable, Equatable {
     let snapshotRows: Int?
     let snapshotText: String?
     let errorMessage: String?
+    let isPreparingLinkPreview: Bool
+    let linkPreviewTitle: String?
+    let linkPreviewMediaKind: SpacesMobileTerminalLinkMediaKind?
+    let linkPreviewErrorMessage: String?
     let visibleText: String
     let renderedText: String
     let renderStateKey: String

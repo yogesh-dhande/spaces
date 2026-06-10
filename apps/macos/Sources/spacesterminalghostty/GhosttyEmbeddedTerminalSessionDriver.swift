@@ -112,7 +112,10 @@ private final class GhosttyHostManagedOutputPipe: @unchecked Sendable {
         }
         hostPTY.setOutputHandler { [weak self, outputPipe] data in
             outputPipe.process(data)
-            Task { @MainActor [weak self] in self?.deliverSessionStateChange() }
+            Task { @MainActor [weak self] in
+                GhosttyEmbeddedAppService.shared.tick()
+                self?.deliverSessionStateChange()
+            }
         }
         hostPTY.setSessionClosedHandler { [weak self] in self?.handleHostPTYClosed() }
 
@@ -174,7 +177,9 @@ private final class GhosttyHostManagedOutputPipe: @unchecked Sendable {
             guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
             ghostty_session_send_input_raw(session, baseAddress, UInt(data.count))
         }
+        GhosttyEmbeddedAppService.shared.tick()
         requestSurfaceRefresh()
+        GhosttyEmbeddedAppService.shared.tick()
     }
 
     func processOutput(_ data: Data) {

@@ -53,6 +53,7 @@ import spacesterminalghostty
 
 public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public let renderedOutput: String
+    public let visibleSurfaceOutput: String?
     public let showsTerminalSurface: Bool
     public let showsTextRenderer: Bool
     public let rendererSummary: String
@@ -2040,13 +2041,14 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     public func debugStateDump() -> TerminalSessionWindowDebugState {
         let renderedOutput: String
+        let visibleSurfaceOutput = !terminalContainer.isHidden ? ghosttyRendererHost?.debugVisibleSurfaceText() : nil
         if !terminalContainer.isHidden { ghosttyRendererHost?.prepareRenderStateExport() }
         let surfaceSnapshot = ghosttyRendererHost?.snapshot() ?? ghosttyRendererHost?.sessionSnapshot()
         if !terminalContainer.isHidden, let surfaceSnapshot,
             TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: surfaceSnapshot, snapshotText: nil)
         {
             renderedOutput = GhosttyTerminalSnapshotGrid.fullPlainText(for: surfaceSnapshot)
-        } else if !terminalContainer.isHidden, let visibleText = ghosttyRendererHost?.debugVisibleSurfaceText(), !visibleText.isEmpty {
+        } else if !terminalContainer.isHidden, let visibleText = visibleSurfaceOutput, !visibleText.isEmpty {
             renderedOutput = visibleText
         } else if !terminalContainer.isHidden, let sessionSnapshotText = ghosttyRendererHost?.sessionSnapshotText(), !sessionSnapshotText.isEmpty {
             renderedOutput = sessionSnapshotText
@@ -2055,9 +2057,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         }
         let searchState = debugTerminalSearchState
         return .init(
-            renderedOutput: renderedOutput, showsTerminalSurface: !terminalContainer.isHidden, showsTextRenderer: !outputScrollView.isHidden,
-            rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue, state: stateLabel.stringValue,
-            windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
+            renderedOutput: renderedOutput, visibleSurfaceOutput: visibleSurfaceOutput, showsTerminalSurface: !terminalContainer.isHidden,
+            showsTextRenderer: !outputScrollView.isHidden, rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue,
+            state: stateLabel.stringValue, windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
             surfaceRows: surfaceSnapshot?.rows, windowIsKey: window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName,
             searchVisible: searchState.isVisible, searchQuery: searchState.query, searchTotal: searchState.total, searchSelected: searchState.selected
         )

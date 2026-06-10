@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 import spacesterminalcore
 
 public enum SpacesMobileFirstPartyPolicy { public static let allowedBundleID = "dev.usespaces.spacesmobile" }
@@ -387,6 +388,91 @@ public struct SpacesMobileWorkspaceCreateOptions: Codable, Sendable, Equatable {
     }
 }
 
+public enum SpacesMobileTerminalLinkMediaKind: String, Codable, Sendable, Equatable {
+    case image
+    case video
+}
+
+public enum SpacesMobileTerminalLinkSource: String, Codable, Sendable, Equatable {
+    case localFile
+    case externalURL
+}
+
+public struct SpacesMobileTerminalLinkMetadata: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let source: SpacesMobileTerminalLinkSource
+    public let originalLink: String
+    public let displayName: String
+    public let contentType: String?
+    public let mediaKind: SpacesMobileTerminalLinkMediaKind?
+    public let byteCount: Int64?
+    public let externalURL: String?
+
+    public init(
+        id: String, source: SpacesMobileTerminalLinkSource, originalLink: String, displayName: String, contentType: String?,
+        mediaKind: SpacesMobileTerminalLinkMediaKind?, byteCount: Int64?, externalURL: String?
+    ) {
+        self.id = id
+        self.source = source
+        self.originalLink = originalLink
+        self.displayName = displayName
+        self.contentType = contentType
+        self.mediaKind = mediaKind
+        self.byteCount = byteCount
+        self.externalURL = externalURL
+    }
+}
+
+public struct SpacesMobileTerminalLinkChunk: Codable, Sendable, Equatable {
+    public let linkID: String
+    public let offset: Int64
+    public let byteCount: Int
+    public let isFinal: Bool
+    public let base64Data: String
+
+    public init(linkID: String, offset: Int64, byteCount: Int, isFinal: Bool, base64Data: String) {
+        self.linkID = linkID
+        self.offset = offset
+        self.byteCount = byteCount
+        self.isFinal = isFinal
+        self.base64Data = base64Data
+    }
+}
+
+public enum SpacesMobileTerminalLinkClassifier {
+    public static func mediaKind(contentType: String?, pathExtension: String?) -> SpacesMobileTerminalLinkMediaKind? {
+        let trimmedContentType = contentType?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedContentType, !trimmedContentType.isEmpty, let type = UTType(mimeType: trimmedContentType) { return mediaKind(for: type) }
+
+        let trimmedExtension = pathExtension?.trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines))
+        if let trimmedExtension, !trimmedExtension.isEmpty, let type = UTType(filenameExtension: trimmedExtension) { return mediaKind(for: type) }
+
+        return nil
+    }
+
+    public static func preferredContentType(pathExtension: String?) -> String? {
+        let trimmedExtension = pathExtension?.trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines))
+        guard let trimmedExtension, !trimmedExtension.isEmpty else { return nil }
+        return UTType(filenameExtension: trimmedExtension)?.preferredMIMEType
+    }
+
+    public static func preferredFilenameExtension(contentType: String?, fallback: String?) -> String {
+        if let contentType = contentType?.trimmingCharacters(in: .whitespacesAndNewlines), !contentType.isEmpty,
+            let preferred = UTType(mimeType: contentType)?.preferredFilenameExtension
+        {
+            return preferred
+        }
+        let fallback = fallback?.trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines)) ?? ""
+        return fallback.isEmpty ? "dat" : fallback
+    }
+
+    private static func mediaKind(for type: UTType) -> SpacesMobileTerminalLinkMediaKind? {
+        if type.conforms(to: .image) { return .image }
+        if type.conforms(to: .movie) || type.conforms(to: .video) { return .video }
+        return nil
+    }
+}
+
 public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
     public let command: String
     public let authToken: String?
@@ -420,6 +506,10 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
     public let agentName: String?
     public let agentID: String?
     public let agentLauncherID: String?
+    public let terminalLink: String?
+    public let terminalLinkID: String?
+    public let chunkOffset: Int64?
+    public let chunkLimit: Int?
 
     public init(
         command: String, authToken: String? = nil, pairingCode: String? = nil, pairingNonce: String? = nil, clientApp: SpacesMobileClientApp? = nil,
@@ -428,7 +518,8 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         scrollHorizontal: Double? = nil, scrollVertical: Double? = nil, scrollMods: Int32? = nil, appendNewline: Bool = false,
         projectID: String? = nil, workspaceID: String? = nil, workspaceTitle: String? = nil, branch: String? = nil, targetBranch: String? = nil,
         directoryName: String? = nil, allowExistingBranchReuse: Bool = false, processKey: String? = nil, processID: String? = nil,
-        processTemplateID: String? = nil, agentName: String? = nil, agentID: String? = nil, agentLauncherID: String? = nil
+        processTemplateID: String? = nil, agentName: String? = nil, agentID: String? = nil, agentLauncherID: String? = nil,
+        terminalLink: String? = nil, terminalLinkID: String? = nil, chunkOffset: Int64? = nil, chunkLimit: Int? = nil
     ) {
         self.command = command
         self.authToken = authToken
@@ -462,6 +553,10 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         self.agentName = agentName
         self.agentID = agentID
         self.agentLauncherID = agentLauncherID
+        self.terminalLink = terminalLink
+        self.terminalLinkID = terminalLinkID
+        self.chunkOffset = chunkOffset
+        self.chunkLimit = chunkLimit
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -497,6 +592,10 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         case agentName
         case agentID
         case agentLauncherID
+        case terminalLink
+        case terminalLinkID
+        case chunkOffset
+        case chunkLimit
     }
 
     public init(from decoder: any Decoder) throws {
@@ -533,6 +632,10 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         agentName = try container.decodeIfPresent(String.self, forKey: .agentName)
         agentID = try container.decodeIfPresent(String.self, forKey: .agentID)
         agentLauncherID = try container.decodeIfPresent(String.self, forKey: .agentLauncherID)
+        terminalLink = try container.decodeIfPresent(String.self, forKey: .terminalLink)
+        terminalLinkID = try container.decodeIfPresent(String.self, forKey: .terminalLinkID)
+        chunkOffset = try container.decodeIfPresent(Int64.self, forKey: .chunkOffset)
+        chunkLimit = try container.decodeIfPresent(Int.self, forKey: .chunkLimit)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -569,6 +672,10 @@ public struct SpacesMobileBridgeRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(agentName, forKey: .agentName)
         try container.encodeIfPresent(agentID, forKey: .agentID)
         try container.encodeIfPresent(agentLauncherID, forKey: .agentLauncherID)
+        try container.encodeIfPresent(terminalLink, forKey: .terminalLink)
+        try container.encodeIfPresent(terminalLinkID, forKey: .terminalLinkID)
+        try container.encodeIfPresent(chunkOffset, forKey: .chunkOffset)
+        try container.encodeIfPresent(chunkLimit, forKey: .chunkLimit)
     }
 }
 
@@ -581,11 +688,14 @@ public struct SpacesMobileBridgeResponse: Codable, Sendable, Equatable {
     public let workspaceCreateOptions: SpacesMobileWorkspaceCreateOptions?
     public let workspaceID: String?
     public let sessionID: String?
+    public let terminalLinkMetadata: SpacesMobileTerminalLinkMetadata?
+    public let terminalLinkChunk: SpacesMobileTerminalLinkChunk?
 
     public init(
         ok: Bool, message: String, overview: SpacesMobileOverviewPayload? = nil, issuedAuthToken: String? = nil,
         sessionState: GhosttyRemoteSessionStatePayload? = nil, workspaceCreateOptions: SpacesMobileWorkspaceCreateOptions? = nil,
-        workspaceID: String? = nil, sessionID: String? = nil
+        workspaceID: String? = nil, sessionID: String? = nil, terminalLinkMetadata: SpacesMobileTerminalLinkMetadata? = nil,
+        terminalLinkChunk: SpacesMobileTerminalLinkChunk? = nil
     ) {
         self.ok = ok
         self.message = message
@@ -595,6 +705,8 @@ public struct SpacesMobileBridgeResponse: Codable, Sendable, Equatable {
         self.workspaceCreateOptions = workspaceCreateOptions
         self.workspaceID = workspaceID
         self.sessionID = sessionID
+        self.terminalLinkMetadata = terminalLinkMetadata
+        self.terminalLinkChunk = terminalLinkChunk
     }
 }
 
