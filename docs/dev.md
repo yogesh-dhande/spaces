@@ -153,7 +153,22 @@ The mobile suite builds the macOS debug products once, builds the iOS app and UI
 
 The daemon-hosted mobile bridge is the first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spaces mobile serve` remains available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spaces mobile request` so local scripts use the same TLS-PSK transport as the iOS app. Standalone bridge processes reject daemon-only recovery commands such as `launchSpacesApp`.
 
-Remote compute-host E2E coverage uses a reachable host running a matching `spacesd`. The SwiftPM `spacesd` target is macOS-scoped, so app-level remote E2E uses another Mac or a loopback remote profile that binds the remote listener on a separate profile root. Compute-host bootstrap, status, and test automation belongs in `spacese2e` so the product `spaces` CLI remains workspace-oriented. Use `upsert-compute-host` and `list-compute-hosts` to seed and inspect host records, `set-project-default-compute-host` and `set-workspace-compute-host-override` to exercise selection precedence, and `plan-workspace-runtime` to inspect the stable binding, daemon target, Remote SSH URI, and runtime manifest for a workspace.
+Remote compute-host E2E coverage uses a reachable host running a matching `spacesd`. The SwiftPM `spacesd` target carries Apple terminal/TLS dependencies, so app-level remote E2E uses another Mac, a loopback remote profile that binds the remote listener on a separate profile root, or a matching Linux daemon artifact produced outside the macOS package. Compute-host bootstrap, status, and test automation belongs in `spacese2e` so the product `spaces` CLI remains workspace-oriented. Use `upsert-compute-host` and `list-compute-hosts` to seed and inspect host records, `set-project-default-compute-host` and `set-workspace-compute-host-override` to exercise selection precedence, and `plan-workspace-runtime` to inspect the stable binding, daemon target, Remote SSH URI, and runtime manifest for a workspace.
+
+For a real SSH smoke that exercises bootstrap, pinned-TLS status, runtime planning, remote terminal launch, and workspace stop through production orchestration:
+
+```bash
+eval "$(apps/macos/.build/debug/spaces profile show --shell)"
+apps/macos/.build/debug/spacese2e remote-compute-host-smoke \
+  --project-dir <local-git-project-dir> \
+  --host-id lab-host \
+  --ssh-host <ssh-host-or-alias> \
+  --ssh-user <ssh-user> \
+  --workspace-root '$HOME/.spaces/workspaces' \
+  --daemon-host <direct-daemon-ip-or-dns-name>
+```
+
+The command starts or reuses the remote daemon through `ComputeHostBootstrapper`, saves the host token for the current profile, sets the project default compute host, asserts the workspace resolves to the host, opens one remote ad hoc Spaces terminal, stops the workspace, and prints JSON with the host, bootstrap metadata, daemon status, runtime plan, terminal session ID, and stop outcome.
 
 A remote daemon listener uses pinned TLS. Print the daemon certificate fingerprint with the same profile environment used to run the listener:
 

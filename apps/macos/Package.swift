@@ -20,6 +20,7 @@ let package = Package(
         .library(name: "spacesterminalui", targets: ["spacesterminalui"]),
         .library(name: "spacesmobilecore", targets: ["spacesmobilecore"]),
         .library(name: "spacesmobilebridge", targets: ["spacesmobilebridge"]),
+        .library(name: "spacesruntimecore", targets: ["spacesruntimecore"]),
         .library(name: "workspacecore", targets: ["workspacecore"]),
         .library(name: "spacesui", targets: ["spacesui"]),
         .library(name: "spacescli", targets: ["spacescli"]),
@@ -55,10 +56,11 @@ let package = Package(
             name: "spacesmobilebridge",
             dependencies: ["spacesmobilecore", "workspacecore", "spacesterminalcore"]
         ),
+        .target(name: "spacesruntimecore"),
         .target(
             name: "spacesterminalghostty",
             dependencies: ["spacesterminalcore", "ghosttyvtshim", "GhosttyKit"],
-            linkerSettings: [.linkedLibrary("c++")]
+            linkerSettings: [.linkedLibrary("c++"), .linkedLibrary("util", .when(platforms: [.linux]))]
         ),
         .target(
             name: "spacesterminalmobileghostty",
@@ -109,7 +111,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "spacesd",
-            dependencies: ["spacesterminalcore", "spacesterminalghostty", "spacesmobilebridge", "workspacecore"],
+            dependencies: [
+                "spacesterminalcore",
+                "spacesterminalghostty",
+                "spacesmobilecore",
+                "spacesruntimecore",
+                .target(name: "spacesmobilebridge", condition: .when(platforms: [.macOS])),
+            ],
             path: "Sources/spacesd"
         ),
         .executableTarget(name: "spaces", dependencies: ["spacescli"], path: "Sources/spaces"),
@@ -132,6 +140,7 @@ let package = Package(
         ),
         .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore"]),
         .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
+        .testTarget(name: "spacesruntimecoreTests", dependencies: ["spacesruntimecore"]),
         .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
         .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore"]),
         .testTarget(name: "spacesuiTests", dependencies: ["spacesui"]),

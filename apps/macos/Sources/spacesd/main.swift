@@ -1,12 +1,23 @@
-import AppKit
-import Darwin
 import Dispatch
 import Foundation
-import spacesmobilebridge
 import spacesmobilecore
+import spacesruntimecore
 import spacesterminalcore
 import spacesterminalghostty
-import workspacecore
+
+#if canImport(AppKit)
+    import AppKit
+#endif
+
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
+
+#if canImport(spacesmobilebridge)
+    import spacesmobilebridge
+#endif
 
 @MainActor private final class SpacesDaemonController {
     private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll"]
@@ -53,8 +64,8 @@ import workspacecore
     private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
-    private let mobileBridgeSupervisor = SpacesMobileBridgeSupervisor()
-    private let git = GitClient()
+    private let mobileBridgeSupervisor = SpacesDaemonMobileBridgeSupervisor()
+    private let git = RemoteWorkspaceGitClient()
 
     init() throws { socketPath = try TerminalServicePaths.socketPath() }
 
@@ -83,7 +94,7 @@ import workspacecore
         case "shutdown":
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(100))
-                NSApp.terminate(nil)
+                Self.terminateProcess()
             }
             return TerminalServiceResponse(ok: true, message: "spacesd is shutting down.", servicePID: getpid())
         case "create":
@@ -153,7 +164,7 @@ import workspacecore
         throws
     {
         guard let remotePath = manifest.remotePath?.trimmingCharacters(in: .whitespacesAndNewlines), !remotePath.isEmpty else {
-            throw WorkspaceError.invalidArgument(message: "Remote workspace path is missing.")
+            throw SpacesRuntimeError.invalidArgument(message: "Remote workspace path is missing.")
         }
         try validateWorkspacePath(remotePath, manifest: manifest)
         guard let branch = (refreshRequest?.branch ?? manifest.branch)?.trimmingCharacters(in: .whitespacesAndNewlines), !branch.isEmpty else {
@@ -168,7 +179,7 @@ import workspacecore
             return
         }
         if exists {
-            throw RemoteWorktreeRefreshBlock(
+            throw RemoteWorkspaceRefreshBlock(
                 hostName: refreshRequest?.hostName ?? "remote host", path: remotePath, branch: branch, reason: .checkoutFailed,
                 detail: "Remote workspace path exists but is not an empty Git worktree.")
         }
@@ -178,7 +189,7 @@ import workspacecore
 
     private func cloneRemoteWorktree(manifest: TerminalServiceWorkspaceRuntimeManifest, branch: String, remotePath: String) throws {
         guard let remoteURL = manifest.gitRemoteURL?.trimmingCharacters(in: .whitespacesAndNewlines), !remoteURL.isEmpty else {
-            throw RemoteWorktreeRefreshBlock(
+            throw RemoteWorkspaceRefreshBlock(
                 hostName: manifest.computeHostID ?? "remote host", path: remotePath, branch: branch, reason: .fetchFailed,
                 detail: "Remote workspace path is missing and no Git remote URL was provided.")
         }
@@ -189,7 +200,7 @@ import workspacecore
         let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
         let allowedRoots = manifest.allowedFileRoots.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
         guard allowedRoots.contains(where: { normalizedPath == $0 || normalizedPath.hasPrefix($0 + "/") }) else {
-            throw WorkspaceError.invalidArgument(message: "Path is outside the workspace runtime roots: \(path)")
+            throw SpacesRuntimeError.invalidArgument(message: "Path is outside the workspace runtime roots: \(path)")
         }
     }
 
@@ -413,7 +424,7 @@ import workspacecore
 
         let socketFD = try connectUnixSocket(path: paths.subscriptionSocketPath)
         defer {
-            Darwin.shutdown(socketFD, SHUT_RDWR)
+            Self.shutdownSocket(socketFD)
             close(socketFD)
         }
 
@@ -485,10 +496,14 @@ import workspacecore
     }
 
     private func setNoSIGPIPE(_ fileDescriptor: Int32) throws {
-        var yes: Int32 = 1
-        guard setsockopt(fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
+        #if canImport(Darwin)
+            var yes: Int32 = 1
+            guard setsockopt(fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        #else
+            _ = fileDescriptor
+        #endif
     }
 
     private func authorizeTerminalLinkTransfer(linkID: String, sessionID: String, resolvedPath: String, now: Date) {
@@ -590,6 +605,22 @@ import workspacecore
         return String(describing: error)
     }
 
+    private static func shutdownSocket(_ fileDescriptor: Int32) {
+        #if canImport(Darwin)
+            Darwin.shutdown(fileDescriptor, SHUT_RDWR)
+        #elseif canImport(Glibc)
+            Glibc.shutdown(fileDescriptor, Int32(SHUT_RDWR))
+        #endif
+    }
+
+    private static func terminateProcess() {
+        #if canImport(AppKit)
+            NSApp.terminate(nil)
+        #else
+            exit(0)
+        #endif
+    }
+
     private nonisolated static func runOnMainActorSynchronously<T: Sendable>(_ work: @escaping @MainActor () -> T) -> T {
         if Thread.isMainThread { return MainActor.assumeIsolated { work() } }
         let box = MainActorSyncBox<T>()
@@ -601,13 +632,33 @@ import workspacecore
 
 private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
 
-@MainActor private final class SpacesDaemonAppDelegate: NSObject, NSApplicationDelegate {
-    private let controller: SpacesDaemonController
+@MainActor private final class SpacesDaemonMobileBridgeSupervisor {
+    #if canImport(spacesmobilebridge)
+        private let supervisor = SpacesMobileBridgeSupervisor()
+    #endif
 
-    init(controller: SpacesDaemonController) { self.controller = controller }
+    func start() {
+        #if canImport(spacesmobilebridge)
+            supervisor.start()
+        #endif
+    }
 
-    func applicationWillTerminate(_ notification: Notification) { controller.shutdown() }
+    func stop() {
+        #if canImport(spacesmobilebridge)
+            supervisor.stop()
+        #endif
+    }
 }
+
+#if canImport(AppKit)
+    @MainActor private final class SpacesDaemonAppDelegate: NSObject, NSApplicationDelegate {
+        private let controller: SpacesDaemonController
+
+        init(controller: SpacesDaemonController) { self.controller = controller }
+
+        func applicationWillTerminate(_ notification: Notification) { controller.shutdown() }
+    }
+#endif
 
 @main struct SpacesDaemonMain {
     static func main() {
@@ -621,18 +672,30 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
             }
         }
 
-        let app = NSApplication.shared
-        app.setActivationPolicy(.prohibited)
+        #if canImport(AppKit)
+            let app = NSApplication.shared
+            app.setActivationPolicy(.prohibited)
 
-        do {
-            let controller = try MainActor.assumeIsolated { try SpacesDaemonController() }
-            let delegate = SpacesDaemonAppDelegate(controller: controller)
-            app.delegate = delegate
-            try MainActor.assumeIsolated { try controller.start() }
-            app.run()
-        } catch {
-            fputs("spacesd: \(error)\n", stderr)
-            exit(1)
-        }
+            do {
+                let controller = try MainActor.assumeIsolated { try SpacesDaemonController() }
+                let delegate = SpacesDaemonAppDelegate(controller: controller)
+                app.delegate = delegate
+                try MainActor.assumeIsolated { try controller.start() }
+                app.run()
+            } catch {
+                fputs("spacesd: \(error)\n", stderr)
+                exit(1)
+            }
+        #else
+            do {
+                let controller = try MainActor.assumeIsolated { try SpacesDaemonController() }
+                try MainActor.assumeIsolated { try controller.start() }
+                RunLoop.main.run()
+                MainActor.assumeIsolated { controller.shutdown() }
+            } catch {
+                fputs("spacesd: \(error)\n", stderr)
+                exit(1)
+            }
+        #endif
     }
 }

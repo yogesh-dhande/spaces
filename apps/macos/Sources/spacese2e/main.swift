@@ -27,8 +27,8 @@ struct SpacesE2ECommand: ParsableCommand {
             SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
             StartTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, UpsertComputeHostCommand.self, ListComputeHostsCommand.self,
             DeleteComputeHostCommand.self, SetProjectDefaultComputeHostCommand.self, SetWorkspaceComputeHostOverrideCommand.self,
-            PlanWorkspaceRuntimeCommand.self, OpenMobilePairingWindowCommand.self, RecordScreenCommand.self, ScrollApplicationWindowCommand.self,
-            TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            PlanWorkspaceRuntimeCommand.self, RemoteComputeHostSmokeCommand.self, OpenMobilePairingWindowCommand.self, RecordScreenCommand.self,
+            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
         ])
 }
 
@@ -556,6 +556,82 @@ private struct PlanWorkspaceRuntimeCommand: ParsableCommand {
                 projectID: plan.project.id, workspace: workspaceSummaryPayload(plan.workspace),
                 selection: computeHostSelectionPayload(plan.selection), daemonTarget: daemonTargetPayload(plan.daemonTarget),
                 binding: plan.binding.map(workspaceComputeBindingPayload), manifest: plan.manifest, remoteSSHURI: plan.remoteSSHURI))
+    }
+}
+
+private struct RemoteComputeHostSmokeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "remote-compute-host-smoke")
+
+    @Option(name: .long) var projectDir: String
+    @Option(name: .long) var hostID: String
+    @Option(name: .long) var sshHost: String
+    @Option(name: .long) var name: String?
+    @Option(name: .long) var sshUser: String?
+    @Option(name: .long) var sshPort: Int?
+    @Option(name: .long) var workspaceRoot: String = ComputeHostDraftBuilder.defaultWorkspaceRoot
+    @Option(name: .long) var daemonHost: String?
+    @Option(name: .long) var daemonPort: Int = ComputeHostDraftBuilder.defaultDaemonPort
+    @Option(name: .long) var authToken: String?
+    @Option(name: .long) var timeoutSeconds: Double = 45
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedProjectDir = normalizePath(projectDir)
+        let project = try orchestrator.project(dir: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
+        guard let workspace = try orchestrator.store.workspace(dir: project.dir) else {
+            throw ValidationError("Default workspace not found for project: \(project.dir)")
+        }
+
+        let host = try initialHost(orchestrator: orchestrator)
+        let token = normalizedOptional(authToken) ?? ComputeHostCredentialStore.generateAuthToken()
+        let outcome = try ComputeHostBootstrapper().startSpacesDaemon(host: host, authToken: token, timeout: timeoutSeconds)
+        let readyHost = host.updatedForBootstrap(outcome)
+        let status = try ping(host: readyHost, authToken: token)
+        try orchestrator.upsertComputeHost(readyHost)
+        try ComputeHostCredentialStore.saveAuthToken(token, hostID: readyHost.id)
+        try orchestrator.setProjectDefaultComputeHost(projectID: project.id, hostID: readyHost.id)
+        let runtimePlan = try orchestrator.workspaceRuntimePlan(workspaceID: workspace.id)
+        guard runtimePlan.selection.computeHostID == readyHost.id else {
+            throw ValidationError("Workspace runtime plan did not resolve to compute host \(readyHost.id).")
+        }
+        guard runtimePlan.selection.isRemote else { throw ValidationError("Workspace runtime plan resolved to local Mac.") }
+
+        let terminalSessionID = try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id)
+        let stopOutcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+        try emitJSON(
+            RemoteComputeHostSmokePayload(
+                host: computeHostPayload(readyHost), bootstrap: bootstrapOutcomePayload(outcome),
+                status: RemoteComputeHostSmokeStatusPayload(ok: status.ok, message: status.message, servicePID: status.servicePID),
+                projectID: project.id, workspace: workspaceSummaryPayload(workspace),
+                runtimePlan: WorkspaceRuntimePlanPayload(
+                    projectID: runtimePlan.project.id, workspace: workspaceSummaryPayload(runtimePlan.workspace),
+                    selection: computeHostSelectionPayload(runtimePlan.selection), daemonTarget: daemonTargetPayload(runtimePlan.daemonTarget),
+                    binding: runtimePlan.binding.map(workspaceComputeBindingPayload), manifest: runtimePlan.manifest,
+                    remoteSSHURI: runtimePlan.remoteSSHURI), terminalSessionID: terminalSessionID,
+                stopOutcome: WorkspaceStopOutcomePayload(
+                    skippedStopScriptBecauseWorkspaceDirectoryMissing: stopOutcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)))
+    }
+
+    private func initialHost(orchestrator: WorkspaceOrchestrator) throws -> ComputeHostRecord {
+        let id = try required(hostID, label: "host-id")
+        let now = nowISO8601()
+        let existing = try orchestrator.store.computeHost(id: id)
+        let requiredSSHHost = try required(sshHost, label: "ssh-host")
+        let endpointHost = normalizedOptional(daemonHost) ?? requiredSSHHost
+        return ComputeHostRecord(
+            id: id, name: normalizedOptional(name) ?? id, sshHost: requiredSSHHost, sshUser: normalizedOptional(sshUser),
+            sshPort: try validOptionalPort(sshPort, label: "ssh-port"), workspaceRoot: normalizeRemoteRoot(workspaceRoot),
+            daemonEndpoint: SpacesDaemonEndpoint(
+                host: endpointHost, port: try validPort(daemonPort, label: "daemon-port"),
+                certificateFingerprint: existing?.daemonEndpoint.certificateFingerprint ?? ""), createdAt: existing?.createdAt ?? now, updatedAt: now)
+    }
+
+    private func ping(host: ComputeHostRecord, authToken: String) throws -> TerminalServiceResponse {
+        let response = try TerminalServiceClient.sendPinnedTLS(
+            request: TerminalServiceRequest(command: "ping"), host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: authToken,
+            certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: 10)
+        guard response.ok else { throw ValidationError("Remote spacesd ping failed: \(response.message)") }
+        return response
     }
 }
 
@@ -1286,6 +1362,34 @@ private struct WorkspaceRuntimePlanPayload: Codable {
     let remoteSSHURI: String?
 }
 
+private struct RemoteComputeHostSmokePayload: Codable {
+    let host: ComputeHostPayload
+    let bootstrap: ComputeHostBootstrapOutcomePayload
+    let status: RemoteComputeHostSmokeStatusPayload
+    let projectID: String
+    let workspace: WorkspaceSummaryPayload
+    let runtimePlan: WorkspaceRuntimePlanPayload
+    let terminalSessionID: String
+    let stopOutcome: WorkspaceStopOutcomePayload
+}
+
+private struct ComputeHostBootstrapOutcomePayload: Codable {
+    let certificateFingerprint: String
+    let workspaceRoot: String
+    let daemonHost: String
+    let daemonPort: Int
+    let processID: Int?
+    let logPath: String
+}
+
+private struct RemoteComputeHostSmokeStatusPayload: Codable {
+    let ok: Bool
+    let message: String
+    let servicePID: Int32?
+}
+
+private struct WorkspaceStopOutcomePayload: Codable { let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool }
+
 private struct ComputeHostSelectionPayload: Codable {
     let location: String
     let computeHostID: String?
@@ -1485,6 +1589,12 @@ private func deleteComputeHostPayload(_ result: ComputeHostDeletionResult) -> De
         credentialTokenDeleted: result.credentialTokenDeleted)
 }
 
+private func bootstrapOutcomePayload(_ outcome: ComputeHostBootstrapOutcome) -> ComputeHostBootstrapOutcomePayload {
+    ComputeHostBootstrapOutcomePayload(
+        certificateFingerprint: outcome.certificateFingerprint, workspaceRoot: outcome.workspaceRoot, daemonHost: outcome.daemonHost,
+        daemonPort: outcome.daemonPort, processID: outcome.processID, logPath: outcome.logPath)
+}
+
 private func computeHostSelectionPayload(_ selection: ComputeHostSelection) -> ComputeHostSelectionPayload {
     switch selection {
     case .localMac: return ComputeHostSelectionPayload(location: "local", computeHostID: nil, displayName: selection.displayName, host: nil)
@@ -1505,6 +1615,19 @@ private func workspaceComputeBindingPayload(_ binding: WorkspaceComputeBinding) 
     WorkspaceComputeBindingPayload(
         workspaceID: binding.workspaceID, hostID: binding.hostID, remotePath: binding.remotePath, branch: binding.branch,
         createdAt: binding.createdAt, updatedAt: binding.updatedAt)
+}
+
+extension ComputeHostRecord {
+    fileprivate func updatedForBootstrap(_ outcome: ComputeHostBootstrapOutcome) -> ComputeHostRecord {
+        ComputeHostRecord(
+            id: id, name: name, kind: kind, sshHost: sshHost, sshUser: sshUser, sshPort: sshPort,
+            workspaceRoot: outcome.workspaceRoot.isEmpty ? workspaceRoot : outcome.workspaceRoot,
+            daemonEndpoint: SpacesDaemonEndpoint(
+                host: outcome.daemonHost.isEmpty ? daemonEndpoint.host : outcome.daemonHost,
+                port: outcome.daemonPort == 0 ? daemonEndpoint.port : outcome.daemonPort,
+                certificateFingerprint: outcome.certificateFingerprint.isEmpty
+                    ? daemonEndpoint.certificateFingerprint : outcome.certificateFingerprint), createdAt: createdAt, updatedAt: nowISO8601())
+    }
 }
 
 /// Shared JSON encoder for the shell harness.

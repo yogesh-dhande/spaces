@@ -46,6 +46,7 @@ Each live session also participates in a service-level control path:
 ## Service Runtime
 - `GhosttyEmbeddedSessionHost` is the service-owned runtime for `ghostty-embedded`.
 - It owns one live libghostty-backed session, writes `output.log`, refreshes SQLite runtime state, enforces owner-only input or resize, and expires stale remote leases from SQLite client rows.
+- HOST_MANAGED sessions use `HostManagedPTYTerminalSessionDriver` for PTY-backed shell ownership. The driver uses Darwin or Glibc PTY/process calls, links `libutil` for Linux `forkpty`, and defaults to `/bin/bash` on Linux and `/bin/zsh` on macOS when a launch request does not provide a shell.
 - It also preserves live metadata such as title, working directory, and child PID so attached clients can reopen a session without restarting the shell.
 - During termination it captures the Ghostty render frame before renderer teardown, writes a final `terminated` payload to SQLite, broadcasts that payload to attached clients, marks active attachments detached, and then closes the live stream and renderer.
 - App-created ad hoc workspace terminals use persistent service-owned sessions so they survive app quit. The `.whileAttached` lifetime policy remains available for callers that intentionally want service reaping after the final live attachment detaches or expires.

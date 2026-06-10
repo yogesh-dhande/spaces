@@ -1,6 +1,18 @@
-import Darwin
 import Foundation
 import spacesterminalcore
+
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
+
+#if os(Linux)
+    @_silgen_name("forkpty") private func spaces_forkpty(
+        _ amaster: UnsafeMutablePointer<Int32>?, _ name: UnsafeMutablePointer<CChar>?, _ termp: UnsafePointer<termios>?,
+        _ winp: UnsafePointer<winsize>?
+    ) -> Int32
+#endif
 
 final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private let launchConfiguration: TerminalSessionLaunchConfiguration
@@ -49,7 +61,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             for argument in arguments { if let argument { free(argument) } }
         }
 
-        let pid = forkpty(&master, nil, nil, &windowSize)
+        let pid = Self.forkPTY(master: &master, windowSize: &windowSize)
         guard pid >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         if pid == 0 {
             if !launchConfiguration.workingDirectory.isEmpty { _ = chdir(launchConfiguration.workingDirectory) }
@@ -234,7 +246,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     }
 
     static func execCommand(for launchConfiguration: TerminalSessionLaunchConfiguration) -> (executable: String, arguments: [String]) {
-        let shell = launchConfiguration.shell.isEmpty ? "/bin/zsh" : launchConfiguration.shell
+        let shell = launchConfiguration.shell.isEmpty ? defaultShellPath() : launchConfiguration.shell
         let shellName = URL(fileURLWithPath: shell).lastPathComponent
         guard let command = launchConfiguration.command, !command.isEmpty else { return (shell, ["-\(shellName)"]) }
 
@@ -247,5 +259,21 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             resolvedCommand = command
         }
         return (shell, [shellName, "-l", "-c", resolvedCommand])
+    }
+
+    private static func forkPTY(master: inout Int32, windowSize: inout winsize) -> Int32 {
+        #if os(Linux)
+            return spaces_forkpty(&master, nil, nil, &windowSize)
+        #else
+            return forkpty(&master, nil, nil, &windowSize)
+        #endif
+    }
+
+    private static func defaultShellPath() -> String {
+        #if os(Linux)
+            return "/bin/bash"
+        #else
+            return "/bin/zsh"
+        #endif
     }
 }

@@ -1,5 +1,4 @@
 import Foundation
-import spacesmobilecore
 
 public enum SpacesMobileTerminalLinkResolverError: LocalizedError, Equatable {
     case missingLink
