@@ -111,15 +111,12 @@ struct TerminalDetailView: View {
                         .onAppear { renderedText = "" }
                 }
             }
+            .overlay(alignment: .bottom) {
+                linkPreviewBannerOverlay
+            }
 
             if let errorMessage = model.errorMessage {
                 errorBanner(errorMessage)
-            }
-            if model.isPreparingLinkPreview {
-                previewStatusBanner("Preparing preview…")
-            }
-            if let previewErrorMessage = model.linkPreviewErrorMessage {
-                errorBanner(previewErrorMessage)
             }
         }
         .background(Self.surfaceBackground.ignoresSafeArea())
@@ -146,6 +143,18 @@ struct TerminalDetailView: View {
         }
         .onDisappear { model.stop() }
         .accessibilityIdentifier("terminal.detail.\(session.id)")
+    }
+
+    private var linkPreviewBannerOverlay: some View {
+        VStack(spacing: 0) {
+            if model.isPreparingLinkPreview {
+                previewStatusBanner("Preparing preview…")
+            }
+            if let previewErrorMessage = model.linkPreviewErrorMessage {
+                errorBanner(previewErrorMessage)
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     private func sendTerminalText(_ text: String) {
