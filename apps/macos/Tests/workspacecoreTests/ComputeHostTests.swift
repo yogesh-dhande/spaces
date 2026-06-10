@@ -227,7 +227,8 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertEqual(try store.workspaceSetupState(workspaceID: workspace.id)?.status, .succeeded)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
         let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
-        XCTAssertEqual(runningProcess.runtimeTargetID, host.id)
+        XCTAssertNotEqual(runningProcess.runtimeTargetID, host.id)
+        XCTAssertEqual(runningProcess.runtimeTargetID, runningProcess.id)
         XCTAssertEqual(runningProcess.terminalTrackingID, createRequest.launchConfiguration?.sessionID)
         XCTAssertEqual(runningProcess.logPath, "/tmp/\(createRequest.launchConfiguration?.sessionID ?? "missing").log")
         XCTAssertNotNil(try store.workspaceComputeBinding(workspaceID: workspace.id, hostID: host.id))
@@ -320,6 +321,103 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertTrue(block.localizedDescription.contains("feature"))
         XCTAssertTrue(block.localizedDescription.contains("fast-forward"))
         XCTAssertTrue(block.localizedDescription.contains("origin/feature is not an ancestor"))
+    }
+
+    func testWorkspaceHostOverrideChangeBlocksWithPreservedSpacesSession() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
+        let project = makeProjectRecord(id: "project-a", dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(id: "workspace-a", projectID: project.id, title: "Feature", dir: try makeTempDirectory().path)
+        try orchestrator.upsertComputeHost(host)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try insertPreservedProcessSession(store: store, workspaceID: workspace.id)
+
+        XCTAssertThrowsError(try orchestrator.setWorkspaceComputeHostOverride(workspaceID: workspace.id, hostID: host.id)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("live or preserved Spaces terminal sessions"))
+        }
+        XCTAssertNil(try store.workspace(id: workspace.id)?.computeHostOverrideID)
+    }
+
+    func testProjectDefaultHostChangeBlocksInheritingWorkspaceWithPreservedSpacesSession() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let hostA = makeComputeHostRecord(id: "host-a", name: "Builder A")
+        let hostB = makeComputeHostRecord(id: "host-b", name: "Builder B")
+        let project = ProjectRecord(
+            id: "project-a", name: "Project", dir: try makeTempDirectory().path, isGitRepo: true, defaultBranch: "main",
+            defaultComputeHostID: hostA.id)
+        let workspace = makeWorkspaceRecord(id: "workspace-a", projectID: project.id, title: "Feature", dir: try makeTempDirectory().path)
+        try orchestrator.upsertComputeHost(hostA)
+        try orchestrator.upsertComputeHost(hostB)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try insertPreservedProcessSession(store: store, workspaceID: workspace.id)
+
+        XCTAssertThrowsError(try orchestrator.setProjectDefaultComputeHost(projectID: project.id, hostID: hostB.id)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("live or preserved Spaces terminal sessions"))
+        }
+        XCTAssertEqual(try store.project(id: project.id)?.defaultComputeHostID, hostA.id)
+    }
+
+    func testDeleteComputeHostBlocksWhenResolvedWorkspaceHasPreservedSpacesSession() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
+        let project = ProjectRecord(
+            id: "project-a", name: "Project", dir: try makeTempDirectory().path, isGitRepo: true, defaultBranch: "main", defaultComputeHostID: host.id
+        )
+        let workspace = makeWorkspaceRecord(id: "workspace-a", projectID: project.id, title: "Feature", dir: try makeTempDirectory().path)
+        try orchestrator.upsertComputeHost(host)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try insertPreservedProcessSession(store: store, workspaceID: workspace.id)
+
+        XCTAssertThrowsError(try orchestrator.deleteComputeHost(id: host.id)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("live or preserved Spaces terminal sessions"))
+        }
+        XCTAssertEqual(try store.computeHost(id: host.id), host)
+        XCTAssertEqual(try store.project(id: project.id)?.defaultComputeHostID, host.id)
+    }
+
+    func testDeleteComputeHostClearsSelectionsBindingsAndReportsCleanup() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let host = makeComputeHostRecord(id: "test-host-\(UUID().uuidString)", name: "Builder A")
+        let project = ProjectRecord(
+            id: "project-a", name: "Project", dir: try makeTempDirectory().path, isGitRepo: true, defaultBranch: "main", defaultComputeHostID: host.id
+        )
+        let workspace = WorkspaceRecord(
+            id: "workspace-a", projectID: project.id, title: "Feature", dir: try makeTempDirectory().path, dirname: nil, branch: "feature",
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil, computeHostOverrideID: host.id)
+        let binding = WorkspaceComputeBinding(
+            workspaceID: workspace.id, hostID: host.id, remotePath: "/srv/spaces/project/feature", branch: "feature",
+            createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+        try orchestrator.upsertComputeHost(host)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.upsert(workspaceComputeBinding: binding)
+
+        let result = try orchestrator.deleteComputeHost(id: host.id)
+
+        XCTAssertEqual(result.hostID, host.id)
+        XCTAssertEqual(result.clearedProjectDefaultIDs, [project.id])
+        XCTAssertEqual(result.clearedWorkspaceOverrideIDs, [workspace.id])
+        XCTAssertEqual(result.clearedWorkspaceBindingIDs, [binding.id])
+        XCTAssertFalse(result.credentialTokenDeleted)
+        XCTAssertNil(try store.computeHost(id: host.id))
+        XCTAssertNil(try store.project(id: project.id)?.defaultComputeHostID)
+        XCTAssertNil(try store.workspace(id: workspace.id)?.computeHostOverrideID)
+        XCTAssertNil(try store.workspaceComputeBinding(workspaceID: workspace.id, hostID: host.id))
+    }
+
+    private func insertPreservedProcessSession(store: SQLiteStore, workspaceID: String, sessionID: String = "session-preserved") throws {
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-\(sessionID)", workspaceID: workspaceID, templateName: "Server", command: "npm run dev",
+                terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil,
+                status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:00Z", exitedAt: "2026-01-01T00:00:01Z"))
     }
 
 }

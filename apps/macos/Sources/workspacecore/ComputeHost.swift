@@ -164,6 +164,25 @@ public struct WorkspaceComputeBinding: Codable, Sendable, Equatable, Identifiabl
     }
 }
 
+public struct ComputeHostDeletionResult: Codable, Sendable, Equatable {
+    public let hostID: String
+    public let clearedProjectDefaultIDs: [String]
+    public let clearedWorkspaceOverrideIDs: [String]
+    public let clearedWorkspaceBindingIDs: [String]
+    public let credentialTokenDeleted: Bool
+
+    public init(
+        hostID: String, clearedProjectDefaultIDs: [String], clearedWorkspaceOverrideIDs: [String], clearedWorkspaceBindingIDs: [String],
+        credentialTokenDeleted: Bool
+    ) {
+        self.hostID = hostID
+        self.clearedProjectDefaultIDs = clearedProjectDefaultIDs
+        self.clearedWorkspaceOverrideIDs = clearedWorkspaceOverrideIDs
+        self.clearedWorkspaceBindingIDs = clearedWorkspaceBindingIDs
+        self.credentialTokenDeleted = credentialTokenDeleted
+    }
+}
+
 public enum ComputeHostSelection: Sendable, Equatable {
     case localMac
     case remote(ComputeHostRecord)

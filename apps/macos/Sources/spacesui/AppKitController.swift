@@ -7964,9 +7964,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func removeSavedComputeHost(_ sender: NSButton) {
         guard let hostID = sender.identifier?.rawValue else { return }
         do {
-            try orchestrator.deleteComputeHost(id: hostID)
-            remoteHostStatusByID.removeValue(forKey: hostID)
-            refreshVisibleRemoteHostsPanel()
+            guard let host = try orchestrator.store.computeHost(id: hostID) else {
+                throw WorkspaceError.invalidArgument(message: "Compute host not found.")
+            }
+            presentComputeHostRemoveConfirmation(host: host) { [weak self] confirmed in
+                guard confirmed, let self else { return }
+                do {
+                    try orchestrator.deleteComputeHost(id: hostID)
+                    remoteHostStatusByID.removeValue(forKey: hostID)
+                    refreshVisibleRemoteHostsPanel()
+                } catch { showError(error) }
+            }
         } catch { showError(error) }
     }
 
@@ -11057,6 +11065,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let alert = NSAlert()
         alert.messageText = "Remove \(launcher.name)?"
         alert.informativeText = "This removes the coding agent from the project."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        confirm(alert.runModal() == .alertFirstButtonReturn)
+    }
+
+    private func presentComputeHostRemoveConfirmation(host: ComputeHostRecord, confirm: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "Remove \(host.name)?"
+        alert.informativeText =
+            "This removes the remote host, clears project and workspace selections that point to it, clears workspace bindings, and deletes its saved daemon token."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")

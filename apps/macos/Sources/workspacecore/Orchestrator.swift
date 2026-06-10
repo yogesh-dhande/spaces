@@ -387,30 +387,138 @@ public final class WorkspaceOrchestrator {
 
     public func upsertComputeHost(_ host: ComputeHostRecord) throws { try store.upsert(computeHost: host) }
 
-    public func deleteComputeHost(id: String) throws {
-        try store.deleteComputeHost(id: id)
-        try? ComputeHostCredentialStore.deleteAuthToken(hostID: id)
+    @discardableResult public func deleteComputeHost(id: String) throws -> ComputeHostDeletionResult {
+        let hostID = normalizedComputeHostID(id) ?? id
+        let blockedWorkspaces = try workspacesResolving(toComputeHostID: hostID).filter {
+            try workspaceHasRetainedSpacesTerminalSession(workspaceID: $0.id)
+        }
+        if !blockedWorkspaces.isEmpty {
+            throw computeHostChangeBlockedError(action: "remove compute host '\(hostID)'", workspaces: blockedWorkspaces)
+        }
+        let deletionResult = try computeHostDeletionResult(hostID: hostID)
+        try store.deleteComputeHost(id: hostID)
+        try ComputeHostCredentialStore.deleteAuthToken(hostID: hostID)
+        return deletionResult
     }
 
     public func setProjectDefaultComputeHost(projectID: String, hostID: String?) throws {
-        if let hostID, try store.computeHost(id: hostID) == nil {
-            throw WorkspaceError.invalidArgument(message: "Compute host '\(hostID)' is not configured.")
+        let nextHostID = normalizedComputeHostID(hostID)
+        if let nextHostID, try store.computeHost(id: nextHostID) == nil {
+            throw WorkspaceError.invalidArgument(message: "Compute host '\(nextHostID)' is not configured.")
         }
-        try store.updateProjectDefaultComputeHost(id: projectID, hostID: hostID)
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.invalidArgument(message: "Project not found.") }
+        let hostsByID = try computeHostsByID()
+        var proposedProject = project
+        proposedProject.defaultComputeHostID = nextHostID
+        let blockedWorkspaces = try store.workspaces(projectID: project.id, includeArchived: true).filter { workspace in
+            let currentSelection = ComputeHostPlanner.selectHost(project: project, workspace: workspace, hostsByID: hostsByID)
+            let proposedSelection = ComputeHostPlanner.selectHost(project: proposedProject, workspace: workspace, hostsByID: hostsByID)
+            guard computeHostSelectionKey(currentSelection) != computeHostSelectionKey(proposedSelection) else { return false }
+            return try workspaceHasRetainedSpacesTerminalSession(workspaceID: workspace.id)
+        }
+        if !blockedWorkspaces.isEmpty {
+            throw computeHostChangeBlockedError(action: "change the project default compute host", workspaces: blockedWorkspaces)
+        }
+        try store.updateProjectDefaultComputeHost(id: projectID, hostID: nextHostID)
     }
 
     public func setWorkspaceComputeHostOverride(workspaceID: String, hostID: String?) throws {
-        if let hostID, try store.computeHost(id: hostID) == nil {
-            throw WorkspaceError.invalidArgument(message: "Compute host '\(hostID)' is not configured.")
+        let nextHostID = normalizedComputeHostID(hostID)
+        if let nextHostID, try store.computeHost(id: nextHostID) == nil {
+            throw WorkspaceError.invalidArgument(message: "Compute host '\(nextHostID)' is not configured.")
         }
-        try store.updateWorkspaceComputeHostOverride(id: workspaceID, hostID: hostID)
+        guard let workspace = try store.workspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
+        guard let project = try store.project(id: workspace.projectID) else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
+        let hostsByID = try computeHostsByID()
+        let currentSelection = ComputeHostPlanner.selectHost(project: project, workspace: workspace, hostsByID: hostsByID)
+        let proposedWorkspace = WorkspaceRecord(
+            id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: workspace.dir, dirname: workspace.dirname,
+            branch: workspace.branch, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
+            isHidden: workspace.isHidden, isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes,
+            computeHostOverrideID: nextHostID)
+        let proposedSelection = ComputeHostPlanner.selectHost(project: project, workspace: proposedWorkspace, hostsByID: hostsByID)
+        if computeHostSelectionKey(currentSelection) != computeHostSelectionKey(proposedSelection),
+            try workspaceHasRetainedSpacesTerminalSession(workspaceID: workspace.id)
+        {
+            throw computeHostChangeBlockedError(action: "change compute host for workspace '\(workspace.title)'", workspaces: [workspace])
+        }
+        try store.updateWorkspaceComputeHostOverride(id: workspaceID, hostID: nextHostID)
     }
 
     public func effectiveComputeHost(workspaceID: String) throws -> ComputeHostSelection {
         guard let workspace = try store.workspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
         guard let project = try store.project(id: workspace.projectID) else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
-        let hostsByID = Dictionary(uniqueKeysWithValues: try store.computeHosts().map { ($0.id, $0) })
+        let hostsByID = try computeHostsByID()
         return ComputeHostPlanner.selectHost(project: project, workspace: workspace, hostsByID: hostsByID)
+    }
+
+    private func computeHostsByID() throws -> [String: ComputeHostRecord] {
+        Dictionary(uniqueKeysWithValues: try store.computeHosts().map { ($0.id, $0) })
+    }
+
+    private func normalizedComputeHostID(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    private func computeHostSelectionKey(_ selection: ComputeHostSelection) -> String {
+        switch selection {
+        case .localMac: return "local"
+        case .remote(let host): return "remote:\(host.id)"
+        }
+    }
+
+    private func workspaceHasRetainedSpacesTerminalSession(workspaceID: String) throws -> Bool {
+        if try store.runningProcesses(workspaceID: workspaceID).contains(where: { builtInTerminalSessionID(for: $0) != nil }) { return true }
+        if try store.agentWindows(workspaceID: workspaceID).contains(where: { builtInTerminalSessionID(for: $0) != nil }) { return true }
+        return try store.windows(workspaceID: workspaceID).contains {
+            $0.role == "terminal" && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) != nil
+        }
+    }
+
+    private func workspacesResolving(toComputeHostID hostID: String) throws -> [WorkspaceRecord] {
+        let hostsByID = try computeHostsByID()
+        var affected: [WorkspaceRecord] = []
+        for project in try store.projects() {
+            for workspace in try store.workspaces(projectID: project.id, includeArchived: true) {
+                if ComputeHostPlanner.selectHost(project: project, workspace: workspace, hostsByID: hostsByID).computeHostID == hostID {
+                    affected.append(workspace)
+                }
+            }
+        }
+        return affected
+    }
+
+    private func computeHostDeletionResult(hostID: String) throws -> ComputeHostDeletionResult {
+        var clearedProjectDefaultIDs: [String] = []
+        var clearedWorkspaceOverrideIDs: [String] = []
+        var clearedWorkspaceBindingIDs: [String] = []
+        for project in try store.projects() {
+            if normalizedComputeHostID(project.defaultComputeHostID) == hostID { clearedProjectDefaultIDs.append(project.id) }
+            for workspace in try store.workspaces(projectID: project.id, includeArchived: true) {
+                if normalizedComputeHostID(workspace.computeHostOverrideID) == hostID { clearedWorkspaceOverrideIDs.append(workspace.id) }
+                for binding in try store.workspaceComputeBindings(workspaceID: workspace.id) where binding.hostID == hostID {
+                    clearedWorkspaceBindingIDs.append(binding.id)
+                }
+            }
+        }
+        let tokenWasStored = (try? ComputeHostCredentialStore.authToken(hostID: hostID)) != nil
+        return ComputeHostDeletionResult(
+            hostID: hostID, clearedProjectDefaultIDs: clearedProjectDefaultIDs.sorted(),
+            clearedWorkspaceOverrideIDs: clearedWorkspaceOverrideIDs.sorted(), clearedWorkspaceBindingIDs: clearedWorkspaceBindingIDs.sorted(),
+            credentialTokenDeleted: tokenWasStored)
+    }
+
+    private func computeHostChangeBlockedError(action: String, workspaces: [WorkspaceRecord]) -> WorkspaceError {
+        let workspaceNames = workspaces.map(\.title).sorted()
+        let visibleNames = workspaceNames.prefix(3).joined(separator: ", ")
+        let suffix = workspaceNames.count > 3 ? " and \(workspaceNames.count - 3) more" : ""
+        let noun = workspaceNames.count == 1 ? "workspace" : "workspaces"
+        let verb = workspaceNames.count == 1 ? "has" : "have"
+        return WorkspaceError.invalidArgument(
+            message:
+                "Cannot \(action) while \(noun) \(visibleNames)\(suffix) \(verb) live or preserved Spaces terminal sessions. Stop or close those sessions first."
+        )
     }
 
     public func stableComputeBinding(workspaceID: String, hostID: String) throws -> WorkspaceComputeBinding {
@@ -1674,17 +1782,17 @@ public final class WorkspaceOrchestrator {
         let now = currentDate()
         let formatter = ISO8601DateFormatter()
         var didUpdate = false
-        let remoteRuntimeTargetID: String?
+        let workspaceUsesRemoteDaemon: Bool
         if let assignedPorts = try? store.workspacePortsAssigned(workspaceID: workspace.id),
             let runtimePlan = try? workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts),
             runtimePlan.selection.isRemote
         {
-            remoteRuntimeTargetID = runtimePlan.daemonTarget.computeHostID
+            workspaceUsesRemoteDaemon = true
         } else {
-            remoteRuntimeTargetID = nil
+            workspaceUsesRemoteDaemon = false
         }
         for process in processes where process.status == .running {
-            if let remoteRuntimeTargetID, process.runtimeTargetID == remoteRuntimeTargetID { continue }
+            if workspaceUsesRemoteDaemon { continue }
             if !ignoreStartupGracePeriod, let startedAtStr = process.startedAt, let startedAt = formatter.date(from: startedAtStr),
                 now.timeIntervalSince(startedAt) < 10.0
             {
@@ -1886,9 +1994,9 @@ public final class WorkspaceOrchestrator {
         let now = nowISO8601()
         let restartedProcess = RunningProcessRecord(
             id: process.id, workspaceID: process.workspaceID, templateID: template.id, templateName: process.templateName, command: template.command,
-            runtimeTargetID: runtimePlan.daemonTarget.computeHostID, terminalApp: TerminalHost.spaces.appName, windowID: session.windowID,
-            terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, pid: session.childPID, status: .running,
-            logPath: session.outputPath, lastOutputAt: nil, startedAt: now, exitedAt: nil)
+            terminalApp: TerminalHost.spaces.appName, windowID: session.windowID, terminalTrackingID: session.sessionID,
+            terminalNativeID: session.sessionID, pid: session.childPID, status: .running, logPath: session.outputPath, lastOutputAt: nil,
+            startedAt: now, exitedAt: nil)
         try store.upsert(runningProcess: restartedProcess)
         let existingWindows = try store.windows(workspaceID: workspace.id)
         let existingWindow = existingWindows.first(where: { matchesTrackedTerminalWindow($0, process: process) })
@@ -4943,9 +5051,9 @@ public final class WorkspaceOrchestrator {
             let now = nowISO8601()
             let running = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
-                runtimeTargetID: runtimePlan?.daemonTarget.computeHostID, terminalApp: TerminalHost.spaces.appName, windowID: session.windowID,
-                terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, pid: session.childPID, status: .running,
-                logPath: session.outputPath, lastOutputAt: nil, startedAt: now, exitedAt: nil)
+                terminalApp: TerminalHost.spaces.appName, windowID: session.windowID, terminalTrackingID: session.sessionID,
+                terminalNativeID: session.sessionID, pid: session.childPID, status: .running, logPath: session.outputPath, lastOutputAt: nil,
+                startedAt: now, exitedAt: nil)
             try store.upsert(runningProcess: running)
             terminalWindows.append(
                 WindowRecord(
@@ -6533,9 +6641,9 @@ public final class WorkspaceOrchestrator {
         let now = nowISO8601()
         let record = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
-            runtimeTargetID: runtimePlan?.daemonTarget.computeHostID, terminalApp: TerminalHost.spaces.appName, windowID: session.windowID,
-            terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, pid: session.childPID, status: .running,
-            logPath: session.outputPath, lastOutputAt: nil, startedAt: now, exitedAt: nil)
+            terminalApp: TerminalHost.spaces.appName, windowID: session.windowID, terminalTrackingID: session.sessionID,
+            terminalNativeID: session.sessionID, pid: session.childPID, status: .running, logPath: session.outputPath, lastOutputAt: nil,
+            startedAt: now, exitedAt: nil)
         try store.upsert(runningProcess: record)
         let nextOrder = Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200)
         try store.upsert(

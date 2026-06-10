@@ -26,9 +26,9 @@ struct SpacesE2ECommand: ParsableCommand {
             FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self,
             SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
             StartTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, UpsertComputeHostCommand.self, ListComputeHostsCommand.self,
-            SetProjectDefaultComputeHostCommand.self, SetWorkspaceComputeHostOverrideCommand.self, PlanWorkspaceRuntimeCommand.self,
-            OpenMobilePairingWindowCommand.self, RecordScreenCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
-            DragApplicationWindowCommand.self,
+            DeleteComputeHostCommand.self, SetProjectDefaultComputeHostCommand.self, SetWorkspaceComputeHostOverrideCommand.self,
+            PlanWorkspaceRuntimeCommand.self, OpenMobilePairingWindowCommand.self, RecordScreenCommand.self, ScrollApplicationWindowCommand.self,
+            TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
         ])
 }
 
@@ -478,6 +478,18 @@ private struct ListComputeHostsCommand: ParsableCommand {
     func run() throws {
         let orchestrator = try makeOrchestrator()
         try emitJSON(ComputeHostListPayload(hosts: try orchestrator.listComputeHosts().map(computeHostPayload)))
+    }
+}
+
+private struct DeleteComputeHostCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "delete-compute-host")
+
+    @Option(name: .long) var id: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let result = try orchestrator.deleteComputeHost(id: try required(id, label: "id"))
+        try emitJSON(deleteComputeHostPayload(result))
     }
 }
 
@@ -1229,6 +1241,14 @@ private struct MobilePairingWindowPayload: Codable {
 
 private struct ComputeHostListPayload: Codable { let hosts: [ComputeHostPayload] }
 
+private struct DeleteComputeHostPayload: Codable {
+    let hostID: String
+    let clearedProjectDefaultIDs: [String]
+    let clearedWorkspaceOverrideIDs: [String]
+    let clearedWorkspaceBindingIDs: [String]
+    let credentialTokenDeleted: Bool
+}
+
 private struct ComputeHostPayload: Codable {
     let id: String
     let name: String
@@ -1456,6 +1476,13 @@ private func computeHostPayload(_ host: ComputeHostRecord) -> ComputeHostPayload
         id: host.id, name: host.name, kind: host.kind.rawValue, sshHost: host.sshHost, sshUser: host.sshUser, sshPort: host.sshPort,
         workspaceRoot: host.workspaceRoot, daemonHost: host.daemonEndpoint.host, daemonPort: host.daemonEndpoint.port,
         certificateFingerprint: host.daemonEndpoint.certificateFingerprint, createdAt: host.createdAt, updatedAt: host.updatedAt)
+}
+
+private func deleteComputeHostPayload(_ result: ComputeHostDeletionResult) -> DeleteComputeHostPayload {
+    DeleteComputeHostPayload(
+        hostID: result.hostID, clearedProjectDefaultIDs: result.clearedProjectDefaultIDs,
+        clearedWorkspaceOverrideIDs: result.clearedWorkspaceOverrideIDs, clearedWorkspaceBindingIDs: result.clearedWorkspaceBindingIDs,
+        credentialTokenDeleted: result.credentialTokenDeleted)
 }
 
 private func computeHostSelectionPayload(_ selection: ComputeHostSelection) -> ComputeHostSelectionPayload {
