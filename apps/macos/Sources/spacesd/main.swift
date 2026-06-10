@@ -1,12 +1,23 @@
 import AppKit
+import Darwin
 import Dispatch
 import Foundation
 import spacesmobilebridge
+import spacesmobilecore
 import spacesterminalcore
 import spacesterminalghostty
 import workspacecore
 
 @MainActor private final class SpacesDaemonController {
+    private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll"]
+    private static let terminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
+
+    private struct TerminalLinkTransferAuthorization {
+        let sessionID: String
+        let resolvedPath: String
+        let expiresAt: Date
+    }
+
     private let socketPath: String
     private let serverQueue = DispatchQueue(label: "spaces.terminal.service")
     private lazy var server = TerminalServiceServer(socketPath: socketPath, queue: serverQueue) { [weak self] request in
@@ -40,6 +51,7 @@ import workspacecore
     }()
     private var remoteServerLoadError: (any Error)?
     private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
+    private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
     private let mobileBridgeSupervisor = SpacesMobileBridgeSupervisor()
     private let git = GitClient()
@@ -95,6 +107,10 @@ import workspacecore
             }
             return terminateSession(id: sessionID)
         case "list": return listSessions()
+        case "state": return loadTerminalState(request)
+        case "control": return handleTerminalControl(request)
+        case "resolveTerminalLink": return resolveTerminalLink(request)
+        case "readTerminalLinkChunk": return readTerminalLinkChunk(request)
         default: return TerminalServiceResponse(ok: false, message: "Unsupported spacesd command '\(request.command)'.")
         }
     }
@@ -220,6 +236,78 @@ import workspacecore
         } catch { return TerminalServiceResponse(ok: false, message: String(describing: error)) }
     }
 
+    private func loadTerminalState(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
+        guard let sessionID = request.sessionID, !sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
+        do {
+            return TerminalServiceResponse(ok: true, message: "Loaded terminal state.", sessionState: try loadCurrentState(sessionID: sessionID))
+        } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
+    }
+
+    private func handleTerminalControl(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
+        guard let sessionID = request.sessionID, !sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
+        guard let controlRequest = request.controlRequest else {
+            return TerminalServiceResponse(ok: false, message: "Missing terminal control request.")
+        }
+        if Self.ownerGatedTerminalCommands.contains(controlRequest.command),
+            controlRequest.clientID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+        {
+            return TerminalServiceResponse(ok: false, message: "Missing mobile client ID.")
+        }
+        do {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
+                return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' is not running.")
+            }
+            guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
+                return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.")
+            }
+            let response = try TerminalControlClient.send(request: controlRequest, socketPath: paths.controlSocketPath)
+            return TerminalServiceResponse(ok: response.ok, message: response.message, controlResponse: response)
+        } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
+    }
+
+    private func resolveTerminalLink(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
+        guard let sessionID = request.sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !sessionID.isEmpty else {
+            return TerminalServiceResponse(ok: false, message: "Missing session ID.")
+        }
+        do {
+            pruneTerminalLinkTransferAuthorizations(now: Date())
+            let metadata: SpacesMobileTerminalLinkMetadata
+            if canResolveTerminalLinkWithoutLocalState(request.terminalLink) {
+                metadata = try SpacesMobileTerminalLinkResolver.resolve(
+                    sessionID: sessionID, link: request.terminalLink, workingDirectory: nil, workspaceRoots: [])
+            } else {
+                let workingDirectory = try terminalWorkingDirectory(sessionID: sessionID)
+                metadata = try SpacesMobileTerminalLinkResolver.resolve(
+                    sessionID: sessionID, link: request.terminalLink, workingDirectory: workingDirectory, workspaceRoots: [workingDirectory])
+            }
+            if metadata.source == .localFile {
+                let resolvedPath = try SpacesMobileTerminalLinkResolver.resolvedLocalFilePath(linkID: metadata.id)
+                authorizeTerminalLinkTransfer(linkID: metadata.id, sessionID: sessionID, resolvedPath: resolvedPath, now: Date())
+            }
+            return TerminalServiceResponse(ok: true, message: "Resolved terminal link.", terminalLinkMetadata: terminalServiceLinkMetadata(metadata))
+        } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
+    }
+
+    private func readTerminalLinkChunk(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
+        guard let sessionID = request.sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !sessionID.isEmpty else {
+            return TerminalServiceResponse(ok: false, message: "Missing session ID.")
+        }
+        do {
+            guard let linkID = request.terminalLinkID?.trimmingCharacters(in: .whitespacesAndNewlines), !linkID.isEmpty else {
+                throw SpacesMobileTerminalLinkResolverError.invalidLinkID
+            }
+            guard let authorization = try terminalLinkTransferAuthorization(linkID: linkID, sessionID: sessionID, now: Date()) else {
+                throw SpacesMobileTerminalLinkResolverError.invalidLinkID
+            }
+            let chunk = try SpacesMobileTerminalLinkResolver.readChunk(
+                sessionID: sessionID, linkID: linkID, offset: request.chunkOffset, limit: request.chunkLimit,
+                workspaceRoots: [authorization.resolvedPath])
+            authorizeTerminalLinkTransfer(linkID: linkID, sessionID: sessionID, resolvedPath: authorization.resolvedPath, now: Date())
+            return TerminalServiceResponse(ok: true, message: "Read terminal link chunk.", terminalLinkChunk: terminalServiceLinkChunk(chunk))
+        } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
+    }
+
     private func terminateSession(id sessionID: String) -> TerminalServiceResponse {
         do {
             if let sessionCore = sessionCores.removeValue(forKey: sessionID) {
@@ -305,7 +393,148 @@ import workspacecore
             id: launchConfiguration.sessionID, title: runtimeState.title ?? launchConfiguration.title,
             workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, backend: launchConfiguration.backend,
             lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
-            childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
+            childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
+            launchConfiguration: launchConfiguration, runtimeState: runtimeState,
+            attachmentSnapshot: (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot(),
+            hasFinalRender: (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderSnapshot != nil)
+    }
+
+    private func loadCurrentState(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
+            if let finalState = try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) { return finalState }
+            return try endedStatePayload(sessionID: sessionID, paths: paths, runtimeState: runtimeState)
+        }
+        guard FileManager.default.fileExists(atPath: paths.subscriptionSocketPath) else {
+            throw NSError(
+                domain: "SpacesDaemonController", code: 404,
+                userInfo: [NSLocalizedDescriptionKey: "Terminal session '\(sessionID)' has no live state stream."])
+        }
+
+        let socketFD = try connectUnixSocket(path: paths.subscriptionSocketPath)
+        defer {
+            Darwin.shutdown(socketFD, SHUT_RDWR)
+            close(socketFD)
+        }
+
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = read(socketFD, &buffer, buffer.count)
+            if count == 0 { break }
+            if count < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            data.append(buffer, count: count)
+            if let newlineIndex = data.firstIndex(of: 0x0A) {
+                data.removeSubrange(newlineIndex..<data.endIndex)
+                break
+            }
+        }
+
+        guard !data.isEmpty else {
+            throw NSError(
+                domain: "SpacesDaemonController", code: 500,
+                userInfo: [NSLocalizedDescriptionKey: "Terminal session '\(sessionID)' did not return a state payload."])
+        }
+        return try GhosttyRemoteSessionStateCodec.decodeLine(data)
+    }
+
+    private func endedStatePayload(sessionID: String, paths: TerminalSessionPaths, runtimeState: TerminalSessionRuntimeState) throws
+        -> GhosttyRemoteSessionStatePayload
+    {
+        let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
+        let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot()
+        let emittedAt = runtimeState.exitedAt ?? runtimeState.updatedAt
+        return GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: emittedAt, sessionStateRevision: nil,
+            sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
+            title: runtimeState.title ?? launchConfiguration?.title ?? sessionID,
+            workingDirectory: runtimeState.workingDirectory ?? launchConfiguration?.workingDirectory ?? paths.rootDirectory, outputByteCount: nil)
+    }
+
+    private func connectUnixSocket(path: String) throws -> Int32 {
+        let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        try setNoSIGPIPE(socketFD)
+        var address = try makeUnixSocketAddress(path: path)
+        let connectResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                connect(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connectResult == 0 else {
+            let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+            close(socketFD)
+            throw POSIXError(code)
+        }
+        return socketFD
+    }
+
+    private func makeUnixSocketAddress(path: String) throws -> sockaddr_un {
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let maxLength = MemoryLayout.size(ofValue: address.sun_path)
+        let utf8Path = path.utf8CString
+        guard utf8Path.count <= maxLength else { throw POSIXError(.ENAMETOOLONG) }
+        withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
+            _ = utf8Path.withUnsafeBufferPointer { buffer in memcpy(pointer, buffer.baseAddress, buffer.count) }
+        }
+        return address
+    }
+
+    private func setNoSIGPIPE(_ fileDescriptor: Int32) throws {
+        var yes: Int32 = 1
+        guard setsockopt(fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    private func authorizeTerminalLinkTransfer(linkID: String, sessionID: String, resolvedPath: String, now: Date) {
+        terminalLinkTransferAuthorizations[linkID] = TerminalLinkTransferAuthorization(
+            sessionID: sessionID, resolvedPath: resolvedPath, expiresAt: now.addingTimeInterval(Self.terminalLinkTransferAuthorizationTTL))
+    }
+
+    private func terminalLinkTransferAuthorization(linkID: String, sessionID: String, now: Date) throws -> TerminalLinkTransferAuthorization? {
+        pruneTerminalLinkTransferAuthorizations(now: now)
+        guard let authorization = terminalLinkTransferAuthorizations[linkID] else { return nil }
+        guard authorization.sessionID == sessionID else { throw SpacesMobileTerminalLinkResolverError.sessionMismatch }
+        return authorization
+    }
+
+    private func pruneTerminalLinkTransferAuthorizations(now: Date) {
+        terminalLinkTransferAuthorizations = terminalLinkTransferAuthorizations.filter { $0.value.expiresAt > now }
+    }
+
+    private func canResolveTerminalLinkWithoutLocalState(_ value: String?) -> Bool {
+        guard let link = normalizedString(value), let scheme = URL(string: link)?.scheme?.lowercased() else { return false }
+        return scheme != "file"
+    }
+
+    private func terminalWorkingDirectory(sessionID: String) throws -> String {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        if let workingDirectory = normalizedString((try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.workingDirectory) {
+            return workingDirectory
+        }
+        return try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).workingDirectory
+    }
+
+    private func normalizedString(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    private func terminalServiceLinkMetadata(_ metadata: SpacesMobileTerminalLinkMetadata) -> TerminalServiceTerminalLinkMetadata {
+        TerminalServiceTerminalLinkMetadata(
+            id: metadata.id, source: metadata.source.rawValue, originalLink: metadata.originalLink, displayName: metadata.displayName,
+            contentType: metadata.contentType, mediaKind: metadata.mediaKind?.rawValue, byteCount: metadata.byteCount,
+            externalURL: metadata.externalURL)
+    }
+
+    private func terminalServiceLinkChunk(_ chunk: SpacesMobileTerminalLinkChunk) -> TerminalServiceTerminalLinkChunk {
+        TerminalServiceTerminalLinkChunk(
+            linkID: chunk.linkID, offset: chunk.offset, byteCount: chunk.byteCount, isFinal: chunk.isFinal, base64Data: chunk.base64Data)
     }
 
     private func startLifecycleTimer() {

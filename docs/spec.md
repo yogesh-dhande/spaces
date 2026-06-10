@@ -126,13 +126,14 @@ Spaces focuses those windows; it does not decide their geometry.
 - Project settings expose the project default compute host. Workspace detail exposes an override selector that inherits the project default unless a remote host is selected for that workspace.
 - A workspace keeps one stable binding per selected remote host. The binding records the remote path and branch and is reused when the workspace returns to that host.
 - Remote workspace launch uses a manifest containing workspace ID, project ID, local path, remote path, branch, target branch, Git remote URL, named ports, process environment, and allowed file roots.
-- Remote workspace setup scripts, configured processes, coding-agent launchers, ad hoc terminals, and stop scripts execute on the selected host's `spacesd`; the Mac records the remote daemon session IDs, log paths, and compute-host target in workspace runtime state.
+- Remote workspace setup scripts, configured processes, coding-agent launchers, ad hoc terminals, and stop scripts execute on the selected host's `spacesd`; the Mac records the returned daemon session IDs and log paths while resolving daemon ownership from the workspace's effective host.
 - A missing remote worktree may be cloned only from the provided Git remote URL and selected branch into the stable binding path. Existing remote binding directories are preserved and validated before execution.
 - Reusing a remote binding requires a fast-forward-only refresh of the remote worktree to the workspace branch tip before terminals or processes launch.
 - Dirty remote worktrees, untracked files that would be overwritten, divergent histories, missing branches, fetch failures, and checkout failures should block launch with a message that names the host, path, branch, and resolution guidance.
 - Remote refresh must not reset, stash, force checkout, or clean the remote worktree.
 - The product CLI should not expose `spaces compute host ...` commands. Automation-oriented compute-host bootstrap, status, and test commands belong in `spacese2e`.
 - Lifecycle, terminal, process, agent, and browser commands should report whether work is local or remote when that context affects the action.
+- Remote workspace browser sessions that target a named localhost service port should open through a Mac-owned SSH local forward to the selected host. Unrelated browser URLs should open unchanged.
 
 ## Workspaces
 
@@ -158,6 +159,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - `Spaces`-hosted terminal windows opened or focused from the app stay visible with the Spaces app instead of following the external-app hide behavior used for browsers, Finder, or editors.
 - The first-party iOS client should show a workspace-first home with every non-archived workspace and its mobile-controllable runtime rows inline: configured processes, configured coding agents, and workspace terminals.
 - The first-party iOS client should read project and workspace metadata through Mac `spacesd` and attach terminal detail, input, resize, scroll, and media preview requests to the local or remote `spacesd` that owns the session.
+- The iOS terminal path should use the Mac bridge for project, workspace, host, and runtime lifecycle mutations while sending terminal state, ownership, input, resize, scroll, and terminal-link preview requests directly to the owning local or remote daemon when the mobile overview includes a daemon endpoint.
 - The iOS home should keep search and row filters local to the current app session. The search field should sit beside a filter button, and filter controls should cover row type (`Processes`, `Coding Agents`, `Workspace Terminals`) plus run state (`Not Started`, `Running`, `Exited`).
 - iOS row taps should open a terminal when the row has a session. Rows without a live session should route the primary action to running the configured process or coding agent when that action is available. Exited configured process rows with an inspectable terminal session should keep row tap for terminal inspection and expose an inline run action.
 - The iOS client should let users create a workspace in any existing project while Mac `spacesd` is reachable. Git projects should expose title, create-branch or existing-branch mode, branch name, target branch, optional directory name, and selected compute host behavior owned by the Mac; non-git projects should hide branch fields.

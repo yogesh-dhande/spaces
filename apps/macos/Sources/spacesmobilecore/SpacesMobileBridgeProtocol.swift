@@ -4,6 +4,20 @@ import spacesterminalcore
 
 public enum SpacesMobileFirstPartyPolicy { public static let allowedBundleID = "dev.usespaces.spacesmobile" }
 
+public struct SpacesMobileTerminalDaemonEndpoint: Codable, Sendable, Equatable {
+    public let host: String
+    public let port: Int
+    public let authToken: String?
+    public let certificateFingerprint: String
+
+    public init(host: String, port: Int, authToken: String?, certificateFingerprint: String) {
+        self.host = host
+        self.port = port
+        self.authToken = authToken
+        self.certificateFingerprint = certificateFingerprint
+    }
+}
+
 public struct SpacesMobileClientApp: Codable, Sendable, Equatable {
     public let installationID: String
     public let bundleID: String
@@ -63,10 +77,11 @@ public struct SpacesMobileWorkspaceProcessRow: Codable, Sendable, Equatable, Ide
     public let canRun: Bool
     public let canStop: Bool
     public let canRestart: Bool
+    public let daemonEndpoint: SpacesMobileTerminalDaemonEndpoint?
 
     public init(
         id: String, workspaceID: String, name: String, command: String, templateID: String? = nil, processID: String?, sessionID: String?,
-        runState: SpacesMobileRunState, canRun: Bool, canStop: Bool, canRestart: Bool
+        runState: SpacesMobileRunState, canRun: Bool, canStop: Bool, canRestart: Bool, daemonEndpoint: SpacesMobileTerminalDaemonEndpoint? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -79,6 +94,7 @@ public struct SpacesMobileWorkspaceProcessRow: Codable, Sendable, Equatable, Ide
         self.canRun = canRun
         self.canStop = canStop
         self.canRestart = canRestart
+        self.daemonEndpoint = daemonEndpoint
     }
 }
 
@@ -96,11 +112,12 @@ public struct SpacesMobileWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
     public let canRun: Bool
     public let canStop: Bool
     public let canRestart: Bool
+    public let daemonEndpoint: SpacesMobileTerminalDaemonEndpoint?
 
     public init(
         id: String, workspaceID: String, name: String, command: String, launcherID: String? = nil, agentID: String?, sessionID: String?,
         isConfigured: Bool, runState: SpacesMobileRunState, activityState: SpacesMobileCodingAgentActivityState, canRun: Bool, canStop: Bool,
-        canRestart: Bool
+        canRestart: Bool, daemonEndpoint: SpacesMobileTerminalDaemonEndpoint? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -115,6 +132,7 @@ public struct SpacesMobileWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
         self.canRun = canRun
         self.canStop = canStop
         self.canRestart = canRestart
+        self.daemonEndpoint = daemonEndpoint
     }
 }
 
@@ -127,10 +145,11 @@ public struct SpacesMobileWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
     public let runState: SpacesMobileRunState
     public let canOpenTerminal: Bool
     public let canStop: Bool
+    public let daemonEndpoint: SpacesMobileTerminalDaemonEndpoint?
 
     public init(
         id: String, workspaceID: String, title: String, workingDirectory: String, sessionID: String?, runState: SpacesMobileRunState,
-        canOpenTerminal: Bool, canStop: Bool = false
+        canOpenTerminal: Bool, canStop: Bool = false, daemonEndpoint: SpacesMobileTerminalDaemonEndpoint? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -140,6 +159,7 @@ public struct SpacesMobileWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
         self.runState = runState
         self.canOpenTerminal = canOpenTerminal
         self.canStop = canStop
+        self.daemonEndpoint = daemonEndpoint
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -151,6 +171,7 @@ public struct SpacesMobileWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
         case runState
         case canOpenTerminal
         case canStop
+        case daemonEndpoint
     }
 
     public init(from decoder: any Decoder) throws {
@@ -163,6 +184,7 @@ public struct SpacesMobileWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
         runState = try container.decode(SpacesMobileRunState.self, forKey: .runState)
         canOpenTerminal = try container.decode(Bool.self, forKey: .canOpenTerminal)
         canStop = try container.decodeIfPresent(Bool.self, forKey: .canStop) ?? false
+        daemonEndpoint = try container.decodeIfPresent(SpacesMobileTerminalDaemonEndpoint.self, forKey: .daemonEndpoint)
     }
 }
 
@@ -270,13 +292,14 @@ public struct SpacesMobileTerminalSessionSummary: Codable, Sendable, Equatable, 
     public let rowKind: SpacesMobileTerminalSessionRowKind
     public let rowSourceID: String?
     public let hasFinalRender: Bool
+    public let daemonEndpoint: SpacesMobileTerminalDaemonEndpoint?
 
     public init(
         id: String, title: String, workingDirectory: String, state: TerminalSessionState, backend: TerminalSessionBackendKind,
         lifetimePolicy: TerminalSessionLifetimePolicy, servicePID: Int32, childPID: Int32?, workspaceID: String?, workspaceTitle: String?,
         projectID: String?, projectName: String?, createdAt: String, updatedAt: String, isControlAvailable: Bool, isSubscriptionAvailable: Bool,
         attachmentSnapshot: TerminalSessionAttachmentSnapshot, rowKind: SpacesMobileTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil,
-        hasFinalRender: Bool = false
+        hasFinalRender: Bool = false, daemonEndpoint: SpacesMobileTerminalDaemonEndpoint? = nil
     ) {
         self.id = id
         self.title = title
@@ -298,6 +321,7 @@ public struct SpacesMobileTerminalSessionSummary: Codable, Sendable, Equatable, 
         self.rowKind = rowKind
         self.rowSourceID = rowSourceID
         self.hasFinalRender = hasFinalRender
+        self.daemonEndpoint = daemonEndpoint
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -321,6 +345,7 @@ public struct SpacesMobileTerminalSessionSummary: Codable, Sendable, Equatable, 
         case rowKind
         case rowSourceID
         case hasFinalRender
+        case daemonEndpoint
     }
 
     public init(from decoder: any Decoder) throws {
@@ -346,6 +371,7 @@ public struct SpacesMobileTerminalSessionSummary: Codable, Sendable, Equatable, 
         rowKind = try container.decodeIfPresent(SpacesMobileTerminalSessionRowKind.self, forKey: .rowKind) ?? .liveSession
         rowSourceID = try container.decodeIfPresent(String.self, forKey: .rowSourceID)
         hasFinalRender = try container.decodeIfPresent(Bool.self, forKey: .hasFinalRender) ?? false
+        daemonEndpoint = try container.decodeIfPresent(SpacesMobileTerminalDaemonEndpoint.self, forKey: .daemonEndpoint)
     }
 }
 

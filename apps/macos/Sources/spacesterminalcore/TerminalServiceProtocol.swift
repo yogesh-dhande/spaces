@@ -10,11 +10,17 @@ public struct TerminalServiceRequest: Codable, Sendable, Equatable {
     public let runtimeManifest: TerminalServiceWorkspaceRuntimeManifest?
     public let worktreeRefresh: TerminalServiceWorktreeRefreshRequest?
     public let workspaceCommand: TerminalServiceWorkspaceCommandRequest?
+    public let controlRequest: TerminalControlRequest?
+    public let terminalLink: String?
+    public let terminalLinkID: String?
+    public let chunkOffset: Int64?
+    public let chunkLimit: Int?
 
     public init(
         command: String, authToken: String? = nil, launchConfiguration: TerminalSessionLaunchConfiguration? = nil, sessionID: String? = nil,
         runtimeManifest: TerminalServiceWorkspaceRuntimeManifest? = nil, worktreeRefresh: TerminalServiceWorktreeRefreshRequest? = nil,
-        workspaceCommand: TerminalServiceWorkspaceCommandRequest? = nil
+        workspaceCommand: TerminalServiceWorkspaceCommandRequest? = nil, controlRequest: TerminalControlRequest? = nil, terminalLink: String? = nil,
+        terminalLinkID: String? = nil, chunkOffset: Int64? = nil, chunkLimit: Int? = nil
     ) {
         self.command = command
         self.authToken = authToken
@@ -23,12 +29,18 @@ public struct TerminalServiceRequest: Codable, Sendable, Equatable {
         self.runtimeManifest = runtimeManifest
         self.worktreeRefresh = worktreeRefresh
         self.workspaceCommand = workspaceCommand
+        self.controlRequest = controlRequest
+        self.terminalLink = terminalLink
+        self.terminalLinkID = terminalLinkID
+        self.chunkOffset = chunkOffset
+        self.chunkLimit = chunkLimit
     }
 
     public func withAuthToken(_ authToken: String?) -> TerminalServiceRequest {
         TerminalServiceRequest(
             command: command, authToken: authToken, launchConfiguration: launchConfiguration, sessionID: sessionID, runtimeManifest: runtimeManifest,
-            worktreeRefresh: worktreeRefresh, workspaceCommand: workspaceCommand)
+            worktreeRefresh: worktreeRefresh, workspaceCommand: workspaceCommand, controlRequest: controlRequest, terminalLink: terminalLink,
+            terminalLinkID: terminalLinkID, chunkOffset: chunkOffset, chunkLimit: chunkLimit)
     }
 }
 
@@ -119,6 +131,47 @@ public struct TerminalServiceCommandResult: Codable, Sendable, Equatable {
     }
 }
 
+public struct TerminalServiceTerminalLinkMetadata: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let source: String
+    public let originalLink: String
+    public let displayName: String
+    public let contentType: String?
+    public let mediaKind: String?
+    public let byteCount: Int64?
+    public let externalURL: String?
+
+    public init(
+        id: String, source: String, originalLink: String, displayName: String, contentType: String?, mediaKind: String?, byteCount: Int64?,
+        externalURL: String?
+    ) {
+        self.id = id
+        self.source = source
+        self.originalLink = originalLink
+        self.displayName = displayName
+        self.contentType = contentType
+        self.mediaKind = mediaKind
+        self.byteCount = byteCount
+        self.externalURL = externalURL
+    }
+}
+
+public struct TerminalServiceTerminalLinkChunk: Codable, Sendable, Equatable {
+    public let linkID: String
+    public let offset: Int64
+    public let byteCount: Int
+    public let isFinal: Bool
+    public let base64Data: String
+
+    public init(linkID: String, offset: Int64, byteCount: Int, isFinal: Bool, base64Data: String) {
+        self.linkID = linkID
+        self.offset = offset
+        self.byteCount = byteCount
+        self.isFinal = isFinal
+        self.base64Data = base64Data
+    }
+}
+
 public struct TerminalServiceSessionSummary: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let title: String
@@ -130,10 +183,16 @@ public struct TerminalServiceSessionSummary: Codable, Sendable, Equatable, Ident
     public let childPID: Int32?
     public let controlSocketPath: String
     public let outputPath: String
+    public let launchConfiguration: TerminalSessionLaunchConfiguration?
+    public let runtimeState: TerminalSessionRuntimeState?
+    public let attachmentSnapshot: TerminalSessionAttachmentSnapshot?
+    public let hasFinalRender: Bool
 
     public init(
         id: String, title: String, workingDirectory: String, backend: TerminalSessionBackendKind, lifetimePolicy: TerminalSessionLifetimePolicy,
-        state: TerminalSessionState, servicePID: Int32, childPID: Int32?, controlSocketPath: String, outputPath: String
+        state: TerminalSessionState, servicePID: Int32, childPID: Int32?, controlSocketPath: String, outputPath: String,
+        launchConfiguration: TerminalSessionLaunchConfiguration? = nil, runtimeState: TerminalSessionRuntimeState? = nil,
+        attachmentSnapshot: TerminalSessionAttachmentSnapshot? = nil, hasFinalRender: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -145,6 +204,10 @@ public struct TerminalServiceSessionSummary: Codable, Sendable, Equatable, Ident
         self.childPID = childPID
         self.controlSocketPath = controlSocketPath
         self.outputPath = outputPath
+        self.launchConfiguration = launchConfiguration
+        self.runtimeState = runtimeState
+        self.attachmentSnapshot = attachmentSnapshot
+        self.hasFinalRender = hasFinalRender
     }
 }
 
@@ -155,10 +218,16 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
     public let sessions: [TerminalServiceSessionSummary]?
     public let servicePID: Int32?
     public let commandResult: TerminalServiceCommandResult?
+    public let sessionState: GhosttyRemoteSessionStatePayload?
+    public let controlResponse: TerminalControlResponse?
+    public let terminalLinkMetadata: TerminalServiceTerminalLinkMetadata?
+    public let terminalLinkChunk: TerminalServiceTerminalLinkChunk?
 
     public init(
         ok: Bool, message: String, session: TerminalServiceSessionSummary? = nil, sessions: [TerminalServiceSessionSummary]? = nil,
-        servicePID: Int32? = nil, commandResult: TerminalServiceCommandResult? = nil
+        servicePID: Int32? = nil, commandResult: TerminalServiceCommandResult? = nil, sessionState: GhosttyRemoteSessionStatePayload? = nil,
+        controlResponse: TerminalControlResponse? = nil, terminalLinkMetadata: TerminalServiceTerminalLinkMetadata? = nil,
+        terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil
     ) {
         self.ok = ok
         self.message = message
@@ -166,6 +235,10 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
         self.sessions = sessions
         self.servicePID = servicePID
         self.commandResult = commandResult
+        self.sessionState = sessionState
+        self.controlResponse = controlResponse
+        self.terminalLinkMetadata = terminalLinkMetadata
+        self.terminalLinkChunk = terminalLinkChunk
     }
 }
 

@@ -621,7 +621,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        return resolveBrowserSessions(sessions, env: env).map { resolved in
+        return try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan).map { resolved in
             BrowserSession(name: resolved.session.name, url: resolved.prefix, extractedWindow: resolved.session.extractedWindow)
         }
     }
@@ -2971,9 +2971,12 @@ public final class WorkspaceOrchestrator {
     )] {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let sessions = try browserSessions ?? store.workspaceBrowserSessions(workspaceID: workspace.id)
-        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-        return try resolveBrowserSessions(sessions, env: env).compactMap { resolved in
+        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
+        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let env = buildWorkspaceEnv(
+            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
+            runtimeManifest: runtimePlan.manifest)
+        return try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan).compactMap { resolved in
             guard let targetURL = sanitizedFocusName(resolved.prefix) else { return nil }
             let name = try requiredConfiguredFocusName(resolved.session.name, kind: "Browser session")
             return (name, targetURL)
@@ -3502,9 +3505,12 @@ public final class WorkspaceOrchestrator {
     private func resolvedBrowserSessionPrefixes(project: ProjectRecord, workspace: WorkspaceRecord) throws -> [String] {
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         guard !sessions.isEmpty else { return [] }
-        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-        return resolveBrowserSessions(sessions, env: env).map(\.prefix)
+        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
+        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let env = buildWorkspaceEnv(
+            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
+            runtimeManifest: runtimePlan.manifest)
+        return try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan).map(\.prefix)
     }
 
     private func resolveBrowserSessions(_ sessions: [BrowserSession], env: [String: String]) -> [ResolvedBrowserSession] {
@@ -3518,6 +3524,22 @@ public final class WorkspaceOrchestrator {
             resolved.append(ResolvedBrowserSession(index: index, prefix: prefix, session: session))
         }
         return resolved
+    }
+
+    private func resolveBrowserSessions(_ sessions: [BrowserSession], env: [String: String], runtimePlan: WorkspaceRuntimePlan) throws
+        -> [ResolvedBrowserSession]
+    {
+        let resolved = resolveBrowserSessions(sessions, env: env)
+        guard runtimePlan.selection.isRemote else { return resolved }
+        var forwarded: [ResolvedBrowserSession] = []
+        var seen = Set<String>()
+        for session in resolved {
+            let prefix = try BrowserSSHForwardResolver.resolvedURL(session.prefix, runtimePlan: runtimePlan)
+            guard !prefix.isEmpty, !seen.contains(prefix) else { continue }
+            seen.insert(prefix)
+            forwarded.append(ResolvedBrowserSession(index: session.index, prefix: prefix, session: session.session))
+        }
+        return forwarded
     }
 
     private func extractSessionWindowIfNeeded(
@@ -3552,14 +3574,17 @@ public final class WorkspaceOrchestrator {
         guard !sessions.isEmpty else { return .notMapped }
 
         let namedPortsStartedAt = currentDate()
-        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
+        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
         logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=load_named_ports elapsed_ms=\(elapsedMS(since: namedPortsStartedAt)) count=\(namedPorts.count)"
+            "workspace=\(workspaceID) path=extracted_substep step=load_named_ports elapsed_ms=\(elapsedMS(since: namedPortsStartedAt)) count=\(assignedPorts.count)"
         )
 
         let resolveSessionsStartedAt = currentDate()
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
+        let env = buildWorkspaceEnv(
+            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
+            runtimeManifest: runtimePlan.manifest)
+        let resolvedSessions = try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan)
         logBrowserFocus(
             "workspace=\(workspaceID) path=extracted_substep step=resolve_sessions elapsed_ms=\(elapsedMS(since: resolveSessionsStartedAt)) count=\(resolvedSessions.count)"
         )
@@ -5066,14 +5091,17 @@ public final class WorkspaceOrchestrator {
 
     private func ensureBrowserSessions(
         project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String], extractOnAttach: Bool,
-        background: Bool = false
+        runtimePlan: WorkspaceRuntimePlan? = nil, background: Bool = false
     ) throws -> (windows: [WindowRecord], sessions: [BrowserSession]) {
         _ = project
         _ = extractOnAttach
         try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         guard !sessions.isEmpty else { return ([], []) }
         guard chrome.isAvailable() else { throw WorkspaceError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
-        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
+        let resolvedSessions =
+            if let runtimePlan { try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan) } else {
+                resolveBrowserSessions(sessions, env: env)
+            }
         var attached: [WindowRecord] = []
         var refreshedSessions = sessions
         for resolvedSession in resolvedSessions {
@@ -6490,9 +6518,12 @@ public final class WorkspaceOrchestrator {
         guard !sessions.isEmpty else { throw WorkspaceError.invalidArgument(message: "No browser sessions are configured for this workspace.") }
         guard chrome.isAvailable() else { throw WorkspaceError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
 
-        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
+        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
+        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let env = buildWorkspaceEnv(
+            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
+            runtimeManifest: runtimePlan.manifest)
+        let resolvedSessions = try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan)
         guard
             let matchedSession = resolvedSessions.compactMap({ resolved -> (session: ResolvedBrowserSession, score: Int)? in
                 guard let score = browserURLMatchScore(targetURL, targetURL: resolved.prefix) else { return nil }

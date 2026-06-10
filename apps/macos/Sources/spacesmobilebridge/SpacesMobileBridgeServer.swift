@@ -155,6 +155,18 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         let expiresAt: Date
     }
 
+    private struct RemoteTerminalSessionList {
+        let entries: [TerminalSessionCatalogEntry]
+        let hasFinalRenderBySessionID: [String: Bool]
+    }
+
+    private struct RemoteTerminalEndpointKey: Hashable {
+        let host: String
+        let port: Int
+        let authToken: String?
+        let certificateFingerprint: String
+    }
+
     private final class StreamSendSequencer: @unchecked Sendable {
         typealias Operation = @Sendable (@escaping @Sendable (Error?) -> Void) -> Void
 
@@ -590,24 +602,86 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = mobileOrchestrator(store: store)
         let projects = try store.projects()
+        let hostsByID = Dictionary(uniqueKeysWithValues: try store.computeHosts().map { ($0.id, $0) })
         let workspaces = try projects.flatMap { project in
             try store.workspaces(projectID: project.id, includeArchived: false).map { workspace in
                 SpacesMobileOverviewBuilder.WorkspaceDescriptor(
                     project: project, workspace: workspace, settings: try? orchestrator.workspaceSettings(workspaceID: workspace.id),
                     runningProcesses: try store.runningProcesses(workspaceID: workspace.id),
-                    agentWindows: try store.agentWindows(workspaceID: workspace.id), windows: try store.windows(workspaceID: workspace.id))
+                    agentWindows: try store.agentWindows(workspaceID: workspace.id), windows: try store.windows(workspaceID: workspace.id),
+                    terminalDaemonEndpoint: terminalDaemonEndpoint(project: project, workspace: workspace, hostsByID: hostsByID))
             }
         }
-        let sessions = try TerminalSessionCatalog.listLiveSessions()
-        let workspaceRows = try loadWorkspaceTerminalRows(store: store, workspaces: workspaces)
+        let localSessions = try TerminalSessionCatalog.listLiveSessions()
+        let remoteSessions = loadRemoteTerminalSessions(workspaces: workspaces)
+        let sessions = localSessions + remoteSessions.entries
+        let workspaceRows = try loadWorkspaceTerminalRows(
+            store: store, workspaces: workspaces, sessions: sessions, hasFinalRenderBySessionID: remoteSessions.hasFinalRenderBySessionID)
         return SpacesMobileOverviewBuilder.build(projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions)
     }
 
-    private func loadWorkspaceTerminalRows(store: SQLiteStore, workspaces: [SpacesMobileOverviewBuilder.WorkspaceDescriptor]) throws
-        -> [SpacesMobileOverviewBuilder.WorkspaceTerminalRow]
+    private func terminalDaemonEndpoint(project: ProjectRecord, workspace: WorkspaceRecord, hostsByID: [String: ComputeHostRecord])
+        -> SpacesMobileTerminalDaemonEndpoint?
     {
+        switch ComputeHostPlanner.selectHost(project: project, workspace: workspace, hostsByID: hostsByID) {
+        case .localMac: return nil
+        case .remote(let host):
+            return SpacesMobileTerminalDaemonEndpoint(
+                host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: try? ComputeHostCredentialStore.authToken(hostID: host.id),
+                certificateFingerprint: host.daemonEndpoint.certificateFingerprint)
+        }
+    }
+
+    private func loadRemoteTerminalSessions(workspaces: [SpacesMobileOverviewBuilder.WorkspaceDescriptor]) -> RemoteTerminalSessionList {
+        var entries: [TerminalSessionCatalogEntry] = []
+        var hasFinalRenderBySessionID: [String: Bool] = [:]
+        var endpointsByKey: [RemoteTerminalEndpointKey: SpacesMobileTerminalDaemonEndpoint] = [:]
+        for endpoint in workspaces.compactMap(\.terminalDaemonEndpoint) {
+            let key = RemoteTerminalEndpointKey(
+                host: endpoint.host, port: endpoint.port, authToken: endpoint.authToken, certificateFingerprint: endpoint.certificateFingerprint)
+            endpointsByKey[key] = endpoint
+        }
+        for endpoint in endpointsByKey.values {
+            guard
+                let response = try? TerminalServiceClient.sendPinnedTLS(
+                    request: TerminalServiceRequest(command: "list"), host: endpoint.host, port: endpoint.port, authToken: endpoint.authToken,
+                    certificateFingerprint: endpoint.certificateFingerprint, timeout: 5), response.ok, let sessions = response.sessions
+            else { continue }
+            for summary in sessions {
+                if let entry = remoteTerminalCatalogEntry(summary) { entries.append(entry) }
+                hasFinalRenderBySessionID[summary.id] = summary.hasFinalRender
+            }
+        }
+        return RemoteTerminalSessionList(entries: entries, hasFinalRenderBySessionID: hasFinalRenderBySessionID)
+    }
+
+    private func remoteTerminalCatalogEntry(_ summary: TerminalServiceSessionSummary) -> TerminalSessionCatalogEntry? {
+        let fallbackTimestamp = summary.runtimeState?.updatedAt ?? ISO8601DateFormatter().string(from: Date())
+        let launchConfiguration =
+            summary.launchConfiguration
+            ?? TerminalSessionLaunchConfiguration(
+                sessionID: summary.id, backend: summary.backend, lifetimePolicy: summary.lifetimePolicy, title: summary.title,
+                workingDirectory: summary.workingDirectory, shell: "/bin/bash", command: nil, createdAt: fallbackTimestamp, workspaceID: nil,
+                kind: .shell)
+        let runtimeState =
+            summary.runtimeState
+            ?? TerminalSessionRuntimeState(
+                sessionID: summary.id, backend: summary.backend, servicePID: summary.servicePID, childPID: summary.childPID, state: summary.state,
+                updatedAt: fallbackTimestamp, title: summary.title, workingDirectory: summary.workingDirectory)
+        guard let paths = try? TerminalSessionPaths.forSession(id: summary.id) else { return nil }
+        return TerminalSessionCatalogEntry(
+            launchConfiguration: launchConfiguration, runtimeState: runtimeState,
+            attachmentSnapshot: summary.attachmentSnapshot ?? TerminalSessionAttachmentSnapshot(), paths: paths,
+            isControlAvailable: summary.state.isInteractive, isSubscriptionAvailable: summary.state.isInteractive)
+    }
+
+    private func loadWorkspaceTerminalRows(
+        store: SQLiteStore, workspaces: [SpacesMobileOverviewBuilder.WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry],
+        hasFinalRenderBySessionID: [String: Bool]
+    ) throws -> [SpacesMobileOverviewBuilder.WorkspaceTerminalRow] {
         var rows: [SpacesMobileOverviewBuilder.WorkspaceTerminalRow] = []
         var representedSessionIDs = Set<String>()
+        let sessionsByID = Dictionary(sessions.map { ($0.sessionID, $0) }, uniquingKeysWith: { existing, _ in existing })
         for descriptor in workspaces {
             let processesBySlot = Dictionary(grouping: try store.runningProcesses(workspaceID: descriptor.workspace.id), by: { processSlotKey($0) })
             for process in processesBySlot.values.compactMap(preferredProcessRecord).sorted(by: {
@@ -617,11 +691,11 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                     let sessionID = normalizedTerminalSessionID(process.terminalNativeID ?? process.terminalTrackingID)
                 else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
-                guard let entry = terminalCatalogEntry(sessionID: sessionID) else { continue }
+                guard let entry = sessionsByID[sessionID] ?? terminalCatalogEntry(sessionID: sessionID) else { continue }
                 rows.append(
                     SpacesMobileOverviewBuilder.WorkspaceTerminalRow(
                         entry: entry, workspace: descriptor, title: process.templateName, rowKind: .process, rowSourceID: process.id,
-                        hasFinalRender: terminalFinalRenderAvailable(sessionID: sessionID)))
+                        hasFinalRender: hasFinalRenderBySessionID[sessionID] ?? terminalFinalRenderAvailable(sessionID: sessionID)))
             }
 
             let agentsBySlot = Dictionary(grouping: try store.agentWindows(workspaceID: descriptor.workspace.id), by: { agentSlotKey($0) })
@@ -631,11 +705,11 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                 guard agent.provider == .spaces, let sessionID = normalizedTerminalSessionID(agent.terminalNativeID ?? agent.terminalTrackingID)
                 else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
-                guard let entry = terminalCatalogEntry(sessionID: sessionID) else { continue }
+                guard let entry = sessionsByID[sessionID] ?? terminalCatalogEntry(sessionID: sessionID) else { continue }
                 rows.append(
                     SpacesMobileOverviewBuilder.WorkspaceTerminalRow(
                         entry: entry, workspace: descriptor, title: agent.label ?? entry.effectiveTitle, rowKind: .agent, rowSourceID: agent.id,
-                        hasFinalRender: terminalFinalRenderAvailable(sessionID: sessionID)))
+                        hasFinalRender: hasFinalRenderBySessionID[sessionID] ?? terminalFinalRenderAvailable(sessionID: sessionID)))
             }
         }
         return rows

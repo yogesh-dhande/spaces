@@ -11,10 +11,11 @@ struct SpacesMobileOverviewBuilder {
         let runningProcesses: [RunningProcessRecord]
         let agentWindows: [AgentWindowRecord]
         let windows: [WindowRecord]
+        let terminalDaemonEndpoint: SpacesMobileTerminalDaemonEndpoint?
 
         init(
             project: ProjectRecord, workspace: WorkspaceRecord, settings: WorkspaceSettings? = nil, runningProcesses: [RunningProcessRecord] = [],
-            agentWindows: [AgentWindowRecord] = [], windows: [WindowRecord] = []
+            agentWindows: [AgentWindowRecord] = [], windows: [WindowRecord] = [], terminalDaemonEndpoint: SpacesMobileTerminalDaemonEndpoint? = nil
         ) {
             self.project = project
             self.workspace = workspace
@@ -22,6 +23,7 @@ struct SpacesMobileOverviewBuilder {
             self.runningProcesses = runningProcesses
             self.agentWindows = agentWindows
             self.windows = windows
+            self.terminalDaemonEndpoint = terminalDaemonEndpoint
         }
     }
 
@@ -128,7 +130,7 @@ struct SpacesMobileOverviewBuilder {
             createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
             isControlAvailable: isInteractive && session.isControlAvailable,
             isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
-            rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender)
+            rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender, daemonEndpoint: matchedWorkspace?.terminalDaemonEndpoint)
     }
 
     private static func normalizedPath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
@@ -197,7 +199,7 @@ struct SpacesMobileOverviewBuilder {
                 SpacesMobileWorkspaceProcessRow(
                     id: template.id, workspaceID: descriptor.workspace.id, name: template.name ?? "", command: template.command,
                     templateID: template.id, processID: runningProcess?.id, sessionID: availableSessionID, runState: state, canRun: !isRunning,
-                    canStop: isRunning, canRestart: isRunning))
+                    canStop: isRunning, canRestart: isRunning, daemonEndpoint: descriptor.terminalDaemonEndpoint))
         }
 
         for runningProcess in descriptor.runningProcesses where !usedProcessIDs.contains(runningProcess.id) {
@@ -211,7 +213,8 @@ struct SpacesMobileOverviewBuilder {
                 SpacesMobileWorkspaceProcessRow(
                     id: "process-runtime:\(runningProcess.id)", workspaceID: descriptor.workspace.id, name: name.isEmpty ? "Process" : name,
                     command: runningProcess.command, templateID: runningProcess.templateID, processID: runningProcess.id,
-                    sessionID: availableSessionID, runState: state, canRun: false, canStop: isRunning, canRestart: false))
+                    sessionID: availableSessionID, runState: state, canRun: false, canStop: isRunning, canRestart: false,
+                    daemonEndpoint: descriptor.terminalDaemonEndpoint))
         }
         return ProcessRows(rows: rows, claimedTerminalKeys: claimedTerminalKeys)
     }
@@ -245,7 +248,8 @@ struct SpacesMobileOverviewBuilder {
             rows.append(
                 codingAgentRow(
                     id: "configured-agent:\(descriptor.workspace.id):\(launcher.id)", workspaceID: descriptor.workspace.id, name: launcher.name,
-                    command: launcher.command, launcherID: launcher.id, agent: agent, isConfigured: true, sessionsByID: sessionsByID))
+                    command: launcher.command, launcherID: launcher.id, agent: agent, isConfigured: true, sessionsByID: sessionsByID,
+                    daemonEndpoint: descriptor.terminalDaemonEndpoint))
         }
 
         for agent in descriptor.agentWindows where !usedAgentIDs.contains(agent.id) {
@@ -254,14 +258,14 @@ struct SpacesMobileOverviewBuilder {
                 codingAgentRow(
                     id: "agent:\(agent.id)", workspaceID: descriptor.workspace.id, name: agent.label ?? agent.claimedLauncherName ?? "Coding Agent",
                     command: terminalDetail(for: agent, windows: descriptor.windows) ?? "", launcherID: agent.claimedLauncherID, agent: agent,
-                    isConfigured: false, sessionsByID: sessionsByID))
+                    isConfigured: false, sessionsByID: sessionsByID, daemonEndpoint: descriptor.terminalDaemonEndpoint))
         }
         return CodingAgentRows(rows: rows, claimedTerminalKeys: claimedTerminalKeys)
     }
 
     private static func codingAgentRow(
         id: String, workspaceID: String, name: String, command: String, launcherID: String?, agent: AgentWindowRecord?, isConfigured: Bool,
-        sessionsByID: [String: TerminalSessionCatalogEntry]
+        sessionsByID: [String: TerminalSessionCatalogEntry], daemonEndpoint: SpacesMobileTerminalDaemonEndpoint?
     ) -> SpacesMobileWorkspaceCodingAgentRow {
         let rawSessionID = terminalSessionID(for: agent)
         let session = rawSessionID.flatMap { sessionsByID[$0] }
@@ -274,7 +278,7 @@ struct SpacesMobileOverviewBuilder {
         return SpacesMobileWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: name, command: command, launcherID: launcherID, agentID: agent?.id, sessionID: session?.sessionID,
             isConfigured: isConfigured, runState: runState, activityState: activityState(for: agent), canRun: canRun, canStop: canStop,
-            canRestart: canRestart)
+            canRestart: canRestart, daemonEndpoint: daemonEndpoint)
     }
 
     private static func workspaceTerminalRows(
@@ -293,7 +297,7 @@ struct SpacesMobileOverviewBuilder {
                     id: "terminal-window:\(window.id)", workspaceID: descriptor.workspace.id,
                     title: window.name ?? session?.effectiveTitle ?? "Workspace Terminal", workingDirectory: descriptor.workspace.dir,
                     sessionID: session?.sessionID, runState: runState, canOpenTerminal: session != nil,
-                    canStop: runState == .running && session?.sessionID != nil))
+                    canStop: runState == .running && session?.sessionID != nil, daemonEndpoint: descriptor.terminalDaemonEndpoint))
         }
 
         for (sessionID, session) in sessionsByID where !includedSessionIDs.contains(sessionID) {
@@ -311,7 +315,7 @@ struct SpacesMobileOverviewBuilder {
                 SpacesMobileWorkspaceTerminalRow(
                     id: "terminal-session:\(sessionID)", workspaceID: descriptor.workspace.id, title: session.effectiveTitle,
                     workingDirectory: session.effectiveWorkingDirectory, sessionID: sessionID, runState: runState, canOpenTerminal: true,
-                    canStop: runState == .running))
+                    canStop: runState == .running, daemonEndpoint: descriptor.terminalDaemonEndpoint))
         }
 
         return rows.sorted { lhs, rhs in lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending }

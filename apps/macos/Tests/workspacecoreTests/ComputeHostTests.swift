@@ -412,6 +412,47 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertNil(try store.workspaceComputeBinding(workspaceID: workspace.id, hostID: host.id))
     }
 
+    func testBrowserSSHForwardResolverMapsRemoteNamedLocalServicePort() throws {
+        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
+        let plan = makeRuntimePlan(selection: .remote(host), ports: [WorkspaceRuntimePortMapping(id: "web", name: "WEB_PORT", port: 3000)])
+        let recorder = BrowserForwardRecorder(localPort: 49_231)
+
+        let mapped = try BrowserSSHForwardResolver.resolvedURL("http://localhost:3000/status?ready=1", runtimePlan: plan, forwarder: recorder.forward)
+
+        XCTAssertEqual(mapped, "http://127.0.0.1:49231/status?ready=1")
+        XCTAssertEqual(recorder.requests.map(\.computeHostID), [host.id])
+        XCTAssertEqual(recorder.requests.map(\.remotePort), [3000])
+        XCTAssertEqual(recorder.requests.map(\.sshHost), [host.sshHost])
+    }
+
+    func testBrowserSSHForwardResolverLeavesUnrelatedRemoteURLsUnchanged() throws {
+        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
+        let plan = makeRuntimePlan(selection: .remote(host), ports: [WorkspaceRuntimePortMapping(id: "web", name: "WEB_PORT", port: 3000)])
+
+        let external = try BrowserSSHForwardResolver.resolvedURL("https://example.com:3000/status", runtimePlan: plan) { _ in
+            XCTFail("External URLs should not open SSH forwards.")
+            return 49_231
+        }
+        let unnamedPort = try BrowserSSHForwardResolver.resolvedURL("http://127.0.0.1:9999/status", runtimePlan: plan) { _ in
+            XCTFail("Unnamed local-service ports should not open SSH forwards.")
+            return 49_231
+        }
+
+        XCTAssertEqual(external, "https://example.com:3000/status")
+        XCTAssertEqual(unnamedPort, "http://127.0.0.1:9999/status")
+    }
+
+    func testBrowserSSHForwardResolverLeavesLocalRuntimeURLsUnchanged() throws {
+        let plan = makeRuntimePlan(selection: .localMac, ports: [WorkspaceRuntimePortMapping(id: "web", name: "WEB_PORT", port: 3000)])
+
+        let mapped = try BrowserSSHForwardResolver.resolvedURL("http://localhost:3000/status", runtimePlan: plan) { _ in
+            XCTFail("Local runtime URLs should not open SSH forwards.")
+            return 49_231
+        }
+
+        XCTAssertEqual(mapped, "http://localhost:3000/status")
+    }
+
     private func insertPreservedProcessSession(store: SQLiteStore, workspaceID: String, sessionID: String = "session-preserved") throws {
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -420,6 +461,47 @@ final class ComputeHostTests: XCTestCase {
                 status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:00Z", exitedAt: "2026-01-01T00:00:01Z"))
     }
 
+    private func makeRuntimePlan(selection: ComputeHostSelection, ports: [WorkspaceRuntimePortMapping]) -> WorkspaceRuntimePlan {
+        let project = ProjectRecord(id: "project", name: "Project", dir: "/local/project", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace", projectID: project.id, title: "Feature", dir: "/local/project/workspace", dirname: nil, branch: "feature",
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        let binding: WorkspaceComputeBinding?
+        if case .remote(let host) = selection {
+            binding = WorkspaceComputeBinding(
+                workspaceID: workspace.id, hostID: host.id, remotePath: "/srv/spaces/project/feature", branch: "feature",
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+        } else {
+            binding = nil
+        }
+        let manifest = ComputeHostPlanner.runtimeManifest(
+            project: project, workspace: workspace, selection: selection, binding: binding, namedPorts: ports)
+        return WorkspaceRuntimePlan(
+            project: project, workspace: workspace, selection: selection, binding: binding, manifest: manifest,
+            daemonTarget: ComputeHostPlanner.daemonTarget(selection: selection, localSocketPath: "/tmp/spacesd.sock"), remoteSSHURI: nil)
+    }
+
+}
+
+private final class BrowserForwardRecorder: @unchecked Sendable {
+    let localPort: Int
+    private let lock = NSLock()
+    private var recordedRequests: [BrowserSSHForwardRequest] = []
+
+    init(localPort: Int) { self.localPort = localPort }
+
+    var requests: [BrowserSSHForwardRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedRequests
+    }
+
+    func forward(_ request: BrowserSSHForwardRequest) throws -> Int {
+        lock.lock()
+        recordedRequests.append(request)
+        lock.unlock()
+        return localPort
+    }
 }
 
 private final class RemoteTerminalServiceRecorder: @unchecked Sendable {

@@ -1,7 +1,7 @@
 import Foundation
 import spacesmobilecore
 
-enum SpacesMobileTerminalLinkResolverError: LocalizedError, Equatable {
+public enum SpacesMobileTerminalLinkResolverError: LocalizedError, Equatable {
     case missingLink
     case missingWorkingDirectory
     case unsupportedScheme(String)
@@ -14,7 +14,7 @@ enum SpacesMobileTerminalLinkResolverError: LocalizedError, Equatable {
     case invalidChunkRange
     case unsupportedFileURLHost(String)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .missingLink: return "Missing terminal link."
         case .missingWorkingDirectory: return "Missing terminal working directory."
@@ -31,9 +31,9 @@ enum SpacesMobileTerminalLinkResolverError: LocalizedError, Equatable {
     }
 }
 
-struct SpacesMobileTerminalLinkResolver {
-    static let defaultChunkLimit = 256 * 1024
-    static let maximumChunkLimit = 512 * 1024
+public struct SpacesMobileTerminalLinkResolver {
+    public static let defaultChunkLimit = 256 * 1024
+    public static let maximumChunkLimit = 512 * 1024
 
     private struct LocalLinkPayload: Codable, Equatable {
         let sessionID: String
@@ -60,7 +60,7 @@ struct SpacesMobileTerminalLinkResolver {
 
     private static let fixedAllowedPathPrefixes = ["/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp", "/opt", "/usr/local"]
 
-    static func resolve(
+    public static func resolve(
         sessionID: String, link: String?, workingDirectory: String?, workspaceRoots: [String] = [], homeDirectory: String = NSHomeDirectory(),
         fileManager: FileManager = .default
     ) throws -> SpacesMobileTerminalLinkMetadata {
@@ -92,7 +92,7 @@ struct SpacesMobileTerminalLinkResolver {
             homeDirectory: homeDirectory, fileManager: fileManager)
     }
 
-    static func readChunk(
+    public static func readChunk(
         sessionID: String, linkID: String?, offset: Int64?, limit: Int?, workspaceRoots: [String] = [], homeDirectory: String = NSHomeDirectory(),
         fileManager: FileManager = .default
     ) throws -> SpacesMobileTerminalLinkChunk {
@@ -116,7 +116,7 @@ struct SpacesMobileTerminalLinkResolver {
         )
     }
 
-    static func resolvedLocalFilePath(linkID: String?) throws -> String {
+    public static func resolvedLocalFilePath(linkID: String?) throws -> String {
         guard let payload = try decodePayload(linkID) else { throw SpacesMobileTerminalLinkResolverError.invalidLinkID }
         return payload.path
     }

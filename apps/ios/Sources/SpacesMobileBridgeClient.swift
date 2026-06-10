@@ -542,6 +542,170 @@ struct SpacesMobileBridgeClient: Sendable {
 
 }
 
+struct SpacesMobileTerminalDaemonClient: Sendable {
+    let endpoint: SpacesMobileTerminalDaemonEndpoint
+
+    func fetchState(sessionID: String, timeout: Duration = .seconds(3)) async throws -> GhosttyRemoteSessionStatePayload {
+        let response = try await send(.init(command: "state", sessionID: sessionID), timeout: timeout)
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+        guard let sessionState = response.sessionState else {
+            throw SpacesMobileBridgeClientError.requestFailed("Remote spacesd did not return terminal state.")
+        }
+        return sessionState
+    }
+
+    func attach(sessionID: String, client: TerminalClient, mode: TerminalAttachmentMode, timeout: Duration = .seconds(3)) async throws {
+        try await control(
+            sessionID: sessionID,
+            request: TerminalControlRequest(command: "attach", client: client, attachmentMode: mode),
+            timeout: timeout)
+    }
+
+    func detach(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws {
+        try await control(sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), timeout: timeout)
+    }
+
+    func takeOver(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws -> GhosttyRemoteSessionStatePayload? {
+        let response = try await controlResponse(
+            sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), timeout: timeout)
+        return response.sessionState
+    }
+
+    func sendText(
+        sessionID: String,
+        clientID: String,
+        text: String,
+        ownerEpoch: UInt64?,
+        appendNewline: Bool = false,
+        timeout: Duration = .seconds(3)
+    ) async throws {
+        try await control(
+            sessionID: sessionID,
+            request: TerminalControlRequest(
+                command: "send", text: text, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: appendNewline),
+            timeout: timeout)
+    }
+
+    func sendKey(sessionID: String, clientID: String, key: String, ownerEpoch: UInt64?, timeout: Duration = .seconds(3)) async throws {
+        try await control(
+            sessionID: sessionID,
+            request: TerminalControlRequest(command: "key", key: key, clientID: clientID, ownerEpoch: ownerEpoch),
+            timeout: timeout)
+    }
+
+    func clearScreen(sessionID: String, clientID: String, ownerEpoch: UInt64?, timeout: Duration = .seconds(3)) async throws {
+        try await control(
+            sessionID: sessionID,
+            request: TerminalControlRequest(command: "clearScreen", clientID: clientID, ownerEpoch: ownerEpoch),
+            timeout: timeout)
+    }
+
+    func resize(
+        sessionID: String,
+        clientID: String,
+        columns: Int,
+        rows: Int,
+        ownerEpoch: UInt64?,
+        resizeSerial: UInt64?,
+        timeout: Duration = .seconds(3)
+    ) async throws {
+        try await control(
+            sessionID: sessionID,
+            request: TerminalControlRequest(
+                command: "resize", clientID: clientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch, resizeSerial: resizeSerial),
+            timeout: timeout)
+    }
+
+    func scroll(
+        sessionID: String,
+        clientID: String,
+        horizontal: Double,
+        vertical: Double,
+        ownerEpoch: UInt64?,
+        scrollMods: Int32? = nil,
+        timeout: Duration = .seconds(3)
+    ) async throws {
+        try await control(
+            sessionID: sessionID,
+            request: TerminalControlRequest(
+                command: "scroll", clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: horizontal, scrollVertical: vertical,
+                scrollMods: scrollMods),
+            timeout: timeout)
+    }
+
+    func resolveTerminalLink(sessionID: String, link: String, timeout: Duration = .seconds(6)) async throws
+        -> SpacesMobileTerminalLinkMetadata
+    {
+        let response = try await send(.init(command: "resolveTerminalLink", sessionID: sessionID, terminalLink: link), timeout: timeout)
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+        guard let metadata = response.terminalLinkMetadata else {
+            throw SpacesMobileBridgeClientError.requestFailed("Remote spacesd did not return terminal link metadata.")
+        }
+        return try Self.mobileLinkMetadata(metadata)
+    }
+
+    func readTerminalLinkChunk(sessionID: String, linkID: String, offset: Int64, limit: Int, timeout: Duration = .seconds(6)) async throws
+        -> SpacesMobileTerminalLinkChunk
+    {
+        let response = try await send(
+            .init(
+                command: "readTerminalLinkChunk", sessionID: sessionID, terminalLinkID: linkID, chunkOffset: offset,
+                chunkLimit: limit),
+            timeout: timeout)
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+        guard let chunk = response.terminalLinkChunk else {
+            throw SpacesMobileBridgeClientError.requestFailed("Remote spacesd did not return terminal link data.")
+        }
+        return SpacesMobileTerminalLinkChunk(
+            linkID: chunk.linkID, offset: chunk.offset, byteCount: chunk.byteCount, isFinal: chunk.isFinal, base64Data: chunk.base64Data)
+    }
+
+    private func control(sessionID: String, request: TerminalControlRequest, timeout: Duration) async throws {
+        let response = try await controlResponse(sessionID: sessionID, request: request, timeout: timeout)
+        if let controlResponse = response.controlResponse, !controlResponse.ok {
+            throw SpacesMobileBridgeClientError.requestFailed(controlResponse.message)
+        }
+    }
+
+    private func controlResponse(sessionID: String, request: TerminalControlRequest, timeout: Duration) async throws -> TerminalServiceResponse {
+        let response = try await send(.init(command: "control", sessionID: sessionID, controlRequest: request), timeout: timeout)
+        guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+        return response
+    }
+
+    private func send(_ request: TerminalServiceRequest, timeout: Duration) async throws -> TerminalServiceResponse {
+        let endpoint = endpoint
+        return try await Task.detached(priority: .userInitiated) {
+            try TerminalServiceClient.sendPinnedTLS(
+                request: request, host: endpoint.host, port: endpoint.port, authToken: endpoint.authToken,
+                certificateFingerprint: endpoint.certificateFingerprint, timeout: Self.timeInterval(timeout))
+        }.value
+    }
+
+    private static func mobileLinkMetadata(_ metadata: TerminalServiceTerminalLinkMetadata) throws -> SpacesMobileTerminalLinkMetadata {
+        guard let source = SpacesMobileTerminalLinkSource(rawValue: metadata.source) else {
+            throw SpacesMobileBridgeClientError.requestFailed("Remote spacesd returned an unknown terminal link source.")
+        }
+        let mediaKind: SpacesMobileTerminalLinkMediaKind?
+        if let value = metadata.mediaKind {
+            guard let parsed = SpacesMobileTerminalLinkMediaKind(rawValue: value) else {
+                throw SpacesMobileBridgeClientError.requestFailed("Remote spacesd returned an unknown terminal link media kind.")
+            }
+            mediaKind = parsed
+        } else {
+            mediaKind = nil
+        }
+        return SpacesMobileTerminalLinkMetadata(
+            id: metadata.id, source: source, originalLink: metadata.originalLink, displayName: metadata.displayName,
+            contentType: metadata.contentType, mediaKind: mediaKind, byteCount: metadata.byteCount, externalURL: metadata.externalURL)
+    }
+
+    private static func timeInterval(_ duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return TimeInterval(components.seconds) + TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000
+    }
+}
+
 actor SpacesMobileBridgeCommandChannel {
     private let host: String
     private let port: Int

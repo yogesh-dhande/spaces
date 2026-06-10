@@ -1,5 +1,6 @@
 import XCTest
 import spacesmobilecore
+import spacesterminalcore
 
 @testable import spacesmobilebridge
 
@@ -54,6 +55,60 @@ final class SpacesMobileBridgeProtocolTests: XCTestCase {
         XCTAssertEqual(overview.workspaces.first?.processRows, [])
         XCTAssertEqual(overview.workspaces.first?.codingAgentRows, [])
         XCTAssertEqual(overview.workspaces.first?.terminalRows, [])
+    }
+
+    func testTerminalDaemonEndpointRoundTripsOnRuntimeRowsAndSessionSummary() throws {
+        let endpoint = SpacesMobileTerminalDaemonEndpoint(
+            host: "builder.example.com", port: 7443, authToken: "SECRET", certificateFingerprint: "SHA256:abcdef")
+        let processRow = SpacesMobileWorkspaceProcessRow(
+            id: "process-1", workspaceID: "workspace-1", name: "API", command: "npm run dev", processID: "runtime-1", sessionID: "session-1",
+            runState: .running, canRun: false, canStop: true, canRestart: true, daemonEndpoint: endpoint)
+        let agentRow = SpacesMobileWorkspaceCodingAgentRow(
+            id: "agent-1", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "agent-runtime-1", sessionID: "session-2",
+            isConfigured: true, runState: .running, activityState: .spinning, canRun: false, canStop: true, canRestart: true, daemonEndpoint: endpoint
+        )
+        let terminalRow = SpacesMobileWorkspaceTerminalRow(
+            id: "terminal-1", workspaceID: "workspace-1", title: "Shell", workingDirectory: "/repo", sessionID: "session-3", runState: .running,
+            canOpenTerminal: true, canStop: true, daemonEndpoint: endpoint)
+        let session = SpacesMobileTerminalSessionSummary(
+            id: "session-1", title: "API", workingDirectory: "/repo", state: .running, backend: .ghosttyEmbedded, lifetimePolicy: .persistent,
+            servicePID: 123, childPID: 456, workspaceID: "workspace-1", workspaceTitle: "Feature", projectID: "project-1", projectName: "Project",
+            createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), daemonEndpoint: endpoint)
+        let overview = SpacesMobileOverviewPayload(
+            workspaces: [
+                SpacesMobileWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: nil, targetBranch: nil, dir: "/repo",
+                    isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1, processRows: [processRow],
+                    codingAgentRows: [agentRow], terminalRows: [terminalRow])
+            ], sessions: [session])
+
+        let decoded = try SpacesMobileBridgeCodec.decodeResponse(
+            SpacesMobileBridgeCodec.encodeResponse(SpacesMobileBridgeResponse(ok: true, message: "ok", overview: overview)))
+
+        XCTAssertEqual(decoded.overview?.workspaces.first?.processRows.first?.daemonEndpoint, endpoint)
+        XCTAssertEqual(decoded.overview?.workspaces.first?.codingAgentRows.first?.daemonEndpoint, endpoint)
+        XCTAssertEqual(decoded.overview?.workspaces.first?.terminalRows.first?.daemonEndpoint, endpoint)
+        XCTAssertEqual(decoded.overview?.sessions.first?.daemonEndpoint, endpoint)
+    }
+
+    func testLegacyTerminalRowDecodesWithoutDaemonEndpoint() throws {
+        let payload = """
+            {
+              "id": "terminal-1",
+              "workspaceID": "workspace-1",
+              "title": "Shell",
+              "workingDirectory": "/repo",
+              "sessionID": "session-1",
+              "runState": "running",
+              "canOpenTerminal": true,
+              "canStop": true
+            }
+            """.data(using: .utf8)!
+
+        let row = try JSONDecoder().decode(SpacesMobileWorkspaceTerminalRow.self, from: payload)
+
+        XCTAssertNil(row.daemonEndpoint)
     }
 
     func testResponseRoundTripsMutationOutputsAndCreateOptions() throws {
