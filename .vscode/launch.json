@@ -1,0 +1,84 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:spaces}/apps/macos",
+            "name": "Debug spacese2e (apps/macos)",
+            "target": "spacese2e",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug spacese2e (apps/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:spaces}/apps/macos",
+            "name": "Release spacese2e (apps/macos)",
+            "target": "spacese2e",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release spacese2e (apps/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:spaces}/apps/macos",
+            "name": "Debug SpacesTerminalService (apps/macos)",
+            "target": "SpacesTerminalService",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug SpacesTerminalService (apps/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:spaces}/apps/macos",
+            "name": "Release SpacesTerminalService (apps/macos)",
+            "target": "SpacesTerminalService",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release SpacesTerminalService (apps/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:spaces}/apps/macos",
+            "name": "Debug spaces (apps/macos)",
+            "target": "spaces",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug spaces (apps/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:spaces}/apps/macos",
+            "name": "Release spaces (apps/macos)",
+            "target": "spaces",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release spaces (apps/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:spaces}/apps/macos",
+            "name": "Debug SpacesApp (apps/macos)",
+            "target": "SpacesApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug SpacesApp (apps/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:spaces}/apps/macos",
+            "name": "Release SpacesApp (apps/macos)",
+            "target": "SpacesApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release SpacesApp (apps/macos)"
+        }
+    ]
+}
