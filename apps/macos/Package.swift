@@ -10,23 +10,42 @@ let systemLibraryTargets: [Target] = [
     .systemLibrary(name: "CSQLite3", pkgConfig: "sqlite3"),
     .systemLibrary(name: "OpenSSL", pkgConfig: "openssl"),
 ]
+let ghosttyKitSupportTargets: [Target] = []
+let ghosttyKitTargetDependencies: [Target.Dependency] = []
+let mobileGhosttyTargets: [Target] = []
+let mobileGhosttyProducts: [Product] = []
 let spacesDatabaseExtraDependencies: [Target.Dependency] = [.target(name: "CSQLite3")]
 let spacesTerminalCoreExtraDependencies: [Target.Dependency] = [.target(name: "OpenSSL")]
 let spacesTerminalCoreExtraLinkerSettings: [LinkerSetting] = [.linkedLibrary("ssl"), .linkedLibrary("crypto")]
 let workspaceCoreExtraDependencies: [Target.Dependency] = [.target(name: "CSQLite3")]
 #else
 let systemLibraryTargets: [Target] = []
+let ghosttyKitSupportTargets: [Target] = [
+    .binaryTarget(
+        name: "GhosttyKit",
+        path: ".local/ghosttykit/GhosttyKit.xcframework"
+    )
+]
+let ghosttyKitTargetDependencies: [Target.Dependency] = [
+    .target(name: "GhosttyKit", condition: .when(platforms: [.macOS]))
+]
+let mobileGhosttyTargets: [Target] = [
+    .target(
+        name: "spacesterminalmobileghostty",
+        dependencies: ["spacesterminalcore", "GhosttyKit"],
+        linkerSettings: [.linkedLibrary("c++", .when(platforms: [.iOS, .macOS]))]
+    )
+]
+let mobileGhosttyProducts: [Product] = [
+    .library(name: "spacesterminalmobileghostty", targets: ["spacesterminalmobileghostty"])
+]
 let spacesDatabaseExtraDependencies: [Target.Dependency] = []
 let spacesTerminalCoreExtraDependencies: [Target.Dependency] = []
 let spacesTerminalCoreExtraLinkerSettings: [LinkerSetting] = []
 let workspaceCoreExtraDependencies: [Target.Dependency] = []
 #endif
 
-let supportTargets: [Target] = [
-    .binaryTarget(
-        name: "GhosttyKit",
-        path: ".local/ghosttykit/GhosttyKit.xcframework"
-    ),
+let supportTargets: [Target] = ghosttyKitSupportTargets + [
     .target(
         name: "ghosttyvtshim",
         cSettings: [
@@ -61,20 +80,14 @@ let terminalTargets: [Target] = [
         dependencies: [
             "spacesterminalcore",
             "ghosttyvtshim",
-            .target(name: "GhosttyKit", condition: .when(platforms: [.macOS])),
-        ],
+        ] + ghosttyKitTargetDependencies,
         linkerSettings: [.linkedLibrary("c++", .when(platforms: [.macOS])), .linkedLibrary("util", .when(platforms: [.linux]))]
-    ),
-    .target(
-        name: "spacesterminalmobileghostty",
-        dependencies: ["spacesterminalcore", "GhosttyKit"],
-        linkerSettings: [.linkedLibrary("c++", .when(platforms: [.iOS, .macOS]))]
     ),
     .target(
         name: "spacesterminalui",
         dependencies: ["spacesterminalcore", "spacesterminalghostty"]
     ),
-]
+] + mobileGhosttyTargets
 
 let appTargets: [Target] = [
     .target(
@@ -185,7 +198,6 @@ let package = Package(
         .library(name: "spacesdatabase", targets: ["spacesdatabase"]),
         .library(name: "spacesterminalcore", targets: ["spacesterminalcore"]),
         .library(name: "spacesterminalghostty", targets: ["spacesterminalghostty"]),
-        .library(name: "spacesterminalmobileghostty", targets: ["spacesterminalmobileghostty"]),
         .library(name: "spacesterminalui", targets: ["spacesterminalui"]),
         .library(name: "spacesmobilecore", targets: ["spacesmobilecore"]),
         .library(name: "spacesmobilebridge", targets: ["spacesmobilebridge"]),
@@ -197,7 +209,7 @@ let package = Package(
         .executable(name: "spacesd", targets: ["spacesd"]),
         .executable(name: "spaces", targets: ["spaces"]),
         .executable(name: "SpacesApp", targets: ["SpacesApp"])
-    ],
+    ] + mobileGhosttyProducts,
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.2"),
