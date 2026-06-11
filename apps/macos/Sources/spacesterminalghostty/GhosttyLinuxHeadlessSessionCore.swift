@@ -108,6 +108,10 @@
             terminating = false
         }
 
+        public func currentRemoteStatePayload(reason: String = TerminalRemoteSessionStateReason.stateChange) -> GhosttyRemoteSessionStatePayload? {
+            makeStatePayload(reason: reason)
+        }
+
         private func handleSessionClosed() {
             guard !terminating else { return }
             terminate()
@@ -151,7 +155,7 @@
             stateStreamServer = server
         }
 
-        private func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        public func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             switch request.command {
             case "attach": return attach(request)
             case "detach": return detach(request)

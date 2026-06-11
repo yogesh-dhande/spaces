@@ -264,6 +264,10 @@ import spacesterminalghostty
         {
             return TerminalServiceResponse(ok: false, message: "Missing mobile client ID.")
         }
+        if let liveCore = sessionCores[sessionID] {
+            let response = liveCore.handleControlRequest(controlRequest)
+            return TerminalServiceResponse(ok: response.ok, message: response.message, controlResponse: response)
+        }
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
@@ -412,6 +416,11 @@ import spacesterminalghostty
 
     private func loadCurrentState(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        if let liveCore = sessionCores[sessionID],
+            let payload = liveCore.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.stateChange)
+        {
+            return payload
+        }
         if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
             if let finalState = try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) { return finalState }
             return try endedStatePayload(sessionID: sessionID, paths: paths, runtimeState: runtimeState)

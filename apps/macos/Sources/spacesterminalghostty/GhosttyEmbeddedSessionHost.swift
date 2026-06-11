@@ -478,7 +478,7 @@
             self.stateStreamServer = stateStreamServer
         }
 
-        func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+        public func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             trace(
                 "control_request command=\(request.command) client=\(request.clientID ?? request.client?.id ?? "nil") target_session=\(launchConfiguration.sessionID)"
             )
@@ -1129,6 +1129,10 @@
         }
 
         func prepareRenderStateExport() { flushPendingIncomingOutputForStateExport() }
+
+        public func currentRemoteStatePayload(reason: String = TerminalRemoteSessionStateReason.stateChange) -> GhosttyRemoteSessionStatePayload? {
+            currentRemoteSessionState(reason: reason, outputByteCount: nil, broadcastExport: true)
+        }
 
         private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil) {
             let startedAt = Date()
