@@ -6,6 +6,9 @@ APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 SUBMODULE_PATH="apps/macos/vendor/ghostty"
 GHOSTTY_SOURCE_ROOT="$REPO_ROOT/$SUBMODULE_PATH"
+GHOSTTYVT_ROOT="$APP_ROOT/.local/ghosttyvt"
+GHOSTTYVT_INCLUDE_ROOT="$GHOSTTYVT_ROOT/include"
+GHOSTTYVT_LIB_ROOT="$GHOSTTYVT_ROOT/lib"
 
 ZIG_VERSION="0.15.2"
 GHOSTTY_BUILD_OPTIMIZE="${SPACES_GHOSTTY_BUILD_OPTIMIZE:-ReleaseFast}"
@@ -170,6 +173,23 @@ build_ghostty_vt() {
     )
 }
 
+stage_ghostty_vt_development_artifacts() {
+    ensure_ghostty_submodule
+    local source_include="$GHOSTTY_SOURCE_ROOT/zig-out/include"
+    local source_lib="$GHOSTTY_SOURCE_ROOT/zig-out/lib"
+    [[ -f "$source_include/ghostty/vt.h" ]] || die "libghostty-vt headers missing at $source_include"
+    [[ -d "$source_lib" ]] || die "libghostty-vt library directory missing at $source_lib"
+    shopt -s nullglob
+    local libraries=("$source_lib"/libghostty-vt.so*)
+    shopt -u nullglob
+    [[ "${#libraries[@]}" -gt 0 ]] || die "libghostty-vt.so output missing under $source_lib"
+
+    rm -rf "$GHOSTTYVT_INCLUDE_ROOT" "$GHOSTTYVT_LIB_ROOT"
+    mkdir -p "$GHOSTTYVT_ROOT"
+    cp -a "$source_include" "$GHOSTTYVT_INCLUDE_ROOT"
+    cp -a "$source_lib" "$GHOSTTYVT_LIB_ROOT"
+}
+
 swift_build_flags() {
     if [[ "$BUILD_CONFIGURATION" == "release" ]]; then
         printf -- "-c release"
@@ -207,7 +227,7 @@ swift_product_dir() {
 
 copy_ghostty_vt_libraries() {
     local destination_bin="$1"
-    local source_lib_dir="$GHOSTTY_SOURCE_ROOT/zig-out/lib"
+    local source_lib_dir="$GHOSTTYVT_LIB_ROOT"
     [[ -d "$source_lib_dir" ]] || die "Ghostty lib output missing at $source_lib_dir"
     shopt -s nullglob
     local libraries=("$source_lib_dir"/libghostty-vt.so*)
@@ -360,6 +380,7 @@ require_command sha256sum
 if [[ "$BUILD_GHOSTTY_VT" -eq 1 ]]; then
     build_ghostty_vt
 fi
+stage_ghostty_vt_development_artifacts
 build_spacesd
 package_artifact
 if [[ "$SMOKE" -eq 1 ]]; then
