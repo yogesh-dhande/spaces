@@ -114,8 +114,6 @@ let appTargets: [Target] = [
     .target(
         name: "spacescli",
         dependencies: [
-            "spacesmobilebridge",
-            "spacesmobilecore",
             "workspacecore",
             "spacesterminalcore",
             "spacesterminalghostty",

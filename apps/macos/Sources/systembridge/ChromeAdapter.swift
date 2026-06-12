@@ -1,7 +1,7 @@
 import Foundation
 
 public final class ChromeAdapter {
-    private static let appleScriptTimeoutSeconds = 2
+    private static let appleScriptTimeoutSeconds = 10
 
     public init() {}
 

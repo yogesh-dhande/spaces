@@ -59,11 +59,14 @@ public struct ComputeHostBootstrapper {
 
     init(runCommand: @escaping CommandRunner) { self.runCommand = runCommand }
 
-    public func startSpacesDaemon(host: ComputeHostRecord, authToken: String, timeout: TimeInterval = 30) throws -> ComputeHostBootstrapOutcome {
+    public func startSpacesDaemon(host: ComputeHostRecord, authToken: String, timeout: TimeInterval = 30, cleanExistingProfile: Bool = false) throws
+        -> ComputeHostBootstrapOutcome
+    {
         let token = authToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else { throw ComputeHostBootstrapError.missingAuthToken }
 
-        let output = try runCommand(Self.sshCommand(host: host, authToken: token, selectsAvailablePort: false), timeout)
+        let output = try runCommand(
+            Self.sshCommand(host: host, authToken: token, selectsAvailablePort: false, cleanExistingProfile: cleanExistingProfile), timeout)
         let parsed = try Self.parseBootstrapOutput(output)
         return ComputeHostBootstrapOutcome(
             certificateFingerprint: parsed.certificateFingerprint,
@@ -80,7 +83,8 @@ public struct ComputeHostBootstrapper {
         let token = authToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else { throw ComputeHostBootstrapError.missingAuthToken }
 
-        let output = try runCommand(Self.sshCommand(host: prepared.host, authToken: token, selectsAvailablePort: true), timeout)
+        let output = try runCommand(
+            Self.sshCommand(host: prepared.host, authToken: token, selectsAvailablePort: true, cleanExistingProfile: false), timeout)
         let outcome = try Self.parseBootstrapOutput(output)
         var host = prepared.host
         host.workspaceRoot = outcome.workspaceRoot.isEmpty ? host.workspaceRoot : outcome.workspaceRoot
@@ -93,19 +97,67 @@ public struct ComputeHostBootstrapper {
         return ComputeHostBootstrapResult(host: host, authToken: token, outcome: normalizedOutcome)
     }
 
-    static func sshCommand(host: ComputeHostRecord, authToken: String, selectsAvailablePort: Bool) -> [String] {
+    static func sshCommand(host: ComputeHostRecord, authToken: String, selectsAvailablePort: Bool, cleanExistingProfile: Bool = false) -> [String] {
         var command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new"]
         if let port = host.sshPort { command.append(contentsOf: ["-p", String(port)]) }
         command.append(sshDestination(host: host))
-        command.append(remoteStartScript(host: host, authToken: authToken, selectsAvailablePort: selectsAvailablePort))
+        command.append(
+            remoteStartScript(
+                host: host, authToken: authToken, selectsAvailablePort: selectsAvailablePort, cleanExistingProfile: cleanExistingProfile))
         return command
     }
 
-    static func remoteStartScript(host: ComputeHostRecord, authToken: String, selectsAvailablePort: Bool = false) -> String {
+    static func remoteStartScript(host: ComputeHostRecord, authToken: String, selectsAvailablePort: Bool = false, cleanExistingProfile: Bool = false)
+        -> String
+    {
         let hostID = safePathComponent(host.id)
         let workspaceRoot = shellSingleQuoted(host.workspaceRoot)
         let port = host.daemonEndpoint.port
         let token = shellSingleQuoted(authToken)
+        let cleanProfileScript: String
+        if cleanExistingProfile {
+            cleanProfileScript = """
+                lsof_path="$(command -v lsof || true)"
+                if [ -z "${lsof_path}" ]; then
+                  echo "lsof executable not found on remote host PATH." >&2
+                  exit 127
+                fi
+                port_pids="$("${lsof_path}" -tiTCP:${requested_port} -sTCP:LISTEN 2>/dev/null || true)"
+                if [ -n "${port_pids}" ]; then
+                  for pid in ${port_pids}; do
+                    kill "${pid}" >/dev/null 2>&1 || true
+                  done
+                  clean_attempt=0
+                  while [ "${clean_attempt}" -lt 40 ]; do
+                    if ! "${lsof_path}" -nPiTCP:${requested_port} -sTCP:LISTEN >/dev/null 2>&1; then
+                      break
+                    fi
+                    clean_attempt=$((clean_attempt + 1))
+                    sleep 0.25
+                  done
+                  if "${lsof_path}" -nPiTCP:${requested_port} -sTCP:LISTEN >/dev/null 2>&1; then
+                    for pid in $("${lsof_path}" -tiTCP:${requested_port} -sTCP:LISTEN 2>/dev/null || true); do
+                      kill -9 "${pid}" >/dev/null 2>&1 || true
+                    done
+                  fi
+                  clean_attempt=0
+                  while [ "${clean_attempt}" -lt 20 ]; do
+                    if ! "${lsof_path}" -nPiTCP:${requested_port} -sTCP:LISTEN >/dev/null 2>&1; then
+                      break
+                    fi
+                    clean_attempt=$((clean_attempt + 1))
+                    sleep 0.25
+                  done
+                  if "${lsof_path}" -nPiTCP:${requested_port} -sTCP:LISTEN >/dev/null 2>&1; then
+                    echo "remote E2E cleanup could not free spacesd port ${requested_port}." >&2
+                    exit 1
+                  fi
+                fi
+                rm -rf "${profile_root}"
+                """
+        } else {
+            cleanProfileScript = ""
+        }
         let portSelectionScript: String
         if selectsAvailablePort {
             portSelectionScript = """
@@ -149,6 +201,7 @@ public struct ComputeHostBootstrapper {
               /*) workspace_root="${workspace_root_input}" ;;
               *) workspace_root="${HOME}/${workspace_root_input}" ;;
             esac
+            \(cleanProfileScript)
             mkdir -p "${profile_root}" "${runtime_root}" "${workspace_root}"
             spacesd_path="$(command -v spacesd || true)"
             if [ -z "${spacesd_path}" ]; then

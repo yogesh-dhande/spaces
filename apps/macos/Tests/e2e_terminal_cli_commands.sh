@@ -113,10 +113,10 @@ extract_session_id() {
 resolve_profile_root() {
   local root
   root="$(
-    env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" profile show \
+    env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" profile-show \
       | awk -F '\t' '$1 == "profile-root" { print $2; exit }'
   )"
-  [[ -n "$root" ]] || { echo "Failed to resolve profile root from spaces profile show" >&2; exit 1; }
+  [[ -n "$root" ]] || { echo "Failed to resolve profile root from spacese2e profile-show" >&2; exit 1; }
   printf '%s\n' "$root"
 }
 

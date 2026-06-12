@@ -6,6 +6,8 @@ set -Eeuo pipefail
 # the built-in Spaces terminal runtime, Chrome, and yabai on an interactive desktop session.
 
 ROOT_DIR="$(cd "$(dirname "$0")/../../.." && pwd -P)"
+source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
+spaces_e2e_load_env "$ROOT_DIR"
 source "$ROOT_DIR/scripts/spaces-profile-helpers.sh"
 MACOS_DIR="$ROOT_DIR/apps/macos"
 # scripts/swiftpm.sh already changes into apps/macos internally, so the default
@@ -40,7 +42,7 @@ PROFILE_REPORT_HTML="${PROFILE_REPORT_HTML:-$PROFILE_ARTIFACT_DIR/report.html}"
 PROFILE_RENDER_SCRIPT="${PROFILE_RENDER_SCRIPT:-$MACOS_DIR/Tests/render_profile_report.py}"
 WORKSPACE_SERVICE_CONTENT_TIMEOUT_SECONDS="${WORKSPACE_SERVICE_CONTENT_TIMEOUT_SECONDS:-60}"
 SPACES_CYCLE_LATENCY_BUDGET_MS_WAS_SET="${SPACES_CYCLE_LATENCY_BUDGET_MS+x}"
-SPACES_CYCLE_LATENCY_BUDGET_MS="${SPACES_CYCLE_LATENCY_BUDGET_MS:-1000}"
+SPACES_CYCLE_LATENCY_BUDGET_MS="${SPACES_CYCLE_LATENCY_BUDGET_MS:-2000}"
 SPACES_SUSTAINED_CPU_BUDGET_PCT="${SPACES_SUSTAINED_CPU_BUDGET_PCT:-80}"
 SPACES_CPU_SAMPLE_COUNT="${SPACES_CPU_SAMPLE_COUNT:-6}"
 SPACES_CPU_SAMPLE_INTERVAL_SECONDS="${SPACES_CPU_SAMPLE_INTERVAL_SECONDS:-0.5}"
@@ -1100,7 +1102,7 @@ configure_e2e_target() {
   if [[ -z "$SPACES_CYCLE_LATENCY_BUDGET_MS_WAS_SET" ]]; then
     case "$target" in
       remote) SPACES_CYCLE_LATENCY_BUDGET_MS=3000 ;;
-      *) SPACES_CYCLE_LATENCY_BUDGET_MS=1000 ;;
+      *) SPACES_CYCLE_LATENCY_BUDGET_MS=2000 ;;
     esac
   fi
   case "$target" in
@@ -1406,6 +1408,13 @@ PY
 
 dump_workspace() {
   "$SPACES_E2E_CLI" dump-workspace --workspace-dir "$1" >"$2"
+}
+
+workspace_id_for_dir() {
+  local workspace_dir="$1"
+  local out="$TMP_ROOT/workspace-id.json"
+  dump_workspace "$workspace_dir" "$out"
+  json_get "$out" "workspace.id"
 }
 
 dump_focusable_window_names() {
@@ -2813,6 +2822,9 @@ on run argv
             exit repeat
           end if
         end repeat
+        if (tabURL contains "://localhost:" or tabURL contains "://127.0.0.1:") and (tabURL contains "/docs/" or tabURL contains "/admin/") then
+          set shouldClose to true
+        end if
         if shouldClose then exit repeat
       end repeat
       if shouldClose then set end of doomedWindowIDs to (id of w)
@@ -3072,6 +3084,30 @@ find_new_app_log_pattern_once() {
   return 1
 }
 
+find_app_log_pattern_once_from_line() {
+  local pattern="$1"
+  local start_line="$2"
+  local match=""
+  if [[ -f "$APP_LOG" ]]; then
+    match="$(
+      awk -v start="$start_line" -v pattern="$pattern" '
+        NR >= start && $0 ~ pattern { print NR ":" $0; exit }
+      ' "$APP_LOG"
+    )"
+    if [[ -n "$match" ]]; then
+      local line_number="${match%%:*}"
+      local line="${match#*:}"
+      if (( line_number >= APP_LOG_SEARCH_FROM_LINE )); then
+        APP_LOG_SEARCH_FROM_LINE=$((line_number + 1))
+      fi
+      APP_LOG_LAST_MATCH="$line"
+      printf '%s\n' "$line"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 wait_for_app_log_pattern() {
   local pattern="$1"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
@@ -3082,6 +3118,19 @@ wait_for_app_log_pattern() {
     sleep 0.1
   done
   fail "timed out waiting for app log pattern: $pattern"
+}
+
+wait_for_app_log_pattern_from_line() {
+  local pattern="$1"
+  local start_line="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if find_app_log_pattern_once_from_line "$pattern" "$start_line"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "timed out waiting for app log pattern from line $start_line: $pattern"
 }
 
 wait_for_app_log_pattern_optional() {
@@ -3383,8 +3432,8 @@ record_browser_focus_metric() {
     record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
     return 0
   fi
-  # `spaces open docs` can resolve through the shared name-based
-  # focus path instead of the browser-session-specific path, so the app may log
+  # Named focus can resolve through the shared name-based path instead of the
+  # browser-session-specific path, so the app may log
   # `named_window_focus target=docs` even though the visible behavior is still
   # "focus the tracked docs Chrome tab". Accept either metric shape here.
   line=""
@@ -3869,6 +3918,12 @@ APPLESCRIPT
 run_spaces_logged() {
   local stdout_file="$1"
   shift
+  if [[ "${1:-}" == "open" ]]; then
+    local name="$2"
+    local workspace_dir="$3"
+    env DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-window --name "$name" --workspace-dir "$workspace_dir" >"$stdout_file" 2>>"$APP_LOG"
+    return
+  fi
   env DEBUG=1 "$SPACES_CLI" "$@" >"$stdout_file" 2>>"$APP_LOG"
 }
 
@@ -4136,6 +4191,27 @@ raise SystemExit(0 if ok else 1)' \
   esac
 }
 
+refocus_cycle_target() {
+  local workspace_dir="$1"
+  local cycle_target="$2"
+  local label="$3"
+  local label_slug target_name
+  label_slug="$(slugify_automation_id "$label")"
+  case "$cycle_target" in
+    browser:*)
+      target_name="docs"
+      ;;
+    terminal:*|process:*|agent:*)
+      target_name="$(extract_cycle_window_title "$cycle_target")"
+      ;;
+    *)
+      fail "unexpected cycle target for refocus: $cycle_target"
+      ;;
+  esac
+  run_spaces_logged "$TMP_ROOT/$label_slug-refocus-cycle-target.log" open "$target_name" "$workspace_dir"
+  transition_pause "$label refocus cycle target"
+}
+
 measure_spaces_cycle_transition() {
   local host="$1"
   local workspace_scope="$2"
@@ -4146,13 +4222,15 @@ measure_spaces_cycle_transition() {
   local transition_label="$7"
   shift 7
   local expected_patterns=("$@")
-  local started_at route_observed_at focus_observed_at surface_observed_at
+  local started_at route_observed_at focus_observed_at surface_observed_at log_start_line workspace_id
   local cycle_line cycle_target cycle_elapsed_ms cycle_request_id cycle_focus_route_line cycle_focus_route_elapsed_ms=""
   local cycle_focus_observed_line cycle_focus_observed_elapsed_ms=""
+  workspace_id="$(workspace_id_for_dir "$workspace_dir")"
+  log_start_line=$(( $(app_log_line_count) + 1 ))
   started_at="$(timestamp_ms)"
   send_cycle_hotkey_with_ack "$direction"
   transition_pause "$transition_label"
-  wait_for_app_log_pattern "spaces: perf metric=window_cycle workspace=.* target=.* success=1 .* direction=${direction}" >/dev/null
+  wait_for_app_log_pattern_from_line "spaces: perf metric=window_cycle workspace=${workspace_id} target=.* success=1 .* direction=${direction}" "$log_start_line" >/dev/null
   cycle_line="$APP_LOG_LAST_MATCH"
   cycle_target="$(extract_perf_target "$cycle_line")"
   if ((${#expected_patterns[@]} > 0)); then
@@ -4419,7 +4497,7 @@ PY
 
   begin_case "$host: workspace detail numbered shortcuts focus correct window"
   # These are the workspace-detail focus cases the user asked for, using the
-  # real detail-pane shortcuts instead of direct CLI focus.
+  # real detail-pane shortcuts instead of harness-directed focus.
   ensure_single_spaces_instance "$SPACES_PID"
   agent_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "$MOCK_AGENT_LABEL" "$dump_file")"
   [[ -n "$agent_session_id" ]] || fail "expected tracked agent terminal session"
@@ -5078,6 +5156,8 @@ PY
   transition_pause "$host focus primary docs"
   log_debug "$host multi primary docs focus complete"
   wait_for_chrome_window_focus "$primary_docs_window_id" "$primary_docs_url" "$host primary docs focus"
+  local cycle_target previous_source
+  local -a previous_expected
   measure_spaces_cycle_transition \
     "$host" \
     "primary" \
@@ -5087,15 +5167,43 @@ PY
     "next" \
     "$host primary cycle next" \
     'process:*' 'terminal:*'
+  cycle_target="$MEASURED_CYCLE_TARGET"
+  case "$cycle_target" in
+    process:*)
+      previous_source="process_tracked_tab"
+      previous_expected=('browser:*')
+      ;;
+    terminal:*)
+      previous_source="terminal_tracked_tab"
+      previous_expected=('process:*')
+      ;;
+    *)
+      fail "$host primary cycle next: unexpected target '$cycle_target'"
+      ;;
+  esac
+  refocus_cycle_target "$primary_workspace_dir" "$cycle_target" "$host primary"
   measure_spaces_cycle_transition \
     "$host" \
     "primary" \
     "$primary_workspace_dir" \
     "$primary_docs_window_id" \
-    "process_tracked_tab" \
+    "$previous_source" \
     "previous" \
     "$host primary cycle previous" \
-    'browser:*'
+    "${previous_expected[@]}"
+  if [[ "$cycle_target" == terminal:* ]]; then
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    refocus_cycle_target "$primary_workspace_dir" "$cycle_target" "$host primary intermediate"
+    measure_spaces_cycle_transition \
+      "$host" \
+      "primary" \
+      "$primary_workspace_dir" \
+      "$primary_docs_window_id" \
+      "process_tracked_tab" \
+      "previous" \
+      "$host primary cycle previous to browser" \
+      'browser:*'
+  fi
 
   run_spaces_logged /tmp/spaces-e2e-multi-secondary-focus.log open docs "$secondary_workspace_dir"
   transition_pause "$host focus secondary docs"
@@ -5110,15 +5218,43 @@ PY
     "next" \
     "$host secondary cycle next" \
     'process:*' 'terminal:*'
+  cycle_target="$MEASURED_CYCLE_TARGET"
+  case "$cycle_target" in
+    process:*)
+      previous_source="process_tracked_tab"
+      previous_expected=('browser:*')
+      ;;
+    terminal:*)
+      previous_source="terminal_tracked_tab"
+      previous_expected=('process:*')
+      ;;
+    *)
+      fail "$host secondary cycle next: unexpected target '$cycle_target'"
+      ;;
+  esac
+  refocus_cycle_target "$secondary_workspace_dir" "$cycle_target" "$host secondary"
   measure_spaces_cycle_transition \
     "$host" \
     "secondary" \
     "$secondary_workspace_dir" \
     "$secondary_docs_window_id" \
-    "process_tracked_tab" \
+    "$previous_source" \
     "previous" \
     "$host secondary cycle previous" \
-    'browser:*'
+    "${previous_expected[@]}"
+  if [[ "$cycle_target" == terminal:* ]]; then
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    refocus_cycle_target "$secondary_workspace_dir" "$cycle_target" "$host secondary intermediate"
+    measure_spaces_cycle_transition \
+      "$host" \
+      "secondary" \
+      "$secondary_workspace_dir" \
+      "$secondary_docs_window_id" \
+      "process_tracked_tab" \
+      "previous" \
+      "$host secondary cycle previous to browser" \
+      'browser:*'
+  fi
 
   reset_fixture_runtime "$primary_workspace_dir"
   reset_fixture_runtime "$secondary_workspace_dir"

@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
 
+spaces_profile_e2e_cli() {
+  local cli="$1"
+  if [[ -n "${SPACES_E2E_CLI:-}" ]]; then
+    printf '%s\n' "$SPACES_E2E_CLI"
+    return 0
+  fi
+  if [[ -n "${SPACES_E2E:-}" ]]; then
+    printf '%s\n' "$SPACES_E2E"
+    return 0
+  fi
+  local cli_dir
+  cli_dir="$(cd "$(dirname "$cli")" && pwd)"
+  printf '%s\n' "$cli_dir/spacese2e"
+}
+
 spaces_profile_eval_shell_env() {
   local cli="$1"
-  eval "$("$cli" profile show --shell)"
+  local e2e_cli
+  e2e_cli="$(spaces_profile_e2e_cli "$cli")"
+  eval "$("$e2e_cli" profile-show --shell)"
 }
 
 spaces_profile_app_owner_pid() {
   local cli="$1"
-  "$cli" profile app-owner --json | python3 -c '
+  local e2e_cli
+  e2e_cli="$(spaces_profile_e2e_cli "$cli")"
+  "$e2e_cli" profile-app-owner --json | python3 -c '
 import json, sys
 payload = json.load(sys.stdin)
 owner = payload.get("owner") or {}
@@ -41,7 +60,9 @@ spaces_profile_terminal_service_socket_path() {
   local runtime_dir="${SPACES_RUNTIME_DIR:-}"
   if [[ -z "$runtime_dir" ]]; then
     local profile_exports
-    profile_exports="$("$cli" profile show --shell)"
+    local e2e_cli
+    e2e_cli="$(spaces_profile_e2e_cli "$cli")"
+    profile_exports="$("$e2e_cli" profile-show --shell)"
     runtime_dir="$(
       PROFILE_EXPORTS="$profile_exports" python3 - <<'PY'
 import os
@@ -189,5 +210,7 @@ spaces_profile_wait_for_owner_pid() {
 spaces_wait_for_desktop_control() {
   local cli="$1"
   shift
-  "$cli" profile wait-for-desktop-control "$@"
+  local e2e_cli
+  e2e_cli="$(spaces_profile_e2e_cli "$cli")"
+  "$e2e_cli" profile-wait-for-desktop-control "$@"
 }

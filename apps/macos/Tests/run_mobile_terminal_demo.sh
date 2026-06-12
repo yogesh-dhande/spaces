@@ -209,8 +209,8 @@ create_demo_root() {
 
 resolve_user_profile_paths() {
   local profile_exports
-  if ! profile_exports="$(run_demo_env "$spaces_cli" profile show --shell)"; then
-    echo "Failed to resolve Spaces profile paths with $spaces_cli profile show --shell." >&2
+  if ! profile_exports="$(run_demo_env "$spacese2e" profile-show --shell)"; then
+    echo "Failed to resolve Spaces profile paths with $spacese2e profile-show --shell." >&2
     exit 1
   fi
   eval "$profile_exports"
@@ -250,26 +250,78 @@ stop_existing_demo_profile_services() {
   )
 }
 
-fail_if_existing_spaces_app() {
-  local existing
-  existing="$(pgrep -x -a SpacesApp || true)"
-  if [[ -n "$existing" ]]; then
-    echo "Refusing to launch demo while another SpacesApp is running:" >&2
-    echo "$existing" >&2
-    echo "Quit the existing app and rerun this script." >&2
-    exit 1
-  fi
+parse_profile_app_owner_pid() {
+  python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+
+owner = payload.get("owner")
+if not owner:
+    raise SystemExit(1)
+pid = owner.get("pid")
+if not isinstance(pid, int) or pid <= 0:
+    raise SystemExit(1)
+print(pid)
+'
 }
 
-fail_if_bridge_port_in_use() {
+terminate_pid() {
+  local pid="$1"
+  local label="$2"
+  [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 0
+  kill "$pid" >/dev/null 2>&1 || true
+  for _ in {1..20}; do
+    if ! ps -p "$pid" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 0.25
+  done
+  echo "Force stopping stale $label pid $pid." >&2
+  kill -9 "$pid" >/dev/null 2>&1 || true
+}
+
+stop_existing_profile_app_owner() {
+  [[ -n "$spaces_db_path" && -n "$spaces_runtime_dir" ]] || return 0
+  local owner_json owner_pid command
+  if ! owner_json="$(run_demo_env \
+    HOME="$demo_home" \
+    SPACES_DB_PATH="$spaces_db_path" \
+    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+    "$spacese2e" profile-app-owner --json 2>/dev/null)"; then
+    return 0
+  fi
+  owner_pid="$(printf '%s' "$owner_json" | parse_profile_app_owner_pid 2>/dev/null || true)"
+  [[ -n "$owner_pid" ]] || return 0
+  command="$(process_command "$owner_pid")"
+  if [[ "$command" != *"SpacesApp"* ]]; then
+    echo "Skipping stale profile app-owner pid $owner_pid because it is not SpacesApp: $command" >&2
+    return 0
+  fi
+  echo "Stopping existing SpacesApp owner for demo profile pid $owner_pid." >&2
+  terminate_pid "$owner_pid" "SpacesApp owner"
+}
+
+stop_bridge_port_listeners() {
   if [[ "$bridge_port" == "0" ]]; then
     return
   fi
-  if lsof -nP -iTCP:"$bridge_port" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "Refusing to launch demo because port $bridge_port is already in use." >&2
-    lsof -nP -iTCP:"$bridge_port" -sTCP:LISTEN >&2 || true
-    exit 1
-  fi
+  local pid command
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    command="$(process_command "$pid")"
+    if [[ "$command" != *"$repo_root"* || ( "$command" != *"spacesd"* && "$command" != *"SpacesApp"* ) ]]; then
+      echo "Refusing to stop non-Spaces listener on mobile demo port $bridge_port: pid=$pid command=$command" >&2
+      lsof -nP -iTCP:"$bridge_port" -sTCP:LISTEN >&2 || true
+      exit 1
+    fi
+    echo "Stopping stale Spaces listener on mobile demo port $bridge_port: pid=$pid." >&2
+    terminate_pid "$pid" "mobile bridge listener"
+  done < <(lsof -tiTCP:"$bridge_port" -sTCP:LISTEN 2>/dev/null || true)
 }
 
 require_executable() {
@@ -526,7 +578,7 @@ start_mobile_bridge() {
     SPACESD_EXECUTABLE="$terminal_service" \
     SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
     SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
-    "$spaces_cli" mobile status >"$bridge_log" 2>&1; then
+    "$spacese2e" mobile-status >"$bridge_log" 2>&1; then
     echo "Timed out waiting for daemon mobile bridge readiness." >&2
     cat "$bridge_log" >&2 || true
     exit 1
@@ -654,14 +706,14 @@ pair_device() {
   local device_pairing_link="$1"
   local installation_id="$2"
   local device_name="$3"
-  python3 - "$device_pairing_link" "$spaces_cli" "$bridge_host" "$bundle_id" "$installation_id" "$device_name" <<'PY'
+  python3 - "$device_pairing_link" "$spacese2e" "$bridge_host" "$bundle_id" "$installation_id" "$device_name" <<'PY'
 import json
 import subprocess
 import sys
 
 (
     pairing_link,
-    spaces_cli,
+    spacese2e,
     host,
     bundle_id,
     installation_id,
@@ -671,9 +723,8 @@ import sys
 def send(pairing_link, request):
     completed = subprocess.run(
         [
-            spaces_cli,
-            "mobile",
-            "request",
+            spacese2e,
+            "mobile-request",
             "--pairing-link",
             pairing_link,
             "--host",
@@ -923,7 +974,7 @@ spaces_demo_tail_bridge_log() {
 }
 
 spaces_demo_mobile_status() {
-  "\$SPACES_CLI" mobile status
+  "\$SPACES_E2E" mobile-status
 }
 
 spaces_demo_tail_ipad_stderr() {
@@ -936,7 +987,6 @@ EOF
 require_path "$ghostty_xcframework" "GhosttyKit.xcframework"
 require_path "$ghostty_resources" "Ghostty resources"
 validate_profile_mode
-fail_if_existing_spaces_app
 build_macos_debug_products
 require_executable "$spaces_app" "SpacesApp"
 require_executable "$spaces_cli" "spaces CLI"
@@ -956,8 +1006,9 @@ ipad_app_stderr_log="$temp_root/ipad-app.stderr.log"
 iphone_app_stdout_log="$temp_root/iphone-app.stdout.log"
 iphone_app_stderr_log="$temp_root/iphone-app.stderr.log"
 prepare_demo_profile
+stop_existing_profile_app_owner
 stop_existing_demo_profile_services
-fail_if_bridge_port_in_use
+stop_bridge_port_listeners
 
 ipad_udid="$(resolve_device_udid "$ipad_name")"
 iphone_udid="$(resolve_device_udid "$iphone_name")"

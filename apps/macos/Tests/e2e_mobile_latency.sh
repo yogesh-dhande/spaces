@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 source "$SCRIPT_DIR/terminal_harness_lock.sh"
 
 SPACES_CLI="${SPACES_CLI:-$APP_ROOT/.build/debug/spaces}"
+SPACES_E2E="${SPACES_E2E:-$APP_ROOT/.build/debug/spacese2e}"
 TERMINAL_SERVICE="${SPACESD_EXECUTABLE:-$APP_ROOT/.build/debug/spacesd}"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-latency.XXXXXX")}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
@@ -135,6 +136,7 @@ parse_args "$@"
 [[ "$NETWORK_PROFILE" == "local" || "$NETWORK_PROFILE" == "ios-constrained" ]] || fail "--network-profile must be local or ios-constrained"
 [[ "$SAMPLES" =~ ^[0-9]+$ && "$SAMPLES" -gt 0 ]] || fail "--samples must be a positive integer"
 [[ -x "$SPACES_CLI" ]] || fail "spaces CLI not found at $SPACES_CLI"
+[[ -x "$SPACES_E2E" ]] || fail "spacese2e not found at $SPACES_E2E"
 [[ -x "$TERMINAL_SERVICE" ]] || fail "spacesd not found at $TERMINAL_SERVICE"
 
 mkdir -p "$(dirname "$DB_PATH")" "$RUNTIME_DIR"
@@ -164,7 +166,7 @@ if [[ "$NETWORK_PROFILE" == "ios-constrained" ]]; then
   )
 fi
 
-env "${bridge_env[@]}" "$SPACES_CLI" mobile serve --host 127.0.0.1 --port 0 >"$BRIDGE_LOG" 2>&1 &
+env "${bridge_env[@]}" "$SPACES_E2E" mobile-serve --host 127.0.0.1 --port 0 >"$BRIDGE_LOG" 2>&1 &
 BRIDGE_PID="$!"
 
 ready_deadline=$((SECONDS + 15))

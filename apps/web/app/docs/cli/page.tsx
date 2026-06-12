@@ -124,19 +124,6 @@ spaces restart /path/to/workspace`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Open</h2>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces open</Cmd> focuses one named tracked browser, process, or coding-agent target. The target name is required so the CLI never guesses which window you meant.
-        </p>
-        <CodeBlock>{`spaces open frontend
-spaces open frontend /path/to/workspace`}</CodeBlock>
-        <ul className="mt-3 space-y-1">
-          <Flag name="<name>" description="Tracked browser, process, or coding-agent name to open or focus." />
-          <Flag name="[path]" description="Workspace directory to resolve. Defaults to the current working directory." />
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Signal</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Coding agents report their lifecycle explicitly. Spaces uses these events to surface waiting and done states in the app and Alerts. This command records state only; it does not launch or stop an agent.

@@ -32,7 +32,6 @@ The `spaces` CLI is workspace-oriented and path-based. From inside a workspace d
 spaces import              # register the current directory as a workspace
 spaces start               # launch configured processes
 spaces restart             # full stop + launch
-spaces open <name>         # focus a tracked window by name
 spaces signal <event>      # coding-agent lifecycle: init|start|waiting|done|exit
 spaces update --notes "…"  # edit workspace metadata
 spaces terminal command --command "cat"   # start a Spaces terminal session
@@ -42,7 +41,6 @@ spaces terminal key <session> ctrl+c      # send a named key or control chord
 spaces terminal tail <session> --lines 20 # read recent output
 spaces terminal show <session>            # open an owner-seeking window for a session
 spaces terminal takeover <session> <id>   # hand input ownership to another client
-spaces mobile status                      # show iPhone bridge details
 ```
 
 Coding agents emit `spaces signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).

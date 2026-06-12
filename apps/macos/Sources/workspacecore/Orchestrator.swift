@@ -2975,7 +2975,7 @@ public final class WorkspaceOrchestrator {
         guard let baseLabel = sanitizedFocusName(preferredLabel) else { return nil }
         // Configured coding-agent slots reserve their exact names even before a live agent
         // reports in. Ad-hoc agents that choose the same label get suffixed so the Run tab
-        // and `spaces open <name>` keep a stable one-name-to-one-row mapping.
+        // and harness focus keep a stable one-name-to-one-row mapping.
         let usedNames = Set(
             try focusableWorkspaceTargets(workspaceID: workspaceID).filter { entry in
                 guard case .agent(let record) = entry.target, let excludingAgentWindowID else { return true }

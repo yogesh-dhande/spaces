@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
+spaces_e2e_load_env "$ROOT_DIR"
 
 DEMO_SCRIPT="$ROOT_DIR/apps/macos/Tests/run_mobile_terminal_demo.sh"
 SPACES_CLI_BIN="${SPACES_CLI:-$ROOT_DIR/apps/macos/.build/debug/spaces}"
@@ -673,6 +675,225 @@ raise SystemExit(f"Timed out waiting for active owner attachment for {session_id
 PY
 }
 
+profile_app_owner_json() {
+  demo_env "$SPACES_E2E_BIN" profile-app-owner --json
+}
+
+profile_app_owner_pid() {
+  python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+
+owner = payload.get("owner")
+if not owner:
+    raise SystemExit(1)
+pid = owner.get("pid")
+if not isinstance(pid, int) or pid <= 0:
+    raise SystemExit(1)
+print(pid)
+'
+}
+
+mobile_bridge_request() {
+  local request_json="$1"
+  [[ -f "$DEMO_ROOT/pairing.json" ]] || return 1
+  demo_env python3 - "$SPACES_E2E_BIN" "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" "$BUNDLE_ID" "$MOBILE_DEVICE_NAME" "$BRIDGE_HOST" "$BRIDGE_PORT" "$request_json" <<'PY'
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+spacese2e = Path(sys.argv[1])
+pairing_path = Path(sys.argv[2])
+device_key = sys.argv[3]
+bundle_id = sys.argv[4]
+device_name = sys.argv[5]
+bridge_host = sys.argv[6]
+bridge_port = int(sys.argv[7])
+request = json.loads(sys.argv[8])
+pairing = json.loads(pairing_path.read_text())[device_key]
+client_app = {
+    "installationID": pairing["installationID"],
+    "bundleID": bundle_id,
+    "platform": "ios",
+    "deviceName": device_name,
+    "appVersion": "1.0",
+}
+completed = subprocess.run(
+    [
+        str(spacese2e),
+        "mobile-request",
+        "--host",
+        bridge_host,
+        "--port",
+        str(bridge_port),
+        "--transport-key",
+        pairing["transportKey"],
+        "--request-json",
+        json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
+    ],
+    capture_output=True,
+    text=True,
+    env=os.environ,
+    timeout=15,
+    check=True,
+)
+print(completed.stdout, end="")
+PY
+}
+
+wait_for_mobile_overview_sessions() {
+  local overview_log="$SCENARIO_DIR/mobile-overview-wait.log"
+  demo_env python3 - "$SPACES_E2E_BIN" "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" "$BUNDLE_ID" "$MOBILE_DEVICE_NAME" "$BRIDGE_HOST" "$BRIDGE_PORT" "$UI_TEST_CONFIG" "$overview_log" <<'PY'
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+spacese2e = Path(sys.argv[1])
+pairing_path = Path(sys.argv[2])
+device_key = sys.argv[3]
+bundle_id = sys.argv[4]
+device_name = sys.argv[5]
+bridge_host = sys.argv[6]
+bridge_port = int(sys.argv[7])
+config_path = Path(sys.argv[8])
+log_path = Path(sys.argv[9])
+
+config = json.loads(config_path.read_text())
+required_session_ids = [
+    value for value in (config.get("sessionID"), config.get("secondarySessionID"))
+    if isinstance(value, str) and value
+]
+if not required_session_ids:
+    raise SystemExit(0)
+
+pairing = json.loads(pairing_path.read_text())[device_key]
+client_app = {
+    "installationID": pairing["installationID"],
+    "bundleID": bundle_id,
+    "platform": "ios",
+    "deviceName": device_name,
+    "appVersion": "1.0",
+}
+command = [
+    str(spacese2e),
+    "mobile-request",
+    "--host",
+    bridge_host,
+    "--port",
+    str(bridge_port),
+    "--transport-key",
+    pairing["transportKey"],
+    "--request-json",
+    json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, "command": "overview"}),
+]
+
+deadline = time.time() + 30
+last_detail = ""
+attempt = 0
+while time.time() < deadline:
+    attempt += 1
+    completed = subprocess.run(command, capture_output=True, text=True, env=os.environ, timeout=20)
+    if completed.returncode == 0:
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            last_detail = f"attempt {attempt}: invalid JSON: {error}\nstdout={completed.stdout}\nstderr={completed.stderr}"
+        else:
+            sessions = payload.get("overview", {}).get("sessions", [])
+            visible_ids = {session.get("id") for session in sessions if isinstance(session, dict)}
+            missing = [session_id for session_id in required_session_ids if session_id not in visible_ids]
+            last_detail = json.dumps(
+                {
+                    "attempt": attempt,
+                    "requiredSessionIDs": required_session_ids,
+                    "visibleSessionIDs": sorted(session_id for session_id in visible_ids if session_id),
+                    "missingSessionIDs": missing,
+                    "ok": payload.get("ok"),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            if payload.get("ok") and not missing:
+                log_path.write_text(last_detail + "\n")
+                raise SystemExit(0)
+    else:
+        last_detail = f"attempt {attempt}: exit={completed.returncode}\nstdout={completed.stdout}\nstderr={completed.stderr}"
+    time.sleep(1)
+
+log_path.write_text(last_detail + "\n")
+raise SystemExit(f"Mobile bridge overview did not include required sessions before UI test.\n{last_detail}")
+PY
+}
+
+wait_for_profile_app_owner() {
+  local timeout_seconds="${1:-20}"
+  local log_path="$2"
+  local deadline=$((SECONDS + timeout_seconds))
+  local owner_json=""
+  local owner_pid=""
+  while (( SECONDS < deadline )); do
+    if owner_json="$(profile_app_owner_json 2>&1)" && owner_pid="$(printf '%s' "$owner_json" | profile_app_owner_pid 2>/dev/null)"; then
+      DEMO_APP_PID="$owner_pid"
+      printf 'profile app owner ready: pid=%s\n' "$owner_pid" >>"$log_path" || true
+      return 0
+    fi
+    sleep 0.2
+  done
+  {
+    printf 'Timed out waiting for profile app owner.\n'
+    printf 'last profile-app-owner payload:\n%s\n' "$owner_json"
+  } >>"$log_path" || true
+  return 1
+}
+
+ensure_profile_app_owner() {
+  local log_path="$1"
+  local owner_json=""
+  local owner_pid=""
+  if owner_json="$(profile_app_owner_json 2>&1)"; then
+    {
+      printf 'profile-app-owner before terminal show:\n'
+      printf '%s\n' "$owner_json"
+    } >>"$log_path" || true
+    if owner_pid="$(printf '%s' "$owner_json" | profile_app_owner_pid 2>/dev/null)"; then
+      DEMO_APP_PID="$owner_pid"
+      return 0
+    fi
+  else
+    {
+      printf 'profile-app-owner failed before terminal show:\n'
+      printf '%s\n' "$owner_json"
+    } >>"$log_path" || true
+  fi
+
+  local launch_response
+  {
+    printf 'No live profile app owner; requesting launchSpacesApp through the daemon bridge.\n'
+  } >>"$log_path" || true
+  if ! launch_response="$(mobile_bridge_request '{"command":"launchSpacesApp"}' 2>&1)"; then
+    {
+      printf 'launchSpacesApp request failed:\n'
+      printf '%s\n' "$launch_response"
+    } >>"$log_path" || true
+    return 1
+  fi
+  {
+    printf 'launchSpacesApp response:\n'
+    printf '%s\n' "$launch_response"
+  } >>"$log_path" || true
+  wait_for_profile_app_owner 20 "$log_path"
+}
+
 new_terminal_session() {
   local title="${1:-e2e-$CURRENT_SCENARIO}"
   local command_text="${2:-}"
@@ -769,6 +990,9 @@ PY
   : >"$show_log"
   for attempt in 1 2 3; do
     local show_attempt_log="$SCENARIO_DIR/show-terminal-attempt-$attempt.log"
+    if ! ensure_profile_app_owner "$show_log"; then
+      fail "No current-profile SpacesApp owner was available for fresh terminal session $session_id."
+    fi
     if ! demo_env "$SPACES_CLI_BIN" terminal show "$session_id" >"$show_attempt_log" 2>&1; then
       cat "$show_attempt_log" >>"$SCENARIO_LOG" || true
       fail "Failed to open Mac owner window for fresh service terminal session $session_id."
@@ -1010,6 +1234,7 @@ PY
 run_ui_test() {
   local test_name="$1"
   printf 'Running %s UI test: %s\n' "$MOBILE_DEVICE_LABEL" "$test_name"
+  wait_for_mobile_overview_sessions
   reset_mobile_app
   if ! SPACES_MOBILE_UI_TEST_CONFIG_PATH="$UI_TEST_CONFIG" \
     xcodebuild \
@@ -1056,22 +1281,24 @@ env = os.environ | {
 
 def current_owner_client_id() -> str:
     root_directory = os.path.normpath(str(runtime_root / "terminal" / "sessions" / session_id))
-    with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
-        row = db.execute(
-            """
-            SELECT client_id
-            FROM terminal_attachments
-            WHERE root_directory = ?
-              AND mode = 'owner'
-              AND detached_at IS NULL
-            ORDER BY attached_at DESC
-            LIMIT 1
-            """,
-            (root_directory,),
-        ).fetchone()
-    if row:
-        return row[0]
-    raise RuntimeError("No active owner attachment was found for the demo session.")
+    deadline = time.time() + 30
+    rows = []
+    while time.time() < deadline:
+        with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
+            rows = db.execute(
+                """
+                SELECT client_id, mode, detached_at
+                FROM terminal_attachments
+                WHERE root_directory = ?
+                ORDER BY attached_at DESC
+                """,
+                (root_directory,),
+            ).fetchall()
+        for client_id, mode, detached_at in rows:
+            if client_id and mode == "owner" and detached_at is None:
+                return client_id
+        time.sleep(0.1)
+    raise RuntimeError(f"No active owner attachment was found for the demo session. rows={rows!r}")
 
 def send_request(request: dict) -> dict:
     command = [
@@ -2540,28 +2767,33 @@ def require(condition: bool, message: str) -> None:
 def process_is_alive(pid: int) -> bool:
     return subprocess.run(["/bin/kill", "-0", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
-def send_mobile_request(request: dict) -> dict:
-    completed = subprocess.run(
-        [
-            str(spaces_cli),
-            "mobile",
-            "request",
-            "--host",
-            bridge_host,
-            "--port",
-            str(bridge_port),
-            "--transport-key",
-            pairing["transportKey"],
-            "--request-json",
-            json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
-        ],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=10,
-        check=True,
-    )
-    return json.loads(completed.stdout)
+def send_mobile_request(request: dict, attempts: int = 3) -> dict:
+    command = [
+        str(spacese2e),
+        "mobile-request",
+        "--host",
+        bridge_host,
+        "--port",
+        str(bridge_port),
+        "--transport-key",
+        pairing["transportKey"],
+        "--request-json",
+        json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
+    ]
+    last_detail = ""
+    for attempt in range(1, attempts + 1):
+        completed = subprocess.run(command, capture_output=True, text=True, env=env, timeout=20)
+        if completed.returncode == 0:
+            try:
+                return json.loads(completed.stdout)
+            except json.JSONDecodeError as error:
+                last_detail = f"attempt {attempt}: invalid JSON: {error}\nstdout={completed.stdout}\nstderr={completed.stderr}"
+        else:
+            last_detail = (
+                f"attempt {attempt}: exit={completed.returncode}\nstdout={completed.stdout}\nstderr={completed.stderr}"
+            )
+        time.sleep(1)
+    raise RuntimeError(f"Mobile bridge request failed after {attempts} attempts: {request}\n{last_detail}")
 
 require(interrupted_dump_path.exists(), f"Missing interrupted {mobile_device_label} render dump at {interrupted_dump_path}")
 interrupted_dump = json.loads(interrupted_dump_path.read_text())
@@ -2775,6 +3007,7 @@ mobile_device_name = sys.argv[10]
 mobile_device_label = sys.argv[11]
 runtime_root = demo_root / "runtime"
 output_log_path = runtime_root / "terminal" / "sessions" / session_id / "output.log"
+performance_log_path = demo_root / "mobile-terminal-performance.jsonl"
 pairing = json.loads((demo_root / "pairing.json").read_text())[mobile_device_key]
 
 env = os.environ | {
@@ -2801,9 +3034,8 @@ mobile_client = {
 def send_mobile_request(request: dict) -> dict:
     completed = subprocess.run(
         [
-            str(spaces_cli),
-            "mobile",
-            "request",
+            str(spacese2e),
+            "mobile-request",
             "--host",
             bridge_host,
             "--port",
@@ -2818,6 +3050,10 @@ def send_mobile_request(request: dict) -> dict:
         env=env,
         check=True,
     )
+    return json.loads(completed.stdout)
+
+def send_terminal_control(command: list[str]) -> dict:
+    completed = subprocess.run(command, capture_output=True, text=True, env=env, check=True)
     return json.loads(completed.stdout)
 
 def active_owner(excluded: set[str] | None = None, timeout: float = 20) -> str:
@@ -2845,6 +3081,47 @@ def active_owner(excluded: set[str] | None = None, timeout: float = 20) -> str:
         time.sleep(0.1)
     raise RuntimeError(f"Timed out waiting for active owner.\n{last_snapshot}")
 
+def wait_for_registered_client(client_id: str, timeout: float = 10) -> None:
+    deadline = time.time() + timeout
+    last_snapshot = ""
+    root_directory = os.path.normpath(str(runtime_root / "terminal" / "sessions" / session_id))
+    while time.time() < deadline:
+        with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
+            rows = db.execute(
+                """
+                SELECT client_id, kind, disconnected_at
+                FROM terminal_clients
+                WHERE root_directory = ?
+                  AND client_id = ?
+                """,
+                (root_directory, client_id),
+            ).fetchall()
+        last_snapshot = repr(rows)
+        if any(row[0] == client_id and row[2] is None for row in rows):
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"Timed out waiting for registered client {client_id}.\n{last_snapshot}")
+
+def wait_for_attachment_activity_quiet(timeout: float = 8, quiet_for: float = 1) -> None:
+    deadline = time.time() + timeout
+    last_count = -1
+    quiet_since = time.time()
+    seen = False
+    while time.time() < deadline:
+        count = 0
+        if performance_log_path.exists():
+            for line in performance_log_path.read_text(errors="replace").splitlines():
+                if session_id in line and '"reason":"attachment_state"' in line:
+                    count += 1
+                    seen = True
+        now = time.time()
+        if count != last_count:
+            last_count = count
+            quiet_since = now
+        elif seen and now - quiet_since >= quiet_for:
+            return
+        time.sleep(0.1)
+
 def wait_for_output(text: str, timeout: float = 20) -> None:
     deadline = time.time() + timeout
     last_output = ""
@@ -2857,14 +3134,31 @@ def wait_for_output(text: str, timeout: float = 20) -> None:
     raise RuntimeError(f"Timed out waiting for {text!r} in output log.\n{last_output[-4000:]}")
 
 initial_owner = active_owner(timeout=20)
-attach = send_mobile_request({
-    "command": "attach",
-    "sessionID": session_id,
-    "client": mobile_client,
-    "attachmentMode": "viewer",
-})
+wait_for_attachment_activity_quiet(timeout=8, quiet_for=1)
+attach = send_terminal_control([
+    str(spacese2e),
+    "terminal-service-control",
+    "--session-id",
+    session_id,
+    "--command",
+    "attach",
+    "--direct-control",
+    "--client-id",
+    mobile_client["id"],
+    "--client-kind",
+    mobile_client["kind"],
+    "--client-label",
+    mobile_client["identity"]["label"],
+    "--client-device-name",
+    mobile_client["identity"]["deviceName"],
+    "--client-network-address",
+    mobile_client["identity"]["networkAddress"],
+    "--attachment-mode",
+    "viewer",
+])
 if not attach.get("ok"):
     raise RuntimeError(f"Viewer attach failed: {attach}")
+wait_for_registered_client(mobile_client["id"], timeout=10)
 
 blocked = send_mobile_request({
     "command": "send",
@@ -2875,6 +3169,8 @@ blocked = send_mobile_request({
 })
 if blocked.get("ok"):
     raise RuntimeError(f"Viewer input should have been rejected: {blocked}")
+if "Only the active owner" not in blocked.get("message", ""):
+    raise RuntimeError(f"Viewer input was not rejected by ownership guard: {blocked}")
 
 takeover = send_mobile_request({"command": "takeover", "sessionID": session_id, "clientID": mobile_client["id"]})
 if not takeover.get("ok"):
@@ -2936,7 +3232,7 @@ run_app_recovery_scenario() {
   track_current_scenario_session "$session_id"
 
   local new_app_pid
-  if ! new_app_pid="$(python3 - "$DEMO_ROOT" "$DB_PATH" "$RUNTIME_DIR" "$session_id" "$DEMO_TERMINAL_SERVICE_PID" "$SPACES_CLI_BIN" "$BRIDGE_HOST" "$BRIDGE_PORT" "$TERMINAL_SERVICE_BIN" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$SCENARIO_DIR" <<'PY' 2>>"$SCENARIO_LOG"
+  if ! new_app_pid="$(python3 - "$DEMO_ROOT" "$DB_PATH" "$RUNTIME_DIR" "$session_id" "$DEMO_TERMINAL_SERVICE_PID" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$BRIDGE_HOST" "$BRIDGE_PORT" "$TERMINAL_SERVICE_BIN" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$SCENARIO_DIR" <<'PY' 2>>"$SCENARIO_LOG"
 import json
 import os
 import shlex
@@ -2952,13 +3248,14 @@ runtime_root = Path(sys.argv[3])
 session_id = sys.argv[4]
 metadata_terminal_service_pid = sys.argv[5]
 spaces_cli = Path(sys.argv[6])
-bridge_host = sys.argv[7]
-bridge_port = int(sys.argv[8])
-terminal_service_bin = sys.argv[9]
-bundle_id = sys.argv[10]
-mobile_device_key = sys.argv[11]
-mobile_device_name = sys.argv[12]
-scenario_dir = Path(sys.argv[13])
+spacese2e = Path(sys.argv[7])
+bridge_host = sys.argv[8]
+bridge_port = int(sys.argv[9])
+terminal_service_bin = sys.argv[10]
+bundle_id = sys.argv[11]
+mobile_device_key = sys.argv[12]
+mobile_device_name = sys.argv[13]
+scenario_dir = Path(sys.argv[14])
 pairing = json.loads((demo_root / "pairing.json").read_text())[mobile_device_key]
 app_recovery_state_path = demo_root / "app-recovery-state.json"
 
@@ -2997,7 +3294,7 @@ def process_command(pid: int) -> str:
 
 def profile_app_owner() -> dict:
     completed = subprocess.run(
-        [str(spaces_cli), "profile", "app-owner", "--json"],
+        [str(spacese2e), "profile-app-owner", "--json"],
         capture_output=True,
         text=True,
         env=env,
@@ -3032,9 +3329,8 @@ def wait_for_app_owner_absent(timeout: float = 10) -> None:
 def send_mobile_request(request: dict) -> dict:
     completed = subprocess.run(
         [
-            str(spaces_cli),
-            "mobile",
-            "request",
+            str(spacese2e),
+            "mobile-request",
             "--host",
             bridge_host,
             "--port",

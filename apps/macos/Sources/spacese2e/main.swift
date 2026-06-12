@@ -4,6 +4,7 @@ import ArgumentParser
 import Carbon
 import Dispatch
 import Foundation
+import Network
 import spacesmobilebridge
 import spacesmobilecore
 import spacesterminalcore
@@ -22,14 +23,16 @@ struct SpacesE2ECommand: ParsableCommand {
             LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
             StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
             ClearWorkspaceAgentWindowsCommand.self, SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self,
-            RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self, CycleWorkspaceWindowCommand.self,
-            FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self,
-            SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
-            StartTerminalSessionCommand.self, StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self,
-            TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, UpsertComputeHostCommand.self, ListComputeHostsCommand.self,
-            DeleteComputeHostCommand.self, SetProjectDefaultComputeHostCommand.self, SetWorkspaceComputeHostOverrideCommand.self,
-            PlanWorkspaceRuntimeCommand.self, RemoteComputeHostSmokeCommand.self, OpenMobilePairingWindowCommand.self, RecordScreenCommand.self,
-            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self, FocusWorkspaceWindowIndexCommand.self,
+            CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
+            CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self,
+            DumpTerminalSessionWindowStateCommand.self, StartTerminalSessionCommand.self, StartWorkspaceTerminalSessionCommand.self,
+            TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, UpsertComputeHostCommand.self,
+            ListComputeHostsCommand.self, DeleteComputeHostCommand.self, SetProjectDefaultComputeHostCommand.self,
+            SetWorkspaceComputeHostOverrideCommand.self, PlanWorkspaceRuntimeCommand.self, RemoteComputeHostSmokeCommand.self,
+            OpenMobilePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
+            ProfileDesktopControlOwnerCommand.self, ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self,
+            MobileRequestCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
         ])
 }
 
@@ -300,16 +303,53 @@ private struct TerminalServiceControlCommand: ParsableCommand {
     @Option(name: .long) var text: String?
     @Option(name: .long) var key: String?
     @Option(name: .long) var clientID: String?
+    @Option(name: .long) var clientKind: String?
+    @Option(name: .long) var clientLabel: String?
+    @Option(name: .long) var clientDeviceName: String?
+    @Option(name: .long) var clientNetworkAddress: String?
+    @Option(name: .long) var attachmentMode: String?
+    @Flag(name: .long) var directControl = false
     @Flag(name: .long) var appendNewline = false
 
     func run() throws {
         let trimmedCommand = try required(command, label: "command")
+        let trimmedSessionID = try required(sessionID, label: "session-id")
+        let normalizedClientID = normalizedOptional(clientID)
+        let client = try terminalClientFromOptions(clientID: normalizedClientID)
+        let parsedAttachmentMode = try terminalAttachmentModeFromOption(attachmentMode)
         let controlRequest = TerminalControlRequest(
-            command: trimmedCommand, text: text, key: key, clientID: normalizedOptional(clientID), client: nil, attachmentMode: nil, columns: nil,
-            rows: nil, ownerEpoch: nil, resizeSerial: nil, scrollHorizontal: nil, scrollVertical: nil, scrollMods: nil, appendNewline: appendNewline)
+            command: trimmedCommand, text: text, key: key, clientID: normalizedClientID, client: client, attachmentMode: parsedAttachmentMode,
+            columns: nil, rows: nil, ownerEpoch: nil, resizeSerial: nil, scrollHorizontal: nil, scrollVertical: nil, scrollMods: nil,
+            appendNewline: appendNewline)
+        if directControl {
+            let paths = try TerminalSessionPaths.forSession(id: trimmedSessionID)
+            let response = try TerminalControlClient.send(request: controlRequest, socketPath: paths.controlSocketPath)
+            try emitJSON(response)
+            return
+        }
         let response = try sendTerminalServiceRequestForSession(
-            sessionID: sessionID, request: TerminalServiceRequest(command: "control", controlRequest: controlRequest))
+            sessionID: trimmedSessionID, request: TerminalServiceRequest(command: "control", controlRequest: controlRequest))
         try emitJSON(response.controlResponse ?? TerminalControlResponse(ok: response.ok, message: response.message))
+    }
+
+    private func terminalClientFromOptions(clientID: String?) throws -> TerminalClient? {
+        let provided = [clientKind, clientLabel, clientDeviceName, clientNetworkAddress].contains { normalizedOptional($0) != nil }
+        guard provided else { return nil }
+        guard let clientID else { throw ValidationError("Missing client-id for client payload.") }
+        guard let clientKindValue = normalizedOptional(clientKind) else { throw ValidationError("Missing client-kind for client payload.") }
+        guard let kind = TerminalClientKind(rawValue: clientKindValue) else { throw ValidationError("Unsupported client-kind '\(clientKindValue)'.") }
+        guard let label = normalizedOptional(clientLabel) else { throw ValidationError("Missing client-label for client payload.") }
+        return TerminalClient(
+            id: clientID, kind: kind,
+            identity: TerminalClientIdentity(
+                label: label, deviceName: normalizedOptional(clientDeviceName), networkAddress: normalizedOptional(clientNetworkAddress)),
+            connectedAt: nowISO8601())
+    }
+
+    private func terminalAttachmentModeFromOption(_ value: String?) throws -> TerminalAttachmentMode? {
+        guard let value = normalizedOptional(value) else { return nil }
+        guard let mode = TerminalAttachmentMode(rawValue: value) else { throw ValidationError("Unsupported attachment-mode '\(value)'.") }
+        return mode
     }
 }
 
@@ -331,6 +371,198 @@ private struct OpenMobilePairingWindowCommand: ParsableCommand {
                 pairingCode: window.code, pairingNonce: window.nonce, transportKey: link.transportKey,
                 certificateFingerprint: link.certificateFingerprint, expiresAt: ISO8601DateFormatter().string(from: window.expiresAt),
                 message: response.message))
+    }
+}
+
+private struct ProfileShowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "profile-show", abstract: "Show resolved Spaces profile paths for harnesses.")
+
+    @Flag(name: .long, help: "Emit shell exports for SPACES_DB_PATH and SPACES_RUNTIME_DIR.") var shell = false
+    @Flag(name: .long, help: "Emit JSON instead of text.") var json = false
+
+    func run() throws {
+        let profile = try SpacesProfile.current()
+        let payload = ProfilePayload(profile: profile)
+        if shell {
+            print("export \(SpacesProfile.databasePathEnvironmentVariable)=\(profileShellQuoted(profile.databasePath))")
+            print("export \(SpacesProfile.runtimeDirectoryEnvironmentVariable)=\(profileShellQuoted(profile.runtimeDirectory))")
+            return
+        }
+        if json {
+            try emitJSON(payload)
+            return
+        }
+
+        print("source\t\(profile.source.rawValue)")
+        print("profile-root\t\(profile.rootDirectory)")
+        print("database-path\t\(profile.databasePath)")
+        print("runtime-dir\t\(profile.runtimeDirectory)")
+        print("ipc-object\t\(profile.ipcNotificationObject)")
+        if let worktreeRoot = payload.worktreeRoot { print("worktree-root\t\(worktreeRoot)") }
+        if let branch = payload.branchName { print("branch\t\(branch)") }
+    }
+}
+
+private struct ProfileAppOwnerCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "profile-app-owner", abstract: "Show the running Spaces app owner for this profile.")
+
+    @Flag(name: .long, help: "Emit JSON instead of text.") var json = false
+
+    func run() throws {
+        let profile = try SpacesProfile.current()
+        let owner = try SpacesLeaseCoordinator.currentProfileAppOwner(profile: profile)
+        let payload = LeaseStatePayload(available: owner == nil, profileRoot: profile.rootDirectory, owner: owner)
+        if json {
+            try emitJSON(payload)
+            return
+        }
+
+        guard let owner else {
+            print("No running Spaces app owns profile \(profile.rootDirectory).")
+            return
+        }
+        print("pid=\(owner.pid)\texecutable=\(owner.executablePath)\tprofile-root=\(owner.profileRoot ?? profile.rootDirectory)")
+    }
+}
+
+private struct ProfileDesktopControlOwnerCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "profile-desktop-control-owner", abstract: "Show which Spaces instance owns desktop-global control.")
+
+    @Flag(name: .long, help: "Emit JSON instead of text.") var json = false
+
+    func run() throws {
+        let owner = try SpacesLeaseCoordinator.currentDesktopControlOwner()
+        let payload = LeaseStatePayload(available: owner == nil, profileRoot: owner?.profileRoot, owner: owner)
+        if json {
+            try emitJSON(payload)
+            return
+        }
+
+        guard let owner else {
+            print("Desktop control is available.")
+            return
+        }
+        print("pid=\(owner.pid)\texecutable=\(owner.executablePath)\tprofile-root=\(owner.profileRoot ?? "unknown")")
+    }
+}
+
+private struct ProfileWaitForDesktopControlCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "profile-wait-for-desktop-control", abstract: "Wait until no Spaces instance owns desktop-global control.")
+
+    @Option(name: .long, help: "Wait timeout in seconds. Defaults to SPACES_REAL_SYSTEM_WAIT_TIMEOUT_SECONDS or 600.") var timeoutSeconds: Double?
+
+    func run() throws {
+        let envTimeoutSeconds = Double(ProcessInfo.processInfo.environment["SPACES_REAL_SYSTEM_WAIT_TIMEOUT_SECONDS"] ?? "")
+        let effectiveTimeoutSeconds = timeoutSeconds ?? envTimeoutSeconds ?? 600
+        if let owner = try SpacesLeaseCoordinator.currentDesktopControlOwner() { deliverDesktopControlBusyNotification(owner: owner) }
+        let available = try SpacesLeaseCoordinator.waitForDesktopControlAvailability(timeoutSeconds: effectiveTimeoutSeconds) { line in print(line) }
+        if available {
+            print("Desktop control is available.")
+            return
+        }
+
+        let owner = try SpacesLeaseCoordinator.currentDesktopControlOwner()
+        let detail =
+            owner.map { "Owner pid=\($0.pid) executable=\($0.executablePath) profile=\($0.profileRoot ?? "unknown")." }
+            ?? "Owner metadata is no longer available."
+        let message = "Desktop control remained busy for \(Int(effectiveTimeoutSeconds)) seconds. \(detail) Retry this workflow once the owner exits."
+        FileHandle.standardError.write(Data("\(message)\n".utf8))
+        throw ExitCode.failure
+    }
+}
+
+private struct MobileStatusCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "mobile-status", abstract: "Show daemon mobile bridge status for harnesses.")
+
+    func run() throws {
+        let response = try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService()
+        guard response.ok else { throw ValidationError(response.message) }
+        guard let status = response.status else { throw ValidationError("Mobile bridge status response did not include address details.") }
+        try emitJSON(status)
+    }
+}
+
+private struct MobileServeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "mobile-serve", abstract: "Run a standalone mobile bridge for harnesses.")
+
+    @Option(name: .long, help: "TCP host to bind. Defaults to all IPv4 interfaces for iPhone and simulator access.") var host =
+        SpacesMobileBridgeDefaults.host
+    @Option(name: .long, help: "TCP port to bind. Defaults to the stable first-party mobile bridge port.") var port = SpacesMobileBridgeDefaults.port
+    @Option(name: .long, help: "One-time pairing code accepted by the first-party iOS client. Defaults to a generated 8-digit code.") var pairingCode:
+        String?
+    @Option(name: .long, help: "Number of one-time pairing windows to emit in standalone harness mode.") var pairingWindowCount = 1
+
+    func run() throws {
+        guard pairingWindowCount > 0 else { throw ValidationError("--pairing-window-count must be greater than zero.") }
+        let trimmedPairingCode = pairingCode?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedPairingCode =
+            if let trimmedPairingCode, !trimmedPairingCode.isEmpty { trimmedPairingCode } else {
+                SpacesMobilePairingCoordinator.generatePairingCode()
+            }
+        let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+        let pairingWindowEmitter = MobileServePairingWindowEmitter(
+            bindHost: host, totalWindowCount: pairingWindowCount, firstPairingCode: resolvedPairingCode)
+        let server = try SpacesMobileBridgeServer(host: host, port: port, transportKey: transportKey) { _ in
+            pairingWindowEmitter.openNextWindow(label: "Spaces mobile pairing window")
+        }
+        pairingWindowEmitter.server = server
+        try server.start()
+        pairingWindowEmitter.linkHost = mobileServePairingLinkHost(host: host)
+        pairingWindowEmitter.openNextWindow(label: "Spaces mobile bridge ready")
+        withExtendedLifetime(server) { dispatchMain() }
+    }
+}
+
+private struct MobileRequestCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "mobile-request", abstract: "Send a TLS-PSK mobile bridge JSON request.")
+
+    @Option(help: "Full spacesmobile:// pairing link. Supplies host, port, transport key, code, and nonce.") var pairingLink: String?
+    @Option(help: "Mobile bridge host. Defaults to the pairing link host or 127.0.0.1.") var host: String?
+    @Option(help: "Mobile bridge port. Defaults to the pairing link port.") var port: Int?
+    @Option(help: "Base64url mobile bridge transport key. Defaults to the pairing link PSK.") var transportKey: String?
+    @Option(help: "JSON bridge request. Reads stdin when omitted.") var requestJSON: String?
+    @Flag(help: "Keep the connection open and print newline-delimited bridge messages.") var stream = false
+
+    func run() throws {
+        let link = try pairingLink.map { try SpacesMobilePairingLink.parse($0) }
+        let resolvedHost = host ?? link?.host ?? "127.0.0.1"
+        guard let resolvedPort = port ?? link?.port else { throw ValidationError("Provide --port or a pairing link.") }
+        guard (1...65_535).contains(resolvedPort) else { throw ValidationError("Port must be between 1 and 65535.") }
+        guard let resolvedTransportKey = transportKey ?? link?.transportKey else {
+            throw ValidationError("Provide --transport-key or a pairing link.")
+        }
+
+        var requestData = try readRequestData()
+        if let link { requestData = try requestDataByApplying(pairingLink: link, to: requestData) }
+
+        let client = MobileBridgeRequestClient(host: resolvedHost, port: UInt16(resolvedPort), transportKey: resolvedTransportKey)
+        if stream {
+            try client.stream(requestData: requestData)
+        } else {
+            let responseData = try client.request(requestData: requestData)
+            FileHandle.standardOutput.write(responseData)
+            FileHandle.standardOutput.write(Data([0x0A]))
+        }
+    }
+
+    private func readRequestData() throws -> Data {
+        if let requestJSON { return Data(requestJSON.utf8) }
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        guard !data.isEmpty else { throw ValidationError("Provide --request-json or request JSON on stdin.") }
+        return data
+    }
+
+    private func requestDataByApplying(pairingLink link: SpacesMobilePairingLink, to data: Data) throws -> Data {
+        guard var payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ValidationError("Request JSON must be an object.")
+        }
+        if payload["command"] as? String == "pair" {
+            payload["pairingCode"] = payload["pairingCode"] ?? link.code
+            payload["pairingNonce"] = payload["pairingNonce"] ?? link.nonce
+        }
+        return try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
     }
 }
 
@@ -644,7 +876,8 @@ private struct RemoteComputeHostSmokeCommand: ParsableCommand {
         let host = try initialHost(orchestrator: orchestrator)
         let explicitToken = normalizedOptional(authToken)
         let token = explicitToken ?? ComputeHostCredentialStore.generateAuthToken()
-        let outcome = try ComputeHostBootstrapper().startSpacesDaemon(host: host, authToken: token, timeout: timeoutSeconds)
+        let outcome = try ComputeHostBootstrapper().startSpacesDaemon(
+            host: host, authToken: token, timeout: timeoutSeconds, cleanExistingProfile: true)
         let readyHost = host.updatedForBootstrap(outcome)
         let status = try ping(host: readyHost, authToken: token)
         try orchestrator.upsertComputeHost(readyHost)
@@ -991,6 +1224,23 @@ private struct FocusWorkspaceWindowIndexCommand: ParsableCommand {
         }
         try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: index)
         try emitJSON(["workspaceID": workspace.id, "index": String(index)])
+    }
+}
+
+private struct FocusWorkspaceWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "focus-workspace-window")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var name: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, name: name)
+        try emitJSON(["workspaceID": workspace.id, "name": name])
     }
 }
 
@@ -1597,6 +1847,32 @@ private struct DragApplicationWindowPayload: Codable {
     let success: Bool
 }
 
+private struct ProfilePayload: Codable {
+    let source: String
+    let databasePath: String
+    let profileRoot: String
+    let runtimeDirectory: String
+    let ipcObject: String
+    let worktreeRoot: String?
+    let branchName: String?
+
+    init(profile: SpacesProfile) {
+        source = profile.source.rawValue
+        databasePath = profile.databasePath
+        profileRoot = profile.rootDirectory
+        runtimeDirectory = profile.runtimeDirectory
+        ipcObject = profile.ipcNotificationObject
+        worktreeRoot = profile.developmentContext?.worktreeRoot
+        branchName = profile.developmentContext?.branchName
+    }
+}
+
+private struct LeaseStatePayload: Codable {
+    let available: Bool
+    let profileRoot: String?
+    let owner: SpacesProcessLeaseOwner?
+}
+
 private struct TargetApplicationWindow {
     let application: NSRunningApplication
     let window: AXUIElement
@@ -1773,6 +2049,242 @@ private func terminalDefaultTitle(command: String?, cwd: String) -> String {
     if let command = command?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty { return command }
     let name = URL(fileURLWithPath: cwd).lastPathComponent
     return name.isEmpty ? "Terminal" : name
+}
+
+private final class MobileServePairingWindowEmitter: @unchecked Sendable {
+    weak var server: SpacesMobileBridgeServer?
+    var linkHost = SpacesMobileBridgeDefaults.loopbackHost
+
+    private let lock = NSLock()
+    private let bindHost: String
+    private let totalWindowCount: Int
+    private var emittedWindowCount = 0
+    private var nextPairingCode: String?
+
+    init(bindHost: String, totalWindowCount: Int, firstPairingCode: String) {
+        self.bindHost = bindHost
+        self.totalWindowCount = totalWindowCount
+        nextPairingCode = firstPairingCode
+    }
+
+    func openNextWindow(label: String) {
+        lock.lock()
+        guard emittedWindowCount < totalWindowCount, let server else {
+            lock.unlock()
+            return
+        }
+        emittedWindowCount += 1
+        let code = nextPairingCode ?? SpacesMobilePairingCoordinator.generatePairingCode()
+        nextPairingCode = nil
+        lock.unlock()
+
+        let window = server.openPairingWindow(host: linkHost, name: "Spaces Standalone", code: code)
+        print(
+            "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(ISO8601DateFormatter().string(from: window.expiresAt))\tbundle=\(SpacesMobileFirstPartyPolicy.allowedBundleID)"
+        )
+        fflush(stdout)
+    }
+}
+
+private final class MobileBridgeRequestClient: @unchecked Sendable {
+    private let host: String
+    private let port: UInt16
+    private let transportKey: String
+
+    init(host: String, port: UInt16, transportKey: String) {
+        self.host = host
+        self.port = port
+        self.transportKey = transportKey
+    }
+
+    func request(requestData: Data) throws -> Data {
+        let connection = try makeConnection()
+        defer { connection.cancel() }
+        try waitUntilReady(connection)
+        try send(requestData: requestData, connection: connection)
+        return try receiveSingleResponse(from: connection)
+    }
+
+    func stream(requestData: Data) throws -> Never {
+        let connection = try makeConnection()
+        try waitUntilReady(connection)
+        try send(requestData: requestData, connection: connection)
+        receiveStream(from: connection, buffered: Data())
+        dispatchMain()
+    }
+
+    private func makeConnection() throws -> NWConnection {
+        let endpointPort = NWEndpoint.Port(rawValue: port)!
+        return NWConnection(
+            host: NWEndpoint.Host(host), port: endpointPort,
+            using: try SpacesMobileBridgeTransport.parameters(transportKey: transportKey, role: .client))
+    }
+
+    private func waitUntilReady(_ connection: NWConnection) throws {
+        let queue = DispatchQueue(label: "spaces.e2e.mobile.request")
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = MobileBridgeRequestResultBox()
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: semaphore.signal()
+            case .failed(let error):
+                box.setError(error)
+                semaphore.signal()
+            default: break
+            }
+        }
+        connection.start(queue: queue)
+        guard semaphore.wait(timeout: .now() + 10) == .success else {
+            throw MobileBridgeRequestError.timeout("Timed out connecting to the mobile bridge.")
+        }
+        if let error = box.error() { throw error }
+    }
+
+    private func send(requestData: Data, connection: NWConnection) throws {
+        var payload = requestData
+        payload.append(0x0A)
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = MobileBridgeRequestResultBox()
+        connection.send(
+            content: payload,
+            completion: .contentProcessed { error in
+                if let error { box.setError(error) }
+                semaphore.signal()
+            })
+        guard semaphore.wait(timeout: .now() + 10) == .success else {
+            throw MobileBridgeRequestError.timeout("Timed out sending the mobile bridge request.")
+        }
+        if let error = box.error() { throw error }
+    }
+
+    private func receiveSingleResponse(from connection: NWConnection) throws -> Data {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = MobileBridgeRequestResultBox()
+        receiveSingleResponse(from: connection, buffered: Data(), box: box, semaphore: semaphore)
+        guard semaphore.wait(timeout: .now() + 10) == .success else {
+            throw MobileBridgeRequestError.timeout("Timed out waiting for the mobile bridge response.")
+        }
+        if let error = box.error() { throw error }
+        return box.responseData()
+    }
+
+    private func receiveSingleResponse(
+        from connection: NWConnection, buffered data: Data, box: MobileBridgeRequestResultBox, semaphore: DispatchSemaphore
+    ) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
+            if let error {
+                box.setError(error)
+                semaphore.signal()
+                return
+            }
+            var nextData = data
+            if let content { nextData.append(content) }
+            if let newlineIndex = nextData.firstIndex(of: 0x0A) {
+                box.setResponseData(Data(nextData.prefix(upTo: newlineIndex)))
+                semaphore.signal()
+                return
+            }
+            if isComplete {
+                box.setResponseData(nextData)
+                semaphore.signal()
+                return
+            }
+            self.receiveSingleResponse(from: connection, buffered: nextData, box: box, semaphore: semaphore)
+        }
+    }
+
+    private func receiveStream(from connection: NWConnection, buffered data: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
+            if let error {
+                fputs("\(error)\n", stderr)
+                exit(1)
+            }
+            var nextData = data
+            if let content { nextData.append(content) }
+            while let newlineIndex = nextData.firstIndex(of: 0x0A) {
+                let line = Data(nextData.prefix(upTo: newlineIndex))
+                FileHandle.standardOutput.write(line)
+                FileHandle.standardOutput.write(Data([0x0A]))
+                fflush(stdout)
+                nextData.removeSubrange(...newlineIndex)
+            }
+            if isComplete { exit(0) }
+            self.receiveStream(from: connection, buffered: nextData)
+        }
+    }
+}
+
+private enum MobileBridgeRequestError: LocalizedError {
+    case timeout(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .timeout(let message): message
+        }
+    }
+}
+
+private final class MobileBridgeRequestResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedError: Error?
+    private var storedResponseData = Data()
+
+    func setError(_ error: Error) {
+        lock.lock()
+        storedError = error
+        lock.unlock()
+    }
+
+    func error() -> Error? {
+        lock.lock()
+        let error = storedError
+        lock.unlock()
+        return error
+    }
+
+    func setResponseData(_ data: Data) {
+        lock.lock()
+        storedResponseData = data
+        lock.unlock()
+    }
+
+    func responseData() -> Data {
+        lock.lock()
+        let data = storedResponseData
+        lock.unlock()
+        return data
+    }
+}
+
+private func mobileServePairingLinkHost(host: String) -> String { SpacesMobileBridgeNetworkInterfaces.pairingLinkHost(boundHost: host) }
+
+private func profileShellQuoted(_ value: String) -> String {
+    let escaped = value.replacingOccurrences(of: "'", with: #"'\"'\"'"#)
+    return "'\(escaped)'"
+}
+
+func deliverDesktopControlBusyNotification(owner: SpacesProcessLeaseOwner) {
+    do { _ = try Shell.runAndCapture(["osascript", "-e", desktopControlBusyNotificationScript(owner: owner)]) } catch {
+        fputs("spaces: Failed to send desktop control notification: \(error.localizedDescription)\n", stderr)
+    }
+}
+
+func desktopControlBusyNotificationScript(owner: SpacesProcessLeaseOwner) -> String {
+    let ownerName = URL(fileURLWithPath: owner.executablePath).lastPathComponent
+    let profileName = owner.profileRoot.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "unknown-profile"
+    let title = "Close Spaces When You're Done"
+    let subtitle = "A real-system Spaces workflow is waiting"
+    let body = "Desktop control is owned by \(ownerName) (pid \(owner.pid), profile \(profileName)). Quit that instance so the harness can continue."
+    return """
+        display notification \(appleScriptStringLiteral(body)) with title \(appleScriptStringLiteral(title)) subtitle \(appleScriptStringLiteral(subtitle))
+        """
+}
+
+private func appleScriptStringLiteral(_ value: String) -> String {
+    let escaped = value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(
+        of: "\r", with: " "
+    ).replacingOccurrences(of: "\n", with: " ")
+    return "\"\(escaped)\""
 }
 
 private func snapshotSpacesSurface(pid: Int32, frontmostPID: Int?) -> SpacesSurfacePayload {

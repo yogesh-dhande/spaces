@@ -58,7 +58,7 @@ Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching t
 For manual worktree-local shell sessions, export the same derived profile before launching the app, CLI, or E2E helper:
 
 ```bash
-eval "$(apps/macos/.build/debug/spaces profile show --shell)"
+eval "$(apps/macos/.build/debug/spacese2e profile-show --shell)"
 apps/macos/.build/debug/SpacesApp
 apps/macos/.build/debug/spaces terminal list
 ```
@@ -133,8 +133,8 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" ap
   terminal send <session-id> "hello from ghostty" --newline
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal tail <session-id> --lines 5
-env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
-  mobile status
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spacese2e \
+  mobile-status
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal show <session-id>
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
@@ -151,9 +151,9 @@ apps/macos/Tests/e2e_mobile.sh
 
 The mobile suite builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack, and then runs the selected scenarios with `test-without-building` against that shared stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, `--keep-root` to preserve the shared demo root, and `--port <port>` to pin the daemon bridge port. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again. The `app-recovery` scenario kills only the current-profile `SpacesApp` owner, sends `launchSpacesApp` through the authenticated daemon bridge, and verifies the spacesd daemon PID and live session remain stable.
 
-Use `--target local`, `--target remote`, or `--target all` to choose the mobile E2E compute target matrix. `SPACES_MOBILE_E2E_TARGETS="local remote"` provides the same selection through the environment, and a configured `SPACES_E2E_REMOTE_SSH_HOST` makes the default matrix include both local and remote targets. Remote mobile coverage prepares a Git origin on the SSH host, registers a compute host through `spacese2e remote-compute-host-smoke`, and runs the remote-compatible direct-daemon scenarios. Set `SPACES_E2E_REMOTE_SSH_HOST`, optional `SPACES_E2E_REMOTE_SSH_USER`, optional `SPACES_E2E_REMOTE_SSH_PORT`, `SPACES_E2E_REMOTE_DAEMON_HOST`, optional `SPACES_E2E_REMOTE_DAEMON_PORT`, optional `SPACES_E2E_REMOTE_AUTH_TOKEN`, and optional `SPACES_E2E_REMOTE_WORKSPACE_ROOT` when running against a real host.
+Use `--target local`, `--target remote`, or `--target all` to choose the mobile E2E compute target matrix. `SPACES_MOBILE_E2E_TARGETS="local remote"` provides the same selection through the environment, and a configured `SPACES_E2E_REMOTE_SSH_HOST` makes the default matrix include both local and remote targets. Remote mobile coverage prepares a Git origin on the SSH host, registers a compute host through `spacese2e remote-compute-host-smoke`, and runs the remote-compatible direct-daemon scenarios. The macOS and mobile E2E scripts load `.env` by default before reading remote settings; use `SPACES_ENV_FILE=<path>` for another env file or `SPACES_SKIP_ENV_FILE=1` to ignore it. Set `SPACES_E2E_REMOTE_SSH_HOST`, optional `SPACES_E2E_REMOTE_SSH_USER`, optional `SPACES_E2E_REMOTE_SSH_PORT`, `SPACES_E2E_REMOTE_DAEMON_HOST`, optional `SPACES_E2E_REMOTE_DAEMON_PORT`, optional `SPACES_E2E_REMOTE_AUTH_TOKEN`, optional `SPACES_E2E_REMOTE_WORKSPACE_ROOT`, optional `SPACES_E2E_REMOTE_GIT_ROOT`, optional `SPACES_E2E_REMOTE_HOST_ID`, and optional `SPACES_E2E_REMOTE_NAME` when running against a real host.
 
-The daemon-hosted mobile bridge is the first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spaces mobile serve` remains available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spaces mobile request` so local scripts use the same TLS-PSK transport as the iOS app. Standalone bridge processes reject daemon-only recovery commands such as `launchSpacesApp`.
+The daemon-hosted mobile bridge is the first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spacese2e mobile-serve` is available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spacese2e mobile-request` so local scripts use the same TLS-PSK transport as the iOS app. Standalone bridge processes reject daemon-only recovery commands such as `launchSpacesApp`.
 
 Remote compute-host E2E coverage uses a reachable host running a matching `spacesd`. App-level remote E2E uses another Mac, a loopback remote profile that binds the remote listener on a separate profile root, or the Ubuntu 24.04 x86_64 daemon artifact published as `spacesd-ubuntu-24.04-x86_64.tar.gz`. Compute-host bootstrap, status, and test automation belongs in `spacese2e` so the product `spaces` CLI remains workspace-oriented. Use `upsert-compute-host` and `list-compute-hosts` to seed and inspect host records, `set-project-default-compute-host` and `set-workspace-compute-host-override` to exercise selection precedence, and `plan-workspace-runtime` to inspect the stable binding, daemon target, Remote SSH URI, and runtime manifest for a workspace.
 
@@ -179,7 +179,7 @@ sudo ln -sfn /opt/spacesd/bin/spaces /usr/local/bin/spaces
 For a real SSH smoke that exercises bootstrap, pinned-TLS status, runtime planning, remote terminal launch, and workspace stop through production orchestration:
 
 ```bash
-eval "$(apps/macos/.build/debug/spaces profile show --shell)"
+eval "$(apps/macos/.build/debug/spacese2e profile-show --shell)"
 apps/macos/.build/debug/spacese2e remote-compute-host-smoke \
   --project-dir <local-git-project-dir> \
   --host-id lab-host \
@@ -188,7 +188,7 @@ apps/macos/.build/debug/spacese2e remote-compute-host-smoke \
   --daemon-host <direct-daemon-ip-or-dns-name>
 ```
 
-The command starts or reuses the remote daemon through `ComputeHostBootstrapper`, saves the host token for the current profile, sets the project default compute host, asserts the workspace resolves to the host, opens one remote ad hoc Spaces terminal, stops the workspace, and prints JSON with the host, bootstrap metadata, daemon status, runtime plan, terminal session ID, and stop outcome.
+The command tears down the named remote E2E profile and requested daemon port, starts the remote daemon through `ComputeHostBootstrapper`, saves the host token for the current profile when it generated one, sets the project default compute host, asserts the workspace resolves to the host, opens one remote ad hoc Spaces terminal, stops the workspace, and prints JSON with the host, bootstrap metadata, daemon status, runtime plan, terminal session ID, and stop outcome.
 
 A remote daemon listener uses pinned TLS. Print the daemon certificate fingerprint with the same profile environment used to run the listener:
 
@@ -210,7 +210,7 @@ export SPACESD_AUTH_TOKEN=<shared-token>
 Register that endpoint from the Mac-side profile. The host-specific token environment key is the uppercased compute host ID with non-alphanumeric characters replaced by `_`:
 
 ```bash
-eval "$(apps/macos/.build/debug/spaces profile show --shell)"
+eval "$(apps/macos/.build/debug/spacese2e profile-show --shell)"
 export SPACESD_AUTH_TOKEN_LAB_MAC=<shared-token>
 apps/macos/.build/debug/spacese2e upsert-compute-host \
   --id lab-mac \
@@ -304,7 +304,7 @@ mkdir -p "$(dirname "$SPACES_DB_PATH")"
 pkill -x SpacesApp 2>/dev/null || true
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal command --backend ghostty-embedded --command cat --title ios-demo
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces mobile status
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-status
 xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
@@ -336,7 +336,7 @@ export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
 mkdir -p "$(dirname "$SPACES_DB_PATH")"
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal command --backend ghostty-embedded --command cat --title ios-demo
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces mobile status
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-status
 ```
 
 6. On the Mac, allow the incoming-network prompt if macOS shows one. In the Mac app, open Mobile Connection, open a pairing window, and scan the QR code or send the full pairing link to the device.
@@ -348,7 +348,7 @@ For a disposable one-command demo stack that launches the macOS app, uses the da
 apps/macos/Tests/run_mobile_terminal_demo.sh
 ```
 
-The launcher expects the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds the repo-local macOS debug products, builds a fresh simulator `SpacesMobile.app` into a DerivedData directory under the demo root, then installs that same app bundle on both the iPad and iPhone simulators. Demo runs use the current user's `HOME` and `XDG_CONFIG_HOME` so Ghostty themes and user settings match normal local debugging. By default, the demo uses isolated Spaces profile mode, which keeps the database and runtime under the demo root without moving user-level settings into a temporary home. Use `SPACES_MOBILE_DEMO_PROFILE_MODE=user` when the demo should attach to the repo-local Spaces profile instead. The launcher provisions two live Mac-owned workspace terminal sessions and waits for their owner attachments before launching the mobile clients so list-navigation and second-session takeover flows can be reproduced without exposing not-yet-owned sessions to iOS. It refuses to start if another `SpacesApp` instance or bridge listener is already running so the global hotkey and mobile port stay unambiguous, then reads the daemon bridge details through `spaces mobile status`. It prints the demo root, profile mode, PIDs, logs, screenshots, both terminal session IDs, the iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
+The launcher expects the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds the repo-local macOS debug products, builds a fresh simulator `SpacesMobile.app` into a DerivedData directory under the demo root, then installs that same app bundle on both the iPad and iPhone simulators. Demo runs use the current user's `HOME` and `XDG_CONFIG_HOME` so Ghostty themes and user settings match normal local debugging. By default, the demo uses isolated Spaces profile mode, which keeps the database and runtime under the demo root without moving user-level settings into a temporary home. Use `SPACES_MOBILE_DEMO_PROFILE_MODE=user` when the demo should attach to the repo-local Spaces profile instead. The launcher stops the current-profile app owner, current-profile terminal service, and stale repo-local listeners on the selected bridge port before launch. It provisions two live Mac-owned workspace terminal sessions and waits for their owner attachments before launching the mobile clients so list-navigation and second-session takeover flows can be reproduced without exposing not-yet-owned sessions to iOS, then reads the daemon bridge details through `spacese2e mobile-status`. It prints the demo root, profile mode, PIDs, logs, screenshots, both terminal session IDs, the iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
 The same demo root also contains `mobile-terminal-performance.jsonl`, and the printed JSON includes its `performanceLogPath`. The mobile E2E suite consumes that file directly when it asserts one bootstrap epoch, first render timing, input-ready timing, and scrollback behavior.
 
 Useful overrides:

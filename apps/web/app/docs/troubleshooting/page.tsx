@@ -33,8 +33,7 @@ export default function TroubleshootingDocsPage() {
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`spaces start /path/to/workspace
-spaces restart /path/to/workspace
-spaces open frontend /path/to/workspace`}</code>
+spaces restart /path/to/workspace`}</code>
         </pre>
       </article>
 

@@ -19,7 +19,7 @@
 - When fixing a bug, reproduce it first using the real system, `~/projects/spaces/apps/macos/.build/debug/spaces` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
 - Use the real-system scripts for hotkey-sensitive verification before resorting to ad hoc manual app launches. Those scripts may wait for desktop control instead of killing unrelated running Spaces instances.
 - When manually launching a repo-local debug build, use the derived profile helper or `scripts/dev-build-and-launch.sh` so the app, CLI, and E2E helpers stay on the same worktree-scoped profile.
-- When working from a repo-local checkout and other worktrees may also be running Spaces, bind your shell to the current worktree profile before using the debug app, `spaces`, or `spacese2e`: `eval "$(apps/macos/.build/debug/spaces profile show --shell)"`.
+- When working from a repo-local checkout and other worktrees may also be running Spaces, bind your shell to the current worktree profile before using the debug app, `spaces`, or `spacese2e`: `eval "$(apps/macos/.build/debug/spacese2e profile-show --shell)"`.
 - Treat other worktrees' running Spaces instances as separate profiles. Do not kill them just to unblock your own workflow; only stop the app instance for the current profile, and let desktop-global verification wait for desktop control when another profile owns it.
 
 ## Ghostty Dependency Workflow
@@ -32,7 +32,8 @@
 
 ## Verification Rules
 - Consider adding or expanding tests before finalizing code changes.
-- Run `scripts/verify.sh` for the normal macOS verification pass so lint, build, and coverage run sequentially.
+- When a commit is planned, rely on the pre-commit hook to run the normal verification path; do not run `scripts/verify.sh` separately first.
+- When finalizing code changes without committing, run `scripts/verify.sh` for the normal macOS verification pass so lint, build, and coverage run sequentially.
 - When running `git commit` via Codex, allow at least a 10-minute timeout so pre-commit checks can finish.
 
 ## Documentation Rules

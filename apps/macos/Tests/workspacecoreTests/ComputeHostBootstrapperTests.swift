@@ -81,6 +81,15 @@ final class ComputeHostBootstrapperTests: XCTestCase {
         XCTAssertTrue(script.contains("spacesd did not start listening on port"))
     }
 
+    func testRemoteStartScriptCanCleanExistingProfileAndPort() {
+        let script = ComputeHostBootstrapper.remoteStartScript(host: makeHost(id: "E2E Remote"), authToken: "secret", cleanExistingProfile: true)
+
+        XCTAssertTrue(script.contains("port_pids=\"$(\"${lsof_path}\" -tiTCP:${requested_port} -sTCP:LISTEN"))
+        XCTAssertTrue(script.contains("remote E2E cleanup could not free spacesd port ${requested_port}."))
+        XCTAssertTrue(script.contains("rm -rf \"${profile_root}\""))
+        XCTAssertTrue(script.contains(".spaces/compute-hosts/e2e-remote"))
+    }
+
     func testParseBootstrapOutputIncludesSelectedPortAndWorkspaceRoot() throws {
         let outcome = try ComputeHostBootstrapper.parseBootstrapOutput(
             "fingerprint=SHA256:abc123\nworkspace_root=/Users/runner/.spaces/workspaces\nport=7444\npid=42\nlog=/tmp/spacesd.log\n")

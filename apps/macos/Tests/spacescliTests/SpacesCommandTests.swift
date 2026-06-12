@@ -2,7 +2,6 @@ import ArgumentParser
 import Darwin
 import Foundation
 import XCTest
-import spacesmobilebridge
 import spacesterminalcore
 import spacesterminalghostty
 import systembridge
@@ -39,13 +38,6 @@ final class SpacesCommandTests: XCTestCase {
         let command = try RestartCommand.parse(["."])
 
         XCTAssertEqual(command.path, ".")
-    }
-
-    func testOpenParsesNameAndOptionalWorkspacePath() throws {
-        let command = try OpenCommand.parse(["frontend"])
-
-        XCTAssertEqual(command.name, "frontend")
-        XCTAssertNil(command.path)
     }
 
     func testSignalParsesTypedEnums() throws {
@@ -196,138 +188,9 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.authToken, "SECRET")
     }
 
-    func testMobileServeParsesHostPortPairingCodeAndWindowCount() throws {
-        let command = try MobileServeCommand.parse([
-            "--host", "0.0.0.0", "--port", "47847", "--pairing-code", "246810", "--pairing-window-count", "2",
-        ])
-
-        XCTAssertEqual(command.host, "0.0.0.0")
-        XCTAssertEqual(command.port, 47_847)
-        XCTAssertEqual(command.pairingCode, "246810")
-        XCTAssertEqual(command.pairingWindowCount, 2)
-    }
-
-    func testMobileServeDefaultsAreLanReachableAndStable() throws {
-        let command = try MobileServeCommand.parse([])
-
-        XCTAssertEqual(command.host, SpacesMobileBridgeDefaults.host)
-        XCTAssertEqual(command.port, SpacesMobileBridgeDefaults.port)
-    }
-
-    func testMobileServePairingLinkHostTreatsIPv6WildcardAsWildcard() {
-        let host = mobileServePairingLinkHost(host: "::")
-
-        XCTAssertNotEqual(host, "::")
-        XCTAssertFalse(SpacesMobileBridgeDefaults.isWildcardHost(host))
-    }
-
-    func testMobileStatusPropagatesControlLookupFailure() {
-        XCTAssertThrowsError(try mobileStatusLines(loadControlResponse: { throw POSIXError(.ECONNREFUSED) })) { error in
-            XCTAssertEqual((error as? POSIXError)?.code, .ECONNREFUSED)
-        }
-    }
-
-    func testMobileStatusRejectsFailedControlResponseWithoutUsingStoredSettings() {
-        XCTAssertThrowsError(
-            try mobileStatusLines(loadControlResponse: { SpacesMobileBridgeControlResponse(ok: false, message: "Mobile bridge is not running.") })
-        ) { error in
-            guard case WorkspaceError.invalidArgument(let message) = error else {
-                XCTFail("Expected WorkspaceError.invalidArgument, got \(error)")
-                return
-            }
-            XCTAssertEqual(message, "Mobile bridge is not running.")
-        }
-    }
-
-    func testMobileStatusRejectsMissingStatusPayloadWithoutUsingStoredSettings() {
-        XCTAssertThrowsError(
-            try mobileStatusLines(loadControlResponse: { SpacesMobileBridgeControlResponse(ok: true, message: "Loaded mobile bridge status.") })
-        ) { error in
-            guard case WorkspaceError.invalidArgument(let message) = error else {
-                XCTFail("Expected WorkspaceError.invalidArgument, got \(error)")
-                return
-            }
-            XCTAssertEqual(message, "Mobile bridge status response did not include address details.")
-        }
-    }
-
-    func testMobileStatusFormatsControlStatus() throws {
-        let lines = try mobileStatusLines(loadControlResponse: {
-            SpacesMobileBridgeControlResponse(
-                ok: true, message: "Loaded mobile bridge status.",
-                status: SpacesMobileBridgeStatus(
-                    host: "0.0.0.0", port: 47_847, bonjourServiceName: "Spaces Mac", bonjourServiceType: "_spaces-mobile._tcp.",
-                    networkAddresses: ["192.168.1.20"], certificateFingerprint: "SHA256:test"))
-        })
-
-        XCTAssertEqual(
-            lines,
-            [
-                "Spaces mobile bridge", "port=47847", "bonjour=Spaces Mac\ttype=_spaces-mobile._tcp.", "fingerprint=SHA256:test",
-                "addresses=192.168.1.20:47847", "iphone=Open Mobile Connection in the Mac app to show a QR code or pairing link.",
-            ])
-    }
-
     func testSpacesCommandListsFlattenedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(
-            subcommands,
-            [
-                "ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "SignalCommand", "TerminalCommand",
-                "MobileCommand", "ProfileCommand",
-            ])
-    }
-
-    func testProfileShowShellOutputIncludesDatabaseAndRuntimeExports() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let databasePath = root.appendingPathComponent("spaces.db").path
-        let runtimePath = root.appendingPathComponent("runtime").path
-        let originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
-        let originalRuntimePath = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
-        setenv("SPACES_DB_PATH", databasePath, 1)
-        setenv("SPACES_RUNTIME_DIR", runtimePath, 1)
-        defer {
-            if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
-            if let originalRuntimePath { setenv("SPACES_RUNTIME_DIR", originalRuntimePath, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
-            try? FileManager.default.removeItem(at: root)
-        }
-
-        let output = try captureStandardOutput {
-            let command = try ProfileShowCommand.parse(["--shell"])
-            try command.run()
-        }
-
-        XCTAssertTrue(output.contains("export SPACES_DB_PATH='\(databasePath)'"))
-        XCTAssertTrue(output.contains("export SPACES_RUNTIME_DIR='\(runtimePath)'"))
-    }
-
-    func testDeliverDesktopControlBusyNotificationUsesAppleScriptDisplayNotification() throws {
-        let captureURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let originalCapture = ProcessInfo.processInfo.environment["SPACES_OSASCRIPT_CAPTURE"]
-        setenv("SPACES_OSASCRIPT_CAPTURE", captureURL.path, 1)
-        defer {
-            if let originalCapture { setenv("SPACES_OSASCRIPT_CAPTURE", originalCapture, 1) } else { unsetenv("SPACES_OSASCRIPT_CAPTURE") }
-            try? FileManager.default.removeItem(at: captureURL)
-        }
-
-        let osascriptMock = """
-            #!/bin/sh
-            printf '%s' "$2" > "$SPACES_OSASCRIPT_CAPTURE"
-            """
-
-        let owner = SpacesProcessLeaseOwner(
-            pid: 4321, executablePath: "/tmp/SpacesApp", profileRoot: "/tmp/.spaces-dev/profiles/spaces/parallel-f46abb6175b3", token: "owner-token",
-            acquiredAt: "2026-05-17T00:00:00Z")
-
-        try withMockCommands(["osascript": osascriptMock]) { deliverDesktopControlBusyNotification(owner: owner) }
-
-        let script = try String(contentsOf: captureURL, encoding: .utf8)
-        XCTAssertTrue(script.contains("display notification"))
-        XCTAssertTrue(script.contains("Close Spaces When You're Done"))
-        XCTAssertTrue(script.contains("A real-system Spaces workflow is waiting"))
-        XCTAssertTrue(script.contains("pid 4321"))
-        XCTAssertTrue(script.contains("parallel-f46abb6175b3"))
+        XCTAssertEqual(subcommands, ["ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "SignalCommand", "TerminalCommand"])
     }
 
     private func captureStandardOutput(_ body: () throws -> Void) throws -> String {

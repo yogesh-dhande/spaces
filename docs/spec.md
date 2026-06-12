@@ -32,9 +32,9 @@ Spaces provides a desktop app and a CLI for power users and coding agents.
   Closing a process or coding-agent Spaces terminal window leaves the runtime running and recoverable through focus. Closing an ad hoc Spaces terminal window stops that ad hoc session. Explicit Stop and Restart controls own process and coding-agent runtime termination.
 - Keep workspace lifecycle separate from runtime health.
   `Running` and `Stopped` should stay easy to explain, while failed processes or stale tracked windows surface as warnings on top of that lifecycle state.
-- Require explicit tracked-window targets for CLI-driven focus.
+- Require explicit tracked-window targets for GUI-driven and harness-driven focus.
   Focus should not guess which window the user meant, because arbitrary focus becomes unpredictable as workspaces collect multiple windows.
-  Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user clicks Focus in the GUI or runs `spaces open <name>`, Spaces should not silently pick whichever window was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit tracked window target keeps focus behavior deterministic. CLI focus targets should be selected by unique window names rather than numeric positions.
+  Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user clicks Focus in the GUI or a test harness focuses a named target, Spaces should not silently pick whichever window was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit tracked window target keeps focus behavior deterministic.
 - Never resize or reposition tracked windows unless initiated by the user.
   Spaces should respect where the user placed each tracked window, because it cannot infer whether the user wants side-by-side windows, overlapping windows, or some other layout that includes non-Spaces windows.
 - Never control windows that Spaces does not explicitly track.
@@ -42,7 +42,7 @@ Spaces provides a desktop app and a CLI for power users and coding agents.
 - Keep coding-agent events explicit.
   `spaces import`, `spaces start`, and `spaces restart` must not infer agent lifecycle, because only the agent can accurately report when it actually initialized, started active work, is waiting, is done, or exited.
 - Use explicit names as the stable identity surface for focusable browser sessions, processes, and coding-agent terminals.
-  Names express purpose and intent, stay meaningful when URLs or process commands change, and avoid collisions where multiple coding agents may run the same command. Those names must be unique within a workspace's combined focusable set so GUI and CLI focus can target one unambiguous window by name.
+  Names express purpose and intent, stay meaningful when URLs or process commands change, and avoid collisions where multiple coding agents may run the same command. Those names must be unique within a workspace's combined focusable set so GUI and harness focus can target one unambiguous window by name.
 
 ## Core Concepts
 
@@ -140,7 +140,7 @@ Spaces focuses those windows; it does not decide their geometry.
 
 ### Creation
 - Users can create, update, focus, stop, restart, and archive workspaces from the GUI.
-- The CLI should stay minimal and support `import`, `update`, `start`, `restart`, `open`, `signal`, low-level `terminal` session commands for Spaces-owned PTY sessions, and first-party `mobile` status plus standalone bridge commands. Terminal commands should support listing available sessions by session ID, runtime state, and working directory and printing a clear empty-state message when none are available, sending text, sending named keys, opening native Spaces-owned session windows in owner-seeking mode, and transferring input ownership between attached clients.
+- The CLI should stay minimal and support `import`, `update`, `start`, `restart`, `signal`, and low-level `terminal` session commands for Spaces-owned PTY sessions. Those supported `spaces` commands must work when executed from Spaces-owned remote compute-host terminals as well as local Mac terminals. Terminal commands should support listing available sessions by session ID, runtime state, and working directory and printing a clear empty-state message when none are available, sending text, sending named keys, opening native Spaces-owned session windows in owner-seeking mode, and transferring input ownership between attached clients.
 - App-launched built-in workspace terminals, process windows, and coding-agent windows should be owned by the per-user `spacesd` daemon and reopen onto the same live shell session across `SpacesApp` quit and relaunch.
 - Quitting `SpacesApp` while service-owned terminal sessions are running should prompt the user to quit while keeping sessions running, stop all sessions and quit, or cancel. Keeping sessions running is the default.
 - `spaces terminal` sessions should remain owned by a per-user `spacesd` daemon so they can survive `SpacesApp` quit and reopen against the same live shell session as long as the service remains alive and the session lifetime is still valid.
@@ -301,10 +301,10 @@ Spaces focuses those windows; it does not decide their geometry.
 - Starting or restarting one configured process or coding agent should not leave a second configured instance visible on Mac or iOS for the same workspace slot. Ad-hoc terminal sessions may remain visible only when they are not represented by a configured process or coding-agent row.
 - Alerts rows should show the tracked window or process name as the primary label and the target detail, such as a browser URL or process command, as secondary text.
 - Ad-hoc terminal rows should keep their generated focus name as the primary label and use the live terminal window title as secondary text.
-- CLI-driven focus through `spaces open <name>` should require an explicit tracked window target instead of picking an arbitrary window.
-- CLI focus should use unique names across focusable browser sessions, processes, and coding-agent terminals, and `spaces open <name>` should require one of those names explicitly.
+- Production CLI-driven focus is not part of the `spaces` command surface.
+- Harness-driven focus should use unique names across focusable browser sessions, processes, and coding-agent terminals when it needs to exercise focus behavior.
 - Configured workspace processes and browser sessions must always have explicit names; Spaces should reject unnamed entries instead of falling back to commands or URLs as identities.
-- Focus target discovery may remain GUI-centric; the CLI does not need a separate read-only discovery command.
+- Focus target discovery may remain GUI-centric; the production CLI does not need a separate read-only discovery command.
 - `spaces terminal tail` should reconstruct the visible terminal screen from persisted session output using the session's last known terminal size, so wrapped lines and full-screen terminal redraws stay aligned with the live session after resizes.
 - Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
 - Shortcut handling must not break normal text-edit shortcuts while an input is focused.

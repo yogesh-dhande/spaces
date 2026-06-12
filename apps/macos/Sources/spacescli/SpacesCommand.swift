@@ -2,8 +2,6 @@ import ArgumentParser
 import Darwin
 import Dispatch
 import Foundation
-import spacesmobilebridge
-import spacesmobilecore
 import spacesterminalcore
 import spacesterminalghostty
 import systembridge
@@ -25,13 +23,9 @@ public struct SpacesCommand: ParsableCommand {
               - `update` mutates workspace metadata after creation.
               - `start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
               - `restart` forces a full stop and relaunch for a workspace.
-              - `open <name>` resolves one named tracked browser, process, or coding-agent target in the workspace and brings it to the foreground.
               - Agent events stay explicit. `import`, `start`, and `restart` do not imply agent lifecycle. `signal <event>` records those lifecycle transitions. Only built-in Spaces terminal sessions are accepted as coding-agent sources.
             """, version: AppVersion.current,
-        subcommands: [
-            ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, OpenCommand.self, SignalCommand.self,
-            TerminalCommand.self, MobileCommand.self, ProfileCommand.self,
-        ])
+        subcommands: [ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, SignalCommand.self, TerminalCommand.self])
 
     public init() {}
 }
@@ -242,111 +236,6 @@ struct TerminalProxyCommand: ParsableCommand {
     }
 }
 
-struct MobileCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "mobile", abstract: "Expose first-party workspace and terminal browsing for the iOS client.",
-        subcommands: [MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self], defaultSubcommand: MobileStatusCommand.self)
-}
-
-struct MobileStatusCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "status", abstract: "Show the first-party mobile bridge address.")
-
-    func run() throws { for line in try mobileStatusLines() { print(line) } }
-}
-
-func mobileStatusLines(
-    loadControlResponse: () throws -> SpacesMobileBridgeControlResponse = {
-        try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService()
-    }
-) throws -> [String] {
-    let response = try loadControlResponse()
-    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-    guard let status = response.status else {
-        throw WorkspaceError.invalidArgument(message: "Mobile bridge status response did not include address details.")
-    }
-    return mobileStatusLines(status: status)
-}
-
-func mobileStatusLines(status: SpacesMobileBridgeStatus) -> [String] {
-    var lines = ["Spaces mobile bridge", "port=\(status.port)", "bonjour=\(status.bonjourServiceName)\ttype=\(status.bonjourServiceType)"]
-    lines.append("fingerprint=\(status.certificateFingerprint)")
-    if status.networkAddresses.isEmpty {
-        lines.append("addresses=(none)")
-    } else {
-        lines.append("addresses=\(status.networkAddresses.map { "\($0):\(status.port)" }.joined(separator: ","))")
-    }
-    lines.append("iphone=Open Mobile Connection in the Mac app to show a QR code or pairing link.")
-    return lines
-}
-
-struct MobileServeCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "serve", abstract: "Run a standalone first-party mobile bridge for the iOS client.")
-
-    @Option(name: .long, help: "TCP host to bind. Defaults to all IPv4 interfaces for iPhone and simulator access.") var host =
-        SpacesMobileBridgeDefaults.host
-    @Option(name: .long, help: "TCP port to bind. Defaults to the stable first-party mobile bridge port.") var port = SpacesMobileBridgeDefaults.port
-    @Option(name: .long, help: "One-time pairing code accepted by the first-party iOS client. Defaults to a generated 8-digit code.") var pairingCode:
-        String?
-    @Option(name: .long, help: "Number of one-time pairing windows to emit in standalone harness mode.") var pairingWindowCount = 1
-
-    func run() throws {
-        guard pairingWindowCount > 0 else { throw ValidationError("--pairing-window-count must be greater than zero.") }
-        let trimmedPairingCode = pairingCode?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedPairingCode =
-            if let trimmedPairingCode, !trimmedPairingCode.isEmpty { trimmedPairingCode } else {
-                SpacesMobilePairingCoordinator.generatePairingCode()
-            }
-        let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
-        let pairingWindowEmitter = MobileServePairingWindowEmitter(
-            bindHost: host, totalWindowCount: pairingWindowCount, firstPairingCode: resolvedPairingCode)
-        let server = try SpacesMobileBridgeServer(host: host, port: port, transportKey: transportKey) { _ in
-            pairingWindowEmitter.openNextWindow(label: "Spaces mobile pairing window")
-        }
-        pairingWindowEmitter.server = server
-        try server.start()
-        pairingWindowEmitter.linkHost = mobileServePairingLinkHost(host: host)
-        pairingWindowEmitter.openNextWindow(label: "Spaces mobile bridge ready")
-        withExtendedLifetime(server) { dispatchMain() }
-    }
-}
-
-private final class MobileServePairingWindowEmitter: @unchecked Sendable {
-    weak var server: SpacesMobileBridgeServer?
-    var linkHost = SpacesMobileBridgeDefaults.loopbackHost
-
-    private let lock = NSLock()
-    private let bindHost: String
-    private let totalWindowCount: Int
-    private var emittedWindowCount = 0
-    private var nextPairingCode: String?
-
-    init(bindHost: String, totalWindowCount: Int, firstPairingCode: String) {
-        self.bindHost = bindHost
-        self.totalWindowCount = totalWindowCount
-        nextPairingCode = firstPairingCode
-    }
-
-    func openNextWindow(label: String) {
-        lock.lock()
-        guard emittedWindowCount < totalWindowCount, let server else {
-            lock.unlock()
-            return
-        }
-        emittedWindowCount += 1
-        let code = nextPairingCode ?? SpacesMobilePairingCoordinator.generatePairingCode()
-        nextPairingCode = nil
-        lock.unlock()
-
-        let window = server.openPairingWindow(host: linkHost, name: "Spaces Standalone", code: code)
-        print(
-            "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(ISO8601DateFormatter().string(from: window.expiresAt))\tbundle=\(SpacesMobileFirstPartyPolicy.allowedBundleID)"
-        )
-        fflush(stdout)
-    }
-}
-
-func mobileServePairingLinkHost(host: String) -> String { SpacesMobileBridgeNetworkInterfaces.pairingLinkHost(boundHost: host) }
-
 struct ImportCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "import", abstract: "Register a workspace for the current directory or a provided path.")
@@ -454,27 +343,6 @@ struct RestartCommand: ParsableCommand {
         try context.output.emit(
             text: "Workspace restarted \(workspace.id)\thost=\(computeHost.displayName)",
             json: MutationResultPayload(message: "Workspace restarted.", resource: updatedWorkspace))
-    }
-}
-
-struct OpenCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "open", abstract: "Open or focus one named tracked workspace target.")
-
-    @Argument(help: "Name of the tracked browser, process, or coding-agent target to open.") var name: String
-
-    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
-
-    func run() throws {
-        let context = CLIContext()
-        let orchestrator = try context.makeOrchestrator()
-        let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
-
-        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, name: name)
-
-        let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
-        try context.output.emit(
-            text: "Opened workspace target \(name)\tworkspace=\(workspace.id)",
-            json: MutationResultPayload(message: "Opened workspace target.", resource: updatedWorkspace))
     }
 }
 

@@ -3,10 +3,16 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../../.. && pwd)"
 spaces_cli="${SPACES_CLI:-$repo_root/apps/macos/.build/debug/spaces}"
+spacese2e="${SPACES_E2E:-$repo_root/apps/macos/.build/debug/spacese2e}"
 terminal_service="${SPACESD_EXECUTABLE:-$repo_root/apps/macos/.build/debug/spacesd}"
 
 if [[ ! -x "$spaces_cli" ]]; then
   echo "spaces CLI not found at $spaces_cli" >&2
+  exit 1
+fi
+
+if [[ ! -x "$spacese2e" ]]; then
+  echo "spacese2e not found at $spacese2e" >&2
   exit 1
 fi
 
@@ -58,7 +64,7 @@ if [[ -z "$session_id" ]]; then
   exit 1
 fi
 
-"$spaces_cli" mobile serve --host 127.0.0.1 --port 0 >"$bridge_log" 2>&1 &
+"$spacese2e" mobile-serve --host 127.0.0.1 --port 0 >"$bridge_log" 2>&1 &
 bridge_pid=$!
 
 ready_deadline=$((SECONDS + 10))
