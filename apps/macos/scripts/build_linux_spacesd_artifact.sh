@@ -23,6 +23,7 @@ usage() {
 Usage: apps/macos/scripts/build_linux_spacesd_artifact.sh [--output-dir DIR] [--debug] [--skip-ghostty-vt-build] [--skip-smoke]
 
 Builds the Ubuntu 24.04 x86_64 remote spacesd artifact. The archive contains:
+  spacesd-ubuntu-24.04-x86_64/bin/spaces
   spacesd-ubuntu-24.04-x86_64/bin/spacesd
   spacesd-ubuntu-24.04-x86_64/bin/spacesd-bin
   spacesd-ubuntu-24.04-x86_64/bin/libghostty-vt.so*
@@ -281,6 +282,116 @@ EOF
     chmod +x "$destination"
 }
 
+write_spaces_wrapper() {
+    local destination="$1"
+    cat > "$destination" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" != "signal" ]]; then
+    echo "This remote Spaces helper only supports: spaces signal <event> [workspace-dir]" >&2
+    exit 64
+fi
+shift
+
+event_type="${1:-}"
+if [[ -z "$event_type" ]]; then
+    echo "usage: spaces signal <event> [workspace-dir]" >&2
+    exit 64
+fi
+shift || true
+
+workspace_path="${1:-}"
+
+python3 - "$event_type" "$workspace_path" <<'PY'
+import datetime
+import json
+import os
+import socket
+import sys
+import uuid
+
+event_type = sys.argv[1].strip()
+workspace_arg = sys.argv[2].strip()
+allowed = {"init", "start", "waiting", "done", "exit"}
+if event_type not in allowed:
+    print(f"unsupported agent signal event: {event_type}", file=sys.stderr)
+    sys.exit(64)
+
+terminal_host = os.environ.get("SPACES_TERMINAL_HOST", "").strip().lower()
+if terminal_host != "spaces":
+    print(f"Dropped agent event {event_type}: non-Spaces terminal")
+    sys.exit(0)
+
+session_id = os.environ.get("SPACES_TERMINAL_TRACKING_ID", "").strip()
+if not session_id:
+    print(f"Dropped agent event {event_type}: untracked Spaces terminal")
+    sys.exit(0)
+
+def socket_path():
+    override = os.environ.get("SPACESD_SERVICE_SOCKET", "").strip()
+    if override:
+        return override
+    runtime_root = os.environ.get("SPACES_RUNTIME_DIR", "").strip()
+    if not runtime_root:
+        raise RuntimeError("SPACES_RUNTIME_DIR is required for remote spaces signal.")
+    terminal_root = os.path.abspath(os.path.join(runtime_root, "terminal"))
+    value = 5381
+    for byte in terminal_root.encode("utf-8"):
+        value = (((value << 5) + value) + byte) & 0xFFFFFFFFFFFFFFFF
+    return f"/tmp/spaces-terminal-sockets/service-{value:016x}.sock"
+
+def optional_env(name):
+    value = os.environ.get(name, "").strip()
+    return value or None
+
+created_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+workspace_path = workspace_arg or optional_env("SPACES_WORKSPACE_DIR") or os.getcwd()
+event = {
+    "id": str(uuid.uuid4()),
+    "sessionID": session_id,
+    "workspaceID": optional_env("SPACES_WORKSPACE_ID"),
+    "workspacePath": workspace_path,
+    "type": event_type,
+    "provider": "spaces",
+    "label": optional_env("SPACES_AGENT_LABEL"),
+    "terminalTrackingID": session_id,
+    "terminalNativeID": session_id,
+    "codexThreadID": optional_env("CODEX_THREAD_ID"),
+    "environmentKeys": sorted(os.environ.keys()),
+    "createdAt": created_at,
+}
+request = {"command": "agentSignal", "sessionID": session_id, "agentSignal": event}
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(5)
+try:
+    sock.connect(socket_path())
+    sock.sendall(json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n")
+    sock.shutdown(socket.SHUT_WR)
+    data = bytearray()
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        data.extend(chunk)
+        if b"\n" in chunk:
+            break
+finally:
+    sock.close()
+
+line = bytes(data).split(b"\n", 1)[0]
+response = json.loads(line.decode("utf-8"))
+if not response.get("ok"):
+    print(response.get("message") or "remote spacesd rejected agent signal", file=sys.stderr)
+    sys.exit(1)
+
+print(f"Agent {event_type}: queued remote signal\tsession={session_id}")
+PY
+EOF
+    chmod +x "$destination"
+}
+
 write_manifest() {
     local staging_root="$1"
     local ghostty_sha="$2"
@@ -311,6 +422,7 @@ manifest = {
     "ghostty_build_optimize": ghostty_optimize,
     "archive_name": archive_name,
     "install_hint": "Extract the archive and put its bin directory on the remote SSH PATH.",
+    "cli": "bin/spaces",
     "executable": "bin/spacesd",
     "binary": "bin/spacesd-bin",
     "runtime_libraries": "lib/",
@@ -337,6 +449,7 @@ package_artifact() {
     cp "$spacesd_bin" "$staging_root/bin/spacesd-bin"
     chmod +x "$staging_root/bin/spacesd-bin"
     write_spacesd_wrapper "$staging_root/bin/spacesd"
+    write_spaces_wrapper "$staging_root/bin/spaces"
     copy_swift_runtime_libraries "$spacesd_bin" "$staging_root/lib"
     copy_ghostty_vt_libraries "$staging_root/bin"
     write_manifest "$staging_root" "$ghostty_sha" "$archive_name"
@@ -364,10 +477,114 @@ smoke_artifact() {
     (
         cd "$smoke_root/$ARTIFACT_ID"
         sha256sum -c SHA256SUMS
+        test -x bin/spaces
         test -x bin/spacesd
         test -x bin/spacesd-bin
+        bin/spaces >/tmp/spaces-linux-helper-smoke.log 2>&1 && exit 1 || test "$?" -eq 64
         ldd bin/spacesd-bin >/dev/null
         timeout 20s env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACESD_PRINT_CERTIFICATE_FINGERPRINT=1 bin/spacesd | grep -q '^SHA256:'
+        mkdir -p "$smoke_root/profile/runtime" "$smoke_root/work"
+        env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
+            bin/spacesd >"$smoke_root/spacesd.log" 2>&1 </dev/null &
+        local daemon_pid=$!
+        trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true' EXIT
+        python3 - "$smoke_root" <<'PY'
+import json
+import os
+import socket
+import sys
+import time
+
+root = sys.argv[1]
+runtime = os.path.join(root, "profile", "runtime")
+work = os.path.join(root, "work")
+
+def service_socket_path():
+    terminal_root = os.path.abspath(os.path.join(runtime, "terminal"))
+    value = 5381
+    for byte in terminal_root.encode("utf-8"):
+        value = (((value << 5) + value) + byte) & 0xFFFFFFFFFFFFFFFF
+    return f"/tmp/spaces-terminal-sockets/service-{value:016x}.sock"
+
+def request(payload, timeout=10):
+    deadline = time.time() + timeout
+    path = service_socket_path()
+    while True:
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect(path)
+            break
+        except OSError:
+            if time.time() > deadline:
+                raise
+            time.sleep(0.1)
+    with sock:
+        sock.sendall(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+        sock.shutdown(socket.SHUT_WR)
+        data = bytearray()
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data.extend(chunk)
+    return json.loads(data.decode("utf-8"))
+
+response = request({
+    "command": "create",
+    "launchConfiguration": {
+        "sessionID": "linux-artifact-smoke",
+        "backend": "ghostty-embedded",
+        "lifetimePolicy": "persistent",
+        "title": "artifact smoke",
+        "workingDirectory": work,
+        "shell": "/bin/bash",
+        "command": "echo artifact-smoke; sleep 20",
+        "createdAt": "2026-06-11T00:00:00.000Z",
+        "workspaceID": "artifact-workspace",
+        "kind": "process",
+    },
+})
+if not response.get("ok"):
+    raise SystemExit(response)
+PY
+        env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
+            SPACES_TERMINAL_HOST=spaces SPACES_TERMINAL_TRACKING_ID=linux-artifact-smoke \
+            SPACES_WORKSPACE_ID=artifact-workspace SPACES_WORKSPACE_DIR="$smoke_root/work" \
+            bin/spaces signal waiting "$smoke_root/work" >/tmp/spaces-linux-signal-smoke.log
+        python3 - "$smoke_root" <<'PY'
+import json
+import os
+import socket
+import sys
+
+root = sys.argv[1]
+runtime = os.path.join(root, "profile", "runtime")
+
+terminal_root = os.path.abspath(os.path.join(runtime, "terminal"))
+value = 5381
+for byte in terminal_root.encode("utf-8"):
+    value = (((value << 5) + value) + byte) & 0xFFFFFFFFFFFFFFFF
+path = f"/tmp/spaces-terminal-sockets/service-{value:016x}.sock"
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(10)
+with sock:
+    sock.connect(path)
+    sock.sendall(json.dumps({"command": "state", "sessionID": "linux-artifact-smoke"}).encode("utf-8"))
+    sock.shutdown(socket.SHUT_WR)
+    data = bytearray()
+    while True:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        data.extend(chunk)
+
+response = json.loads(data.decode("utf-8"))
+signals = response.get("agentSignals") or []
+if not response.get("ok") or not any(signal.get("type") == "waiting" for signal in signals):
+    raise SystemExit(response)
+PY
     )
     rm -rf "$smoke_root"
 }

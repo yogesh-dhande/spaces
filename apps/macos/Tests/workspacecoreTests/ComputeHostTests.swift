@@ -4,6 +4,13 @@ import spacesterminalcore
 @testable import workspacecore
 
 final class ComputeHostTests: XCTestCase {
+    func testResolvedAuthTokenUsesHostSpecificEnvironmentKey() throws {
+        let key = ComputeHostCredentialStore.authTokenEnvironmentKey(hostID: "Builder-A.1")
+        XCTAssertEqual(key, "SPACESD_AUTH_TOKEN_BUILDER_A_1")
+        XCTAssertEqual(
+            try ComputeHostCredentialStore.resolvedAuthToken(hostID: "Builder-A.1", environment: [key: "  remote-secret  "]), "remote-secret")
+    }
+
     func testStoreRoundTripsComputeHostAndWorkspaceBinding() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(id: "project-12345678", dir: try makeTempDirectory().path)
@@ -187,7 +194,9 @@ final class ComputeHostTests: XCTestCase {
     func testWorkspaceLaunchRunsRemoteSetupAndProcessThroughSpacesd() throws {
         let store = try makeTemporaryStore()
         let recorder = RemoteTerminalServiceRecorder()
-        let orchestrator = WorkspaceOrchestrator(store: store, remoteTerminalServiceClient: recorder.client)
+        let openedWindows = BuiltInTerminalWindowOpenRecorder()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowOpener: openedWindows.open, remoteTerminalServiceClient: recorder.client)
         let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
         let projectDir = try makeTempDirectory()
         let setupMarker = projectDir.appendingPathComponent("setup.marker")
@@ -221,6 +230,17 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertEqual(createRequest.launchConfiguration?.shell, "/bin/bash")
         XCTAssertEqual(createRequest.launchConfiguration?.kind, .process)
         XCTAssertEqual(createRequest.worktreeRefresh?.path, createRequest.runtimeManifest?.remotePath)
+        let openedWindow = try XCTUnwrap(openedWindows.opened().first)
+        XCTAssertEqual(openedWindows.opened().count, 1)
+        XCTAssertEqual(openedWindow.sessionID, createRequest.launchConfiguration?.sessionID)
+        XCTAssertEqual(openedWindow.mode, .owner)
+        let mirroredPaths = try TerminalSessionPaths.forSession(id: openedWindow.sessionID)
+        let mirroredLaunchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: mirroredPaths)
+        let mirroredRuntimeState = try TerminalSessionPersistence.readRuntimeState(paths: mirroredPaths)
+        XCTAssertEqual(mirroredLaunchConfiguration.workspaceID, workspace.id)
+        XCTAssertEqual(mirroredLaunchConfiguration.kind, .process)
+        XCTAssertEqual(mirroredRuntimeState.servicePID, 42)
+        XCTAssertEqual(mirroredRuntimeState.childPID, 4242)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: setupMarker.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: processMarker.path))
@@ -278,7 +298,9 @@ final class ComputeHostTests: XCTestCase {
     func testOpenWorkspaceTerminalRunsRemoteShellThroughSpacesd() throws {
         let store = try makeTemporaryStore()
         let recorder = RemoteTerminalServiceRecorder()
-        let orchestrator = WorkspaceOrchestrator(store: store, remoteTerminalServiceClient: recorder.client)
+        let openedWindows = BuiltInTerminalWindowOpenRecorder()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowOpener: openedWindows.open, remoteTerminalServiceClient: recorder.client)
         let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
         let projectDir = try makeTempDirectory()
         let project = ProjectRecord(
@@ -299,6 +321,7 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertEqual(request.launchConfiguration?.workingDirectory, request.runtimeManifest?.remotePath)
         XCTAssertEqual(request.launchConfiguration?.shell, "/bin/bash")
         XCTAssertEqual(request.worktreeRefresh?.branch, "feature")
+        XCTAssertTrue(openedWindows.opened().isEmpty)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).first?.terminalTrackingID, sessionID)
     }
@@ -425,6 +448,34 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertEqual(recorder.requests.map(\.sshHost), [host.sshHost])
     }
 
+    func testBrowserSSHForwardResolverReusesLivePersistedForward() throws {
+        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
+        let plan = makeRuntimePlan(selection: .remote(host), ports: [WorkspaceRuntimePortMapping(id: "web", name: "WEB_PORT", port: 3000)])
+        let checker = BrowserLiveForwardCheckerRecorder(liveLocalPort: 49_230)
+
+        let mapped = BrowserSSHForwardResolver.reusableResolvedURL(
+            "http://127.0.0.1:49230/status?ready=1", for: "http://localhost:3000/status?ready=1", runtimePlan: plan
+        ) { localPort, request in checker.check(localPort: localPort, request: request) }
+
+        XCTAssertEqual(mapped, "http://127.0.0.1:49230/status?ready=1")
+        XCTAssertEqual(checker.requests.map(\.computeHostID), [host.id])
+        XCTAssertEqual(checker.requests.map(\.remotePort), [3000])
+    }
+
+    func testBrowserSSHForwardResolverRejectsPersistedForwardForDifferentURL() throws {
+        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
+        let plan = makeRuntimePlan(selection: .remote(host), ports: [WorkspaceRuntimePortMapping(id: "web", name: "WEB_PORT", port: 3000)])
+
+        let mapped = BrowserSSHForwardResolver.reusableResolvedURL(
+            "http://127.0.0.1:49230/admin", for: "http://localhost:3000/status", runtimePlan: plan
+        ) { _, _ in
+            XCTFail("Different paths should not probe SSH forwards.")
+            return true
+        }
+
+        XCTAssertNil(mapped)
+    }
+
     func testBrowserSSHForwardResolverLeavesUnrelatedRemoteURLsUnchanged() throws {
         let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
         let plan = makeRuntimePlan(selection: .remote(host), ports: [WorkspaceRuntimePortMapping(id: "web", name: "WEB_PORT", port: 3000)])
@@ -504,6 +555,44 @@ private final class BrowserForwardRecorder: @unchecked Sendable {
     }
 }
 
+private final class BrowserLiveForwardCheckerRecorder: @unchecked Sendable {
+    let liveLocalPort: Int
+    private let lock = NSLock()
+    private var checkedRequests: [BrowserSSHForwardRequest] = []
+
+    init(liveLocalPort: Int) { self.liveLocalPort = liveLocalPort }
+
+    var requests: [BrowserSSHForwardRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return checkedRequests
+    }
+
+    func check(localPort: Int, request: BrowserSSHForwardRequest) -> Bool {
+        lock.lock()
+        checkedRequests.append(request)
+        lock.unlock()
+        return localPort == liveLocalPort
+    }
+}
+
+private final class BuiltInTerminalWindowOpenRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [(sessionID: String, mode: TerminalAttachmentMode)] = []
+
+    func open(sessionID: String, mode: TerminalAttachmentMode) {
+        lock.lock()
+        entries.append((sessionID: sessionID, mode: mode))
+        lock.unlock()
+    }
+
+    func opened() -> [(sessionID: String, mode: TerminalAttachmentMode)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries
+    }
+}
+
 private final class RemoteTerminalServiceRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var recordedRequests: [TerminalServiceRequest] = []
@@ -516,13 +605,17 @@ private final class RemoteTerminalServiceRecorder: @unchecked Sendable {
         switch request.command {
         case "create":
             let launchConfiguration = try XCTUnwrap(request.launchConfiguration)
+            let runtimeState = TerminalSessionRuntimeState(
+                sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: 42, childPID: 4242, state: .running,
+                updatedAt: "2026-06-10T00:00:00Z", title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory)
             return TerminalServiceResponse(
                 ok: true, message: "created",
                 session: TerminalServiceSessionSummary(
                     id: launchConfiguration.sessionID, title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory,
                     backend: launchConfiguration.backend, lifetimePolicy: launchConfiguration.lifetimePolicy, state: .running, servicePID: 42,
                     childPID: 4242, controlSocketPath: "/tmp/\(launchConfiguration.sessionID).sock",
-                    outputPath: "/tmp/\(launchConfiguration.sessionID).log"))
+                    outputPath: "/tmp/\(launchConfiguration.sessionID).log", launchConfiguration: launchConfiguration, runtimeState: runtimeState,
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot()))
         case "runWorkspaceCommand":
             return TerminalServiceResponse(
                 ok: true, message: "ran", commandResult: TerminalServiceCommandResult(exitCode: 0, logPath: "/tmp/workspace-command.log"))

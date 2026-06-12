@@ -613,10 +613,14 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             }
         }
         let localSessions = try TerminalSessionCatalog.listLiveSessions()
+        let databaseRemoteSessions = loadDatabaseRemoteTerminalSessions(workspaces: workspaces)
         let remoteSessions = loadRemoteTerminalSessions(workspaces: workspaces)
-        let sessions = localSessions + remoteSessions.entries
+        let sessions = mergedTerminalSessions(localSessions + databaseRemoteSessions.entries + remoteSessions.entries)
+        let hasFinalRenderBySessionID = databaseRemoteSessions.hasFinalRenderBySessionID.merging(remoteSessions.hasFinalRenderBySessionID) {
+            _, remote in remote
+        }
         let workspaceRows = try loadWorkspaceTerminalRows(
-            store: store, workspaces: workspaces, sessions: sessions, hasFinalRenderBySessionID: remoteSessions.hasFinalRenderBySessionID)
+            store: store, workspaces: workspaces, sessions: sessions, hasFinalRenderBySessionID: hasFinalRenderBySessionID)
         return SpacesMobileOverviewBuilder.build(projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions)
     }
 
@@ -627,9 +631,34 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         case .localMac: return nil
         case .remote(let host):
             return SpacesMobileTerminalDaemonEndpoint(
-                host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: try? ComputeHostCredentialStore.authToken(hostID: host.id),
+                host: host.daemonEndpoint.host, port: host.daemonEndpoint.port,
+                authToken: try? ComputeHostCredentialStore.resolvedAuthToken(hostID: host.id),
                 certificateFingerprint: host.daemonEndpoint.certificateFingerprint)
         }
+    }
+
+    private func loadDatabaseRemoteTerminalSessions(workspaces: [SpacesMobileOverviewBuilder.WorkspaceDescriptor]) -> RemoteTerminalSessionList {
+        let remoteWorkspaceIDs = Set(workspaces.filter { $0.terminalDaemonEndpoint != nil }.map(\.workspace.id))
+        guard !remoteWorkspaceIDs.isEmpty else { return RemoteTerminalSessionList(entries: [], hasFinalRenderBySessionID: [:]) }
+
+        var entries: [TerminalSessionCatalogEntry] = []
+        var hasFinalRenderBySessionID: [String: Bool] = [:]
+        let configurations = (try? TerminalSessionPersistence.listKnownSessions()) ?? []
+        for launchConfiguration in configurations {
+            guard let workspaceID = launchConfiguration.workspaceID, remoteWorkspaceIDs.contains(workspaceID) else { continue }
+            guard let paths = try? TerminalSessionPaths.forSession(id: launchConfiguration.sessionID),
+                let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+            else { continue }
+            let hasFinalRender = (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderSnapshot != nil
+            guard runtimeState.state.isInteractive || hasFinalRender else { continue }
+            hasFinalRenderBySessionID[launchConfiguration.sessionID] = hasFinalRender
+            entries.append(
+                TerminalSessionCatalogEntry(
+                    launchConfiguration: launchConfiguration, runtimeState: runtimeState,
+                    attachmentSnapshot: (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot(),
+                    paths: paths, isControlAvailable: runtimeState.state.isInteractive, isSubscriptionAvailable: runtimeState.state.isInteractive))
+        }
+        return RemoteTerminalSessionList(entries: entries, hasFinalRenderBySessionID: hasFinalRenderBySessionID)
     }
 
     private func loadRemoteTerminalSessions(workspaces: [SpacesMobileOverviewBuilder.WorkspaceDescriptor]) -> RemoteTerminalSessionList {
@@ -645,7 +674,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             guard
                 let response = try? TerminalServiceClient.sendPinnedTLS(
                     request: TerminalServiceRequest(command: "list"), host: endpoint.host, port: endpoint.port, authToken: endpoint.authToken,
-                    certificateFingerprint: endpoint.certificateFingerprint, timeout: 5), response.ok, let sessions = response.sessions
+                    certificateFingerprint: endpoint.certificateFingerprint, timeout: 2), response.ok, let sessions = response.sessions
             else { continue }
             for summary in sessions {
                 if let entry = remoteTerminalCatalogEntry(summary) { entries.append(entry) }
@@ -653,6 +682,16 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             }
         }
         return RemoteTerminalSessionList(entries: entries, hasFinalRenderBySessionID: hasFinalRenderBySessionID)
+    }
+
+    private func mergedTerminalSessions(_ sessions: [TerminalSessionCatalogEntry]) -> [TerminalSessionCatalogEntry] {
+        var order: [String] = []
+        var entriesByID: [String: TerminalSessionCatalogEntry] = [:]
+        for session in sessions {
+            if entriesByID[session.sessionID] == nil { order.append(session.sessionID) }
+            entriesByID[session.sessionID] = session
+        }
+        return order.compactMap { entriesByID[$0] }
     }
 
     private func remoteTerminalCatalogEntry(_ summary: TerminalServiceSessionSummary) -> TerminalSessionCatalogEntry? {

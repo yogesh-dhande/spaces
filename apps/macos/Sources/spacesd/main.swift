@@ -120,6 +120,8 @@ import spacesterminalghostty
         case "list": return listSessions()
         case "state": return loadTerminalState(request)
         case "control": return handleTerminalControl(request)
+        case "agentSignal": return recordAgentSignal(request)
+        case "ackAgentSignals": return acknowledgeAgentSignals(request)
         case "resolveTerminalLink": return resolveTerminalLink(request)
         case "readTerminalLinkChunk": return readTerminalLinkChunk(request)
         default: return TerminalServiceResponse(ok: false, message: "Unsupported spacesd command '\(request.command)'.")
@@ -250,7 +252,33 @@ import spacesterminalghostty
     private func loadTerminalState(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
         guard let sessionID = request.sessionID, !sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
         do {
-            return TerminalServiceResponse(ok: true, message: "Loaded terminal state.", sessionState: try loadCurrentState(sessionID: sessionID))
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            return TerminalServiceResponse(
+                ok: true, message: "Loaded terminal state.", sessionState: try loadCurrentState(sessionID: sessionID),
+                agentSignals: try TerminalSessionPersistence.pendingAgentSignals(sessionID: sessionID, paths: paths))
+        } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
+    }
+
+    private func recordAgentSignal(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
+        guard let event = request.agentSignal else { return TerminalServiceResponse(ok: false, message: "Missing agent signal event.") }
+        guard !event.sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
+        if let requestSessionID = request.sessionID, !requestSessionID.isEmpty, requestSessionID != event.sessionID {
+            return TerminalServiceResponse(ok: false, message: "Agent signal session does not match request session.")
+        }
+        do {
+            let paths = try TerminalSessionPaths.forSession(id: event.sessionID)
+            try TerminalSessionPersistence.appendPendingAgentSignal(event, paths: paths)
+            return TerminalServiceResponse(ok: true, message: "Queued agent signal.", agentSignals: [event])
+        } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
+    }
+
+    private func acknowledgeAgentSignals(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
+        guard let sessionID = request.sessionID, !sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
+        do {
+            try TerminalSessionPersistence.acknowledgeAgentSignals(
+                ids: request.agentSignalEventIDs ?? [], sessionID: sessionID, paths: try TerminalSessionPaths.forSession(id: sessionID),
+                acknowledgedAt: nowISO8601())
+            return TerminalServiceResponse(ok: true, message: "Acknowledged agent signals.")
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 
@@ -638,6 +666,8 @@ import spacesterminalghostty
         #endif
     }
 
+    private func nowISO8601() -> String { GhosttyRemoteSessionStateTimestamp.string(from: Date()) }
+
     private nonisolated static func runOnMainActorSynchronously<T: Sendable>(_ work: @escaping @MainActor () -> T) -> T {
         if Thread.isMainThread { return MainActor.assumeIsolated { work() } }
         let box = MainActorSyncBox<T>()
@@ -679,6 +709,8 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
 
 @main struct SpacesDaemonMain {
     static func main() {
+        configureProcessSignals()
+
         if environmentValue("SPACESD_PRINT_CERTIFICATE_FINGERPRINT") == "1" {
             do {
                 print(try TerminalServiceTLSIdentityStore.loadOrCreate().certificateFingerprint)
@@ -713,6 +745,12 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
                 writeStandardError("spacesd: \(error)\n")
                 exit(1)
             }
+        #endif
+    }
+
+    private static func configureProcessSignals() {
+        #if canImport(Glibc)
+            _ = signal(SIGPIPE, SIG_IGN)
         #endif
     }
 }

@@ -525,6 +525,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             guard (0...Int(UInt16.max)).contains(port) else { throw TerminalServiceTLSError.invalidPort(port) }
             let context = try Self.makeSSLContext(identity: identity)
             let socketFD = try Self.makeListenSocket(host: host, port: port)
+            try Self.setCloseOnExec(socketFD)
             try Self.setNonBlocking(socketFD)
             listenSocketFD = socketFD
             sslContext = context
@@ -559,6 +560,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                     return
                 }
                 do {
+                    try Self.setCloseOnExec(clientFD)
                     try Self.setBlocking(clientFD)
                     Self.setSocketTimeout(clientFD, seconds: 15)
                     try handleClient(fileDescriptor: clientFD)
@@ -677,6 +679,12 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             let currentFlags = fcntl(fileDescriptor, F_GETFL)
             guard currentFlags >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
             guard fcntl(fileDescriptor, F_SETFL, currentFlags | O_NONBLOCK) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        }
+
+        private static func setCloseOnExec(_ fileDescriptor: Int32) throws {
+            let currentFlags = fcntl(fileDescriptor, F_GETFD)
+            guard currentFlags >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            guard fcntl(fileDescriptor, F_SETFD, currentFlags | FD_CLOEXEC) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         }
 
         private static func setBlocking(_ fileDescriptor: Int32) throws {

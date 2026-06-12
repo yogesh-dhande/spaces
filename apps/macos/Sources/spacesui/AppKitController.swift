@@ -874,6 +874,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let sessionIsTerminating =
                 (notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? Bool)
                 ?? ((notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? String) == "true")
+            TerminalPerformance.logMetric(
+                "terminal_window_close_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
+                detail: "terminating=\(sessionIsTerminating ? 1 : 0)")
             Task { @MainActor [weak self, sessionID, sessionIsTerminating] in
                 guard let self else { return }
                 self.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: sessionIsTerminating)
@@ -938,6 +941,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } catch {}
     }
 
+    private struct RemoteTerminalSessionRoute: Sendable { let requestSender: RemoteGhosttyTerminalServiceRequestSender }
+
+    private final class RemoteTerminalWindowClientStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var clientID: String?
+
+        func set(_ clientID: String?) {
+            lock.lock()
+            self.clientID = clientID
+            lock.unlock()
+        }
+
+        func current() -> String? {
+            lock.lock()
+            defer { lock.unlock() }
+            return clientID
+        }
+    }
+
     @discardableResult private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) -> Int? {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
@@ -951,20 +973,83 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 reusedExistingWindow = true
             } else {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
-                let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void = { client, attachmentMode in
-                    let response = try TerminalControlClient.send(
-                        request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
-                        socketPath: paths.controlSocketPath)
-                    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                let remoteRoute = try remoteTerminalSessionRoute(sessionID: sessionID)
+                if let remoteRoute {
+                    try refreshRemoteTerminalSessionMirror(sessionID: sessionID, paths: paths, requestSender: remoteRoute.requestSender)
                 }
-                let detachClientAction: @Sendable (String) throws -> Void = { clientID in
-                    let response = try TerminalControlClient.send(
-                        request: TerminalControlRequest(command: "detach", clientID: clientID), socketPath: paths.controlSocketPath)
-                    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
+                if remoteRoute == nil {
+                    agentSignalHandler = nil
+                } else {
+                    agentSignalHandler = { [weak self] events in
+                        guard let self else { return [String]() }
+                        return try self.applyRemoteAgentSignals(events)
+                    }
+                }
+                let remoteClientStore = RemoteTerminalWindowClientStore()
+                let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void
+                let detachClientAction: @Sendable (String) throws -> Void
+                let sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)?
+                let sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)?
+                let takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)?
+                if let remoteRoute {
+                    let requestSender = remoteRoute.requestSender
+                    attachClientAction = { client, attachmentMode in
+                        remoteClientStore.set(client.id)
+                        let response = try Self.sendRemoteTerminalControl(
+                            sessionID: sessionID, request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
+                            paths: paths, requestSender: requestSender, refreshMirror: true)
+                        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                    }
+                    detachClientAction = { clientID in
+                        if remoteClientStore.current() == clientID { remoteClientStore.set(nil) }
+                        let response = try Self.sendRemoteTerminalControl(
+                            sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), paths: paths,
+                            requestSender: requestSender, refreshMirror: true)
+                        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                    }
+                    sendInputAction = { text, appendNewline in
+                        guard let clientID = remoteClientStore.current() else {
+                            return TerminalControlResponse(ok: false, message: "Terminal window is not attached.")
+                        }
+                        return try Self.sendRemoteTerminalControl(
+                            sessionID: sessionID,
+                            request: TerminalControlRequest(command: "send", text: text, clientID: clientID, appendNewline: appendNewline),
+                            paths: paths, requestSender: requestSender, refreshMirror: false)
+                    }
+                    sendKeyAction = { key in
+                        guard let clientID = remoteClientStore.current() else {
+                            return TerminalControlResponse(ok: false, message: "Terminal window is not attached.")
+                        }
+                        return try Self.sendRemoteTerminalControl(
+                            sessionID: sessionID, request: TerminalControlRequest(command: "key", key: key, clientID: clientID), paths: paths,
+                            requestSender: requestSender, refreshMirror: false)
+                    }
+                    takeoverAction = { clientID in
+                        try Self.sendRemoteTerminalControl(
+                            sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), paths: paths,
+                            requestSender: requestSender, refreshMirror: true)
+                    }
+                } else {
+                    attachClientAction = { client, attachmentMode in
+                        let response = try TerminalControlClient.send(
+                            request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
+                            socketPath: paths.controlSocketPath)
+                        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                    }
+                    detachClientAction = { clientID in
+                        let response = try TerminalControlClient.send(
+                            request: TerminalControlRequest(command: "detach", clientID: clientID), socketPath: paths.controlSocketPath)
+                        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                    }
+                    sendInputAction = nil
+                    sendKeyAction = nil
+                    takeoverAction = nil
                 }
                 let created = TerminalSessionWindowController(
-                    sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false,
-                    attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
+                    sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false, sendInputAction: sendInputAction,
+                    sendKeyAction: sendKeyAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
+                    detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
                     onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
                     onWindowClose: { [weak self] sessionID, clientID, sessionIsTerminating in
                         if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
@@ -972,7 +1057,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                             sessionID: sessionID, clientID: clientID, sessionIsTerminating: sessionIsTerminating)
                     }, runtimeControlsProvider: { [weak self] sessionID in self?.terminalRuntimeControls(forSessionID: sessionID) },
                     sessionHostProvider: { launchConfiguration, paths in
-                        Self.terminalSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+                        Self.terminalSessionHost(
+                            launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: remoteRoute?.requestSender,
+                            agentSignalHandler: agentSignalHandler)
                     })
                 terminalSessionWindowControllers[sessionID] = created
                 controller = created
@@ -999,14 +1086,108 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func remoteTerminalSessionRoute(sessionID: String) throws -> RemoteTerminalSessionRoute? {
+        guard let workspaceID = try orchestrator.workspaceIDForTerminalSession(sessionID) else { return nil }
+        let plan = try orchestrator.workspaceRuntimePlan(workspaceID: workspaceID)
+        guard plan.selection.isRemote else { return nil }
+        let target = plan.daemonTarget
+        return RemoteTerminalSessionRoute(requestSender: { request in
+            try WorkspaceOrchestrator.sendTerminalServiceRequest(to: target, request: request)
+        })
+    }
+
+    private func applyRemoteAgentSignals(_ events: [TerminalServiceAgentSignalEvent]) throws -> [String] {
+        var acknowledgedIDs: [String] = []
+        var didApply = false
+        for event in events {
+            if try orchestrator.recordRemoteAgentSignal(event) {
+                acknowledgedIDs.append(event.id)
+                didApply = true
+            }
+        }
+        if didApply { reloadData() }
+        return acknowledgedIDs
+    }
+
+    private func refreshRemoteTerminalSessionMirror(
+        sessionID: String, paths: TerminalSessionPaths, requestSender: RemoteGhosttyTerminalServiceRequestSender
+    ) throws {
+        let response = try requestSender(TerminalServiceRequest(command: "state", sessionID: sessionID))
+        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+        guard let payload = response.sessionState else {
+            throw WorkspaceError.invalidArgument(message: "Remote spacesd did not return terminal state.")
+        }
+        if (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) == nil {
+            let workspaceID = try orchestrator.workspaceIDForTerminalSession(sessionID)
+            let kind = try remoteTerminalSessionKind(sessionID: sessionID, workspaceID: workspaceID)
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                Self.remoteTerminalLaunchConfiguration(sessionID: sessionID, workspaceID: workspaceID, kind: kind, payload: payload), paths: paths)
+        }
+        try TerminalSessionPersistence.writeRemoteStateMirror(payload, paths: paths)
+    }
+
+    private func remoteTerminalSessionKind(sessionID: String, workspaceID: String?) throws -> TerminalSessionKind {
+        guard let workspaceID else { return .shell }
+        if try orchestrator.runningProcesses(workspaceID: workspaceID).contains(where: { Self.terminalSessionID(for: $0) == sessionID }) {
+            return .process
+        }
+        if try orchestrator.agentWindows(workspaceID: workspaceID).contains(where: { Self.terminalSessionID(for: $0) == sessionID }) { return .agent }
+        return .shell
+    }
+
+    nonisolated private static func sendRemoteTerminalControl(
+        sessionID: String, request: TerminalControlRequest, paths: TerminalSessionPaths, requestSender: RemoteGhosttyTerminalServiceRequestSender,
+        refreshMirror: Bool
+    ) throws -> TerminalControlResponse {
+        let response = try requestSender(TerminalServiceRequest(command: "control", sessionID: sessionID, controlRequest: request))
+        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+        if let payload = response.sessionState {
+            try TerminalSessionPersistence.writeRemoteStateMirror(payload, paths: paths)
+        } else if refreshMirror {
+            try refreshRemoteTerminalSessionMirror(sessionID: sessionID, paths: paths, requestSender: requestSender)
+        }
+        return response.controlResponse ?? TerminalControlResponse(ok: response.ok, message: response.message)
+    }
+
+    nonisolated private static func refreshRemoteTerminalSessionMirror(
+        sessionID: String, paths: TerminalSessionPaths, requestSender: RemoteGhosttyTerminalServiceRequestSender
+    ) throws {
+        let response = try requestSender(TerminalServiceRequest(command: "state", sessionID: sessionID))
+        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+        guard let payload = response.sessionState else {
+            throw WorkspaceError.invalidArgument(message: "Remote spacesd did not return terminal state.")
+        }
+        try TerminalSessionPersistence.writeRemoteStateMirror(payload, paths: paths)
+    }
+
+    nonisolated private static func remoteTerminalLaunchConfiguration(
+        sessionID: String, workspaceID: String?, kind: TerminalSessionKind, payload: GhosttyRemoteSessionStatePayload
+    ) -> TerminalSessionLaunchConfiguration {
+        TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: payload.runtimeState?.backend ?? .ghosttyEmbedded, title: payload.title,
+            workingDirectory: payload.workingDirectory, shell: "/bin/bash", command: nil,
+            createdAt: payload.runtimeState?.updatedAt ?? payload.emittedAt, workspaceID: workspaceID, kind: kind)
+    }
+
     private func pruneClosedTerminalSessionWindowControllers(sessionID: String) {
         guard let controller = terminalSessionWindowControllers[sessionID] else { return }
         if controller.didClose { terminalSessionWindowControllers.removeValue(forKey: sessionID) }
     }
 
     private func closeTerminalSessionWindows(sessionID: String, sessionIsTerminating: Bool = false) {
+        let startedAt = Date()
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-        guard let controller = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) else { return }
+        guard let controller = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) else {
+            logPerfMetric(
+                "terminal_window_close", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
+                detail: "route=missing_controller terminating=\(sessionIsTerminating ? 1 : 0)")
+            return
+        }
+        logPerfMetric(
+            "terminal_window_close", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+            detail:
+                "route=controller terminating=\(sessionIsTerminating ? 1 : 0) client=\(controller.clientID) window_number=\(controller.window?.windowNumber ?? 0) visible=\((controller.window?.isVisible == true) ? 1 : 0)"
+        )
         if sessionIsTerminating { controller.closeForSessionTermination() } else { controller.window?.close() }
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
     }
@@ -1293,8 +1474,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func removeTerminalSessionWindowController(sessionID: String, clientID: String, sessionIsTerminating: Bool) {
-        guard let controller = terminalSessionWindowControllers[sessionID] else { return }
-        guard controller.clientID == clientID else { return }
+        guard let controller = terminalSessionWindowControllers[sessionID] else {
+            logPerfMetric(
+                "terminal_window_controller_remove", target: "session=\(sessionID)", elapsedMS: 0, success: false,
+                detail: "route=missing_controller client=\(clientID) terminating=\(sessionIsTerminating ? 1 : 0)")
+            return
+        }
+        guard controller.clientID == clientID else {
+            logPerfMetric(
+                "terminal_window_controller_remove", target: "session=\(sessionID)", elapsedMS: 0, success: false,
+                detail: "route=client_mismatch expected=\(controller.clientID) actual=\(clientID) terminating=\(sessionIsTerminating ? 1 : 0)")
+            return
+        }
+        logPerfMetric(
+            "terminal_window_controller_remove", target: "session=\(sessionID)", elapsedMS: 0, success: true,
+            detail: "client=\(clientID) terminating=\(sessionIsTerminating ? 1 : 0)")
         terminalSessionWindowControllers.removeValue(forKey: sessionID)
         guard !sessionIsTerminating else { return }
         stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID)
@@ -1302,7 +1496,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func stopBuiltInTerminalSessionClosedByUser(sessionID: String) {
         guard !keepsTerminalSessionsRunningDuringTermination else { return }
-        do { if try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID) { requestSidebarReload() } } catch { showError(error) }
+        do {
+            let didStop = try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID)
+            logPerfMetric("terminal_window_closed_by_user_stop", target: "session=\(sessionID)", elapsedMS: 0, success: didStop)
+            if didStop { requestSidebarReload() }
+        } catch {
+            logPerfMetric("terminal_window_closed_by_user_stop", target: "session=\(sessionID)", elapsedMS: 0, success: false)
+            showError(error)
+        }
     }
 
     private func terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: String, now: Date = Date()) {
@@ -1553,9 +1754,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private static var clickTargetAssocKey: UInt8 = 0
 
-    @MainActor static func terminalSessionHost(launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths)
-        -> any TerminalGhosttySessionHosting
-    { RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths) }
+    @MainActor static func terminalSessionHost(
+        launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
+        terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil
+    ) -> any TerminalGhosttySessionHosting {
+        RemoteGhosttySessionHost(
+            launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: terminalServiceRequestSender,
+            agentSignalHandler: agentSignalHandler)
+    }
 
     nonisolated static func launchServiceBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
         -> TerminalServiceSessionSummary
@@ -9014,15 +9220,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             do {
                 let db = try DatabaseLocator.defaultPath()
                 let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspaceID)
-                Task.detached(priority: .userInitiated) {
-                    do {
+                let opensRemoteSession = try orchestrator.workspaceRuntimePlan(workspaceID: workspaceID).selection.isRemote
+                if opensRemoteSession {
+                    let sessionID = try await Task.detached(priority: .userInitiated) {
                         let store = try SQLiteStore(path: db)
                         let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowOpener: { _, _ in })
-                        try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation)
-                    } catch { NSLog("spaces: workspace terminal launch failed: \(String(describing: error))") }
-                }
-                if let windowID = openTerminalSessionWindow(sessionID: reservation.sessionID, mode: .owner) {
-                    try? orchestrator.persistBuiltInTerminalWindowID(sessionID: reservation.sessionID, windowID: windowID)
+                        return try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation)
+                    }.value
+                    if let windowID = openTerminalSessionWindow(sessionID: sessionID, mode: .owner) {
+                        try? orchestrator.persistBuiltInTerminalWindowID(sessionID: sessionID, windowID: windowID)
+                    }
+                } else {
+                    Task.detached(priority: .userInitiated) {
+                        do {
+                            let store = try SQLiteStore(path: db)
+                            let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowOpener: { _, _ in })
+                            try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation)
+                        } catch { NSLog("spaces: workspace terminal launch failed: \(String(describing: error))") }
+                    }
+                    if let windowID = openTerminalSessionWindow(sessionID: reservation.sessionID, mode: .owner) {
+                        try? orchestrator.persistBuiltInTerminalWindowID(sessionID: reservation.sessionID, windowID: windowID)
+                    }
                 }
                 reloadData()
                 hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
@@ -9757,6 +9975,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         appIsActive: Bool, mainWindowIsFocused: Bool, commandPaletteIsFocused: Bool
     ) -> Bool { appIsActive && !mainWindowIsFocused && !commandPaletteIsFocused }
 
+    nonisolated static func shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: Bool) -> Bool { appIsActive }
+
+    nonisolated static func preferredWorkspaceIDForGlobalNavigation(
+        focusedWindowWorkspaceID: String?, focusedTerminalSessionWorkspaceID: String?, activeWorkspaceID: String?
+    ) -> String? { focusedWindowWorkspaceID ?? focusedTerminalSessionWorkspaceID ?? activeWorkspaceID }
+
     nonisolated static func shouldHideMainWindowForToggle(appIsHidden: Bool, mainWindowIsFocused: Bool) -> Bool {
         !appIsHidden && mainWindowIsFocused
     }
@@ -9981,19 +10205,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func globalWindowNavigationWorkspaceID() -> String? {
-        if let terminalSessionID = activeBuiltInTerminalSessionID(),
-            let workspaceID = try? orchestrator.workspaceIDForTerminalSession(terminalSessionID)
-        {
-            return workspaceID
+        let focusedWindowWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
+        let focusedTerminalSessionWorkspaceID: String?
+        if focusedWindowWorkspaceID == nil, let terminalSessionID = activeBuiltInTerminalSessionID() {
+            focusedTerminalSessionWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(terminalSessionID)
+        } else {
+            focusedTerminalSessionWorkspaceID = nil
         }
-        if let workspaceID = try? orchestrator.workspaceIDForFocusedWindow() { return workspaceID }
-        if let workspaceID = try? orchestrator.activeWorkspaceID() { return workspaceID }
-        return nil
+        let activeWorkspaceID = try? orchestrator.activeWorkspaceID()
+        return Self.preferredWorkspaceIDForGlobalNavigation(
+            focusedWindowWorkspaceID: focusedWindowWorkspaceID, focusedTerminalSessionWorkspaceID: focusedTerminalSessionWorkspaceID,
+            activeWorkspaceID: activeWorkspaceID)
     }
 
     private func activeBuiltInTerminalSessionID() -> String? {
-        for window in [NSApp.keyWindow, NSApp.mainWindow].compactMap({ $0 }) {
-            if let sessionID = (window.windowController as? TerminalSessionWindowController)?.terminalSessionID { return sessionID }
+        if Self.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: NSApp.isActive) {
+            for window in [NSApp.keyWindow, NSApp.mainWindow].compactMap({ $0 }) {
+                if let sessionID = (window.windowController as? TerminalSessionWindowController)?.terminalSessionID { return sessionID }
+            }
         }
         guard
             Self.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(

@@ -1007,6 +1007,31 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.workspaceIDForTerminalSession(sessionID), workspace.id)
     }
 
+    func testWorkspaceIDForTerminalSessionResolvesWorkspaceOwnedTerminalRow() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces-test.db")
+        let store = try SQLiteStore(path: dbURL.path)
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature-terminal", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let sessionID = "workspace-owned-shell-session"
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                INSERT INTO terminal_sessions(
+                  session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, created_at
+                )
+                VALUES(
+                  '\(sessionID)', '/tmp/workspace-owned-shell-session', 'ghostty-embedded', 'persistent',
+                  '\(workspace.id)', 'shell', 'shell', '\(workspace.dir)', '/bin/zsh', '2026-06-11T00:00:00Z'
+                );
+                """)
+
+        XCTAssertEqual(try store.workspaceIDForTerminalSession(sessionID), workspace.id)
+    }
+
     // Tests delete workspace removes dependent rows by arranging representative inputs and asserting the expected result.
     func testDeleteWorkspaceRemovesDependentRows() throws {
         let store = try makeTemporaryStore()

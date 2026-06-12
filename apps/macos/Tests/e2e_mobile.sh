@@ -32,10 +32,21 @@ SCROLLBACK_SWIPE_COUNT=2
 TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-Screen Recording 2026-03-20 at 11.17.57 AM.png}"
 TERMINAL_LINK_PREVIEW_PATH="${SPACES_MOBILE_E2E_LINK_PREVIEW_PATH:-/tmp/$TERMINAL_LINK_PREVIEW_IMAGE_NAME}"
 
-SCENARIOS=(codex codex-resume-reopen roundtrip scrollback terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard app-recovery)
+SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard app-recovery)
 SELECTED_SCENARIOS=()
+SELECTED_TARGETS=()
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
 DEMO_PORT="${SPACES_MOBILE_DEMO_PORT:-}"
+REMOTE_HOST_ID="${SPACES_E2E_REMOTE_HOST_ID:-mobile-e2e-remote}"
+REMOTE_HOST_NAME="${SPACES_E2E_REMOTE_NAME:-Mobile E2E Remote}"
+REMOTE_SSH_HOST="${SPACES_E2E_REMOTE_SSH_HOST:-}"
+REMOTE_SSH_USER="${SPACES_E2E_REMOTE_SSH_USER:-}"
+REMOTE_SSH_PORT="${SPACES_E2E_REMOTE_SSH_PORT:-}"
+REMOTE_WORKSPACE_ROOT="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/workspaces}"
+REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-$REMOTE_SSH_HOST}"
+REMOTE_DAEMON_PORT="${SPACES_E2E_REMOTE_DAEMON_PORT:-7443}"
+REMOTE_AUTH_TOKEN="${SPACES_E2E_REMOTE_AUTH_TOKEN:-}"
+REMOTE_GIT_ROOT="${SPACES_E2E_REMOTE_GIT_ROOT:-~/.spaces/e2e-git}"
 
 SUITE_ROOT=""
 IOS_DERIVED_DATA=""
@@ -48,6 +59,7 @@ DEMO_BRIDGE_PID=""
 DEMO_TERMINAL_SERVICE_PID=""
 DEMO_ROOT=""
 PROJECT_DIR=""
+DEMO_PROJECT_DIR=""
 DB_PATH=""
 RUNTIME_DIR=""
 BRIDGE_HOST=""
@@ -57,6 +69,7 @@ IPHONE_UDID=""
 MOBILE_UDID=""
 PERFORMANCE_LOG_PATH=""
 CURRENT_SCENARIO=""
+CURRENT_TARGET="local"
 SCENARIO_DIR=""
 SCENARIO_LOG=""
 UI_TEST_CONFIG=""
@@ -71,11 +84,13 @@ Usage: apps/macos/Tests/e2e_mobile.sh [options]
 Options:
   --list                 List available mobile E2E scenarios.
   --scenario NAME        Run only one scenario. May be passed multiple times.
+  --target NAME          Run against local, remote, or all. May be passed multiple times.
   --keep-root            Preserve the shared demo root after a successful run.
   --port PORT            Use a specific daemon mobile bridge port.
   --help                 Show this help text.
 
 Scenarios:
+  takeover
   codex
   codex-resume-reopen
   roundtrip
@@ -98,6 +113,13 @@ scenario_exists() {
   return 1
 }
 
+target_exists() {
+  case "$1" in
+    local|remote|all) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -109,6 +131,16 @@ parse_args() {
         [[ $# -ge 2 ]] || fail "missing value for --scenario"
         scenario_exists "$2" || fail "unknown scenario: $2"
         SELECTED_SCENARIOS+=("$2")
+        shift 2
+        ;;
+      --target)
+        [[ $# -ge 2 ]] || fail "missing value for --target"
+        target_exists "$2" || fail "unknown target: $2"
+        if [[ "$2" == "all" ]]; then
+          SELECTED_TARGETS+=(local remote)
+        else
+          SELECTED_TARGETS+=("$2")
+        fi
         shift 2
         ;;
       --keep-root)
@@ -133,6 +165,26 @@ parse_args() {
   if [[ ${#SELECTED_SCENARIOS[@]} -eq 0 ]]; then
     SELECTED_SCENARIOS=("${SCENARIOS[@]}")
   fi
+  if [[ ${#SELECTED_TARGETS[@]} -eq 0 ]]; then
+    if [[ -n "${SPACES_MOBILE_E2E_TARGETS:-}" ]]; then
+      read -r -a SELECTED_TARGETS <<<"$SPACES_MOBILE_E2E_TARGETS"
+    elif [[ -n "$REMOTE_SSH_HOST" ]]; then
+      SELECTED_TARGETS=(local remote)
+    else
+      SELECTED_TARGETS=(local)
+    fi
+  fi
+  local expanded_targets=()
+  local selected_target
+  for selected_target in "${SELECTED_TARGETS[@]}"; do
+    target_exists "$selected_target" || fail "unknown target: $selected_target"
+    if [[ "$selected_target" == "all" ]]; then
+      expanded_targets+=(local remote)
+    else
+      expanded_targets+=("$selected_target")
+    fi
+  done
+  SELECTED_TARGETS=("${expanded_targets[@]}")
 }
 
 run_demo_env() {
@@ -172,9 +224,21 @@ tail_if_present() {
   fi
 }
 
+capture_desktop_screenshot() {
+  local path="$1"
+  command -v screencapture >/dev/null 2>&1 || return 0
+  mkdir -p "$(dirname "$path")"
+  screencapture -x "$path" >/dev/null 2>&1 || true
+}
+
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
   PRESERVE_ROOT=1
+  if [[ -n "$DEMO_ROOT" && -d "$DEMO_ROOT" ]]; then
+    local failure_screenshot="$DEMO_ROOT/failure-desktop.png"
+    capture_desktop_screenshot "$failure_screenshot"
+    [[ -f "$failure_screenshot" ]] && printf 'Failure desktop screenshot: %s\n' "$failure_screenshot" >&2
+  fi
   tail_if_present "Scenario log tail" "$SCENARIO_LOG" 160
   tail_if_present "UI test output tail" "$UI_TEST_LOG" 160
   tail_if_present "Demo output tail" "$DEMO_STDOUT_LOG" 120
@@ -400,19 +464,168 @@ start_demo() {
     "$DEMO_SCRIPT" >"$DEMO_STDOUT_LOG" 2>&1 &
   DEMO_PID=$!
   wait_for_demo_metadata
+  DEMO_PROJECT_DIR="$PROJECT_DIR"
   printf 'Shared demo root: %s\n' "$DEMO_ROOT"
+}
+
+shell_quote() {
+  python3 - "$1" <<'PY'
+import shlex
+import sys
+print(shlex.quote(sys.argv[1]))
+PY
+}
+
+remote_ssh_destination() {
+  if [[ -n "$REMOTE_SSH_USER" ]]; then
+    printf '%s@%s' "$REMOTE_SSH_USER" "$REMOTE_SSH_HOST"
+  else
+    printf '%s' "$REMOTE_SSH_HOST"
+  fi
+}
+
+remote_ssh() {
+  [[ -n "$REMOTE_SSH_HOST" ]] || fail "Remote target requires SPACES_E2E_REMOTE_SSH_HOST."
+  local destination
+  destination="$(remote_ssh_destination)"
+  local -a args=(-o BatchMode=yes)
+  if [[ -n "$REMOTE_SSH_PORT" ]]; then
+    args+=(-p "$REMOTE_SSH_PORT")
+  fi
+  ssh "${args[@]}" "$destination" "$@"
+}
+
+remote_expand_path() {
+  local raw_path="$1"
+  local quoted
+  quoted="$(shell_quote "$raw_path")"
+  remote_ssh "python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' $quoted"
+}
+
+remote_push_url_for_path() {
+  local remote_path="$1"
+  local user_prefix=""
+  local port_part=""
+  if [[ -n "$REMOTE_SSH_USER" ]]; then
+    user_prefix="$REMOTE_SSH_USER@"
+  fi
+  if [[ -n "$REMOTE_SSH_PORT" ]]; then
+    port_part=":$REMOTE_SSH_PORT"
+  fi
+  printf 'ssh://%s%s%s%s\n' "$user_prefix" "$REMOTE_SSH_HOST" "$port_part" "$remote_path"
+}
+
+remote_auth_token_env_key() {
+  printf 'SPACESD_AUTH_TOKEN_%s\n' "$(printf '%s' "$REMOTE_HOST_ID" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]/_/g')"
+}
+
+export_remote_auth_token() {
+  [[ -n "$REMOTE_AUTH_TOKEN" ]] || return 0
+  local key
+  key="$(remote_auth_token_env_key)"
+  export "$key=$REMOTE_AUTH_TOKEN"
+}
+
+prepare_remote_git_origin() {
+  local project_dir="$1"
+  local slug="$2"
+  local git_root
+  git_root="$(remote_expand_path "$REMOTE_GIT_ROOT")"
+  local remote_origin="$git_root/$slug.git"
+  local quoted_root quoted_origin
+  quoted_root="$(shell_quote "$git_root")"
+  quoted_origin="$(shell_quote "$remote_origin")"
+  remote_ssh "mkdir -p $quoted_root && rm -rf $quoted_origin && git init --bare -q $quoted_origin"
+  local push_url
+  push_url="$(remote_push_url_for_path "$remote_origin")"
+  local ssh_command="ssh"
+  if [[ -n "$REMOTE_SSH_PORT" ]]; then
+    ssh_command+=" -p $REMOTE_SSH_PORT"
+  fi
+  git -C "$project_dir" remote remove origin >/dev/null 2>&1 || true
+  git -C "$project_dir" remote add origin "$remote_origin"
+  git -C "$project_dir" -c core.sshCommand="$ssh_command" push -q "$push_url" main
+  printf '%s\n' "$remote_origin"
+}
+
+prepare_remote_target_project() {
+  local source_project_dir="$PROJECT_DIR"
+  local remote_project_dir="$DEMO_ROOT/remote-project"
+  if [[ ! -d "$remote_project_dir/.git" ]]; then
+    mkdir -p "$remote_project_dir"
+    (cd "$source_project_dir" && tar --exclude .git -cf - .) | (cd "$remote_project_dir" && tar -xf -)
+    git -C "$remote_project_dir" init -q
+    git -C "$remote_project_dir" checkout -q -B main
+    git -C "$remote_project_dir" config user.email "e2e@example.com"
+    git -C "$remote_project_dir" config user.name "Spaces E2E"
+    git -C "$remote_project_dir" add .
+    git -C "$remote_project_dir" commit -q -m "seed remote mobile e2e fixture"
+    demo_env "$SPACES_E2E_BIN" seed-fixture \
+      --project-dir "$remote_project_dir" \
+      --docs-url "http://127.0.0.1:20001" \
+      --admin-url "http://127.0.0.1:20002" >/dev/null
+  fi
+  PROJECT_DIR="$remote_project_dir"
+}
+
+configure_local_target() {
+  PROJECT_DIR="$DEMO_PROJECT_DIR"
+  demo_env "$SPACES_E2E_BIN" set-project-default-compute-host --project-dir "$PROJECT_DIR" --local >"$DEMO_ROOT/local-compute-host-target.json" 2>/dev/null || true
+}
+
+configure_remote_target() {
+  [[ -n "$REMOTE_SSH_HOST" ]] || fail "Remote target requires SPACES_E2E_REMOTE_SSH_HOST."
+  export_remote_auth_token
+  prepare_remote_target_project
+  local slug
+  slug="$(basename "$DEMO_ROOT" | tr -cd 'A-Za-z0-9_.-')"
+  [[ -n "$slug" ]] || slug="mobile-e2e"
+  prepare_remote_git_origin "$PROJECT_DIR" "mobile-$slug" >>"$DEMO_ROOT/remote-git-origin.log" 2>&1
+
+  local -a args=(
+    remote-compute-host-smoke
+    --project-dir "$PROJECT_DIR"
+    --host-id "$REMOTE_HOST_ID"
+    --name "$REMOTE_HOST_NAME"
+    --ssh-host "$REMOTE_SSH_HOST"
+    --workspace-root "$REMOTE_WORKSPACE_ROOT"
+    --daemon-port "$REMOTE_DAEMON_PORT"
+  )
+  if [[ -n "$REMOTE_SSH_USER" ]]; then args+=(--ssh-user "$REMOTE_SSH_USER"); fi
+  if [[ -n "$REMOTE_SSH_PORT" ]]; then args+=(--ssh-port "$REMOTE_SSH_PORT"); fi
+  if [[ -n "$REMOTE_DAEMON_HOST" ]]; then args+=(--daemon-host "$REMOTE_DAEMON_HOST"); fi
+  if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then args+=(--auth-token "$REMOTE_AUTH_TOKEN"); fi
+  demo_env "$SPACES_E2E_BIN" "${args[@]}" >"$DEMO_ROOT/remote-compute-host-smoke.json" 2>"$DEMO_ROOT/remote-compute-host-smoke.stderr.log" \
+    || fail "Remote compute host smoke failed. See $DEMO_ROOT/remote-compute-host-smoke.stderr.log"
+}
+
+configure_target() {
+  CURRENT_TARGET="$1"
+  case "$CURRENT_TARGET" in
+    local)
+      printf '\n[%s] Configuring local mobile E2E target.\n' "$(date +%H:%M:%S)"
+      configure_local_target
+      ;;
+    remote)
+      printf '\n[%s] Configuring remote mobile E2E target: %s\n' "$(date +%H:%M:%S)" "$REMOTE_HOST_ID"
+      configure_remote_target
+      ;;
+    *)
+      fail "unknown target: $CURRENT_TARGET"
+      ;;
+  esac
 }
 
 begin_scenario() {
   CURRENT_SCENARIO="$1"
   SCENARIO_CREATED_SESSIONS=()
-  SCENARIO_DIR="$DEMO_ROOT/mobile-e2e/$CURRENT_SCENARIO"
+  SCENARIO_DIR="$DEMO_ROOT/mobile-e2e/$CURRENT_TARGET/$CURRENT_SCENARIO"
   SCENARIO_LOG="$SCENARIO_DIR/scenario.log"
   UI_TEST_CONFIG="$SCENARIO_DIR/ui-test-config.json"
   UI_TEST_LOG="$SCENARIO_DIR/ui-test.log"
   mkdir -p "$SCENARIO_DIR"
   : >"$SCENARIO_LOG"
-  printf '\n[%s] Running mobile scenario: %s\n' "$(date +%H:%M:%S)" "$CURRENT_SCENARIO"
+  printf '\n[%s] Running mobile scenario: %s target=%s\n' "$(date +%H:%M:%S)" "$CURRENT_SCENARIO" "$CURRENT_TARGET"
 }
 
 discover_session_ids() {
@@ -469,7 +682,12 @@ new_terminal_session() {
   : >"$create_log"
   for attempt in 1 2 3 4 5; do
     local attempt_log="$SCENARIO_DIR/start-terminal-session-attempt-$attempt.log"
-    local create_args=(start-terminal-session --cwd "$PROJECT_DIR" --title "$title")
+    local -a create_args
+    if [[ "$CURRENT_TARGET" == "remote" ]]; then
+      create_args=(start-workspace-terminal-session --workspace-dir "$PROJECT_DIR" --title "$title")
+    else
+      create_args=(start-terminal-session --cwd "$PROJECT_DIR" --title "$title")
+    fi
     if [[ -n "$command_text" ]]; then
       create_args+=(--command "$command_text")
     fi
@@ -520,6 +738,34 @@ PY
   )"; then
     fail "Unable to parse fresh service terminal session ID for $CURRENT_SCENARIO."
   fi
+  python3 - "$create_log" "$SCENARIO_DIR/session-$session_id.output-path" "$RUNTIME_DIR" "$session_id" <<'PY'
+import json
+import pathlib
+import sys
+
+create_log = pathlib.Path(sys.argv[1])
+output_path_file = pathlib.Path(sys.argv[2])
+runtime_dir = pathlib.Path(sys.argv[3])
+session_id = sys.argv[4]
+decoder = json.JSONDecoder()
+text = create_log.read_text()
+payload = None
+index = 0
+while True:
+    start = text.find("{", index)
+    if start < 0:
+        break
+    try:
+        decoded, end = decoder.raw_decode(text[start:])
+    except json.JSONDecodeError:
+        index = start + 1
+        continue
+    if isinstance(decoded, dict) and (decoded.get("id") or decoded.get("sessionID")):
+        payload = decoded
+    index = start + max(end, 1)
+output_path = (payload or {}).get("outputPath") or str(runtime_dir / "terminal" / "sessions" / session_id / "output.log")
+output_path_file.write_text(output_path)
+PY
   : >"$show_log"
   for attempt in 1 2 3; do
     local show_attempt_log="$SCENARIO_DIR/show-terminal-attempt-$attempt.log"
@@ -536,9 +782,22 @@ PY
       printf '%s\n' "$session_id"
       return
     fi
+    local screenshot_path="$SCENARIO_DIR/show-terminal-attempt-$attempt-desktop.png"
+    capture_desktop_screenshot "$screenshot_path"
+    [[ -f "$screenshot_path" ]] && printf 'Desktop screenshot: %s\n' "$screenshot_path" >>"$show_log"
     sleep 1
   done
   fail "Fresh terminal session did not become owner-ready: $session_id"
+}
+
+session_output_path() {
+  local session_id="$1"
+  local path_file="$SCENARIO_DIR/session-$session_id.output-path"
+  if [[ -f "$path_file" ]]; then
+    cat "$path_file"
+  else
+    printf '%s/terminal/sessions/%s/output.log\n' "$RUNTIME_DIR" "$session_id"
+  fi
 }
 
 track_current_scenario_session() {
@@ -608,6 +867,7 @@ from pathlib import Path
 ) = sys.argv[1:]
 
 demo_root = Path(demo_root_raw)
+artifacts_dir = Path(scenario_config_raw).parent
 bridge_port = int(bridge_port_raw)
 scrollback_swipe_count = int(scrollback_swipe_count_raw)
 config_paths = [Path(scenario_config_raw), Path(default_config_raw)]
@@ -625,11 +885,11 @@ payload = {
     "transportKey": mobile_pairing["transportKey"],
     "certificateFingerprint": mobile_pairing["certificateFingerprint"],
     "installationID": mobile_pairing["installationID"],
-    "renderDumpPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-render.json"),
-    "eventLogPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-events.jsonl"),
-    "immediateScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-takeover-immediate.png"),
-    "shortDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-takeover-plus-2s.png"),
-    "longDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-takeover-plus-6s.png"),
+    "renderDumpPath": str(artifacts_dir / f"{artifact_prefix}-render.json"),
+    "eventLogPath": str(artifacts_dir / f"{artifact_prefix}-events.jsonl"),
+    "immediateScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-takeover-immediate.png"),
+    "shortDelayScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-takeover-plus-2s.png"),
+    "longDelayScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-takeover-plus-6s.png"),
     "proceedTakeOverPath": None,
     "firstCommandRequestPath": None,
     "firstCommandFocusedPath": None,
@@ -652,7 +912,7 @@ payload = {
     "finalMacRetakeoverRequestPath": None,
     "finalMacRetakeoverObservedPath": None,
     "postFinalMacRetakeoverScreenshotPath": None,
-    "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final.png"),
+    "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-final.png"),
     "terminalLinkText": "",
     "expectedLinkPreviewTitle": "",
     "linkPreviewScreenshotPath": None,
@@ -676,36 +936,36 @@ if scenario == "codex-resume-reopen":
     payload["secondarySessionID"] = session_id
 elif scenario == "roundtrip":
     payload.update({
-        "proceedTakeOverPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-proceed-takeover"),
-        "firstCommandRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-request"),
-        "firstCommandFocusedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-focused"),
-        "firstCommandCompletedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-completed"),
-        "firstCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-observed"),
-        "secondCommandRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-second-command-request"),
-        "secondCommandFocusedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-second-command-focused"),
-        "secondCommandCompletedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-second-command-completed"),
-        "secondCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-second-command-observed"),
-        "proceedFinishPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-proceed-finish"),
+        "proceedTakeOverPath": str(artifacts_dir / f"{artifact_prefix}-proceed-takeover"),
+        "firstCommandRequestPath": str(artifacts_dir / f"{artifact_prefix}-first-command-request"),
+        "firstCommandFocusedPath": str(artifacts_dir / f"{artifact_prefix}-first-command-focused"),
+        "firstCommandCompletedPath": str(artifacts_dir / f"{artifact_prefix}-first-command-completed"),
+        "firstCommandObservedPath": str(artifacts_dir / f"{artifact_prefix}-first-command-observed"),
+        "secondCommandRequestPath": str(artifacts_dir / f"{artifact_prefix}-second-command-request"),
+        "secondCommandFocusedPath": str(artifacts_dir / f"{artifact_prefix}-second-command-focused"),
+        "secondCommandCompletedPath": str(artifacts_dir / f"{artifact_prefix}-second-command-completed"),
+        "secondCommandObservedPath": str(artifacts_dir / f"{artifact_prefix}-second-command-observed"),
+        "proceedFinishPath": str(artifacts_dir / f"{artifact_prefix}-proceed-finish"),
         "firstCommandText": f"echo __roundtrip_{mobile_artifact_name}_one__",
         "secondCommandText": f"echo __roundtrip_{mobile_artifact_name}_two__",
         "manualRetakeoverAttempts": 2,
-        "manualRetakeoverObservedPrefix": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-manual-retakeover-observed"),
-        "manualRetakeoverContinuePrefix": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-manual-retakeover-continue"),
-        "postFirstCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-command.png"),
-        "postSecondCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-second-command.png"),
-        "finalMacRetakeoverRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final-mac-retakeover-request"),
-        "finalMacRetakeoverObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final-mac-retakeover-observed"),
-        "postFinalMacRetakeoverScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-final-mac-retakeover.png"),
+        "manualRetakeoverObservedPrefix": str(artifacts_dir / f"{artifact_prefix}-manual-retakeover-observed"),
+        "manualRetakeoverContinuePrefix": str(artifacts_dir / f"{artifact_prefix}-manual-retakeover-continue"),
+        "postFirstCommandScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-first-command.png"),
+        "postSecondCommandScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-second-command.png"),
+        "finalMacRetakeoverRequestPath": str(artifacts_dir / f"{artifact_prefix}-final-mac-retakeover-request"),
+        "finalMacRetakeoverObservedPath": str(artifacts_dir / f"{artifact_prefix}-final-mac-retakeover-observed"),
+        "postFinalMacRetakeoverScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-final-mac-retakeover.png"),
         "minimumVisibleTerminalInkBands": 3,
         "maximumTerminalTopBlankRatio": 0.20,
     })
 elif scenario == "scrollback":
     payload.update({
-        "firstCommandRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-request"),
-        "firstCommandFocusedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-focused"),
-        "firstCommandCompletedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-completed"),
-        "firstCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-observed"),
-        "postFirstCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-command-while-scrolled.png"),
+        "firstCommandRequestPath": str(artifacts_dir / f"{artifact_prefix}-first-command-request"),
+        "firstCommandFocusedPath": str(artifacts_dir / f"{artifact_prefix}-first-command-focused"),
+        "firstCommandCompletedPath": str(artifacts_dir / f"{artifact_prefix}-first-command-completed"),
+        "firstCommandObservedPath": str(artifacts_dir / f"{artifact_prefix}-first-command-observed"),
+        "postFirstCommandScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-command-while-scrolled.png"),
         "scrollbackSwipeCount": scrollback_swipe_count,
         "minimumVisibleTerminalInkBands": 3,
         "maximumTerminalTopBlankRatio": 0.20,
@@ -714,26 +974,26 @@ elif scenario == "terminal-link-preview":
     payload.update({
         "terminalLinkText": terminal_link_preview_path,
         "expectedLinkPreviewTitle": terminal_link_preview_image_name,
-        "linkPreviewScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-preview.png"),
+        "linkPreviewScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-preview.png"),
         "minimumVisibleTerminalInkBands": 2,
         "maximumTerminalTopBlankRatio": 0.30,
     })
 elif scenario == "two-session":
     payload.update({
         "secondarySessionID": secondary_session_id,
-        "immediateScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-takeover.png"),
-        "shortDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-takeover-plus-2s.png"),
-        "longDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-takeover-plus-6s.png"),
-        "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-second-takeover.png"),
+        "immediateScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-first-takeover.png"),
+        "shortDelayScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-first-takeover-plus-2s.png"),
+        "longDelayScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-first-takeover-plus-6s.png"),
+        "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-second-takeover.png"),
         "firstCommandText": "pwd",
     })
 elif scenario in ("ctrl-c-final-frame", "ctrl-c-final-frame-codex-survivor"):
     expected_secondary_text = "" if scenario == "ctrl-c-final-frame-codex-survivor" else "__spaces_survivor_peer_ready__"
     payload.update({
         "secondarySessionID": secondary_session_id,
-        "interruptedRenderDumpPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-interrupted-render.json"),
-        "postInterruptScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-interrupted-final-frame.png"),
-        "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-secondary-live-after-interrupt.png"),
+        "interruptedRenderDumpPath": str(artifacts_dir / f"{artifact_prefix}-interrupted-render.json"),
+        "postInterruptScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-interrupted-final-frame.png"),
+        "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-secondary-live-after-interrupt.png"),
         "expectedInterruptedText": "__spaces_ctrl_c_target_ready__",
         "expectedSecondaryText": expected_secondary_text,
         "minimumVisibleTerminalInkBands": 1,
@@ -766,10 +1026,11 @@ run_ui_test() {
 launch_codex_on_mac_owner() {
   local session_id="$1"
   local command_text="$2"
-  python3 - "$DEMO_ROOT" "$session_id" "$SPACES_E2E_BIN" "$command_text" "$SCENARIO_DIR" <<'PY'
+  local output_path
+  output_path="$(session_output_path "$session_id")"
+  python3 - "$DEMO_ROOT" "$session_id" "$SPACES_E2E_BIN" "$command_text" "$SCENARIO_DIR" "$output_path" <<'PY'
 import json
 import os
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -781,9 +1042,9 @@ session_id = sys.argv[2]
 spacese2e = Path(sys.argv[3])
 command_text = sys.argv[4]
 scenario_dir = Path(sys.argv[5])
+output_log_path = Path(sys.argv[6])
 runtime_root = demo_root / "runtime"
 owner_dump_path = scenario_dir / "codex-mac-owner-dump.json"
-output_log_path = runtime_root / "terminal" / "sessions" / session_id / "output.log"
 
 env = os.environ | {
     "HOME": str(demo_root / "home"),
@@ -792,12 +1053,6 @@ env = os.environ | {
     "SPACES_DB_PATH": str(demo_root / "spaces.db"),
     "SPACES_RUNTIME_DIR": str(runtime_root),
 }
-
-def socket_path(root: Path, session_id: str) -> Path:
-    hash_value = 5381
-    for byte in f"{root}|{session_id}".encode("utf-8"):
-        hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
-    return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
 
 def current_owner_client_id() -> str:
     root_directory = os.path.normpath(str(runtime_root / "terminal" / "sessions" / session_id))
@@ -819,19 +1074,24 @@ def current_owner_client_id() -> str:
     raise RuntimeError("No active owner attachment was found for the demo session.")
 
 def send_request(request: dict) -> dict:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(5)
-    client.connect(str(socket_path(demo_root, session_id)))
-    client.sendall(json.dumps(request).encode("utf-8"))
-    client.shutdown(socket.SHUT_WR)
-    response = bytearray()
-    while True:
-        chunk = client.recv(4096)
-        if not chunk:
-            break
-        response.extend(chunk)
-    client.close()
-    return json.loads(response.decode("utf-8"))
+    command = [
+        str(spacese2e),
+        "terminal-service-control",
+        "--session-id",
+        session_id,
+        "--command",
+        request["command"],
+        "--client-id",
+        request["clientID"],
+    ]
+    if request.get("text") is not None:
+        command.extend(["--text", request["text"]])
+    if request.get("key") is not None:
+        command.extend(["--key", request["key"]])
+    if request.get("appendNewline"):
+        command.append("--append-newline")
+    completed = subprocess.run(command, env=env, capture_output=True, text=True, check=True)
+    return json.loads(completed.stdout)
 
 def dump_owner_window() -> dict:
     if owner_dump_path.exists():
@@ -1231,6 +1491,16 @@ PY
   assert_mobile_terminal_text_rendered
   assert_codex_takeover_metrics "$session_id" "$takeover_started_at" "$reopen_same_session"
   printf 'Mobile scenario passed: %s\n' "$scenario"
+}
+
+run_takeover_scenario() {
+  begin_scenario "takeover"
+  local session_id
+  session_id="$(new_terminal_session)"
+  track_current_scenario_session "$session_id"
+  write_ui_test_config "takeover" "$session_id"
+  run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverFromList"
+  printf 'Mobile scenario passed: takeover\n'
 }
 
 run_roundtrip_scenario() {
@@ -2897,7 +3167,20 @@ PY
 run_selected_scenarios() {
   local scenario
   for scenario in "${SELECTED_SCENARIOS[@]}"; do
+    if [[ "$CURRENT_TARGET" == "remote" ]]; then
+      case "$scenario" in
+        takeover|two-session)
+          ;;
+        *)
+          printf '[%s] Skipping mobile scenario on remote target: %s\n' "$(date +%H:%M:%S)" "$scenario"
+          continue
+          ;;
+      esac
+    fi
     case "$scenario" in
+      takeover)
+        run_takeover_scenario
+        ;;
       codex|codex-resume-reopen)
         run_codex_scenario "$scenario"
         ;;
@@ -2945,11 +3228,21 @@ SUITE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-e2e.XXXXXX")"
 MOBILE_UDID="$(resolve_simulator_udid "$MOBILE_DEVICE_NAME")"
 build_macos_debug_products
 build_ios_for_testing "$MOBILE_UDID"
+export_remote_auth_token
 start_demo
 case "$MOBILE_DEVICE_KEY" in
   iphone) MOBILE_UDID="$IPHONE_UDID" ;;
   ipad) MOBILE_UDID="$IPAD_UDID" ;;
 esac
-run_selected_scenarios
+target_seen=" "
+for target in "${SELECTED_TARGETS[@]}"; do
+  target_exists "$target" || fail "unknown target: $target"
+  if [[ "$target_seen" == *" $target "* ]]; then
+    continue
+  fi
+  target_seen+=" $target "
+  configure_target "$target"
+  run_selected_scenarios
+done
 
-printf '\nMobile E2E passed: %s\n' "${SELECTED_SCENARIOS[*]}"
+printf '\nMobile E2E passed: scenarios=%s targets=%s\n' "${SELECTED_SCENARIOS[*]}" "${SELECTED_TARGETS[*]}"

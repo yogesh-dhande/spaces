@@ -151,6 +151,8 @@ apps/macos/Tests/e2e_mobile.sh
 
 The mobile suite builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack, and then runs the selected scenarios with `test-without-building` against that shared stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, `--keep-root` to preserve the shared demo root, and `--port <port>` to pin the daemon bridge port. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again. The `app-recovery` scenario kills only the current-profile `SpacesApp` owner, sends `launchSpacesApp` through the authenticated daemon bridge, and verifies the spacesd daemon PID and live session remain stable.
 
+Use `--target local`, `--target remote`, or `--target all` to choose the mobile E2E compute target matrix. `SPACES_MOBILE_E2E_TARGETS="local remote"` provides the same selection through the environment, and a configured `SPACES_E2E_REMOTE_SSH_HOST` makes the default matrix include both local and remote targets. Remote mobile coverage prepares a Git origin on the SSH host, registers a compute host through `spacese2e remote-compute-host-smoke`, and runs the remote-compatible direct-daemon scenarios. Set `SPACES_E2E_REMOTE_SSH_HOST`, optional `SPACES_E2E_REMOTE_SSH_USER`, optional `SPACES_E2E_REMOTE_SSH_PORT`, `SPACES_E2E_REMOTE_DAEMON_HOST`, optional `SPACES_E2E_REMOTE_DAEMON_PORT`, optional `SPACES_E2E_REMOTE_AUTH_TOKEN`, and optional `SPACES_E2E_REMOTE_WORKSPACE_ROOT` when running against a real host.
+
 The daemon-hosted mobile bridge is the first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spaces mobile serve` remains available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spaces mobile request` so local scripts use the same TLS-PSK transport as the iOS app. Standalone bridge processes reject daemon-only recovery commands such as `launchSpacesApp`.
 
 Remote compute-host E2E coverage uses a reachable host running a matching `spacesd`. App-level remote E2E uses another Mac, a loopback remote profile that binds the remote listener on a separate profile root, or the Ubuntu 24.04 x86_64 daemon artifact published as `spacesd-ubuntu-24.04-x86_64.tar.gz`. Compute-host bootstrap, status, and test automation belongs in `spacese2e` so the product `spaces` CLI remains workspace-oriented. Use `upsert-compute-host` and `list-compute-hosts` to seed and inspect host records, `set-project-default-compute-host` and `set-workspace-compute-host-override` to exercise selection precedence, and `plan-workspace-runtime` to inspect the stable binding, daemon target, Remote SSH URI, and runtime manifest for a workspace.
@@ -165,12 +167,13 @@ docker run --rm --platform linux/amd64 \
   bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh'
 ```
 
-The archive contains a `bin/spacesd` wrapper, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. Install it on the remote host by extracting the archive and putting its `bin` directory on the SSH PATH:
+The archive contains `bin/spacesd`, the minimal remote `bin/spaces signal` helper, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. Install it on the remote host by extracting the archive and putting its `bin` directory on the SSH PATH:
 
 ```bash
 sudo tar -xzf spacesd-ubuntu-24.04-x86_64.tar.gz -C /opt
 sudo ln -sfn /opt/spacesd-ubuntu-24.04-x86_64 /opt/spacesd
 sudo ln -sfn /opt/spacesd/bin/spacesd /usr/local/bin/spacesd
+sudo ln -sfn /opt/spacesd/bin/spaces /usr/local/bin/spaces
 ```
 
 For a real SSH smoke that exercises bootstrap, pinned-TLS status, runtime planning, remote terminal launch, and workspace stop through production orchestration:
@@ -361,6 +364,7 @@ Useful overrides:
 For targeted mobile E2E runs, use `--scenario`:
 
 ```bash
+apps/macos/Tests/e2e_mobile.sh --scenario takeover
 apps/macos/Tests/e2e_mobile.sh --scenario codex
 apps/macos/Tests/e2e_mobile.sh --scenario codex-resume-reopen
 apps/macos/Tests/e2e_mobile.sh --scenario roundtrip
@@ -509,6 +513,8 @@ apps/macos/Tests/e2e_macos_app.sh
 ```
 
 Before the suite launches its isolated app instance, it waits for desktop-global control. A timeout from that wait is an environment-contention result and should be retried without killing unrelated running Spaces instances.
+
+Use `--target local`, `--target remote`, or `--target all` to run the macOS E2E suite against local built-in terminal sessions, remote built-in terminal sessions, or both. `SPACES_MACOS_E2E_TARGETS="local remote"` provides the same matrix through the environment, and a configured `SPACES_E2E_REMOTE_SSH_HOST` makes the default matrix include both local and remote targets. The remote target prepares bare Git origins on the SSH host for the fixture projects, registers the host through `spacese2e remote-compute-host-smoke`, sets each project default compute host, and then drives the same app-level launch, focus, cycling, and agent-status assertions through remote Spaces terminal sessions.
 
 To capture a product-demo video from the same suite, record the run with the native `ScreenCaptureKit` helper and optionally add short editing-friendly pauses between visible transitions:
 

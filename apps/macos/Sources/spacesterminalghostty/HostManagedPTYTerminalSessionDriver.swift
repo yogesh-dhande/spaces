@@ -64,6 +64,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         let pid = Self.forkPTY(master: &master, windowSize: &windowSize)
         guard pid >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         if pid == 0 {
+            Self.closeInheritedFileDescriptorsForExec()
             if !launchConfiguration.workingDirectory.isEmpty { _ = chdir(launchConfiguration.workingDirectory) }
             setenv("TERM", "xterm-256color", 1)
             setenv("COLORTERM", "truecolor", 1)
@@ -267,6 +268,13 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         #else
             return forkpty(&master, nil, nil, &windowSize)
         #endif
+    }
+
+    private static func closeInheritedFileDescriptorsForExec() {
+        let rawLimit = sysconf(Int32(_SC_OPEN_MAX))
+        let upperBound = rawLimit > 3 ? Int32(clamping: rawLimit) : 1024
+        guard upperBound > 3 else { return }
+        for fd in Int32(3)..<upperBound { _ = close(fd) }
     }
 
     private static func defaultShellPath() -> String {

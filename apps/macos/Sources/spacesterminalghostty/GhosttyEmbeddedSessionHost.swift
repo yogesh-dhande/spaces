@@ -839,6 +839,7 @@
         }
 
         private func appendOutput(_ data: Data, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) {
+            guard !didTerminateCurrentRun else { return }
             let startedAt = Date()
             do {
                 let outputHandle = try ensureOutputHandle()

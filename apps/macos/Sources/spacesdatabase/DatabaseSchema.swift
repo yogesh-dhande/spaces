@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 10
+    public static let currentVersion = 11
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "terminal metadata tables", requiresBackup: false) { database in
@@ -74,6 +74,9 @@ public enum DatabaseSchema {
             try executeBatch(sql: computeHostSchemaSQL, database: database)
             try addColumnIfNeeded(table: "projects", column: "default_compute_host_id", definition: "TEXT", database: database)
             try addColumnIfNeeded(table: "workspaces", column: "compute_host_override_id", definition: "TEXT", database: database)
+        },
+        DatabaseMigrationStep(fromVersion: 10, toVersion: 11, description: "remote terminal agent signal queue", requiresBackup: false) { database in
+            try executeBatch(sql: terminalAgentSignalEventsSQL, database: database)
         },
     ]
 
@@ -144,6 +147,28 @@ public enum DatabaseSchema {
               emitted_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+        """
+
+    static let terminalAgentSignalEventsSQL = """
+            CREATE TABLE IF NOT EXISTS terminal_agent_signal_events (
+              id TEXT PRIMARY KEY,
+              root_directory TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              workspace_id TEXT,
+              workspace_path TEXT,
+              provider TEXT NOT NULL,
+              label TEXT,
+              terminal_tracking_id TEXT,
+              terminal_native_id TEXT,
+              codex_thread_id TEXT,
+              environment_keys_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              acknowledged_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS terminal_agent_signal_events_pending_idx
+            ON terminal_agent_signal_events(session_id, acknowledged_at, created_at);
         """
 
     static let terminalSchemaSQL = """
@@ -238,6 +263,7 @@ public enum DatabaseSchema {
             );
 
             \(terminalRemoteSessionStateSQL)
+            \(terminalAgentSignalEventsSQL)
         """
 
     static let projectAgentLauncherIdentityBackfillSQL = """

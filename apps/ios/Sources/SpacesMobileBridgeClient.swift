@@ -69,6 +69,7 @@ struct SpacesMobileBridgeClient: Sendable {
     func fetchOverview(commandChannel: SpacesMobileBridgeCommandChannel? = nil) async throws -> SpacesMobileOverviewPayload {
         let response = try await sendRequest(
             .init(command: "overview", authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            timeout: .seconds(8),
             commandChannel: commandChannel
         )
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }

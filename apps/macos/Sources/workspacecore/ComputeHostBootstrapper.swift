@@ -155,6 +155,8 @@ public struct ComputeHostBootstrapper {
               echo "spacesd executable not found on remote host PATH." >&2
               exit 127
             fi
+            spacesd_bin_dir="$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "${spacesd_path}" 2>/dev/null || dirname "${spacesd_path}")"
+            PATH="${spacesd_bin_dir}:$PATH"
             fingerprint="$(SPACES_DB_PATH="${db_path}" SPACES_RUNTIME_DIR="${runtime_root}" SPACESD_PRINT_CERTIFICATE_FINGERPRINT=1 "${spacesd_path}")"
             if [ -z "${fingerprint}" ]; then
               echo "spacesd did not print a certificate fingerprint." >&2
@@ -163,9 +165,30 @@ public struct ComputeHostBootstrapper {
             \(portSelectionScript)
             log_path="${profile_root}/spacesd-${selected_port}.log"
             daemon_pid=""
-            if ! { command -v lsof >/dev/null 2>&1 && lsof -nPiTCP:${selected_port} -sTCP:LISTEN >/dev/null 2>&1; }; then
-              nohup env SPACES_DB_PATH="${db_path}" SPACES_RUNTIME_DIR="${runtime_root}" SPACESD_LISTEN_PORT="${selected_port}" SPACESD_AUTH_TOKEN=\(token) "${spacesd_path}" >>"${log_path}" 2>&1 &
+            if [ -z "${lsof_path:-}" ]; then
+              lsof_path="$(command -v lsof || true)"
+            fi
+            if ! { [ -n "${lsof_path}" ] && "${lsof_path}" -nPiTCP:${selected_port} -sTCP:LISTEN >/dev/null 2>&1; }; then
+              nohup env PATH="${PATH}" SPACES_DB_PATH="${db_path}" SPACES_RUNTIME_DIR="${runtime_root}" SPACESD_LISTEN_PORT="${selected_port}" SPACESD_AUTH_TOKEN=\(token) "${spacesd_path}" >>"${log_path}" 2>&1 &
               daemon_pid="$!"
+            fi
+            if [ -n "${lsof_path}" ]; then
+              ready_attempt=0
+              listener_ready=0
+              while [ "${ready_attempt}" -lt 100 ]; do
+                if "${lsof_path}" -nPiTCP:${selected_port} -sTCP:LISTEN >/dev/null 2>&1; then
+                  listener_ready=1
+                  break
+                fi
+                ready_attempt=$((ready_attempt + 1))
+                sleep 0.2
+              done
+              if [ "${listener_ready}" != "1" ]; then
+                echo "spacesd did not start listening on port ${selected_port}." >&2
+                if [ -f "${log_path}" ]; then tail -n 40 "${log_path}" >&2 || true; fi
+                exit 1
+              fi
+            else
               sleep 1
             fi
             printf 'fingerprint=%s\\n' "${fingerprint}"

@@ -322,6 +322,29 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(try TerminalSessionPersistence.readRemoteSessionState(paths: paths), payload)
     }
 
+    func testPendingAgentSignalsCanBeAcknowledged() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-agent-signal"
+        try writeLaunchConfiguration(sessionID: sessionID, paths: paths)
+        let event = TerminalServiceAgentSignalEvent(
+            id: "event-1", sessionID: sessionID, workspaceID: "workspace-1", workspacePath: "/tmp/workspace", type: "waiting", provider: "spaces",
+            label: "Mock Agent", terminalTrackingID: sessionID, terminalNativeID: sessionID, codexThreadID: "thread-1",
+            environmentKeys: ["SPACES_WORKSPACE_ID", "SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-05-08T00:00:00Z")
+
+        try TerminalSessionPersistence.appendPendingAgentSignal(event, paths: paths)
+
+        XCTAssertEqual(try TerminalSessionPersistence.pendingAgentSignals(sessionID: sessionID, paths: paths), [event])
+
+        try TerminalSessionPersistence.acknowledgeAgentSignals(
+            ids: [event.id], sessionID: sessionID, paths: paths, acknowledgedAt: "2026-05-08T00:00:01Z")
+
+        XCTAssertTrue(try TerminalSessionPersistence.pendingAgentSignals(sessionID: sessionID, paths: paths).isEmpty)
+    }
+
     func testDetachActiveClientsMarksClientsDisconnectedAndAttachmentsDetached() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

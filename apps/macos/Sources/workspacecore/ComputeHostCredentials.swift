@@ -29,6 +29,21 @@ public enum ComputeHostCredentialStore {
             of: "=", with: "")
     }
 
+    public static func resolvedAuthToken(
+        hostID: String, profile: SpacesProfile? = nil, environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> String? {
+        let hostSpecificKey = authTokenEnvironmentKey(hostID: hostID)
+        if let token = trimmedNonEmpty(environment[hostSpecificKey]) { return token }
+        if let token = try authToken(hostID: hostID, profile: profile) { return token }
+        return trimmedNonEmpty(environment["SPACESD_AUTH_TOKEN"])
+    }
+
+    public static func authTokenEnvironmentKey(hostID: String) -> String {
+        let suffix = hostID.map { character -> Character in character.isLetter || character.isNumber ? Character(String(character).uppercased()) : "_"
+        }
+        return "SPACESD_AUTH_TOKEN_\(String(suffix))"
+    }
+
     public static func authToken(hostID: String, profile: SpacesProfile? = nil) throws -> String? {
         let query = try baseQuery(hostID: hostID, profile: profile).merging([
             kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne,
@@ -73,5 +88,10 @@ public enum ComputeHostCredentialStore {
             kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
             kSecAttrAccount as String: "\(resolvedProfile.rootDirectory)#\(hostID)",
         ]
+    }
+
+    private static func trimmedNonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

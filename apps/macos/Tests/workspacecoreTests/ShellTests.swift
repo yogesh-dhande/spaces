@@ -970,6 +970,31 @@ final class ShellTests: XCTestCase {
             XCTAssertEqual(result, "mocked-osascript")
         }
     }
+
+    func testAppleScriptRunWrapsScriptWithTimeout() throws {
+        try withMockCommands(["osascript": "#!/bin/bash\nprintf '%s' \"${*: -1}\"\n"]) {
+            let result = try AppleScript.run("return \"hello\"", timeoutSeconds: 2)
+            XCTAssertTrue(result.hasPrefix("with timeout of 2 seconds"))
+            XCTAssertTrue(result.contains("  return \"hello\""))
+            XCTAssertTrue(result.hasSuffix("end timeout"))
+        }
+    }
+
+    func testAppleScriptRunWithTimeoutTerminatesSlowCommand() throws {
+        let osascriptMock = """
+            #!/usr/bin/perl
+            select(undef, undef, undef, 5);
+            """
+        let startedAt = Date()
+        try withMockCommands(["osascript": osascriptMock]) {
+            XCTAssertThrowsError(try AppleScript.run("return 1", timeoutSeconds: 1)) { error in
+                let nsError = error as NSError
+                XCTAssertEqual(nsError.domain, "spaces.applescript")
+                XCTAssertTrue(nsError.localizedDescription.contains("timed out"))
+            }
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 3)
+    }
 }
 
 private func currentUserAccountInfo() -> (shellPath: String, homePath: String)? {

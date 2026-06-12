@@ -77,6 +77,8 @@ final class ComputeHostBootstrapperTests: XCTestCase {
         XCTAssertTrue(script.contains("printf 'port=%s"))
         XCTAssertTrue(script.contains("SPACESD_AUTH_TOKEN='a'\"'\"'b'"))
         XCTAssertTrue(script.contains("command -v spacesd"))
+        XCTAssertTrue(script.contains("while [ \"${ready_attempt}\" -lt 100 ]"))
+        XCTAssertTrue(script.contains("spacesd did not start listening on port"))
     }
 
     func testParseBootstrapOutputIncludesSelectedPortAndWorkspaceRoot() throws {

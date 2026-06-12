@@ -25,7 +25,8 @@ struct SpacesE2ECommand: ParsableCommand {
             RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowIndexCommand.self, CycleWorkspaceWindowCommand.self,
             FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self,
             SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
-            StartTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, UpsertComputeHostCommand.self, ListComputeHostsCommand.self,
+            StartTerminalSessionCommand.self, StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self,
+            TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, UpsertComputeHostCommand.self, ListComputeHostsCommand.self,
             DeleteComputeHostCommand.self, SetProjectDefaultComputeHostCommand.self, SetWorkspaceComputeHostOverrideCommand.self,
             PlanWorkspaceRuntimeCommand.self, RemoteComputeHostSmokeCommand.self, OpenMobilePairingWindowCommand.self, RecordScreenCommand.self,
             ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
@@ -241,6 +242,28 @@ private struct StartTerminalSessionCommand: ParsableCommand {
     }
 }
 
+private struct StartWorkspaceTerminalSessionCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "start-workspace-terminal-session")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var command: String?
+    @Option(name: .long) var title: String?
+
+    /// Creates a workspace-owned Spaces terminal session without opening a Mac
+    /// window. The production orchestrator resolves the workspace's effective
+    /// compute host, so the helper exercises the same local or remote daemon
+    /// routing as app and mobile entry points.
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        let session = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspace.id, title: title, command: command)
+        try emitJSON(session)
+    }
+}
+
 private struct TerminateTerminalSessionCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "terminate-terminal-session")
 
@@ -249,8 +272,44 @@ private struct TerminateTerminalSessionCommand: ParsableCommand {
     func run() throws {
         let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session ID.") }
+        if try makeOrchestrator().stopAdHocBuiltInTerminalSession(sessionID: trimmedSessionID) {
+            try emitJSON(TerminatedTerminalSessionPayload(sessionID: trimmedSessionID, terminated: true))
+            return
+        }
         try TerminalService.terminateSession(id: trimmedSessionID)
         try emitJSON(TerminatedTerminalSessionPayload(sessionID: trimmedSessionID, terminated: true))
+    }
+}
+
+private struct TerminalServiceStateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "terminal-service-state")
+
+    @Option(name: .long) var sessionID: String
+
+    func run() throws {
+        let response = try sendTerminalServiceRequestForSession(sessionID: sessionID, request: TerminalServiceRequest(command: "state"))
+        try emitJSON(response)
+    }
+}
+
+private struct TerminalServiceControlCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "terminal-service-control")
+
+    @Option(name: .long) var sessionID: String
+    @Option(name: .long) var command: String
+    @Option(name: .long) var text: String?
+    @Option(name: .long) var key: String?
+    @Option(name: .long) var clientID: String?
+    @Flag(name: .long) var appendNewline = false
+
+    func run() throws {
+        let trimmedCommand = try required(command, label: "command")
+        let controlRequest = TerminalControlRequest(
+            command: trimmedCommand, text: text, key: key, clientID: normalizedOptional(clientID), client: nil, attachmentMode: nil, columns: nil,
+            rows: nil, ownerEpoch: nil, resizeSerial: nil, scrollHorizontal: nil, scrollVertical: nil, scrollMods: nil, appendNewline: appendNewline)
+        let response = try sendTerminalServiceRequestForSession(
+            sessionID: sessionID, request: TerminalServiceRequest(command: "control", controlRequest: controlRequest))
+        try emitJSON(response.controlResponse ?? TerminalControlResponse(ok: response.ok, message: response.message))
     }
 }
 
@@ -583,12 +642,17 @@ private struct RemoteComputeHostSmokeCommand: ParsableCommand {
         }
 
         let host = try initialHost(orchestrator: orchestrator)
-        let token = normalizedOptional(authToken) ?? ComputeHostCredentialStore.generateAuthToken()
+        let explicitToken = normalizedOptional(authToken)
+        let token = explicitToken ?? ComputeHostCredentialStore.generateAuthToken()
         let outcome = try ComputeHostBootstrapper().startSpacesDaemon(host: host, authToken: token, timeout: timeoutSeconds)
         let readyHost = host.updatedForBootstrap(outcome)
         let status = try ping(host: readyHost, authToken: token)
         try orchestrator.upsertComputeHost(readyHost)
-        try ComputeHostCredentialStore.saveAuthToken(token, hostID: readyHost.id)
+        if explicitToken == nil {
+            try ComputeHostCredentialStore.saveAuthToken(token, hostID: readyHost.id)
+        } else {
+            fputs("spacese2e: skipping Keychain token storage because --auth-token was supplied.\n", stderr)
+        }
         try orchestrator.setProjectDefaultComputeHost(projectID: project.id, hostID: readyHost.id)
         let runtimePlan = try orchestrator.workspaceRuntimePlan(workspaceID: workspace.id)
         guard runtimePlan.selection.computeHostID == readyHost.id else {
@@ -650,16 +714,15 @@ private struct SeedFixtureCommand: ParsableCommand {
         let normalizedProjectDir = normalizePath(projectDir)
         try materializeDemoFixtureIfNeeded(projectDir: normalizedProjectDir, variant: "beacon")
         let project = try orchestrator.project(dir: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
-        let pythonExecutable = try resolveExecutablePath(named: "python3")
         let frontendCommand = fixtureServiceCommand(
-            pythonExecutable: pythonExecutable,
+            executable: "/usr/bin/env",
             arguments: [
-                "-m", "spaces_e2e_demo", "frontend", "--port", "$APP_PORT", "--site-dir", ".spaces-e2e-demo/site", "--backend-url",
+                "python3", "-m", "spaces_e2e_demo", "frontend", "--port", "$APP_PORT", "--site-dir", ".spaces-e2e-demo/site", "--backend-url",
                 "http://127.0.0.1:$API_PORT",
             ])
         let backendCommand = fixtureServiceCommand(
-            pythonExecutable: pythonExecutable,
-            arguments: ["-m", "spaces_e2e_demo", "backend", "--port", "$API_PORT", "--data-dir", ".spaces-e2e-demo/api"])
+            executable: "/usr/bin/env",
+            arguments: ["python3", "-m", "spaces_e2e_demo", "backend", "--port", "$API_PORT", "--data-dir", ".spaces-e2e-demo/api"])
         let fixturePorts = [PortDefinition(name: "APP_PORT"), PortDefinition(name: "API_PORT")]
         let fixtureStopScript =
             #"bash -lc 'for port in "$APP_PORT" "$API_PORT"; do if [ -n "$port" ]; then pids=(); while IFS= read -r pid; do [ -n "$pid" ] && pids+=("$pid"); done < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true); for pid in "${pids[@]}"; do kill "$pid" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in "${pids[@]}"; do kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true; done; fi; done; printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
@@ -726,8 +789,8 @@ private struct SeedFixtureCommand: ParsableCommand {
 
     private func shellToken(_ raw: String) -> String { raw.contains("$") ? raw : shellQuoted(raw) }
 
-    private func fixtureServiceCommand(pythonExecutable: String, arguments: [String]) -> String {
-        let joinedArguments = ([shellQuoted(pythonExecutable)] + arguments.map(shellToken)).joined(separator: " ")
+    private func fixtureServiceCommand(executable: String, arguments: [String]) -> String {
+        let joinedArguments = ([shellQuoted(executable)] + arguments.map(shellToken)).joined(separator: " ")
         return "export PYTHONPATH=.spaces-e2e-demo/src; exec \(joinedArguments)"
     }
 
@@ -1641,6 +1704,29 @@ private func emitJSON<T: Encodable>(_ value: T) throws {
 /// Builds the same real orchestrator used by the app and CLI so the manual E2E
 /// helper exercises production storage and lifecycle code.
 private func makeOrchestrator() throws -> WorkspaceOrchestrator { try WorkspaceOrchestrator(store: .init(path: DatabaseLocator.defaultPath())) }
+
+private func sendTerminalServiceRequestForSession(sessionID rawSessionID: String, request: TerminalServiceRequest) throws -> TerminalServiceResponse {
+    let sessionID = try required(rawSessionID, label: "session-id")
+    let request = request.withSessionID(sessionID)
+    let orchestrator = try makeOrchestrator()
+    if let workspaceID = try orchestrator.workspaceIDForTerminalSession(sessionID) {
+        let plan = try orchestrator.workspaceRuntimePlan(workspaceID: workspaceID)
+        return try WorkspaceOrchestrator.sendTerminalServiceRequest(to: plan.daemonTarget, request: request)
+    }
+    let target = SpacesDaemonConnectionTarget(
+        transport: .localUnixSocket, computeHostID: nil, displayName: "local Mac", socketPath: try TerminalServicePaths.socketPath())
+    return try WorkspaceOrchestrator.sendTerminalServiceRequest(to: target, request: request)
+}
+
+extension TerminalServiceRequest {
+    fileprivate func withSessionID(_ sessionID: String) -> TerminalServiceRequest {
+        TerminalServiceRequest(
+            command: command, authToken: authToken, launchConfiguration: launchConfiguration, sessionID: sessionID, runtimeManifest: runtimeManifest,
+            worktreeRefresh: worktreeRefresh, workspaceCommand: workspaceCommand, controlRequest: controlRequest, terminalLink: terminalLink,
+            terminalLinkID: terminalLinkID, chunkOffset: chunkOffset, chunkLimit: chunkLimit, agentSignal: agentSignal,
+            agentSignalEventIDs: agentSignalEventIDs)
+    }
+}
 
 /// Normalizes filesystem paths before lookups so shell callers can pass either
 /// relative or absolute values safely.

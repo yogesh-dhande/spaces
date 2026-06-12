@@ -11,6 +11,34 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     private var originalDatabasePath: String?
     private var databaseRoot: URL?
     private final class RuntimeNotificationProbe: @unchecked Sendable { var count = 0 }
+    private final class DirectTerminalServiceRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var payload: GhosttyRemoteSessionStatePayload
+        private var recordedRequests: [TerminalServiceRequest] = []
+
+        init(payload: GhosttyRemoteSessionStatePayload) { self.payload = payload }
+
+        func send(_ request: TerminalServiceRequest) throws -> TerminalServiceResponse {
+            lock.lock()
+            recordedRequests.append(request)
+            let currentPayload = payload
+            lock.unlock()
+
+            switch request.command {
+            case "state": return TerminalServiceResponse(ok: true, message: "state", sessionState: currentPayload)
+            case "control":
+                return TerminalServiceResponse(
+                    ok: true, message: "controlled", controlResponse: TerminalControlResponse(ok: true, message: "controlled"))
+            default: return TerminalServiceResponse(ok: false, message: "Unexpected command '\(request.command)'.")
+            }
+        }
+
+        func requests() -> [TerminalServiceRequest] {
+            lock.lock()
+            defer { lock.unlock() }
+            return recordedRequests
+        }
+    }
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -1269,6 +1297,47 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertFalse(renderedText.contains("^]"))
         XCTAssertFalse(renderedText.contains("rgb:"))
         XCTAssertFalse(renderedText.contains(";R"))
+    }
+
+    @MainActor func testRemoteHostFetchesStateAndSendsDirectDaemonControls() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-direct-daemon"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, title: "remote", workingDirectory: "/tmp/work", shell: "/bin/bash", command: "cat",
+            createdAt: "2026-06-10T00:00:00Z")
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-10T00:00:00Z",
+            title: "remote", workingDirectory: "/tmp/work", columns: 5, rows: 1)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: "2026-06-10T00:00:01Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil, renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
+        let recorder = DirectTerminalServiceRecorder(payload: payload)
+
+        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send)
+
+        waitForCondition("direct daemon state render") { host.snapshotText() == "alpha" }
+        XCTAssertEqual(try TerminalSessionPersistence.readRemoteSessionState(paths: paths).sessionID, sessionID)
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180))
+        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-10T00:00:02Z")
+        try host.attach(client: client, mode: .owner, into: container)
+
+        XCTAssertTrue(host.clearScreenAndScrollback())
+        waitForCondition("direct daemon control") {
+            recorder.requests().contains {
+                $0.command == "control" && $0.sessionID == sessionID && $0.controlRequest?.command == "clearScreen"
+                    && $0.controlRequest?.clientID == client.id
+            }
+        }
+        XCTAssertTrue(recorder.requests().contains { $0.command == "state" && $0.sessionID == sessionID })
     }
 
     @MainActor private func waitForCondition(_ label: String, timeout: TimeInterval = 2, condition: @escaping () -> Bool) {

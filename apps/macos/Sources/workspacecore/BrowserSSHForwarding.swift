@@ -12,21 +12,44 @@ struct BrowserSSHForwardRequest: Sendable, Hashable {
 
 enum BrowserSSHForwardResolver {
     typealias Forwarder = @Sendable (BrowserSSHForwardRequest) throws -> Int
+    typealias LiveForwardChecker = @Sendable (Int, BrowserSSHForwardRequest) -> Bool
 
     static func resolvedURL(
         _ rawURL: String, runtimePlan: WorkspaceRuntimePlan?, forwarder: Forwarder = { try BrowserSSHForwardManager.shared.localPort(for: $0) }
     ) throws -> String {
-        guard let runtimePlan, case .remote(let host) = runtimePlan.selection else { return rawURL }
-        guard let components = URLComponents(string: rawURL), isLocalServiceURL(components), let remotePort = components.port else { return rawURL }
-        guard runtimePlan.manifest.namedPorts.contains(where: { $0.port == remotePort }) else { return rawURL }
-        let localPort = try forwarder(
-            BrowserSSHForwardRequest(
-                computeHostID: host.id, displayName: host.name, sshHost: host.sshHost, sshUser: normalized(host.sshUser), sshPort: host.sshPort,
-                remotePort: remotePort))
+        guard let (components, request) = forwardRequest(rawURL: rawURL, runtimePlan: runtimePlan) else { return rawURL }
+        let localPort = try forwarder(request)
         var mapped = components
         mapped.host = "127.0.0.1"
         mapped.port = localPort
         return mapped.string ?? rawURL
+    }
+
+    static func reusableResolvedURL(
+        _ candidateURL: String?, for rawURL: String, runtimePlan: WorkspaceRuntimePlan?,
+        liveForwardChecker: LiveForwardChecker = { BrowserSSHForwardManager.shared.hasLiveForward(localPort: $0, for: $1) }
+    ) -> String? {
+        guard let candidateURL, let (components, request) = forwardRequest(rawURL: rawURL, runtimePlan: runtimePlan) else { return nil }
+        guard var candidate = URLComponents(string: candidateURL), isLocalServiceURL(candidate), let localPort = candidate.port else { return nil }
+        guard candidate.scheme?.lowercased() == components.scheme?.lowercased() else { return nil }
+        guard candidate.percentEncodedPath == components.percentEncodedPath else { return nil }
+        guard candidate.percentEncodedQuery == components.percentEncodedQuery else { return nil }
+        guard liveForwardChecker(localPort, request) else { return nil }
+        candidate.host = "127.0.0.1"
+        candidate.port = localPort
+        return candidate.string
+    }
+
+    private static func forwardRequest(rawURL: String, runtimePlan: WorkspaceRuntimePlan?) -> (URLComponents, BrowserSSHForwardRequest)? {
+        guard let runtimePlan, case .remote(let host) = runtimePlan.selection else { return nil }
+        guard let components = URLComponents(string: rawURL), isLocalServiceURL(components), let remotePort = components.port else { return nil }
+        guard runtimePlan.manifest.namedPorts.contains(where: { $0.port == remotePort }) else { return nil }
+        return (
+            components,
+            BrowserSSHForwardRequest(
+                computeHostID: host.id, displayName: host.name, sshHost: host.sshHost, sshUser: normalized(host.sshUser), sshPort: host.sshPort,
+                remotePort: remotePort)
+        )
     }
 
     private static func isLocalServiceURL(_ components: URLComponents) -> Bool {
@@ -80,6 +103,19 @@ final class BrowserSSHForwardManager: @unchecked Sendable {
         return forward.localPort
     }
 
+    func hasLiveForward(localPort: Int, for request: BrowserSSHForwardRequest) -> Bool {
+        let key = ForwardKey(
+            computeHostID: request.computeHostID, sshHost: request.sshHost, sshUser: request.sshUser, sshPort: request.sshPort,
+            remotePort: request.remotePort)
+        lock.lock()
+        if let existing = forwards[key], existing.localPort == localPort, existing.process.isRunning {
+            lock.unlock()
+            return true
+        }
+        lock.unlock()
+        return Self.hasLiveSSHForward(localPort: localPort, request: request)
+    }
+
     private func startForward(_ request: BrowserSSHForwardRequest) throws -> Forward {
         let localPort = try Self.allocateEphemeralPort()
         let process = Process()
@@ -88,7 +124,7 @@ final class BrowserSSHForwardManager: @unchecked Sendable {
             "-N", "-L", "127.0.0.1:\(localPort):127.0.0.1:\(request.remotePort)", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
         ]
         if let sshPort = request.sshPort { arguments.append(contentsOf: ["-p", String(sshPort)]) }
-        arguments.append(sshDestination(request))
+        arguments.append(Self.sshDestination(request))
         process.arguments = arguments
         let standardError = Pipe()
         process.standardError = standardError
@@ -156,6 +192,32 @@ final class BrowserSSHForwardManager: @unchecked Sendable {
         return result == 0
     }
 
+    private static func hasLiveSSHForward(localPort: Int, request: BrowserSSHForwardRequest) -> Bool {
+        guard canConnectToLocalhost(port: localPort) else { return false }
+        let forwardArgument = "127.0.0.1:\(localPort):127.0.0.1:\(request.remotePort)"
+        let destination = sshDestination(request)
+        return runningProcessCommandLines().contains { line in
+            guard line.contains("ssh"), line.contains("-N"), line.contains(forwardArgument), line.contains(destination) else { return false }
+            guard let sshPort = request.sshPort else { return true }
+            return line.contains("-p \(sshPort)") || line.contains("-p\(sshPort)")
+        }
+    }
+
+    private static func runningProcessCommandLines() -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "command="]
+        let output = Pipe()
+        process.standardOutput = output
+        do {
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0, let text = String(data: data, encoding: .utf8) else { return [] }
+            return text.split(separator: "\n").map(String.init)
+        } catch { return [] }
+    }
+
     private static func errorText(from pipe: Pipe) -> String {
         let data = pipe.fileHandleForReading.availableData
         let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -163,7 +225,7 @@ final class BrowserSSHForwardManager: @unchecked Sendable {
         return "ssh exited before the forward was ready."
     }
 
-    private func sshDestination(_ request: BrowserSSHForwardRequest) -> String {
+    private static func sshDestination(_ request: BrowserSSHForwardRequest) -> String {
         if let user = request.sshUser { return "\(user)@\(request.sshHost)" }
         return request.sshHost
     }

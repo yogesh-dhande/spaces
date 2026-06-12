@@ -882,10 +882,17 @@ public final class SQLiteStore {
                   FROM agent_sessions
                   LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
                   WHERE agent_sessions.terminal_session_id = ?
+
+                  UNION ALL
+
+                  SELECT terminal_sessions.workspace_id, terminal_sessions.created_at AS resolved_at, 300000 AS resolved_order, 3 AS source_priority
+                  FROM terminal_sessions
+                  WHERE terminal_sessions.session_id = ?
+                    AND terminal_sessions.workspace_id IS NOT NULL
                 )
                 ORDER BY source_priority, resolved_at DESC, resolved_order
                 LIMIT 1
-                """, bindings: [sessionID, sessionID, sessionID])
+                """, bindings: [sessionID, sessionID, sessionID, sessionID])
         return row?.first
     }
 

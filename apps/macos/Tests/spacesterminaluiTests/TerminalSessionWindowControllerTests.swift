@@ -1627,6 +1627,14 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(focusedStates.contains(false))
     }
 
+    func testDeferredInitialOwnerPresentationActivatesOnlyForActiveAppOrExplicitFocusRequest() {
+        XCTAssertTrue(TerminalSessionWindowController.shouldActivateDeferredInitialOwnerPresentation(appIsActive: true, requestID: nil))
+        XCTAssertTrue(
+            TerminalSessionWindowController.shouldActivateDeferredInitialOwnerPresentation(appIsActive: false, requestID: UUID().uuidString))
+        XCTAssertFalse(TerminalSessionWindowController.shouldActivateDeferredInitialOwnerPresentation(appIsActive: false, requestID: nil))
+        XCTAssertFalse(TerminalSessionWindowController.shouldActivateDeferredInitialOwnerPresentation(appIsActive: false, requestID: ""))
+    }
+
     @MainActor func testGhosttyOwnerFocusWindowReassertsOwnerSurfaceFocus() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

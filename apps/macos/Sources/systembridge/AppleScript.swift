@@ -1,7 +1,8 @@
+import Darwin
 import Foundation
 
 public enum AppleScript {
-    @discardableResult public static func run(_ script: String) throws -> String {
+    @discardableResult public static func run(_ script: String, timeoutSeconds: Int? = nil) throws -> String {
         let isRunningTests = NSClassFromString("XCTest") != nil
         if isRunningTests, ProcessInfo.processInfo.environment["SPACES_ALLOW_TEST_APPLESCRIPT"] != "1" {
             throw NSError(
@@ -10,7 +11,10 @@ public enum AppleScript {
                     NSLocalizedDescriptionKey: "Unmocked AppleScript call during tests. Install an `osascript` mock before invoking AppleScript.run."
                 ])
         }
+        let usesProcessTimeout = (timeoutSeconds ?? 0) > 0
+        let script = usesProcessTimeout ? timeoutWrappedScript(script, timeoutSeconds: timeoutSeconds ?? 0) : script
         do {
+            if usesProcessTimeout, let timeoutSeconds { return try runWithProcessTimeout(script, timeoutSeconds: timeoutSeconds) }
             if isRunningTests {
                 let output = try Shell.runAndCapture(["osascript", "-e", script])
                 return output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -33,8 +37,54 @@ public enum AppleScript {
         }
     }
 
-    @discardableResult public static func run(lines: [String]) throws -> String {
+    @discardableResult public static func run(lines: [String], timeoutSeconds: Int? = nil) throws -> String {
         let script = lines.joined(separator: "\n")
-        return try run(script)
+        return try run(script, timeoutSeconds: timeoutSeconds)
+    }
+
+    private static func timeoutWrappedScript(_ script: String, timeoutSeconds: Int) -> String {
+        guard timeoutSeconds > 0 else { return script }
+        let body = script.split(separator: "\n", omittingEmptySubsequences: false).map { "  \($0)" }.joined(separator: "\n")
+        return """
+            with timeout of \(timeoutSeconds) seconds
+            \(body)
+            end timeout
+            """
+    }
+
+    private static func runWithProcessTimeout(_ script: String, timeoutSeconds: Int) throws -> String {
+        let process = Process()
+        let out = Pipe()
+        let err = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["osascript", "-e", script]
+        process.environment = ProcessInfo.processInfo.environment
+        process.standardOutput = out
+        process.standardError = err
+
+        try process.run()
+        let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+        while process.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+
+        if process.isRunning {
+            process.terminate()
+            let terminationDeadline = Date().addingTimeInterval(0.5)
+            while process.isRunning, Date() < terminationDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+                process.waitUntilExit()
+            }
+            throw NSError(
+                domain: "spaces.applescript", code: 4, userInfo: [NSLocalizedDescriptionKey: "AppleScript timed out after \(timeoutSeconds)s."])
+        }
+
+        process.waitUntilExit()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        if process.terminationStatus != 0 {
+            let errData = err.fileHandleForReading.readDataToEndOfFile()
+            let text = String(data: errData, encoding: .utf8) ?? ""
+            throw NSError(domain: "spaces.applescript", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: text])
+        }
+        return (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

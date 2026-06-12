@@ -446,25 +446,34 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         }
     }
 
+    nonisolated static func shouldActivateDeferredInitialOwnerPresentation(appIsActive: Bool, requestID: String?) -> Bool {
+        appIsActive || requestID?.isEmpty == false
+    }
+
     private func completeDeferredInitialOwnerPresentation(window: NSWindow, startedAt: Date, requestID: String?, route: String?) {
         deferredInitialPresentationTask?.cancel()
         deferredInitialPresentationTask = nil
         isDeferringInitialOwnerPresentation = false
+        let shouldActivateWindow = Self.shouldActivateDeferredInitialOwnerPresentation(appIsActive: NSApp.isActive, requestID: requestID)
         let postRefreshStartedAt = Date()
         refreshNow()
         window.contentView?.layoutSubtreeIfNeeded()
         terminalContainer.layoutSubtreeIfNeeded()
         logShowStage(startedAt: postRefreshStartedAt, requestID: requestID, detail: "stage=refresh_before_present deferred=1")
         let presentStartedAt = Date()
-        presentWindow(window, forceFrontmost: true)
-        logShowStage(startedAt: presentStartedAt, requestID: requestID, detail: "stage=present_window visible=0 deferred=1")
-        syncGhosttyOwnerFocus(reason: "deferred_show_present", requestWindowFocus: true)
+        if shouldActivateWindow { presentWindow(window, forceFrontmost: true) } else { presentWindowWithoutActivating(window) }
+        logShowStage(
+            startedAt: presentStartedAt, requestID: requestID,
+            detail: "stage=present_window visible=0 deferred=1 activating=\(shouldActivateWindow ? 1 : 0)")
+        syncGhosttyOwnerFocus(reason: "deferred_show_present", requestWindowFocus: shouldActivateWindow)
         let startRefreshingStartedAt = Date()
         startRefreshing()
         logShowStage(startedAt: startRefreshingStartedAt, requestID: requestID, detail: "stage=start_refresh deferred=1")
         let firstResponderStartedAt = Date()
-        assignPreferredFirstResponder()
-        logShowStage(startedAt: firstResponderStartedAt, requestID: requestID, detail: "stage=assign_first_responder deferred=1")
+        if shouldActivateWindow { assignPreferredFirstResponder() }
+        logShowStage(
+            startedAt: firstResponderStartedAt, requestID: requestID,
+            detail: "stage=assign_first_responder deferred=1 activating=\(shouldActivateWindow ? 1 : 0)")
         logFocusMetric("terminal_window_show", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "show") deferred=1")
     }
 
@@ -550,6 +559,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         closesForSessionTermination = false
         didCloseWindow = true
         hasTestWindowPresentation = false
+        TerminalPerformance.logMetric(
+            "terminal_window_will_close", target: "session=\(sessionID)", elapsedMS: 0, success: true,
+            detail: "client=\(client.id) terminating=\(sessionIsTerminating ? 1 : 0)")
         persistCurrentWindowFrame(immediately: true)
         if backend == .ghosttyEmbedded {
             syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false)
@@ -1165,6 +1177,14 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             guard let window, window.isVisible, !window.isMiniaturized else { return }
             window.makeKeyAndOrderFront(nil)
         }
+    }
+
+    private func presentWindowWithoutActivating(_ window: NSWindow) {
+        if Self.isRunningUnderXCTest {
+            hasTestWindowPresentation = true
+            return
+        }
+        window.orderFront(nil)
     }
 
     private func startRefreshing() {

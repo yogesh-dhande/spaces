@@ -1105,6 +1105,28 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertNotNil(runtimeState.exitedAt)
     }
 
+    @MainActor func testLateOutputAfterTerminateDoesNotRecreateOutputFile() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-late-output-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+            shell: "/bin/zsh", command: "zsh", createdAt: "2026-06-11T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+
+        host.debugHandleIncomingOutput(Data("before terminate\n".utf8))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.outputPath))
+
+        host.terminate()
+        try? FileManager.default.removeItem(atPath: paths.outputPath)
+        host.debugHandleIncomingOutput(Data("late output\n".utf8))
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.outputPath))
+    }
+
     @MainActor func testStartIfNeededRefreshesExitedRuntimeStateForReusedSessionID() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }

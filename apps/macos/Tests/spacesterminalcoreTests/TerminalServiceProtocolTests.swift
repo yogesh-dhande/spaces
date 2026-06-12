@@ -19,7 +19,12 @@ final class TerminalServiceProtocolTests: XCTestCase {
             worktreeRefresh: TerminalServiceWorktreeRefreshRequest(path: "/srv/work", branch: "feature", hostName: "Builder"),
             workspaceCommand: TerminalServiceWorkspaceCommandRequest(command: "true", workingDirectory: "/srv/work"),
             controlRequest: TerminalControlRequest(command: "send", text: "hello", clientID: "ios-client", ownerEpoch: 7), terminalLink: "image.png",
-            terminalLinkID: "link-1", chunkOffset: 128, chunkLimit: 4096)
+            terminalLinkID: "link-1", chunkOffset: 128, chunkLimit: 4096,
+            agentSignal: TerminalServiceAgentSignalEvent(
+                id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "waiting", label: "Mock Agent",
+                terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil,
+                environmentKeys: ["SPACES_TERMINAL_HOST", "SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-06-11T00:00:00Z"),
+            agentSignalEventIDs: ["event-1"])
         let response = TerminalServiceResponse(
             ok: true, message: "Started.",
             session: TerminalServiceSessionSummary(
@@ -31,7 +36,13 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 id: "link-1", source: "localFile", originalLink: "image.png", displayName: "image.png", contentType: "image/png", mediaKind: "image",
                 byteCount: 12, externalURL: nil),
             terminalLinkChunk: TerminalServiceTerminalLinkChunk(
-                linkID: "link-1", offset: 0, byteCount: 4, isFinal: true, base64Data: Data([1, 2, 3, 4]).base64EncodedString()))
+                linkID: "link-1", offset: 0, byteCount: 4, isFinal: true, base64Data: Data([1, 2, 3, 4]).base64EncodedString()),
+            agentSignals: [
+                TerminalServiceAgentSignalEvent(
+                    id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "waiting",
+                    label: "Mock Agent", terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil,
+                    environmentKeys: ["SPACES_TERMINAL_HOST", "SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-06-11T00:00:00Z")
+            ])
 
         XCTAssertEqual(try TerminalServiceCodec.decodeRequest(TerminalServiceCodec.encodeRequest(request)), request)
         XCTAssertEqual(try TerminalServiceCodec.decodeResponse(TerminalServiceCodec.encodeResponse(response)), response)
