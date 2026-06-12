@@ -720,6 +720,39 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: snapshot), "alpha")
     }
 
+    func testStateStreamClientDoesNotCoalesceDeltaRenderUpdatePayloads() throws {
+        let firstFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha"))
+        let secondFrame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 0, snapshot: snapshot(text: "bravo"))
+        let thirdFrame = GhosttyRenderFrame(sessionRevision: 3, ownerEpoch: 0, snapshot: snapshot(text: "charl"))
+        let firstBaseline = GhosttyRenderUpdateBaseline(frame: firstFrame)
+        let firstDelta = GhosttyRenderUpdateFactory.makeUpdate(target: secondFrame, baseline: firstBaseline)
+        let secondBaseline = try GhosttyRenderUpdateApplier.apply(firstDelta, to: firstBaseline)
+        let secondDelta = GhosttyRenderUpdateFactory.makeUpdate(target: thirdFrame, baseline: secondBaseline)
+        XCTAssertEqual(firstDelta.kind, .delta)
+        XCTAssertEqual(secondDelta.kind, .delta)
+
+        func payload(_ update: GhosttyRenderUpdate, revision: UInt64) throws -> GhosttyRemoteSessionStatePayload {
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "stream-delta-coalescing", reason: TerminalRemoteSessionStateReason.stateChange,
+                emittedAt: "2026-06-03T00:00:0\(revision)Z", sessionStateRevision: revision, sessionStateFlags: 1, screenStateRevision: revision,
+                runtimeState: nil, attachmentSnapshot: nil, title: "live", workingDirectory: "/tmp/live", outputByteCount: nil,
+                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(update))
+        }
+
+        let pendingDeltaPayload = try payload(firstDelta, revision: 2)
+        let incomingDeltaPayload = try payload(secondDelta, revision: 3)
+        let incomingFullPayload = try payload(.full(thirdFrame), revision: 3)
+        let pendingMetadataPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "stream-delta-coalescing", reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: "2026-06-03T00:00:01Z",
+            sessionStateRevision: 2, sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "live",
+            workingDirectory: "/tmp/live", outputByteCount: nil)
+
+        XCTAssertFalse(GhosttyRemoteSessionStateStreamClient.canCoalescePendingEvent(pendingDeltaPayload, with: incomingDeltaPayload))
+        XCTAssertFalse(GhosttyRemoteSessionStateStreamClient.canCoalescePendingEvent(pendingDeltaPayload, with: incomingFullPayload))
+        XCTAssertFalse(GhosttyRemoteSessionStateStreamClient.canCoalescePendingEvent(pendingMetadataPayload, with: incomingDeltaPayload))
+        XCTAssertTrue(GhosttyRemoteSessionStateStreamClient.canCoalescePendingEvent(pendingMetadataPayload, with: pendingMetadataPayload))
+    }
+
     @MainActor func testRemoteHostPrefersRenderFrameSnapshotWhenAvailable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

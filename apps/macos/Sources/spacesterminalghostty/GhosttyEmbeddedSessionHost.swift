@@ -241,6 +241,11 @@ extension TerminalGhosttyRendererHosting {
         }
     }
 
+    private enum RenderStateExportMode {
+        case selfContained
+        case streamDeltaAllowed
+    }
+
     public let launchConfiguration: TerminalSessionLaunchConfiguration
     public let paths: TerminalSessionPaths
 
@@ -463,10 +468,15 @@ extension TerminalGhosttyRendererHosting {
     }
 
     private func startStateStreamServer() throws {
-        let stateStreamServer = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: stateStreamQueue) {
-            [weak self] in
-            Self.runOnMainActorSynchronously { self?.currentRemoteSessionState(reason: "initial", outputByteCount: nil, markNextBroadcastFull: true) }
-        }
+        let stateStreamServer = GhosttyRemoteSessionStateStreamServer(
+            socketPath: paths.subscriptionSocketPath, queue: stateStreamQueue,
+            initialStateProviderWithConnectionState: { [weak self] hasExistingClients in
+                Self.runOnMainActorSynchronously {
+                    self?.currentRemoteSessionState(
+                        reason: TerminalRemoteSessionStateReason.initial, outputByteCount: nil, exportMode: .selfContained,
+                        markNextBroadcastFull: hasExistingClients, markNextBroadcastFullWhenMissingRenderUpdate: true)
+                }
+            })
         try stateStreamServer.start()
         self.stateStreamServer = stateStreamServer
     }
@@ -1126,7 +1136,7 @@ extension TerminalGhosttyRendererHosting {
         )
         guard stateStreamServer != nil,
             let payload = currentRemoteSessionState(
-                reason: reason, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, broadcastExport: true)
+                reason: reason, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, exportMode: .streamDeltaAllowed)
         else { return }
         broadcastRemoteStatePayload(payload, startedAt: startedAt, ownerClient: ownerClient, outputByteCount: outputByteCount)
     }
@@ -1173,7 +1183,8 @@ extension TerminalGhosttyRendererHosting {
     }
 
     private func currentRemoteSessionState(
-        reason: String, outputByteCount: Int?, outputEndByteOffset: Int? = nil, broadcastExport: Bool = false, markNextBroadcastFull: Bool = false
+        reason: String, outputByteCount: Int?, outputEndByteOffset: Int? = nil, exportMode: RenderStateExportMode = .selfContained,
+        markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false
     ) -> GhosttyRemoteSessionStatePayload? {
         let runtimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastPersistedRuntimeState
         let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
@@ -1197,12 +1208,15 @@ extension TerminalGhosttyRendererHosting {
             let frame = snapshot.map { GhosttyRenderFrame(sessionRevision: renderFrameRevision(for: $0), ownerEpoch: ownerEpoch, snapshot: $0) }
             let renderUpdateEncodeStartedAt = Date()
             let renderUpdateValue = frame.map {
-                makeRenderUpdate(for: $0, reason: reason, nativeScrollRects: resolvedScreenState.scrollRects, broadcastExport: broadcastExport)
+                makeRenderUpdate(for: $0, reason: reason, nativeScrollRects: resolvedScreenState.scrollRects, exportMode: exportMode)
             }
             let renderUpdate = renderUpdateValue.flatMap { try? GhosttyRenderUpdateBinaryCodec.encode($0) }
             if renderUpdate != nil, markNextBroadcastFull { forceNextBroadcastFullRenderUpdate = true }
+            if renderUpdate == nil, markNextBroadcastFullWhenMissingRenderUpdate { forceNextBroadcastFullRenderUpdate = true }
             let renderUpdateEncodeMS = TerminalPerformance.elapsedMS(since: renderUpdateEncodeStartedAt)
-            if renderUpdate != nil, let lastScreenStateRevision, broadcastExport { lastExportedScreenStateRevision = lastScreenStateRevision }
+            if renderUpdate != nil, let lastScreenStateRevision, exportMode == .streamDeltaAllowed {
+                lastExportedScreenStateRevision = lastScreenStateRevision
+            }
             trace(
                 "render_frame_export_end reason=\(reason) render_update=\(renderUpdate == nil ? 0 : 1) frame_size=\(traceSize(columns: snapshot?.columns, rows: snapshot?.rows)) source=\(resolvedScreenState.source) owner_epoch=\(ownerEpoch)"
             )
@@ -1230,6 +1244,7 @@ extension TerminalGhosttyRendererHosting {
                 title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, outputByteCount: bootstrapOutputByteCount,
                 outputEndByteOffset: bootstrapOutputEndByteOffset, renderUpdate: renderUpdate)
         }
+        if markNextBroadcastFullWhenMissingRenderUpdate { forceNextBroadcastFullRenderUpdate = true }
         return GhosttyRemoteSessionStatePayload(
             sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()),
             sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
@@ -1238,23 +1253,25 @@ extension TerminalGhosttyRendererHosting {
     }
 
     private func makeRenderUpdate(
-        for frame: GhosttyRenderFrame, reason: String, nativeScrollRects: [GhosttyRenderScrollRectOperation] = [], broadcastExport: Bool = false
+        for frame: GhosttyRenderFrame, reason: String, nativeScrollRects: [GhosttyRenderScrollRectOperation] = [],
+        exportMode: RenderStateExportMode = .selfContained
     ) -> GhosttyRenderUpdate {
-        let forceFullForSubscriberBaseline = broadcastExport && forceNextBroadcastFullRenderUpdate
+        let forceFullForSubscriberBaseline = exportMode == .streamDeltaAllowed && forceNextBroadcastFullRenderUpdate
+        let forceFullForSelfContainedExport = exportMode == .selfContained
         let forceFullForExplicitResync =
-            reason == TerminalRemoteSessionStateReason.initial || reason == TerminalRemoteSessionStateReason.stateChange
-            || reason == TerminalRemoteSessionStateReason.inputOutput || reason == TerminalRemoteSessionStateReason.resize
-            || reason == TerminalRemoteSessionStateReason.terminated
+            reason == TerminalRemoteSessionStateReason.initial || reason == TerminalRemoteSessionStateReason.inputOutput
+            || reason == TerminalRemoteSessionStateReason.resize || reason == TerminalRemoteSessionStateReason.terminated
         let forceFull =
-            forceFullForExplicitResync || lastRenderUpdateBaseline?.sessionRevision == frame.sessionRevision || forceFullForSubscriberBaseline
+            forceFullForExplicitResync || forceFullForSelfContainedExport || lastRenderUpdateBaseline?.sessionRevision == frame.sessionRevision
+            || forceFullForSubscriberBaseline
         let forceFullReason =
             if reason == TerminalRemoteSessionStateReason.initial {
                 "initial_baseline"
-            } else if reason == TerminalRemoteSessionStateReason.stateChange || reason == TerminalRemoteSessionStateReason.inputOutput
-                || reason == TerminalRemoteSessionStateReason.terminated
-            { "explicit_resync" } else if reason == TerminalRemoteSessionStateReason.resize {
-                "resize_self_contained"
-            } else if forceFullForSubscriberBaseline { "subscriber_baseline_reset" } else { "baseline_already_current" }
+            } else if reason == TerminalRemoteSessionStateReason.inputOutput || reason == TerminalRemoteSessionStateReason.terminated {
+                "explicit_resync"
+            } else if reason == TerminalRemoteSessionStateReason.resize { "resize_self_contained" } else if forceFullForSubscriberBaseline {
+                "subscriber_baseline_reset"
+            } else if forceFullForSelfContainedExport { "self_contained_state_export" } else { "baseline_already_current" }
         let update = GhosttyRenderUpdateFactory.makeUpdate(
             target: frame, baseline: lastRenderUpdateBaseline, forceFull: forceFull, forceFullReason: forceFullReason,
             nativeScrollRects: nativeScrollRects)
@@ -1341,7 +1358,7 @@ extension TerminalGhosttyRendererHosting {
     func debugHandleOwnerInputActivity(byteCount: Int = 1) { handleOwnerInputActivity(byteCount: byteCount) }
     func debugMarkLocalOwnerCommandInputOutputResyncPending() { markLocalOwnerCommandInputOutputResyncPending() }
     func debugCurrentRemoteSessionState(reason: String) -> GhosttyRemoteSessionStatePayload? {
-        currentRemoteSessionState(reason: reason, outputByteCount: nil, broadcastExport: true)
+        currentRemoteSessionState(reason: reason, outputByteCount: nil, exportMode: .selfContained)
     }
     func debugPersistRuntimeState(force: Bool = true) { refreshRuntimeState(force: force) }
     func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
