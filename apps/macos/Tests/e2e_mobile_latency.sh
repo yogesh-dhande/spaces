@@ -510,6 +510,31 @@ def decode_render_update(payload: dict) -> dict | None:
     return update
 
 
+def render_update_binary_size(payload: dict) -> int:
+    encoded = payload.get("renderUpdate")
+    if not encoded:
+        return 0
+    try:
+        return len(base64.b64decode(encoded))
+    except Exception:
+        return 0
+
+
+def render_update_metadata(payload: dict, update: dict) -> dict:
+    changed_cell_count = 0
+    if update["kind"] == "full":
+        changed_cell_count = len((update.get("snapshot") or {}).get("cells") or [])
+    elif update["kind"] == "delta":
+        changed_cell_count = int((update.get("delta") or {}).get("changedCellCount") or 0)
+    return {
+        "reason": payload.get("reason"),
+        "frame_kind": update["kind"],
+        "fallback_reason": update.get("fallbackReason"),
+        "changed_cell_count": changed_cell_count,
+        "render_update_bytes": render_update_binary_size(payload),
+    }
+
+
 def read_render_update_cell(reader: RenderUpdateReader) -> dict:
     return {
         "codepoint": reader.u32(),
@@ -653,12 +678,17 @@ def materialize_render_update(payload: dict) -> dict:
     session_id = payload.get("sessionID")
     if not session_id or not payload.get("renderUpdate"):
         return payload
+    materialized = dict(payload)
     try:
         update = decode_render_update(payload)
-    except Exception:
-        return payload
+    except Exception as error:
+        materialized["_renderUpdateDecodeFailed"] = str(error)
+        return materialized
     if update is None or update["kind"] == "resync_required":
-        return payload
+        if update is not None:
+            materialized["_renderUpdateMeta"] = render_update_metadata(payload, update)
+        return materialized
+    materialized["_renderUpdateMeta"] = render_update_metadata(payload, update)
     if update["kind"] == "full":
         baseline = {
             "sessionRevision": update["sessionRevision"],
@@ -668,21 +698,20 @@ def materialize_render_update(payload: dict) -> dict:
     else:
         baseline = render_update_baselines.get(session_id)
         if not baseline:
-            return payload
+            return materialized
         delta = update["delta"]
         if baseline.get("sessionRevision") != delta["baseRevision"] or baseline.get("ownerEpoch") != delta["ownerEpoch"]:
-            return payload
+            return materialized
         try:
             snapshot = apply_render_update_delta(delta, baseline["snapshot"])
         except Exception:
-            return payload
+            return materialized
         baseline = {
             "sessionRevision": delta["targetRevision"],
             "ownerEpoch": delta["ownerEpoch"],
             "snapshot": snapshot,
         }
     render_update_baselines[session_id] = baseline
-    materialized = dict(payload)
     materialized["_materializedRenderSnapshot"] = baseline["snapshot"]
     materialized["_materializedSessionRevision"] = baseline["sessionRevision"]
     materialized["_materializedOwnerEpoch"] = baseline["ownerEpoch"]
@@ -729,15 +758,26 @@ def wait_for_line(stream: subprocess.Popen, predicate, timeout: float = 10) -> t
             continue
         raw_render_update = bool(payload.get("renderUpdate"))
         payload = materialize_render_update(payload)
+        if payload.get("_renderUpdateDecodeFailed"):
+            decode_failures += 1
+        render_meta = dict(payload.get("_renderUpdateMeta") or {})
+        if render_meta:
+            render_meta["json_payload_bytes"] = line_bytes
+            payload["_renderUpdateMeta"] = render_meta
         materialized_snapshot = bool(payload.get("_materializedRenderSnapshot"))
         stream_records.append(
             {
                 "received_ns": received_ns,
                 "bytes": line_bytes,
                 "decode_failed": False,
+                "render_update_decode_failed": bool(payload.get("_renderUpdateDecodeFailed")),
                 "reason": payload.get("reason"),
                 "render_update": raw_render_update,
-                "render_update_bytes": len((payload.get("renderUpdate") or "").encode("utf-8")),
+                "frame_kind": render_meta.get("frame_kind"),
+                "fallback_reason": render_meta.get("fallback_reason"),
+                "changed_cell_count": render_meta.get("changed_cell_count"),
+                "render_update_bytes": render_meta.get("render_update_bytes") or 0,
+                "json_payload_bytes": line_bytes,
                 "materialized_snapshot": materialized_snapshot,
             }
         )
@@ -944,6 +984,34 @@ def summarize_phases(measurements: list[dict]) -> dict:
     }
 
 
+def visible_render_metadata(payload: dict) -> dict:
+    meta = payload.get("_renderUpdateMeta") or {}
+    return {
+        "visible_reason": meta.get("reason"),
+        "visible_frame_kind": meta.get("frame_kind"),
+        "visible_fallback_reason": meta.get("fallback_reason"),
+        "visible_changed_cell_count": meta.get("changed_cell_count"),
+        "visible_render_update_bytes": meta.get("render_update_bytes"),
+        "visible_json_payload_bytes": meta.get("json_payload_bytes"),
+    }
+
+
+def summarize_visible_render_samples(measurements: list[dict]) -> dict:
+    kinds = [item.get("visible_frame_kind") for item in measurements if item.get("visible_frame_kind")]
+    byte_counts = [
+        int(item["visible_render_update_bytes"])
+        for item in measurements
+        if item.get("visible_render_update_bytes") is not None
+    ]
+    return {
+        "visible_sample_count": len(kinds),
+        "full_visible_sample_count": sum(1 for kind in kinds if kind == "full"),
+        "delta_visible_sample_count": sum(1 for kind in kinds if kind == "delta"),
+        "resync_required_visible_sample_count": sum(1 for kind in kinds if kind == "resync_required"),
+        "median_visible_render_update_bytes": round(statistics.median(byte_counts), 1) if byte_counts else None,
+    }
+
+
 def bridge_latency_split(session_id: str, begin_ns: int, frame_publish_ns: int | None, visible_ns: int) -> dict:
     after_ns = frame_publish_ns if frame_publish_ns is not None else begin_ns
     relay_read = last_performance_event(session_id, "mobile-bridge", "stream_relay_read", after_ns, before_ns=visible_ns)
@@ -992,6 +1060,21 @@ def run_ios_input_latency() -> dict:
     _, mobile_client_id, stream = attach_pair(session_id)
     measurements = []
     try:
+        warmup_token = f"ioswarmup{uuid.uuid4().hex[:8]}"
+        response, _ = request(
+            {
+                "command": "send",
+                "authToken": auth_token,
+                "clientApp": client_app,
+                "sessionID": session_id,
+                "clientID": mobile_client_id,
+                "text": warmup_token,
+                "appendNewline": True,
+            }
+        )
+        assert response["ok"], response
+        wait_for_line(stream, lambda payload, token=warmup_token: token in plain_text(payload), timeout=10)
+
         for index in range(sample_count):
             probe_id = f"ios-input-{index + 1:03d}-{uuid.uuid4().hex[:8]}"
             token = f"ioslatency{index + 1:03d}{uuid.uuid4().hex[:6]}"
@@ -1018,7 +1101,8 @@ def run_ios_input_latency() -> dict:
             rpc_end_ns = now_ns()
             rpc_duration_ms = ms_between(rpc_begin_ns, rpc_end_ns)
             event("ios_input_rpc_end", scenario, probe_id, rpc_end_ns, rpc_ms=rpc_duration_ms)
-            _, visible_ns = wait_for_line(stream, lambda payload, token=token: token in plain_text(payload), timeout=10)
+            visible_payload, visible_ns = wait_for_line(stream, lambda payload, token=token: token in plain_text(payload), timeout=10)
+            visible_meta = visible_render_metadata(visible_payload)
             frame_publish = last_performance_event(session_id, "mac-host", "render_frame_payload_publish", begin_ns, before_ns=visible_ns)
             frame_publish_ns = frame_publish[1] if frame_publish else None
             event_to_frame_publish_ms = ms_between(begin_ns, frame_publish_ns) if frame_publish_ns is not None else None
@@ -1041,25 +1125,31 @@ def run_ios_input_latency() -> dict:
                 visible_ns,
                 rpc_end_to_render_visible_ms=ms_between(rpc_end_ns, visible_ns),
                 event_to_visible_ms=ms_between(begin_ns, visible_ns),
+                visible_reason=visible_meta["visible_reason"],
+                visible_frame_kind=visible_meta["visible_frame_kind"],
+                visible_fallback_reason=visible_meta["visible_fallback_reason"],
+                visible_changed_cell_count=visible_meta["visible_changed_cell_count"],
+                visible_render_update_bytes=visible_meta["visible_render_update_bytes"],
+                visible_json_payload_bytes=visible_meta["visible_json_payload_bytes"],
             )
-            measurements.append(
-                {
-                    "sample_index": index + 1,
-                    "probe_id": probe_id,
-                    "token": token,
-                    "enqueue_to_rpc_begin_ms": ms_between(enqueue_ns, rpc_begin_ns),
-                    "flush_to_rpc_begin_ms": ms_between(flush_ns, rpc_begin_ns),
-                    "rpc_ms": round(rpc_ms, 3),
-                    "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
-                    "event_to_frame_publish_ms": event_to_frame_publish_ms,
-                    "host_publish_to_relay_read_ms": bridge_split["host_publish_to_relay_read_ms"],
-                    "relay_read_to_network_send_begin_ms": bridge_split["relay_read_to_network_send_begin_ms"],
-                    "network_send_begin_to_stream_visible_ms": bridge_split["network_send_begin_to_stream_visible_ms"],
-                    "frame_publish_to_visible_ms": frame_publish_to_visible_ms,
-                    "event_to_visible_ms": ms_between(begin_ns, visible_ns),
-                    "visible_latency_ms": ms_between(begin_ns, visible_ns),
-                }
-            )
+            measurement = {
+                "sample_index": index + 1,
+                "probe_id": probe_id,
+                "token": token,
+                "enqueue_to_rpc_begin_ms": ms_between(enqueue_ns, rpc_begin_ns),
+                "flush_to_rpc_begin_ms": ms_between(flush_ns, rpc_begin_ns),
+                "rpc_ms": round(rpc_ms, 3),
+                "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
+                "event_to_frame_publish_ms": event_to_frame_publish_ms,
+                "host_publish_to_relay_read_ms": bridge_split["host_publish_to_relay_read_ms"],
+                "relay_read_to_network_send_begin_ms": bridge_split["relay_read_to_network_send_begin_ms"],
+                "network_send_begin_to_stream_visible_ms": bridge_split["network_send_begin_to_stream_visible_ms"],
+                "frame_publish_to_visible_ms": frame_publish_to_visible_ms,
+                "event_to_visible_ms": ms_between(begin_ns, visible_ns),
+                "visible_latency_ms": ms_between(begin_ns, visible_ns),
+            }
+            measurement.update(visible_meta)
+            measurements.append(measurement)
     finally:
         close_stream(stream)
     return {
@@ -1067,6 +1157,7 @@ def run_ios_input_latency() -> dict:
         "measurements": measurements,
         "summary": summarize_latencies(measurements),
         "phase_summaries": summarize_phases(measurements),
+        "visible_render_summary": summarize_visible_render_samples(measurements),
         "budget_enforced": True,
     }
 
@@ -1106,8 +1197,10 @@ def run_ios_scrollback_latency() -> dict:
             event_to_frame_publish_ms = None
             frame_publish_to_visible_ms = None
             no_op = remote_frame is None
+            visible_meta = {}
             if remote_frame:
                 changed_state, frame_ns = remote_frame
+                visible_meta = visible_render_metadata(changed_state)
                 rendered_change_latency_ms = ms_between(begin_ns, frame_ns)
                 rpc_end_to_render_visible_ms = ms_between(rpc_end_ns, frame_ns)
                 frame_publish = last_performance_event(session_id, "mac-host", "render_frame_payload_publish", begin_ns, before_ns=frame_ns)
@@ -1135,6 +1228,12 @@ def run_ios_scrollback_latency() -> dict:
                     text_changed=plain_text(changed_state) != before_text,
                     event_to_visible_ms=rendered_change_latency_ms,
                     rpc_end_to_render_visible_ms=rpc_end_to_render_visible_ms,
+                    visible_reason=visible_meta["visible_reason"],
+                    visible_frame_kind=visible_meta["visible_frame_kind"],
+                    visible_fallback_reason=visible_meta["visible_fallback_reason"],
+                    visible_changed_cell_count=visible_meta["visible_changed_cell_count"],
+                    visible_render_update_bytes=visible_meta["visible_render_update_bytes"],
+                    visible_json_payload_bytes=visible_meta["visible_json_payload_bytes"],
                 )
             else:
                 bridge_split = {
@@ -1151,25 +1250,26 @@ def run_ios_scrollback_latency() -> dict:
                     received=False,
                     remote_frame_timeout_s=remote_frame_timeout,
                 )
-            measurements.append(
-                {
-                    "sample_index": index + 1,
-                    "probe_id": probe_id,
-                    "scroll_delta": scroll_delta,
-                    "event_to_visible_ms": rendered_change_latency_ms,
-                    "visible_latency_ms": rendered_change_latency_ms,
-                    "rpc_end_to_render_visible_ms": rpc_end_to_render_visible_ms,
-                    "event_to_frame_publish_ms": event_to_frame_publish_ms,
-                    "host_publish_to_relay_read_ms": bridge_split["host_publish_to_relay_read_ms"],
-                    "relay_read_to_network_send_begin_ms": bridge_split["relay_read_to_network_send_begin_ms"],
-                    "network_send_begin_to_stream_visible_ms": bridge_split["network_send_begin_to_stream_visible_ms"],
-                    "frame_publish_to_visible_ms": frame_publish_to_visible_ms,
-                    "rendered_change_latency_ms": rendered_change_latency_ms,
-                    "rpc_ms": round(rpc_ms, 3),
-                    "scroll_vertical": scroll_delta,
-                    "no_op": no_op,
-                }
-            )
+            measurement = {
+                "sample_index": index + 1,
+                "probe_id": probe_id,
+                "scroll_delta": scroll_delta,
+                "event_to_visible_ms": rendered_change_latency_ms,
+                "visible_latency_ms": rendered_change_latency_ms,
+                "rpc_end_to_render_visible_ms": rpc_end_to_render_visible_ms,
+                "event_to_frame_publish_ms": event_to_frame_publish_ms,
+                "host_publish_to_relay_read_ms": bridge_split["host_publish_to_relay_read_ms"],
+                "relay_read_to_network_send_begin_ms": bridge_split["relay_read_to_network_send_begin_ms"],
+                "network_send_begin_to_stream_visible_ms": bridge_split["network_send_begin_to_stream_visible_ms"],
+                "frame_publish_to_visible_ms": frame_publish_to_visible_ms,
+                "rendered_change_latency_ms": rendered_change_latency_ms,
+                "rpc_ms": round(rpc_ms, 3),
+                "scroll_vertical": scroll_delta,
+                "no_op": no_op,
+            }
+            if visible_meta:
+                measurement.update(visible_meta)
+            measurements.append(measurement)
     finally:
         close_stream(stream)
     return {
@@ -1177,6 +1277,7 @@ def run_ios_scrollback_latency() -> dict:
         "measurements": measurements,
         "summary": summarize_latencies(measurements),
         "phase_summaries": summarize_phases(measurements),
+        "visible_render_summary": summarize_visible_render_samples(measurements),
         "no_op_gestures": sum(1 for item in measurements if item.get("no_op")),
         "rendered_change_count": sum(1 for item in measurements if not item.get("no_op")),
         "report_only": True,
@@ -1195,7 +1296,10 @@ def payload_rate_summary(records: list[dict]) -> dict:
             "stale_drops": 0,
             "render_mode": "ghostty-mirror",
             "render_update_count": 0,
+            "full_render_update_count": 0,
+            "delta_render_update_count": 0,
             "materialized_snapshot_count": 0,
+            "render_update_bytes": 0,
             "render_cadence_ms": summarize_values([]),
         }
     first_ns = good_records[0]["received_ns"]
@@ -1231,6 +1335,8 @@ def payload_rate_summary(records: list[dict]) -> dict:
         "stale_drops": 0,
         "render_mode": "ghostty-mirror",
         "render_update_count": len(update_records),
+        "full_render_update_count": sum(1 for record in update_records if record.get("frame_kind") == "full"),
+        "delta_render_update_count": sum(1 for record in update_records if record.get("frame_kind") == "delta"),
         "materialized_snapshot_count": len(snapshot_records),
         "render_update_bytes": sum(record.get("render_update_bytes") or 0 for record in good_records),
         "render_cadence_ms": summarize_values(snapshot_intervals_ms),
@@ -1253,6 +1359,16 @@ for name, result in scenario_results.items():
     p95 = result["summary"]["p95_ms"]
     if result.get("budget_enforced", True) and p95 is not None and p95 > budget["gross_p95_ms"]:
         failures.append(f"{name} {network_profile} p95 {p95}ms exceeded gross budget {budget['gross_p95_ms']}ms")
+input_result = scenario_results.get("ios-input-latency")
+if input_result:
+    for measurement in input_result.get("measurements") or []:
+        sample_index = measurement.get("sample_index")
+        frame_kind = measurement.get("visible_frame_kind")
+        fallback_reason = measurement.get("visible_fallback_reason")
+        if frame_kind != "delta":
+            failures.append(f"ios-input-latency sample {sample_index} visible echo used {frame_kind or 'missing'} frame, expected delta")
+        if fallback_reason == "explicit_resync":
+            failures.append(f"ios-input-latency sample {sample_index} visible echo used explicit_resync")
 if payload_metrics["decode_failures"] != 0:
     failures.append(f"render-update stream had {payload_metrics['decode_failures']} decode failures")
 if payload_metrics["render_mode"] != "ghostty-mirror":
@@ -1296,6 +1412,15 @@ for name, result in scenario_results.items():
         )
     if result.get("measurements"):
         print(f"  samples: {sample_series(result['measurements'])}")
+    visible_render = result.get("visible_render_summary") or {}
+    if visible_render:
+        print(
+            "  visible render: "
+            f"full={visible_render.get('full_visible_sample_count', 0)} "
+            f"delta={visible_render.get('delta_visible_sample_count', 0)} "
+            f"resync_required={visible_render.get('resync_required_visible_sample_count', 0)} "
+            f"median_update_bytes={visible_render.get('median_visible_render_update_bytes')}"
+        )
     if "no_op_gestures" in result:
         print(f"  scroll movement: rendered_changes={result['rendered_change_count']} no_ops={result['no_op_gestures']}")
 print(
@@ -1305,6 +1430,8 @@ print(
     f"peak10s={payload_metrics['peak_10s_bytes_per_second']} B/s "
     f"decode_failures={payload_metrics['decode_failures']} "
     f"render_updates={payload_metrics['render_update_count']} "
+    f"full={payload_metrics['full_render_update_count']} "
+    f"delta={payload_metrics['delta_render_update_count']} "
     f"materialized_snapshots={payload_metrics['materialized_snapshot_count']}"
 )
 if failures:
