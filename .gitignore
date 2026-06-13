@@ -25,6 +25,7 @@ apps/web/public/releases/*
 .env
 apps/macos/.local/
 apps/macos/.artifacts/terminal-render-profiles/
+apps/macos/.artifacts/real-system-profiles/
 
 .venv
 __pycache__
