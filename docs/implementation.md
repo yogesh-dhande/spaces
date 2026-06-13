@@ -9,7 +9,7 @@ Core invariants:
 - SQLite is the single source of truth for persisted model data and global preferences.
 - yabai is the source of truth for window IDs and cross-app window focus.
 - Workspace settings are seeded from project templates at workspace creation and preserved as per-workspace overrides after that.
-- Schema migrations must preserve current project, workspace, and runtime data.
+- Store startup accepts only the current app schema and fails closed for unsupported schema versions.
 - GUI and CLI both call the same orchestration layer instead of re-implementing behavior independently.
 
 ## Module Map
@@ -37,6 +37,100 @@ flowchart LR
   systembridge --> yabai["yabai"]
   systembridge --> chrome["Chrome AppleScript"]
 ```
+
+## Runtime Process Communication
+
+```mermaid
+flowchart TD
+  subgraph mac["Mac profile"]
+    app["SpacesApp / spacesui"]
+    cli["spaces CLI"]
+    core["workspacecore"]
+    db[("SQLite profile database")]
+    keychain["macOS Keychain"]
+    spacesd["spacesd\nTerminalService + mobile bridge supervisor"]
+    mobileControl["Mobile bridge control socket"]
+    mobileBridge["Mobile bridge TCP listener"]
+    terminal["Ghostty session core\nper terminal session"]
+    child["Shell / process / coding-agent child"]
+    runtimeFiles[("Runtime files\nlogs, sockets, terminal output, mobile JSON")]
+    yabai["yabai"]
+    chrome["Google Chrome"]
+    sshForward["ssh -N -L browser forward"]
+    terminalProxy["spaces terminal proxy\noptional TCP bridge"]
+  end
+
+  subgraph ios["iOS"]
+    iosApp["SpacesMobile"]
+  end
+
+  subgraph remote["Remote compute host"]
+    sshd["sshd"]
+    remoteSpacesd["spacesd\nTerminalService TLS listener"]
+    remoteTerminal["Ghostty headless session core"]
+    remoteChild["Remote shell / process / agent child"]
+    remoteRuntime[("Remote profile runtime\nSQLite, logs, terminal state")]
+    signalHelper["remote spaces helper\nbin/spaces agent signal"]
+  end
+
+  bonjour["Bonjour / NetService"]
+
+  app --> core
+  cli --> core
+  core <--> db
+  core --> keychain
+  app --> mobileControl
+  mobileControl --> spacesd
+  app --> yabai
+  app --> chrome
+  core --> yabai
+  core --> chrome
+
+  app -->|TerminalService JSON: create/list/state/terminate/runWorkspaceCommand\nprofile Unix socket; auth by local user + 0600 socket| spacesd
+  cli -->|TerminalService JSON for terminal create/list\nprofile Unix socket; auth by local user + 0600 socket| spacesd
+  spacesd -->|launch config, runtime state, clients, attachments, final render| db
+  spacesd --> runtimeFiles
+  spacesd --> terminal
+  terminal <-->|PTY bytes, resize, input, foreground process samples\nSPACES_* environment| child
+  terminal <-->|TerminalControl JSON: attach, detach, heartbeat, takeover, send, key, resize, scroll\nper-session Unix socket; auth by local user + 0600 socket; owner commands require clientID| app
+  cli -->|TerminalControl JSON: send, key, takeover, tail\nper-session Unix socket; auth by local user + 0600 socket| terminal
+  terminal -->|newline-delimited GhosttyRemoteSessionStatePayload\nper-session Unix subscription socket; auth by local user + 0600 socket| app
+
+  cli --> terminalProxy
+  terminalProxy -->|TerminalControl JSON over TCP; --auth-token checked in request| terminal
+
+  spacesd --> mobileBridge
+  mobileBridge -->|publishes service name, port, TXT metadata only; no authorization data| bonjour
+  iosApp -->|discovers host and port| bonjour
+  iosApp -->|SpacesMobileBridge JSON commands and state subscription\nTLS-PSK using pairing transport key; app auth token bound to first-party bundle + installation ID| mobileBridge
+  mobileBridge -->|overview, create/run/stop/restart, terminal state for local and remote sessions| core
+  mobileBridge -->|TerminalControl JSON and state-stream relay for local sessions\nper-session Unix sockets; paired device token required before relay| terminal
+  mobileBridge -->|TerminalService JSON and state-stream relay for remote sessions\npaired device token required before relay| remoteSpacesd
+  mobileBridge -->|paired device token hashes and bridge settings| runtimeFiles
+
+  app -->|SSH BatchMode bootstrap script\nOpenSSH auth; host key accept-new; passes profile root, runtime root, port, SPACESD_AUTH_TOKEN| sshd
+  sshd --> remoteSpacesd
+  app -->|TerminalService JSON: ping, prepareWorkspace, create, state, control, terminate, runWorkspaceCommand\nTLS 1.2/1.3 with pinned SHA-256 certificate fingerprint; bearer auth token from Keychain or SPACESD_AUTH_TOKEN_*| remoteSpacesd
+  core -->|same pinned-TLS TerminalService requests for remote launch/stop/setup| remoteSpacesd
+  remoteSpacesd --> remoteRuntime
+  remoteSpacesd --> remoteTerminal
+  remoteTerminal <-->|PTY bytes, resize, input, foreground process samples\nmanifest SPACES_* environment| remoteChild
+  signalHelper -->|TerminalService agentSignal request with session/workspace context\nremote profile Unix socket; auth by remote user + 0600 socket| remoteSpacesd
+  remoteSpacesd -->|pending remote agent signal events| remoteRuntime
+  app -->|state polling fetches pending agent signals; ackAgentSignals after Mac profile update\npinned TLS + host auth token| remoteSpacesd
+
+  app -->|allocates local ephemeral port and starts ssh -L\nOpenSSH auth; forwards Mac 127.0.0.1:local to remote 127.0.0.1:namedPort| sshForward
+  sshForward --> sshd
+  chrome -->|loads rewritten localhost URL through SSH tunnel| sshForward
+```
+
+- `spacesd` is per profile. On macOS it always serves the profile Unix socket; when `SPACESD_LISTEN_PORT` is set it also serves the pinned-TLS TerminalService endpoint used by compute hosts.
+- The mobile bridge is hosted inside `spacesd`. Its control socket is local-only and used by the Mac UI to inspect bridge status, open pairing windows, revoke devices, and rotate pairing state.
+- Mobile bridge transport has two authentication layers: TLS-PSK proves possession of the pairing transport key from the QR/deep link, and the per-device auth token proves a paired first-party iOS installation. Tokens are stored only as hashes in the profile runtime.
+- Remote `spacesd` transport has two authentication layers: clients pin the daemon's self-signed certificate fingerprint from `compute_hosts.daemon_certificate_fingerprint`, then include the host auth token from Keychain or the environment in each TerminalService request.
+- Local Unix socket transports rely on profile-scoped paths under `/tmp/spaces-terminal-sockets` and `0600` permissions. They are not cross-user or cross-profile APIs.
+- Bonjour advertises only discoverability metadata for the mobile bridge. It is not used for trust or authorization.
+- `spaces terminal proxy` is an explicit CLI-run TCP bridge for one terminal session. It forwards TerminalControl JSON to the local per-session socket and requires the configured shared token.
 
 ## Module Responsibilities
 - `SpacesApp`: minimal app entry point that boots AppKit.
@@ -85,20 +179,20 @@ flowchart LR
 - `spacesd` creates or loads a profile-scoped self-signed TLS identity under the terminal runtime root's `daemon-tls` directory. Remote daemon clients verify the pinned SHA-256 certificate fingerprint from `SpacesDaemonEndpoint` during TLS handshake before sending newline-framed JSON requests with any configured auth token. The Mac app stores generated per-host daemon auth tokens in Keychain under the active Spaces profile root and host ID; environment variables remain the automation override.
 - `SSHConfigurationResolver` parses `ssh -G` output so Remote Hosts can treat the entered SSH alias as user-facing input while storing the resolved `HostName` as the internal daemon host when OpenSSH provides one.
 - `ComputeHostBootstrapper` runs the Remote Hosts connect path over SSH with non-interactive host access. The remote shell resolves `spacesd` from the SSH PATH, uses a stable per-host remote profile root under `~/.spaces/compute-hosts/<host-id>`, resolves the workspace root, prints the daemon TLS fingerprint, starts `spacesd` with the selected port and the Keychain-backed token when the selected port is not already listening, and returns the fingerprint, workspace root, selected port, and log metadata for the Mac app to verify with pinned TLS before saving the host.
-- Ubuntu 24.04 x86_64 compute hosts consume the `spacesd-ubuntu-24.04-x86_64.tar.gz` artifact. The artifact keeps `bin/spacesd` as the executable PATH entry, wraps `spacesd-bin` with the bundled Swift runtime library path, ships a minimal `bin/spaces signal` helper for remote agent lifecycle events, and ships `libghostty-vt` beside the daemon binary so headless Ghostty rendering does not require a display server or Swift toolchain installation on the host.
-- `projects.default_compute_host_id` and `workspaces.compute_host_override_id` store nullable host preferences. The local Mac is implicit and represented by the absence of an effective remote host.
-- `workspace_compute_bindings` stores one stable remote path per workspace and host. Conflict updates preserve the original `remote_path` so host switching does not silently move an existing remote checkout.
-- `ComputeHostPlanner` owns deterministic selection and manifest planning: workspace override takes precedence over project default, which takes precedence over local Mac; remote daemon targets carry endpoint metadata, and local daemon targets use the profile service socket.
+- Ubuntu 24.04 x86_64 compute hosts consume the `spacesd-ubuntu-24.04-x86_64.tar.gz` artifact. The artifact keeps `bin/spacesd` as the daemon executable PATH entry, wraps `spacesd-bin` with the bundled Swift runtime library path, ships the Swift `spaces` executable, and ships `libghostty-vt` beside the daemon binary so headless Ghostty rendering does not require a display server or Swift toolchain installation on the host.
+- `compute_hosts` includes the first-class local Mac host record with ID `local`.
+- `workspaces.host_id` stores immutable host assignment, and `workspaces.runtime_path` stores the runtime path used by that workspace on its assigned host.
+- `ComputeHostPlanner` owns deterministic selection and manifest planning from the workspace host ID; remote daemon targets carry endpoint metadata, and local daemon targets use the profile service socket.
 - Runtime manifests carry workspace ID, project ID, location, local path, remote path, branch, target branch, Git remote URL, named ports, process environment, and allowed file roots. The Mac sends that manifest to the selected remote daemon before launch.
-- Remote workspace setup scripts, configured processes, coding-agent launchers, ad hoc terminals, and stop scripts are sent to the selected `spacesd` endpoint with the runtime manifest and fast-forward refresh request. The Mac persists the returned daemon session IDs and log paths in the same process, agent, and window records used for local sessions. Daemon ownership for those records is resolved from the workspace's effective host at operation time; `runtime_target_id` remains reserved for UI and window focus targets.
+- Remote workspace setup scripts, configured processes, coding-agent launchers, ad hoc terminals, and stop scripts are sent to the selected `spacesd` endpoint with the runtime manifest and fast-forward refresh request. The Mac persists the returned daemon session IDs and log paths in the same process, agent, and window records used for local sessions. Daemon ownership for those records is resolved from the workspace host at operation time; `runtime_target_id` remains reserved for UI and window focus targets.
 - Remote configured process and coding-agent launch paths mirror returned terminal launch, runtime, attachment, and render-state metadata into the Mac profile before opening a native owner window. The native window resolves the workspace's effective daemon endpoint at open time and sends attach, takeover, input, resize, scroll, and state refresh requests to that endpoint while keeping the Mac-side terminal tables as a local mirror for window chrome, ownership UI, and ended-session reopening.
-- Remote `spaces signal` events are queued by the remote daemon with the terminal session identity and workspace manifest context. Mac remote terminal windows fetch pending signal events during state refresh, apply them to the Mac profile's coding-agent rows, and acknowledge only the events that were handled so remote agent lifecycle state remains database-backed.
+- Remote `spaces agent signal` events are queued by the remote daemon with the terminal session identity and workspace manifest context. Mac remote terminal windows fetch pending signal events during state refresh, apply them to the Mac profile's coding-agent rows, and acknowledge only the events that were handled so remote agent lifecycle state remains database-backed.
 - Remote `spacesd` validates working directories against manifest allowed roots, clones a missing empty Git worktree from the provided remote URL and branch, refreshes existing worktrees through the fast-forward-only `RemoteWorkspaceGitClient` path in `spacesruntimecore`, starts Ghostty-backed sessions, and runs synchronous workspace commands with daemon-side logs. Existing non-empty non-Git paths, dirty worktrees, missing branches, divergent histories, overwrite risks, fetch failures, and checkout failures block execution instead of resetting or cleaning remote state.
 - Remote worktree refresh is modeled as a fast-forward-only preflight. `RemoteWorkspaceGitClient.refreshWorktreeFastForwardOnly` fetches the workspace branch, checks for tracked dirty state and untracked overwrite risks, requires `HEAD` to be an ancestor of `origin/<branch>`, and advances with `merge --ff-only`. `RemoteWorkspaceRefreshBlock` reports dirty worktrees, overwrite risks, divergent histories, missing branches, fetch failures, and checkout failures with host, path, branch, and guidance. Destructive repair paths such as reset, stash, forced checkout, or cleanup are outside the launch path.
-- The mobile overview builder attaches an optional terminal daemon endpoint to process rows, coding-agent rows, workspace terminal rows, and terminal session summaries. The Mac bridge remains the metadata and mutation authority, and iOS terminal detail uses the endpoint to send state, control, resize, scroll, and terminal-link preview requests directly to the daemon that owns the session.
+- The mobile overview builder attaches terminal ownership metadata to process rows, coding-agent rows, workspace terminal rows, and terminal session summaries. The Mac bridge remains the metadata, mutation, and iOS terminal authority; remote terminal detail requests are proxied by Mac `spacesd` to the daemon that owns the session.
 - Terminal link preview resolution lives in `spacesmobilecore` so the owning local or remote daemon can resolve file and external media links without importing the Mac mobile bridge server. Remote `spacesd` terminal service commands are scoped to terminal/session/preview operations. Project, workspace, host, and lifecycle mutations continue to enter through the Mac bridge, which resolves the effective host and forwards launch or stop requests through the compute-host runtime path.
 - Editor integration derives Remote SSH URIs from host SSH metadata and the bound remote path.
-- Product CLI commands report the effective host for lifecycle actions, support execution from Spaces-owned remote compute-host terminals, and do not expose host-management subcommands. Automation setup, host selection, and runtime-plan inspection for compute hosts belong in `spacese2e`.
+- The product `spaces` CLI exposes grouped project, workspace, agent, terminal, and MCP commands. Workspace creation requires explicit project, branch, and host IDs. Grouped CLI commands and `spaces mcp` send explicit profile commands to the adjacent Mac `spacesd` over the profile service socket. MCP exposes project, workspace, and terminal list/tail/send tools; terminal send forwards either UTF-8 text or validated raw bytes through the same daemon-owned control path. Agent lifecycle signaling remains a CLI-only hook path. `spaces import` is not a public command because workspace creation creates profile state, port allocations, and setup state rather than passively discovering a directory. Automation setup, host selection, and runtime-plan inspection for compute hosts belong in `spacese2e`.
 
 ## Persistence
 
@@ -107,7 +201,7 @@ flowchart LR
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
 - SQLite stores projects, workspaces, runtime state, terminal metadata, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` records the canonical schema version. The active schema is version `11`.
+- `migration_state.current_version` records the canonical schema version. The active schema is version `1`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
 
 ### Profile Resolution
@@ -125,146 +219,362 @@ flowchart LR
 
 ### Migration Rules
 - Fresh installs create the latest schema directly and record the current schema version.
-- Existing installs should migrate in ordered `N -> N+1` steps until they reach the current schema version.
-- Each migration step should run inside `BEGIN IMMEDIATE ... COMMIT`, update `migration_state` in the same transaction, and roll back on failure.
-- Compatible schema changes should use additive techniques such as `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, backfills, indexes, and table rebuilds with copy when SQLite requires them. Cleanup migrations may remove retired columns or tables only after current schema fields own the required data and the migration preserves active rows.
 - Store startup validates `migration_state.current_version` against the canonical schema version and fails closed when they do not match.
+- There is no compatibility migration ladder for retired schema versions.
 - Startup runs `PRAGMA integrity_check` and fails if validation does not return `ok`.
 
 ## Data Model
 
+The canonical schema is `DatabaseSchema.currentVersion == 1`. Foreign keys below reflect the SQLite schema. Terminal tables also correlate by `session_id` and `root_directory` because they are shared by local and daemon-hosted terminal persistence paths.
+
 ```mermaid
-classDiagram
-  class Project {
-    +id
-    +name
-    +dir
-    +is_git
-    +default_branch
-    +is_collapsed
-    +setup_script
-    +stop_script
+erDiagram
+  projects {
+    TEXT id PK
+    TEXT name
+    TEXT dir
+    INTEGER is_git
+    TEXT default_branch
+    INTEGER is_collapsed
+    TEXT setup_script
+    TEXT stop_script
   }
 
-  class Workspace {
-    +id
-    +project_id
-    +title
-    +dir
-    +dirname
-    +branch
-    +target_branch
-    +is_default
-    +is_archived
-    +is_hidden
-    +is_running
-    +last_launched_at
-    +notes
+  project_port_definitions {
+    TEXT id
+    TEXT project_id PK
+    TEXT name
+    INTEGER order_index PK
   }
 
-  class WorkspaceSettings {
-    +workspace_id
-    +stop_script
-    +setup_status
-    +setup_error
-    +setup_started_at
-    +setup_finished_at
-    +setup_exit_code
-    +setup_log_path
+  project_processes {
+    TEXT id PK
+    TEXT project_id FK
+    TEXT name
+    TEXT command
+    TEXT on_exit
+    INTEGER order_index
   }
 
-  class WorkspacePort {
-    +workspace_id
-    +port_index
-    +port_number
-    +port_name
-    +definition_id
+  project_browser_sessions {
+    TEXT project_id PK
+    TEXT name
+    TEXT url
+    INTEGER order_index PK
   }
 
-  class RunningProcess {
-    +id
-    +workspace_id
-    +template_id
-    +template_name
-    +command
-    +runtime_target_id
-    +terminal_session_id
-    +pid
-    +status
-    +log_path
-    +last_output_at
-    +started_at
-    +exited_at
+  project_agent_launchers {
+    TEXT project_id PK
+    TEXT id
+    TEXT name
+    TEXT command
+    INTEGER order_index PK
   }
 
-  class RuntimeTarget {
-    +id
-    +workspace_id
-    +type
-    +name
-    +detail
-    +app
-    +window_id
-    +tracking_id
-    +order_index
-    +created_at
-    +updated_at
+  workspaces {
+    TEXT id PK
+    TEXT project_id FK
+    TEXT host_id FK
+    TEXT title
+    TEXT dir
+    TEXT runtime_path
+    TEXT dirname
+    TEXT branch
+    TEXT target_branch
+    INTEGER is_default
+    INTEGER is_archived
+    INTEGER is_hidden
+    INTEGER is_running
+    TEXT last_launched_at
+    TEXT notes
   }
 
-  class BrowserTarget {
-    +runtime_target_id
-    +target_url
-    +resolved_url
+  workspace_ports {
+    TEXT workspace_id PK
+    INTEGER port_index PK
+    INTEGER port_number
+    TEXT port_name
+    TEXT definition_id
   }
 
-  class AgentSession {
-    +id
-    +workspace_id
-    +provider
-    +label
-    +status
-    +runtime_target_id
-    +terminal_session_id
-    +session_key
-    +claimed_launcher_id
-    +claimed_launcher_name
-    +created_at
-    +updated_at
+  workspace_port_definitions {
+    TEXT id
+    TEXT workspace_id PK
+    TEXT name
+    INTEGER order_index PK
   }
 
-  class RuntimeTargetEvent {
-    +id
-    +runtime_target_id
-    +event_type
-    +source
-    +message
-    +window_id
-    +created_at
+  workspace_settings {
+    TEXT workspace_id PK
+    TEXT stop_script
+    TEXT setup_status
+    TEXT setup_error
+    TEXT setup_started_at
+    TEXT setup_finished_at
+    INTEGER setup_exit_code
+    TEXT setup_log_path
   }
 
-  class AgentSessionEvent {
-    +id
-    +agent_session_id
-    +event_type
-    +source
-    +message
-    +runtime_target_id
-    +created_at
+  workspace_processes {
+    TEXT id PK
+    TEXT workspace_id FK
+    TEXT name
+    TEXT command
+    TEXT on_exit
+    INTEGER order_index
   }
 
-  Project "1" --> "*" Workspace
-  Workspace "1" --> "0..1" WorkspaceSettings
-  Workspace "1" --> "*" WorkspacePort
-  Workspace "1" --> "*" RunningProcess
-  Workspace "1" --> "*" RuntimeTarget
-  Workspace "1" --> "*" AgentSession
-  RunningProcess "*" --> "0..1" RuntimeTarget : runtime_target_id
-  RuntimeTarget "1" --> "0..1" BrowserTarget
-  RuntimeTarget "1" --> "*" RuntimeTargetEvent
-  AgentSession "*" --> "0..1" RuntimeTarget : runtime_target_id
-  AgentSession "1" --> "*" AgentSessionEvent
-  AgentSessionEvent "*" --> "0..1" RuntimeTarget : runtime_target_id
+  workspace_browser_sessions {
+    TEXT workspace_id PK
+    TEXT name
+    TEXT url
+    TEXT extracted_target_url
+    INTEGER extracted_window_id
+    INTEGER extracted_window_valid
+    INTEGER order_index PK
+  }
+
+  workspace_agent_launchers {
+    TEXT workspace_id PK
+    TEXT id
+    TEXT name
+    TEXT command
+    INTEGER order_index PK
+  }
+
+  running_processes {
+    TEXT id PK
+    TEXT workspace_id FK
+    TEXT template_id
+    TEXT template_name
+    TEXT command
+    TEXT runtime_target_id FK
+    TEXT terminal_session_id
+    INTEGER pid
+    TEXT status
+    TEXT log_path
+    TEXT last_output_at
+    TEXT started_at
+    TEXT exited_at
+  }
+
+  runtime_targets {
+    TEXT id PK
+    TEXT workspace_id FK
+    TEXT type
+    TEXT name
+    TEXT detail
+    TEXT app
+    INTEGER window_id
+    TEXT tracking_id
+    INTEGER order_index
+    TEXT created_at
+    TEXT updated_at
+  }
+
+  browser_targets {
+    TEXT runtime_target_id PK
+    TEXT target_url
+    TEXT resolved_url
+  }
+
+  agent_sessions {
+    TEXT id PK
+    TEXT workspace_id FK
+    TEXT provider
+    TEXT label
+    TEXT status
+    TEXT runtime_target_id FK
+    TEXT terminal_session_id
+    TEXT session_key
+    TEXT claimed_launcher_id
+    TEXT claimed_launcher_name
+    TEXT created_at
+    TEXT updated_at
+  }
+
+  runtime_target_events {
+    TEXT id PK
+    TEXT runtime_target_id FK
+    TEXT event_type
+    TEXT source
+    TEXT message
+    INTEGER window_id
+    TEXT created_at
+  }
+
+  agent_session_events {
+    TEXT id PK
+    TEXT agent_session_id FK
+    TEXT event_type
+    TEXT source
+    TEXT message
+    TEXT runtime_target_id FK
+    TEXT created_at
+  }
+
+  compute_hosts {
+    TEXT id PK
+    TEXT name
+    TEXT kind
+    TEXT ssh_host
+    TEXT ssh_user
+    INTEGER ssh_port
+    TEXT workspace_root
+    TEXT daemon_host
+    INTEGER daemon_port
+    TEXT daemon_certificate_fingerprint
+    TEXT created_at
+    TEXT updated_at
+  }
+
+  terminal_sessions {
+    TEXT session_id PK
+    TEXT root_directory
+    TEXT backend
+    TEXT lifetime_policy
+    TEXT workspace_id
+    TEXT kind
+    TEXT title
+    TEXT working_directory
+    TEXT shell
+    TEXT command
+    TEXT created_at
+  }
+
+  terminal_runtime_states {
+    TEXT session_id PK
+    TEXT root_directory
+    TEXT backend
+    INTEGER service_pid
+    INTEGER child_pid
+    TEXT title
+    TEXT working_directory
+    INTEGER columns
+    INTEGER rows
+    TEXT state
+    TEXT updated_at
+    TEXT exited_at
+    INTEGER foreground_pid
+    TEXT foreground_executable_path
+    TEXT foreground_executable_name
+    TEXT foreground_argv_json
+    TEXT foreground_detected_agent_kind
+    TEXT foreground_display_label
+    TEXT foreground_display_command
+  }
+
+  terminal_clients {
+    TEXT root_directory PK
+    TEXT session_id
+    TEXT client_id PK
+    TEXT kind
+    TEXT identity_label
+    TEXT identity_host_name
+    TEXT identity_device_name
+    TEXT identity_network_address
+    TEXT connected_at
+    TEXT lease_refreshed_at
+    TEXT disconnected_at
+  }
+
+  terminal_attachments {
+    TEXT id PK
+    TEXT root_directory
+    TEXT session_id
+    TEXT client_id
+    TEXT mode
+    TEXT attached_at
+    TEXT detached_at
+  }
+
+  terminal_window_frames {
+    TEXT root_directory PK
+    TEXT session_id
+    TEXT mode PK
+    REAL x
+    REAL y
+    REAL width
+    REAL height
+    TEXT updated_at
+  }
+
+  terminal_remote_session_states {
+    TEXT session_id PK
+    TEXT root_directory
+    TEXT reason
+    TEXT payload_json
+    TEXT emitted_at
+    TEXT updated_at
+  }
+
+  terminal_agent_signal_events {
+    TEXT id PK
+    TEXT root_directory
+    TEXT session_id
+    TEXT event_type
+    TEXT workspace_id
+    TEXT workspace_path
+    TEXT provider
+    TEXT label
+    TEXT terminal_tracking_id
+    TEXT terminal_native_id
+    TEXT codex_thread_id
+    TEXT environment_keys_json
+    TEXT created_at
+    TEXT acknowledged_at
+  }
+
+  ignored_worktrees {
+    TEXT worktree_dir PK
+    TEXT project_id FK
+  }
+
+  settings {
+    TEXT key PK
+    TEXT value
+  }
+
+  migration_state {
+    INTEGER current_version
+  }
+
+  projects ||--o{ project_port_definitions : owns
+  projects ||--o{ project_processes : owns
+  projects ||--o{ project_browser_sessions : owns
+  projects ||--o{ project_agent_launchers : owns
+  projects ||--o{ workspaces : owns
+  projects ||--o{ ignored_worktrees : owns
+  compute_hosts ||--o{ workspaces : owns_runtime
+  workspaces ||--o{ workspace_ports : allocates
+  workspaces ||--o{ workspace_port_definitions : configures
+  workspaces ||--o| workspace_settings : has
+  workspaces ||--o{ workspace_processes : configures
+  workspaces ||--o{ workspace_browser_sessions : configures
+  workspaces ||--o{ workspace_agent_launchers : configures
+  workspaces ||--o{ running_processes : runs
+  workspaces ||--o{ runtime_targets : tracks
+  workspaces ||--o{ agent_sessions : tracks
+  workspaces ||--o{ terminal_sessions : logical_owner
+  runtime_targets ||--o| browser_targets : extends
+  runtime_targets ||--o{ runtime_target_events : records
+  runtime_targets ||--o{ running_processes : focus_target
+  runtime_targets ||--o{ agent_sessions : focus_target
+  runtime_targets ||--o{ agent_session_events : referenced_by
+  agent_sessions ||--o{ agent_session_events : records
+  terminal_sessions ||--o| terminal_runtime_states : state
+  terminal_sessions ||--o{ terminal_clients : clients
+  terminal_sessions ||--o{ terminal_attachments : attachments
+  terminal_sessions ||--o{ terminal_window_frames : frames
+  terminal_sessions ||--o| terminal_remote_session_states : final_render
+  terminal_sessions ||--o{ terminal_agent_signal_events : pending_signals
 ```
+
+Notable uniqueness outside primary keys:
+- `projects.dir` and `compute_hosts.name` are unique.
+- `workspaces(project_id, branch, host_id)` is unique for active non-empty branch names.
+- `terminal_sessions.root_directory`, `terminal_runtime_states.root_directory`, and `terminal_remote_session_states.root_directory` are unique.
+- `terminal_attachments` enforces at most one active owner per root and at most one active attachment per root/client pair through partial unique indexes.
 
 ### Projects
 Projects persist:
@@ -274,9 +584,10 @@ Projects persist:
 - setup and stop scripts
 - port definitions
 - process templates
+- browser-session templates
+- coding-agent launcher templates
 
 Managed clone directories under `~/spaces/repos` and managed worktree roots under `~/spaces/workspaces` must be keyed by project identity rather than project name so cleanup, retries, and same-name projects cannot collide on disk ownership. Prepared Git imports persist normalized clone paths by resolving managed-root parents while replacement checks operate on the managed entry path. Replacement of existing managed folders is limited to entries inside those managed roots, and only when SQLite has no project or workspace owner at or beneath the entry or its resolved target. The ownership check runs during preflight and immediately before deletion so a folder that becomes database-owned is preserved. Discarding an unsaved prepared Git import also rechecks ownership before cleanup and skips paths that were registered by another process. Symlinked managed entries are unlinked at the managed path instead of following the link target, but replacement candidates below symlinked ancestors inside a managed root are rejected. Replacing an orphaned managed worktree clears any matching Git worktree registration before the folder is removed, pruning stale metadata when Git reports a corrupted or missing working tree.
-- browser-session templates
 
 Project configuration can also be represented as `spaces.yaml` through GUI-only import/export in `workspacecore`. The file is resolved from the default workspace directory: local projects use the project directory, while app-managed Git projects use the checked-out default worktree. The YAML document uses schema version `1`, treats a missing `version` as `1`, rejects versions greater than the supported schema version, and omits internal database IDs. Missing optional keys decode to app-state defaults without rewriting the source file.
 
@@ -299,7 +610,8 @@ Workspaces persist:
 - default and archived flags
 - hidden sidebar visibility state
 - explicit lifecycle state (`running` vs `stopped`)
-- seeded per-workspace copies of launch-time settings
+- nullable compute-host override
+- seeded per-workspace copies of launch-time settings, including port definitions, process rows, browser sessions, agent launchers, stop script, and setup result metadata
 
 ### Runtime Records
 Runtime state persists separately from project and workspace templates:
@@ -307,9 +619,11 @@ Runtime state persists separately from project and workspace templates:
 - running processes
 - runtime targets
 - terminal target details
-- final terminal render-state payloads
+- terminal session metadata, client attachments, runtime state, and remote final render-state payloads
+- remote terminal agent-signal queue entries
 - browser target details
 - agent sessions
+- compute-host records and per-workspace remote path bindings
 
 This separation lets template edits coexist with current runtime state and per-workspace overrides.
 It also lets lifecycle state stay explicit while runtime health is derived from the current runtime records.
@@ -317,18 +631,19 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 ### Runtime Target Model
 - `runtime_targets` is the canonical inventory of focusable runtime items for a workspace. Each row stores shared fields such as `type`, host app, current yabai `window_id`, durable terminal `tracking_id`, ordering, and display metadata.
 - `browser_targets` extends browser runtime targets with the configured target URL and the last resolved URL.
-- `agent_sessions` models logical coding-agent sessions separately from focusable windows. Each row links to a `runtime_target` and stores only agent-session state: provider, display label, status, provider session key, claimed launcher name, and timestamps.
-- `agent_session_events` records signal-driven lifecycle updates and launcher-driven agent transitions. Lifecycle events keep the resolved runtime-target link plus a compact message containing the provider, label, tracking token, native terminal ID, provider session key, yabai window ID, and the full set of environment key names seen by `spaces signal` for that event.
-- `running_processes` is the canonical process-status record. Each row links to a `runtime_target` and stores only process runtime state such as command, PID, status, log path, and timestamps.
+- `agent_sessions` models logical coding-agent sessions separately from focusable windows. Each row links to a `runtime_target` when the session is focusable and stores agent-session state: provider, display label, status, provider session key, claimed launcher identity, durable Spaces `terminal_session_id`, and timestamps.
+- `agent_session_events` records signal-driven lifecycle updates and launcher-driven agent transitions. Lifecycle events keep the resolved runtime-target link plus a compact message containing the provider, label, tracking token, native terminal ID, provider session key, yabai window ID, and the full set of environment key names seen by `spaces agent signal` for that event.
+- `running_processes` is the canonical process-status record. Each row links to a `runtime_target` when focusable and stores process runtime state such as template identity, command, PID, status, log path, durable Spaces `terminal_session_id`, and timestamps.
 - Runtime targets are seeded as soon as a process or agent terminal is known, even before a separate window-reconciliation pass fills in a live yabai `window_id`. That keeps process and agent rows linked to a single canonical target instead of caching terminal identity on the base row.
-- Configured process and coding-agent rows group by their reserved workspace slot and use the linked runtime target's `tracking_id` as the current Spaces terminal session identity for Mac focus, restart, and mobile overview. Replacement launch paths terminate and close the prior Spaces-backed session before deleting or rebinding the runtime row, which prevents orphaned configured sessions from reappearing as ad-hoc mobile rows. Exit and missing-window prune paths preserve configured coding-agent rows and their `terminal_session_id`; ad-hoc agent rows remain tied to their tracked terminal target and are removed when that target disappears.
+- Configured process and coding-agent rows group by their reserved workspace slot and use `terminal_session_id` as the durable Spaces terminal session identity for focus, restart, final-frame viewing, and mobile overview. The linked runtime target's `tracking_id` mirrors the focusable terminal target while a window or terminal target exists. Replacement launch paths terminate and close the prior Spaces-backed session before deleting or rebinding the runtime row, which prevents orphaned configured sessions from reappearing as ad-hoc mobile rows. Exit and missing-window prune paths preserve configured coding-agent rows and their `terminal_session_id`; ad-hoc agent rows remain tied to their tracked terminal target and are removed when that target disappears.
 
 ### Data Modeling Guidelines
 - Base tables should stay generic. If a field only makes sense for one provider or feature family, it should live on an adapter-specific runtime path rather than on a cross-cutting base record.
-- `runtime_targets` is the shared focus inventory. Keep terminal identity there only because the built-in-only branch has one terminal runtime and one durable session identifier per target.
-- Agent-session records should describe logical session state, not terminal implementation details. Agent sessions should relate to terminal identity through `runtime_targets` instead of copying terminal fields onto the session row.
-- Running-process records should describe process runtime, not terminal identity. Process rows should link to the relevant runtime target instead of owning terminal-specific fields.
-- When a process or agent needs terminal identity before yabai has reconciled a live window, seed or reuse a `runtime_target` record rather than persisting terminal identity on the base process or session row.
+- `runtime_targets` is the shared focus inventory. It owns transient window identity and focus metadata, while process and agent rows own their configured slot state.
+- The `terminal_session_id` columns on `running_processes` and `agent_sessions` are deliberate durable Spaces session ownership fields. Keep them aligned with the matching Spaces terminal launch and use `runtime_targets.tracking_id` for focus/window correlation.
+- Agent-session records should describe logical session state, not terminal rendering implementation details. Provider-specific terminal metadata should stay in terminal persistence or event payloads unless the configured row needs a stable session identity.
+- Running-process records should describe process runtime and configured slot ownership, not terminal rendering internals. Process rows should link to the relevant runtime target for focus behavior instead of owning window-specific fields.
+- When a process or agent needs focus identity before yabai has reconciled a live window, seed or reuse a `runtime_target` record. When it needs durable final-frame or restart identity, persist the Spaces terminal session ID on the process or agent row.
 - Provider-specific naming should be avoided in shared schema. Generic fields such as `provider` and `session_key` are acceptable when the same concept exists across providers; fields named for one product should be treated as transitional and refactored away.
 - Add abstractions only when current behavior needs them. Extensibility matters, but speculative tables or fields should not be added before a real workflow requires them.
 - Prefer event history for debugging destructive transitions over piling more `last_*` and `*_reason` fields onto canonical state rows. When a target or session is rebound, detached, or pruned, the system should leave an inspectable event trail.
@@ -420,12 +735,12 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 
 ## Agent Integration
 - Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.
-- `spaces signal` only resolves direct built-in terminal environments. `init` creates or attaches the originating terminal's agent row. Non-`init` events update an existing row, or establish one when the signal context or current terminal runtime identifies the terminal as a coding agent. The label inference path recognizes `codex`-, `claude`-, and `opencode`-specific environments, while `SPACES_AGENT_LABEL` remains the explicit label override for custom agent hook integrations.
+- `spaces agent signal` resolves explicit workspace and terminal-session IDs. `init` creates or attaches the originating terminal's agent row. Non-`init` events update an existing row, or establish one when the signal context or current terminal runtime identifies the terminal as a coding agent. The label inference path recognizes configured Spaces agent terminals and known runtime agent foreground state.
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata, but `init` also reconciles them against tracked terminal windows so ad-hoc agent terminals become focusable tracked rows.
 - Built-in terminal runtime state records nullable foreground process metadata for the sampled foreground PID, with separate nullable classification fields for known coding-agent commands including `codex`, `claude`, `claude-code`, and `opencode`. The Ghostty host classifies only the current live foreground PID; cached child PID state is used for process liveness and is not used for agent classification. The classifier matches the resolved executable basename and the POSIX invocation basename (`argv[0]`) as command identity candidates, then handles Node wrapper script paths. Later arguments are ignored for command identity so editors, search tools, and arbitrary scripts that mention an agent name are not promoted as agents.
-- The process-monitor cadence reconciles Spaces terminal sessions against foreground classifications. Terminal launch metadata identifies configured process and configured launcher sessions; `spaces signal` history is not used as configured ownership. Configured process sessions are skipped, configured launcher-backed agent rows are preserved, and ad-hoc agent rows are created while a known agent is foreground. `spaces signal` can establish an ad-hoc agent row before the polling detector observes it. Once a live terminal session has an agent row, foreground samples do not relabel, reclassify, or remove that row. Live signal-exit events record ad-hoc session-backed rows as idle, and exited ad-hoc agent sessions keep their row with a completed status so their final terminal frame remains accessible as an agent.
+- The process-monitor cadence reconciles Spaces terminal sessions against foreground classifications. Terminal launch metadata identifies configured process and configured launcher sessions; `spaces agent signal` history is not used as configured ownership. Configured process sessions are skipped, configured launcher-backed agent rows are preserved, and ad-hoc agent rows are created while a known agent is foreground. `spaces agent signal` can establish an ad-hoc agent row before the polling detector observes it. Once a live terminal session has an agent row, foreground samples do not relabel, reclassify, or remove that row. Live signal-exit events record ad-hoc session-backed rows as idle, and exited ad-hoc agent sessions keep their row with a completed status so their final terminal frame remains accessible as an agent.
 - Configured agent-launcher names are treated as reserved focus labels. The launcher-owned agent instance may keep that exact label, while unrelated ad-hoc agents that report the same label are suffixed during registration so GUI rows and harness focus targets stay unambiguous.
-- Workspace launch opens configured coding agents through the same direct-terminal path as manual agent launch. That creates the tracked agent rows eagerly, while later `spaces signal` calls still supply the actual lifecycle status.
+- Workspace launch opens configured coding agents through the same direct-terminal path as manual agent launch. That creates the tracked agent rows eagerly, while later `spaces agent signal` calls still supply the actual lifecycle status.
 - Alerts and numbered window shortcuts keep configured and ad-hoc agent rows in one `Coding Agents` section. Configured rows occupy their stable slots first, then unmatched ad-hoc agent rows append after them so shortcut ordering remains deterministic.
 - Configured-agent relaunch is conservative: if a reserved row still points at a live tracked terminal, Spaces keeps that row and treats launch as a no-op. Only clearly stale rows are evicted and replaced.
 - Ended reserved agent rows keep their terminal identity for focus and final-frame viewing; explicit launcher replacement closes and terminates that stale Spaces-backed session before rebinding the reserved row.

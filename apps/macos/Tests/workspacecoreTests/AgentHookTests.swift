@@ -283,7 +283,9 @@ final class AgentHookTests: XCTestCase {
     }
 
     func testHandleAgentExitKeepsLiveAdHocSpacesSessionIdleWithoutPersistingSignalWindowID() throws {
-        let store = try makeTemporaryStore()
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces-test.db").path
+        let store = try SQLiteStore(path: dbPath)
         let closeCapture = AgentHookTerminalCloseCapture()
         let terminateCapture = AgentHookTerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
@@ -291,13 +293,17 @@ final class AgentHookTests: XCTestCase {
             builtInTerminalSessionTerminator: { terminateCapture.sessionIDs.append($0) })
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let sessionID = UUID().uuidString
-        try writeLiveBuiltInTerminalSession(sessionID: sessionID, workspaceDirectory: workspace.dir)
+        try withSpacesProfileEnvironment(dbPath: dbPath) {
+            try writeLiveBuiltInTerminalSession(sessionID: sessionID, workspaceDirectory: workspace.dir)
+        }
 
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, terminalNativeID: sessionID,
             codexThreadID: "thread-1", yabaiWindowID: 101, status: .done)
 
-        let result = try orchestrator.handleAgentExit(agent, terminalNativeID: sessionID, yabaiWindowID: 202)
+        let result = try withSpacesProfileEnvironment(dbPath: dbPath) {
+            try orchestrator.handleAgentExit(agent, terminalNativeID: sessionID, yabaiWindowID: 202)
+        }
 
         let record = try XCTUnwrap(result)
         XCTAssertEqual(record.status, .idle)
@@ -451,6 +457,10 @@ final class AgentHookTests: XCTestCase {
     }
 
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
+        if name == SpacesProfile.databasePathEnvironmentVariable {
+            try withSpacesProfileEnvironment(dbPath: value, run: run)
+            return
+        }
         let original = ProcessInfo.processInfo.environment[name]
         setenv(name, value, 1)
         defer { if let original { setenv(name, original, 1) } else { unsetenv(name) } }

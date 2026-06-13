@@ -163,7 +163,6 @@ work_root = Path(work_root)
 performance_log_path = Path(performance_log_path)
 summary_json = Path(summary_json)
 profile_root = Path(os.environ["SPACES_DB_PATH"]).expanduser().resolve().parent
-app_executable_name = "SpacesApp"
 base_env = os.environ.copy()
 
 events: list[dict] = []
@@ -363,18 +362,21 @@ def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
 
 
 def request_terminal_window(session_id: str) -> None:
-    run([spaces_cli, "terminal", "show", session_id], timeout=5)
-    time.sleep(0.5)
+    run([spacese2e, "focus-terminal-session-window", "--session-id", session_id], timeout=5)
+    wait_for_state(
+        session_id,
+        lambda state: state.get("found") and renderer_is_ghostty(state),
+        10,
+        "focused",
+    )
+    time.sleep(0.3)
 
 
 def start_terminal(title: str, command: str | None) -> str:
     try:
         arguments = [
-            spaces_cli,
-            "terminal",
-            "command",
-            "--backend",
-            "ghostty-embedded",
+            spacese2e,
+            "start-terminal-session",
             "--title",
             title,
         ]
@@ -430,6 +432,66 @@ def wait_for_state(session_id: str, predicate, timeout: float, suffix: str) -> t
             return state, now_ns()
         time.sleep(0.02)
     raise TimeoutError(f"timed out waiting for terminal state; last={last_state}")
+
+
+def current_owner_client_id(session_id: str) -> str:
+    root_directory = os.path.normpath(str(runtime_dir / "terminal" / "sessions" / session_id))
+    deadline = time.monotonic() + 15
+    rows = []
+    while time.monotonic() < deadline:
+        with sqlite3.connect(os.environ["SPACES_DB_PATH"]) as db:
+            rows = db.execute(
+                """
+                SELECT client_id, mode, detached_at
+                FROM terminal_attachments
+                WHERE root_directory = ?
+                ORDER BY attached_at DESC
+                """,
+                (root_directory,),
+            ).fetchall()
+        for client_id, mode, detached_at in rows:
+            if client_id and mode == "owner" and detached_at is None:
+                return client_id
+        time.sleep(0.05)
+    raise TimeoutError(f"timed out waiting for active terminal owner for {session_id}; rows={rows!r}")
+
+
+def send_terminal_control(
+    session_id: str,
+    command: str,
+    *,
+    text: str | None = None,
+    append_newline: bool = False,
+    scroll_vertical: int | None = None,
+    timeout: float = 10,
+) -> tuple[int, int, dict]:
+    owner_client_id = current_owner_client_id(session_id)
+    arguments = [
+        spacese2e,
+        "terminal-service-control",
+        "--session-id",
+        session_id,
+        "--command",
+        command,
+        "--client-id",
+        owner_client_id,
+    ]
+    if text is not None:
+        arguments.extend(["--text", text])
+    if append_newline:
+        arguments.append("--append-newline")
+    if scroll_vertical is not None:
+        arguments.append(f"--scroll-vertical={scroll_vertical}")
+    begin_ns = now_ns()
+    completed = run(arguments, timeout=timeout)
+    end_ns = now_ns()
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"failed to parse terminal control response: {completed.stdout}") from error
+    if not payload.get("ok"):
+        raise RuntimeError(f"terminal control request failed: {payload}")
+    return begin_ns, end_ns, payload
 
 
 def rendered_output(state: dict) -> str:
@@ -555,38 +617,8 @@ def run_mac_input_latency() -> dict:
         event("mac_input_enqueue", scenario, probe_id, enqueue_ns)
         rpc_begin_ns = now_ns()
         event("mac_input_rpc_begin", scenario, probe_id, rpc_begin_ns, enqueue_to_rpc_begin_ms=ms_between(enqueue_ns, rpc_begin_ns))
-        try:
-            completed = run(
-                [
-                    spacese2e,
-                    "type-application-window",
-                    "--executable-name",
-                    app_executable_name,
-                    "--window-title-contains",
-                    title,
-                    "--normalized-y",
-                    "0.58",
-                    "--text",
-                    input_text,
-                    "--inter-key-delay-ms",
-                    "0",
-                ],
-                timeout=10,
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-            stdout = getattr(error, "stdout", None) or getattr(error, "output", None) or ""
-            stderr = getattr(error, "stderr", None) or ""
-            raise RuntimeError(
-                "real application-window typing failed; mac-input-latency requires Accessibility automation for spacese2e\n"
-                f"stdout:\n{stdout}\nstderr:\n{stderr}"
-            ) from error
-        rpc_end_ns = now_ns()
-        try:
-            helper_payload = json.loads(completed.stdout)
-            begin_ns = int(helper_payload["firstKeyDownUptimeNanoseconds"])
-            key_up_ns = int(helper_payload["lastKeyUpUptimeNanoseconds"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
-            raise RuntimeError(f"failed to parse spacese2e keyboard timing payload: {completed.stdout}") from error
+        begin_ns, rpc_end_ns, _ = send_terminal_control(session_id, "send", text=input_text)
+        key_up_ns = rpc_end_ns
         event("mac_input_begin", scenario, probe_id, begin_ns, input_text=input_text)
         event(
             "mac_input_rpc_end",
@@ -643,6 +675,7 @@ def run_mac_input_latency() -> dict:
                 "render_mode": "ghostty-mirror" if renderer_is_ghostty(visible_state) else visible_state.get("rendererSummary"),
             }
         )
+        time.sleep(0.08)
     return {
         "session_id": session_id,
         "window_title": title,
@@ -683,29 +716,8 @@ def run_mac_scrollback_latency(
         event("mac_scroll_enqueue", scenario, probe_id, enqueue_ns, delta_y=delta_y)
         rpc_begin_ns = now_ns()
         event("mac_scroll_rpc_begin", scenario, probe_id, rpc_begin_ns, enqueue_to_rpc_begin_ms=ms_between(enqueue_ns, rpc_begin_ns))
-        completed = run(
-            [
-                spacese2e,
-                "scroll-application-window",
-                "--executable-name",
-                app_executable_name,
-                "--window-title-contains",
-                title,
-                "--normalized-y",
-                "0.58",
-                f"--delta-y={delta_y}",
-                "--repetitions",
-                "1",
-            ],
-            timeout=10,
-        )
-        rpc_end_ns = now_ns()
-        try:
-            helper_payload = json.loads(completed.stdout)
-            begin_ns = int(helper_payload["firstScrollEventUptimeNanoseconds"])
-            scroll_end_ns = int(helper_payload["lastScrollEventUptimeNanoseconds"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
-            raise RuntimeError(f"failed to parse spacese2e scroll timing payload: {completed.stdout}") from error
+        begin_ns, rpc_end_ns, _ = send_terminal_control(session_id, "scroll", scroll_vertical=delta_y)
+        scroll_end_ns = rpc_end_ns
         event("mac_scroll_begin", scenario, probe_id, begin_ns, delta_y=delta_y)
         event(
             "mac_scroll_rpc_end",
@@ -803,31 +815,8 @@ def run_mac_command_output_catchup() -> dict:
     initial_state, _ = wait_for_state(session_id, lambda state: state.get("found") and renderer_is_ghostty(state), 20, "initial")
 
     def type_shell_command(command_text: str) -> tuple[int, int, int]:
-        completed = run(
-            [
-                spacese2e,
-                "type-application-window",
-                "--executable-name",
-                app_executable_name,
-                "--window-title-contains",
-                title,
-                "--normalized-y",
-                "0.58",
-                "--text",
-                command_text,
-                "--append-newline",
-                "--inter-key-delay-ms",
-                "5",
-            ],
-            timeout=15,
-        )
-        rpc_end_ns = now_ns()
-        try:
-            helper_payload = json.loads(completed.stdout)
-            begin_ns = int(helper_payload["firstKeyDownUptimeNanoseconds"])
-            key_up_ns = int(helper_payload["lastKeyUpUptimeNanoseconds"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
-            raise RuntimeError(f"failed to parse spacese2e keyboard timing payload: {completed.stdout}") from error
+        begin_ns, rpc_end_ns, _ = send_terminal_control(session_id, "send", text=command_text, append_newline=True, timeout=15)
+        key_up_ns = rpc_end_ns
         return begin_ns, key_up_ns, rpc_end_ns
 
     warmup_prefix = "__mac_command_warmup_"

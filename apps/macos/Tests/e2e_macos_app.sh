@@ -60,6 +60,7 @@ REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-$REMOTE_SSH_HOST}"
 REMOTE_DAEMON_PORT="${SPACES_E2E_REMOTE_DAEMON_PORT:-7443}"
 REMOTE_AUTH_TOKEN="${SPACES_E2E_REMOTE_AUTH_TOKEN:-}"
 REMOTE_GIT_ROOT="${SPACES_E2E_REMOTE_GIT_ROOT:-~/.spaces/e2e-git}"
+REMOTE_DEFAULT_WORKSPACE_DIR=""
 
 TMP_PREFIX="${TMP_PREFIX:-/tmp/spaces-real-e2e}"
 TMP_ROOT="$(cd "$(mktemp -d "$TMP_PREFIX".XXXXXX)" && pwd -P)"
@@ -1018,14 +1019,6 @@ prepare_remote_scout_git_origin() {
   prepare_remote_git_origin "$TEST_REPO_2" "macos-$slug-scout" >>"$TMP_ROOT/remote-git-origin.log" 2>&1
 }
 
-set_project_target_local() {
-  "$SPACES_E2E_CLI" set-project-default-compute-host --project-dir "$1" --local >/tmp/spaces-e2e-target-local.json
-}
-
-set_project_target_remote() {
-  "$SPACES_E2E_CLI" set-project-default-compute-host --project-dir "$1" --host-id "$REMOTE_HOST_ID" >/tmp/spaces-e2e-target-remote.json
-}
-
 configure_mixed_e2e_targets() {
   if [[ -z "$SPACES_CYCLE_LATENCY_BUDGET_MS_WAS_SET" ]]; then
     SPACES_CYCLE_LATENCY_BUDGET_MS=3000
@@ -1033,8 +1026,6 @@ configure_mixed_e2e_targets() {
   log_step "configuring mixed local/remote compute targets"
   require_remote_configuration
   export_remote_auth_token
-  set_project_target_local "$TEST_REPO"
-  set_project_target_local "$TEST_REPO_3"
   prepare_remote_scout_git_origin \
     || fail "Remote git fixture setup failed. See $TMP_ROOT/remote-git-origin.log"
   local -a args=(
@@ -1052,7 +1043,8 @@ configure_mixed_e2e_targets() {
   if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then args+=("--auth-token=$REMOTE_AUTH_TOKEN"); fi
   "$SPACES_E2E_CLI" "${args[@]}" >"$TMP_ROOT/remote-compute-host-smoke.json" 2>"$TMP_ROOT/remote-compute-host-smoke.stderr.log" \
     || fail "Remote compute host smoke failed. See $TMP_ROOT/remote-compute-host-smoke.stderr.log"
-  set_project_target_remote "$TEST_REPO_2"
+  REMOTE_DEFAULT_WORKSPACE_DIR="$(json_get "$TMP_ROOT/remote-compute-host-smoke.json" "workspace.dir")"
+  [[ -n "$REMOTE_DEFAULT_WORKSPACE_DIR" ]] || fail "Remote compute host smoke did not return a workspace directory."
 }
 
 add_workspace_process() {
@@ -1202,18 +1194,20 @@ script_path, spaces_cli, event_log = sys.argv[1:4]
 content = f"""#!/usr/bin/env bash
 set -euo pipefail
 workspace_dir="${{SPACES_WORKSPACE_DIR:-$PWD}}"
+workspace_id="${{SPACES_WORKSPACE_ID:?}}"
+session_id="${{SPACES_TERMINAL_TRACKING_ID:?}}"
 agent_log="{event_log}"
 spaces_cli="{spaces_cli}"
-"$spaces_cli" signal init "$workspace_dir" >/dev/null
-"$spaces_cli" signal start "$workspace_dir" >/dev/null
+"$spaces_cli" agent signal --workspace "$workspace_id" --session "$session_id" init >/dev/null
+"$spaces_cli" agent signal --workspace "$workspace_id" --session "$session_id" start >/dev/null
 printf 'agent-start:%s\\n' "$workspace_dir" >>"$agent_log"
 sleep 2
-"$spaces_cli" signal waiting "$workspace_dir" >/dev/null
+"$spaces_cli" agent signal --workspace "$workspace_id" --session "$session_id" waiting >/dev/null
 printf 'agent-waiting:%s\\n' "$workspace_dir" >>"$agent_log"
 sleep 6
-"$spaces_cli" signal done "$workspace_dir" >/dev/null
+"$spaces_cli" agent signal --workspace "$workspace_id" --session "$session_id" done >/dev/null
 printf 'agent-done:%s\\n' "$workspace_dir" >>"$agent_log"
-trap '"$spaces_cli" signal exit "$workspace_dir" >/dev/null 2>&1 || true; printf "agent-exit:%s\\n" "$workspace_dir" >>"$agent_log"; exit 0' TERM INT
+trap '"$spaces_cli" agent signal --workspace "$workspace_id" --session "$session_id" exit >/dev/null 2>&1 || true; printf "agent-exit:%s\\n" "$workspace_dir" >>"$agent_log"; exit 0' TERM INT
 while true; do sleep 5; done
 """
 Path(script_path).write_text(content)
@@ -1231,13 +1225,15 @@ import shlex
 
 script = r"""set -euo pipefail
 workspace_dir="${SPACES_WORKSPACE_DIR:-$PWD}"
-spaces signal init "$workspace_dir" >/dev/null
-spaces signal start "$workspace_dir" >/dev/null
+workspace_id="${SPACES_WORKSPACE_ID:?}"
+session_id="${SPACES_TERMINAL_TRACKING_ID:?}"
+spaces agent signal --workspace "$workspace_id" --session "$session_id" init >/dev/null
+spaces agent signal --workspace "$workspace_id" --session "$session_id" start >/dev/null
 sleep 2
-spaces signal waiting "$workspace_dir" >/dev/null
+spaces agent signal --workspace "$workspace_id" --session "$session_id" waiting >/dev/null
 sleep 6
-spaces signal done "$workspace_dir" >/dev/null
-trap 'spaces signal exit "$workspace_dir" >/dev/null 2>&1 || true; exit 0' TERM INT
+spaces agent signal --workspace "$workspace_id" --session "$session_id" done >/dev/null
+trap 'spaces agent signal --workspace "$workspace_id" --session "$session_id" exit >/dev/null 2>&1 || true; exit 0' TERM INT
 while true; do sleep 5; done
 """
 print("bash -lc " + shlex.quote(script))
@@ -1248,7 +1244,26 @@ PY
 }
 
 create_high_output_process_script() {
-  local project_dir="$1"
+  local host="$1"
+  local project_dir="$2"
+  if [[ "$host" == "remote" ]]; then
+    python3 <<'PY'
+import shlex
+
+script = r"""set -euo pipefail
+trap 'exit 0' TERM INT
+while true; do
+  for _ in {1..128}; do
+    printf 'spaces-e2e-noisy\n'
+  done
+  sleep 0.05
+done
+"""
+print("bash -lc " + shlex.quote(script))
+PY
+    return
+  fi
+
   local script_path="$project_dir/.spaces-e2e-high-output"
   python3 - "$script_path" <<'PY'
 import os
@@ -1780,6 +1795,7 @@ create_scout_branch_workspace() {
   "$SPACES_E2E_CLI" create-workspace \
     --project-dir "$TEST_REPO_2" \
     --title "$SCOUT_BRANCH_WORKSPACE_TITLE" \
+    --host "$REMOTE_HOST_ID" \
     --existing-branch \
     --branch "$SCOUT_BRANCH_WORKSPACE_BRANCH" \
     --target-branch main \
@@ -3953,6 +3969,14 @@ run_spaces_logged() {
     env DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-window --name "$name" --workspace-dir "$workspace_dir" >"$stdout_file" 2>>"$APP_LOG"
     return
   fi
+  if [[ "${1:-}" == "start" || "${1:-}" == "restart" ]]; then
+    local command="$1"
+    local workspace_dir="$2"
+    local workspace_id
+    workspace_id="$(workspace_id_for_dir "$workspace_dir")"
+    env DEBUG=1 "$SPACES_CLI" workspace "$command" --workspace "$workspace_id" >"$stdout_file" 2>>"$APP_LOG"
+    return
+  fi
   env DEBUG=1 "$SPACES_CLI" "$@" >"$stdout_file" 2>>"$APP_LOG"
 }
 
@@ -4877,7 +4901,7 @@ PY
     ensure_single_spaces_instance "$SPACES_PID"
     local high_output_process_command="${HIGH_OUTPUT_PROCESS_COMMAND:-}"
     if [[ -z "$high_output_process_command" ]]; then
-      high_output_process_command="$(create_high_output_process_script "$workspace_dir")"
+      high_output_process_command="$(create_high_output_process_script "$host" "$workspace_dir")"
     fi
     add_workspace_process "$workspace_dir" "$HIGH_OUTPUT_PROCESS_NAME" "$high_output_process_command" \
       >/tmp/spaces-e2e-add-high-output-process.json
@@ -4993,6 +5017,7 @@ PY
   wait_for_workspace_running_state "$workspace_dir" "true"
   wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
   wait_for_workspace_process_status "$workspace_dir" "backend" "running"
+  run_spaces_logged /tmp/spaces-e2e-lifecycle-open-docs.log open docs "$workspace_dir"
   local browser_docs_url
   browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
   local backend_status_url
@@ -5439,6 +5464,9 @@ main() {
   workspace_dir="$(json_get "$SEED_FILE" "defaultWorkspace.dir")"
   local second_workspace_dir
   second_workspace_dir="$(json_get "$SECOND_SEED_FILE" "defaultWorkspace.dir")"
+  if [[ -n "$REMOTE_DEFAULT_WORKSPACE_DIR" ]]; then
+    second_workspace_dir="$REMOTE_DEFAULT_WORKSPACE_DIR"
+  fi
   local third_workspace_dir
   third_workspace_dir="$(json_get "$THIRD_SEED_FILE" "defaultWorkspace.dir")"
   local scout_branch_workspace_dir

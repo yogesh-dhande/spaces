@@ -4,6 +4,7 @@ import spacesmobilecore
 import spacesruntimecore
 import spacesterminalcore
 import spacesterminalghostty
+import workspacecore
 
 #if canImport(AppKit)
     import AppKit
@@ -122,6 +123,7 @@ import spacesterminalghostty
         case "control": return handleTerminalControl(request)
         case "agentSignal": return recordAgentSignal(request)
         case "ackAgentSignals": return acknowledgeAgentSignals(request)
+        case "profileCommand": return handleProfileCommand(request)
         case "resolveTerminalLink": return resolveTerminalLink(request)
         case "readTerminalLinkChunk": return readTerminalLinkChunk(request)
         default: return TerminalServiceResponse(ok: false, message: "Unsupported spacesd command '\(request.command)'.")
@@ -280,6 +282,230 @@ import spacesterminalghostty
                 acknowledgedAt: nowISO8601())
             return TerminalServiceResponse(ok: true, message: "Acknowledged agent signals.")
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
+    }
+
+    private func handleProfileCommand(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
+        guard let command = request.profileCommand else { return TerminalServiceResponse(ok: false, message: "Missing profile command request.") }
+        do {
+            let profile = try runProfileCommand(command)
+            return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
+        } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
+    }
+
+    private func runProfileCommand(_ command: TerminalServiceProfileCommandRequest) throws -> TerminalServiceProfileCommandResponse {
+        switch command.operation {
+        case .terminalList:
+            let response = listSessions()
+            guard response.ok else { throw SpacesRuntimeError.invalidArgument(message: response.message) }
+            return TerminalServiceProfileCommandResponse(message: response.message, terminalSessions: response.sessions ?? [])
+        case .terminalSend: return try sendProfileTerminalInput(command)
+        case .terminalTail: return try tailProfileTerminalOutput(command)
+        case .projectList:
+            let orchestrator = try makeProfileOrchestrator()
+            let projects = try orchestrator.listProjects().map(profileProjectSummary)
+            return TerminalServiceProfileCommandResponse(message: "Listed projects.", projects: projects)
+        case .workspaceList:
+            let orchestrator = try makeProfileOrchestrator()
+            let includeArchived = command.includeArchived ?? false
+            let workspaces: [WorkspaceRecord]
+            if let projectID = normalizedProfileArgument(command.projectID) {
+                workspaces = try orchestrator.store.workspaces(projectID: projectID, includeArchived: includeArchived)
+            } else {
+                workspaces = try orchestrator.store.projects().flatMap {
+                    try orchestrator.store.workspaces(projectID: $0.id, includeArchived: includeArchived)
+                }
+            }
+            return TerminalServiceProfileCommandResponse(message: "Listed workspaces.", workspaces: workspaces.map(profileWorkspaceRecord))
+        case .workspaceCreate:
+            let orchestrator = try makeProfileOrchestrator()
+            let projectID = try requiredProfileArgument(command.projectID, name: "projectID")
+            let branch = try requiredProfileArgument(command.branch, name: "branch")
+            let hostID = try requiredProfileArgument(command.hostID, name: "hostID")
+            guard let project = try orchestrator.store.project(id: projectID) else {
+                throw SpacesRuntimeError.invalidArgument(message: "Project not found for id \(projectID).")
+            }
+            let workspace = try orchestrator.createWorkspaceOnHost(
+                projectID: project.id, name: normalizedProfileArgument(command.title) ?? branch, branch: branch, hostID: hostID,
+                targetBranch: command.targetBranch, allowExistingBranchReuse: command.existingBranch ?? false)
+            return TerminalServiceProfileCommandResponse(message: "Created workspace.", workspace: profileWorkspaceRecord(workspace))
+        case .workspaceStart:
+            let orchestrator = try makeProfileOrchestrator()
+            let workspaceID = try requiredProfileArgument(command.workspaceID, name: "workspaceID")
+            try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: false, background: true)
+            let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
+            return TerminalServiceProfileCommandResponse(message: "Workspace is running.", workspace: profileWorkspaceRecord(workspace))
+        case .workspaceRestart:
+            let orchestrator = try makeProfileOrchestrator()
+            let workspaceID = try requiredProfileArgument(command.workspaceID, name: "workspaceID")
+            try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: true, background: true)
+            let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
+            return TerminalServiceProfileCommandResponse(message: "Workspace restarted.", workspace: profileWorkspaceRecord(workspace))
+        case .agentSignal:
+            let orchestrator = try makeProfileOrchestrator()
+            return try recordProfileAgentSignal(command, orchestrator: orchestrator)
+        }
+    }
+
+    private func sendProfileTerminalInput(_ command: TerminalServiceProfileCommandRequest) throws -> TerminalServiceProfileCommandResponse {
+        let sessionID = try requiredProfileArgument(command.terminalSessionID, name: "terminalSessionID")
+        let hasText = command.terminalText != nil
+        let hasBytes = command.terminalBytes != nil
+        guard hasText || hasBytes else { throw SpacesRuntimeError.invalidArgument(message: "terminalText or terminalBytes is required.") }
+        guard !(hasText && hasBytes) else { throw SpacesRuntimeError.invalidArgument(message: "Provide terminalText or terminalBytes, not both.") }
+        let controlResponse = try sendProfileTerminalControl(
+            sessionID: sessionID,
+            request: TerminalControlRequest(
+                command: "send", text: command.terminalText, bytes: command.terminalBytes, appendNewline: command.appendNewline ?? false))
+        guard controlResponse.ok else { throw SpacesRuntimeError.invalidArgument(message: controlResponse.message) }
+        return TerminalServiceProfileCommandResponse(message: controlResponse.message)
+    }
+
+    private func sendProfileTerminalControl(sessionID: String, request: TerminalControlRequest) throws -> TerminalControlResponse {
+        if let liveCore = sessionCores[sessionID] { return liveCore.handleControlRequest(request) }
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
+            return TerminalControlResponse(ok: false, message: "Terminal session '\(sessionID)' is not running.")
+        }
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
+            return TerminalControlResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.")
+        }
+        return try TerminalControlClient.send(request: request, socketPath: paths.controlSocketPath)
+    }
+
+    private func tailProfileTerminalOutput(_ command: TerminalServiceProfileCommandRequest) throws -> TerminalServiceProfileCommandResponse {
+        let sessionID = try requiredProfileArgument(command.terminalSessionID, name: "terminalSessionID")
+        let lineCount = max(command.lineCount ?? 20, 1)
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.outputPath) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Terminal session '\(sessionID)' has no output yet.")
+        }
+        let output = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: lineCount)
+        return TerminalServiceProfileCommandResponse(message: "Read terminal output.", terminalOutput: output)
+    }
+
+    private func makeProfileOrchestrator() throws -> WorkspaceOrchestrator {
+        let store = try SQLiteStore(path: try DatabaseLocator.defaultPath())
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        _ = try orchestrator.syncConfig()
+        return orchestrator
+    }
+
+    private func profileProjectSummary(_ value: ProjectSummary) -> TerminalServiceProfileProjectSummary {
+        TerminalServiceProfileProjectSummary(
+            id: value.id, name: value.name, dir: value.dir, isGitRepo: value.isGitRepo, defaultBranch: value.defaultBranch,
+            isCollapsed: value.isCollapsed)
+    }
+
+    private func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
+        TerminalServiceProfileWorkspaceRecord(
+            id: value.id, projectID: value.projectID, hostID: value.hostID, title: value.title, dir: value.dir, runtimePath: value.runtimePath,
+            dirname: value.dirname, branch: value.branch, targetBranch: value.targetBranch, isDefault: value.isDefault, isArchived: value.isArchived,
+            isHidden: value.isHidden, isRunning: value.isRunning, lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
+    }
+
+    private func requiredProfileWorkspace(id: String, orchestrator: WorkspaceOrchestrator) throws -> WorkspaceRecord {
+        guard let workspace = try orchestrator.store.workspace(id: id) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Workspace not found for id \(id).")
+        }
+        return workspace
+    }
+
+    private func requiredProfileArgument(_ value: String?, name: String) throws -> String {
+        guard let normalized = normalizedProfileArgument(value) else { throw SpacesRuntimeError.invalidArgument(message: "\(name) is required.") }
+        return normalized
+    }
+
+    private func normalizedProfileArgument(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    private enum ProfileAgentEventType: String {
+        case `init` = "init"
+        case start = "start"
+        case waiting = "waiting"
+        case done = "done"
+        case exit = "exit"
+
+        var status: AgentWindowStatus {
+            switch self {
+            case .`init`: .idle
+            case .start: .spinning
+            case .waiting: .waiting
+            case .done: .done
+            case .exit: .idle
+            }
+        }
+
+        var establishesAgentFromEvidence: Bool {
+            switch self {
+            case .start, .waiting, .done: true
+            case .`init`, .exit: false
+            }
+        }
+    }
+
+    private func recordProfileAgentSignal(_ command: TerminalServiceProfileCommandRequest, orchestrator: WorkspaceOrchestrator) throws
+        -> TerminalServiceProfileCommandResponse
+    {
+        let workspaceID = try requiredProfileArgument(command.workspaceID, name: "workspaceID")
+        let sessionID = try requiredProfileArgument(command.terminalSessionID, name: "terminalSessionID")
+        let eventValue = try requiredProfileArgument(command.agentEvent, name: "agentEvent")
+        guard let type = ProfileAgentEventType(rawValue: eventValue) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Unsupported agent event '\(eventValue)'.")
+        }
+        _ = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
+        let existingAgent = try matchingProfileAgentWindow(workspaceID: workspaceID, sessionID: sessionID, orchestrator: orchestrator)
+        let signalLabel = profileAgentRuntimeLabel(sessionID: sessionID) ?? normalizedProfileArgument(existingAgent?.label)
+        let canRecordSignal = existingAgent != nil || type == .`init` || (type.establishesAgentFromEvidence && signalLabel != nil)
+        if !canRecordSignal { return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) ignored.") }
+
+        let environmentKeys = [WorkspaceOrchestrator.terminalTrackingIDEnvVar]
+        switch type {
+        case .`init`:
+            try orchestrator.registerAgentWindow(
+                workspaceID: workspaceID, provider: .spaces, label: signalLabel, terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys
+            )
+        case .start, .waiting, .done:
+            try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, codexThreadID: nil, terminalNativeID: sessionID,
+                label: signalLabel, status: type.status, eventType: type.rawValue, eventSource: "spaces_agent_signal",
+                environmentKeys: environmentKeys)
+        case .exit:
+            guard let existingAgent else { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
+            try orchestrator.handleAgentExit(
+                existingAgent, terminalNativeID: sessionID, eventType: type.rawValue, eventSource: "spaces_agent_signal",
+                environmentKeys: environmentKeys)
+        }
+        postAgentEventNotification()
+        return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
+    }
+
+    private func matchingProfileAgentWindow(workspaceID: String, sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> AgentWindowRecord?
+    {
+        try orchestrator.agentWindows(workspaceID: workspaceID).first {
+            $0.provider == .spaces && ($0.terminalTrackingID == sessionID || $0.terminalNativeID == sessionID)
+        }
+    }
+
+    private func profileAgentRuntimeLabel(sessionID: String) -> String? {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
+        if let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths), launchConfiguration.kind == .agent {
+            return normalizedProfileArgument(launchConfiguration.title)
+        }
+        guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), let kind = runtimeState.foregroundDetectedAgentKind
+        else { return nil }
+        return normalizedProfileArgument(runtimeState.foregroundDisplayLabel) ?? kind.displayLabel
+    }
+
+    private func postAgentEventNotification() {
+        #if os(macOS)
+            guard let object = try? IPCNotification.currentObject() else { return }
+            DistributedNotificationCenter.default().postNotificationName(
+                IPCNotification.agentEventFired, object: object, userInfo: nil, options: [.deliverImmediately])
+        #endif
     }
 
     private func handleTerminalControl(_ request: TerminalServiceRequest) -> TerminalServiceResponse {

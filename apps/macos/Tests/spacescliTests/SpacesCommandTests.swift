@@ -10,62 +10,52 @@ import workspacecore
 @testable import spacescli
 
 final class SpacesCommandTests: XCTestCase {
-    func testImportParsesPath() throws {
-        let command = try ImportCommand.parse(["."])
+    func testProjectListParses() throws { XCTAssertNoThrow(try ProjectListCommand.parse([])) }
 
-        XCTAssertEqual(command.path, ".")
+    func testWorkspaceListParsesProjectFilter() throws {
+        let command = try WorkspaceListCommand.parse(["--project", "project-1", "--include-archived"])
+
+        XCTAssertEqual(command.project, "project-1")
+        XCTAssertTrue(command.includeArchived)
     }
 
-    func testUpdateRequiresMutationFlag() {
-        XCTAssertThrowsError(try UpdateCommand.parse([])) { error in XCTAssertTrue(String(describing: error).contains("at least one field")) }
+    func testWorkspaceCreateParsesExplicitHostScopedArguments() throws {
+        let command = try WorkspaceCreateCommand.parse([
+            "--project", "project-1", "--branch", "feature/a", "--host", "local", "--title", "Feature A", "--target-branch", "main",
+            "--existing-branch",
+        ])
+
+        XCTAssertEqual(command.project, "project-1")
+        XCTAssertEqual(command.branch, "feature/a")
+        XCTAssertEqual(command.host, "local")
+        XCTAssertEqual(command.title, "Feature A")
+        XCTAssertEqual(command.targetBranch, "main")
+        XCTAssertTrue(command.existingBranch)
     }
 
-    func testUpdateParsesPathAndMetadata() throws {
-        let command = try UpdateCommand.parse([".", "--title", "Title", "--notes", "Ready for review"])
+    func testWorkspaceStartParsesWorkspaceID() throws {
+        let command = try WorkspaceStartCommand.parse(["--workspace", "workspace-1"])
 
-        XCTAssertEqual(command.path, ".")
-        XCTAssertEqual(command.title, "Title")
-        XCTAssertEqual(command.notes, "Ready for review")
+        XCTAssertEqual(command.workspace, "workspace-1")
     }
 
-    func testStartParsesWorkspacePath() throws {
-        let command = try StartCommand.parse(["."])
+    func testWorkspaceRestartParsesWorkspaceID() throws {
+        let command = try WorkspaceRestartCommand.parse(["--workspace", "workspace-1"])
 
-        XCTAssertEqual(command.path, ".")
+        XCTAssertEqual(command.workspace, "workspace-1")
     }
 
-    func testRestartParsesWorkspacePath() throws {
-        let command = try RestartCommand.parse(["."])
+    func testAgentSignalParsesExplicitWorkspaceSessionAndEvent() throws {
+        let command = try AgentSignalCommand.parse(["--workspace", "workspace-1", "--session", "session-1", "waiting"])
 
-        XCTAssertEqual(command.path, ".")
-    }
-
-    func testSignalParsesTypedEnums() throws {
-        let command = try SignalCommand.parse(["waiting"])
-
+        XCTAssertEqual(command.workspace, "workspace-1")
+        XCTAssertEqual(command.session, "session-1")
         XCTAssertEqual(command.type, .waiting)
-        XCTAssertNil(command.path)
     }
 
     func testTerminalListParses() throws { XCTAssertNoThrow(try TerminalListCommand.parse([])) }
 
-    func testTerminalListPrintsClearMessageWhenNoSessionsExist() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
-        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
-        defer {
-            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
-            try? FileManager.default.removeItem(at: root)
-        }
-
-        let output = try captureStandardOutput {
-            let command = TerminalListCommand()
-            try command.run()
-        }
-
-        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "No terminal sessions.")
-    }
+    func testTerminalSessionRowsReturnsEmptyListWhenNoSessionsExist() { XCTAssertEqual(terminalSessionRows([]), []) }
 
     func testAvailableTerminalSessionRowsSkipsMetadataOnlySessions() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -188,9 +178,37 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.authToken, "SECRET")
     }
 
-    func testSpacesCommandListsFlattenedPublicVerbs() {
+    func testSpacesCommandListsGroupedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(subcommands, ["ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "SignalCommand", "TerminalCommand"])
+        XCTAssertEqual(subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "MCPCommand"])
+    }
+
+    func testMCPToolDefinitionsExposeExplicitSpacesOperations() throws {
+        let tools = SpacesMCPStdioServer.toolDefinitions()
+        let names = try tools.map { try XCTUnwrap($0["name"] as? String) }
+
+        XCTAssertEqual(
+            names,
+            [
+                "spaces_project_list", "spaces_workspace_list", "spaces_workspace_create", "spaces_workspace_start", "spaces_workspace_restart",
+                "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send",
+            ])
+        XCTAssertFalse(names.contains("spaces_agent_signal"))
+
+        let createTool = try XCTUnwrap(tools.first { ($0["name"] as? String) == "spaces_workspace_create" })
+        let schema = try XCTUnwrap(createTool["inputSchema"] as? [String: Any])
+        XCTAssertEqual(schema["required"] as? [String], ["project", "branch", "host"])
+
+        let tailTool = try XCTUnwrap(tools.first { ($0["name"] as? String) == "spaces_terminal_tail" })
+        let tailSchema = try XCTUnwrap(tailTool["inputSchema"] as? [String: Any])
+        XCTAssertEqual(tailSchema["required"] as? [String], ["session"])
+
+        let sendTool = try XCTUnwrap(tools.first { ($0["name"] as? String) == "spaces_terminal_send" })
+        let sendSchema = try XCTUnwrap(sendTool["inputSchema"] as? [String: Any])
+        XCTAssertEqual(sendSchema["required"] as? [String], ["session"])
+        let sendProperties = try XCTUnwrap(sendSchema["properties"] as? [String: Any])
+        XCTAssertNotNil(sendProperties["bytes"])
+        XCTAssertEqual(sendSchema["oneOf"] as? [[String: [String]]], [["required": ["text"]], ["required": ["bytes"]]])
     }
 
     private func captureStandardOutput(_ body: () throws -> Void) throws -> String {
@@ -224,23 +242,20 @@ final class SpacesCommandTests: XCTestCase {
         }
     }
 
-    func testAgentEventDropResultRejectsUnsupportedHostBeforeWorkspaceLookup() {
+    func testAgentEventDropResultRejectsUntrackedSessionBeforeWorkspaceLookup() {
         let context = CLIContext()
 
         let result = agentEventDropResult(type: .start, environment: ["__CFBundleIdentifier": "com.apple.Terminal"], context: context)
 
-        XCTAssertEqual(result?.text, "Dropped agent event start: non-Spaces terminal")
-        XCTAssertEqual(result?.payload.message, "Dropped non-Spaces agent event.")
+        XCTAssertEqual(result?.text, "Dropped agent event start: untracked Spaces terminal")
+        XCTAssertEqual(result?.payload.message, "Dropped untracked Spaces agent event.")
     }
 
     func testAgentEventDropResultAcceptsTrackedSpacesSession() {
         let context = CLIContext()
 
         let result = agentEventDropResult(
-            type: .start,
-            environment: [
-                "SPACES_TERMINAL_HOST": TerminalHost.spaces.rawValue, WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1",
-            ], context: context)
+            type: .start, environment: [WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1"], context: context)
 
         XCTAssertNil(result)
     }
@@ -248,7 +263,7 @@ final class SpacesCommandTests: XCTestCase {
     func testAgentEventDropResultRejectsUntrackedSpacesSessionBeforeWorkspaceLookup() {
         let context = CLIContext()
 
-        let result = agentEventDropResult(type: .start, environment: ["SPACES_TERMINAL_HOST": TerminalHost.spaces.rawValue], context: context)
+        let result = agentEventDropResult(type: .start, environment: [:], context: context)
 
         XCTAssertEqual(result?.text, "Dropped agent event start: untracked Spaces terminal")
         XCTAssertEqual(result?.payload.message, "Dropped untracked Spaces agent event.")
@@ -278,16 +293,14 @@ final class SpacesCommandTests: XCTestCase {
             let context = CLIContext()
             let agentContext = try resolveAgentInvocationContext(
                 workspaceID: workspace.id,
-                environment: [
-                    "SPACES_TERMINAL_HOST": TerminalHost.spaces.rawValue, WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1",
-                    "CLAUDE_CODE_ENTRYPOINT": "1",
-                ], orchestrator: orchestrator, context: context)
+                environment: [WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1", "CLAUDE_CODE_ENTRYPOINT": "1"],
+                orchestrator: orchestrator, context: context)
 
             XCTAssertEqual(agentContext?.provider, .spaces)
             XCTAssertEqual(agentContext?.terminalTrackingID, "spaces-session-token-1")
             XCTAssertEqual(agentContext?.terminalNativeID, "spaces-session-token-1")
             XCTAssertEqual(agentContext?.yabaiWindowID, 106482)
-            XCTAssertEqual(agentContext?.environmentKeys, ["CLAUDE_CODE_ENTRYPOINT", "SPACES_TERMINAL_HOST", "SPACES_TERMINAL_TRACKING_ID"])
+            XCTAssertEqual(agentContext?.environmentKeys, ["CLAUDE_CODE_ENTRYPOINT", "SPACES_TERMINAL_TRACKING_ID"])
         }
     }
 
@@ -300,15 +313,13 @@ final class SpacesCommandTests: XCTestCase {
             let context = CLIContext()
             let agentContext = try resolveAgentInvocationContext(
                 workspaceID: workspace.id,
-                environment: [
-                    "SPACES_TERMINAL_HOST": TerminalHost.spaces.rawValue, "CODEX_MANAGED_BY_NPM": "1",
-                    WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1",
-                ], orchestrator: orchestrator, context: context)
+                environment: ["CODEX_MANAGED_BY_NPM": "1", WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1"],
+                orchestrator: orchestrator, context: context)
 
             XCTAssertEqual(agentContext?.provider, .spaces)
             XCTAssertEqual(agentContext?.label, "codex cli")
             XCTAssertEqual(agentContext?.codexThreadID, nil)
-            XCTAssertEqual(agentContext?.environmentKeys, ["CODEX_MANAGED_BY_NPM", "SPACES_TERMINAL_HOST", "SPACES_TERMINAL_TRACKING_ID"])
+            XCTAssertEqual(agentContext?.environmentKeys, ["CODEX_MANAGED_BY_NPM", "SPACES_TERMINAL_TRACKING_ID"])
         }
     }
 
@@ -321,16 +332,13 @@ final class SpacesCommandTests: XCTestCase {
             let context = CLIContext()
             let agentContext = try resolveAgentInvocationContext(
                 workspaceID: workspace.id,
-                environment: [
-                    "SPACES_TERMINAL_HOST": TerminalHost.spaces.rawValue, "OPENCODE_EXPERIMENTAL_FILEWATCHER": "1",
-                    WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1",
-                ], orchestrator: orchestrator, context: context)
+                environment: ["OPENCODE_EXPERIMENTAL_FILEWATCHER": "1", WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1"],
+                orchestrator: orchestrator, context: context)
 
             XCTAssertEqual(agentContext?.provider, .spaces)
             XCTAssertEqual(agentContext?.label, "opencode cli")
             XCTAssertEqual(agentContext?.codexThreadID, nil)
-            XCTAssertEqual(
-                agentContext?.environmentKeys, ["OPENCODE_EXPERIMENTAL_FILEWATCHER", "SPACES_TERMINAL_HOST", "SPACES_TERMINAL_TRACKING_ID"])
+            XCTAssertEqual(agentContext?.environmentKeys, ["OPENCODE_EXPERIMENTAL_FILEWATCHER", "SPACES_TERMINAL_TRACKING_ID"])
         }
     }
 
@@ -344,14 +352,13 @@ final class SpacesCommandTests: XCTestCase {
             let agentContext = try resolveAgentInvocationContext(
                 workspaceID: workspace.id,
                 environment: [
-                    "SPACES_TERMINAL_HOST": TerminalHost.spaces.rawValue, WorkspaceOrchestrator.agentLabelEnvVar: "opencode",
-                    WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1",
+                    WorkspaceOrchestrator.agentLabelEnvVar: "opencode", WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1",
                 ], orchestrator: orchestrator, context: context)
 
             XCTAssertEqual(agentContext?.provider, .spaces)
             XCTAssertEqual(agentContext?.label, "opencode")
             XCTAssertEqual(agentContext?.terminalTrackingID, "spaces-session-token-1")
-            XCTAssertEqual(agentContext?.environmentKeys, ["SPACES_AGENT_LABEL", "SPACES_TERMINAL_HOST", "SPACES_TERMINAL_TRACKING_ID"])
+            XCTAssertEqual(agentContext?.environmentKeys, ["SPACES_AGENT_LABEL", "SPACES_TERMINAL_TRACKING_ID"])
         }
     }
 
@@ -364,10 +371,8 @@ final class SpacesCommandTests: XCTestCase {
             let context = CLIContext()
             let agentContext = try resolveAgentInvocationContext(
                 workspaceID: workspace.id,
-                environment: [
-                    "SPACES_TERMINAL_HOST": TerminalHost.spaces.rawValue, WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1",
-                    "CLAUDE_CODE_ENTRYPOINT": "1",
-                ], orchestrator: orchestrator, context: context)
+                environment: [WorkspaceOrchestrator.terminalTrackingIDEnvVar: "spaces-session-token-1", "CLAUDE_CODE_ENTRYPOINT": "1"],
+                orchestrator: orchestrator, context: context)
 
             XCTAssertEqual(agentContext?.provider, .spaces)
             XCTAssertEqual(agentContext?.terminalTrackingID, "spaces-session-token-1")
@@ -719,9 +724,8 @@ final class SpacesCommandTests: XCTestCase {
 
     private func withAgentSignalEnvironment<T>(dbPath: String, sessionID: String, label: String? = nil, run: () throws -> T) throws -> T {
         let values: [String: String?] = [
-            "SPACES_DB_PATH": dbPath, "SPACES_TERMINAL_HOST": TerminalHost.spaces.rawValue, WorkspaceOrchestrator.terminalTrackingIDEnvVar: sessionID,
-            WorkspaceOrchestrator.agentLabelEnvVar: label, "CODEX_THREAD_ID": nil, "CODEX_MANAGED_BY_NPM": nil, "CLAUDE_CODE_ENTRYPOINT": nil,
-            "OPENCODE_EXPERIMENTAL_FILEWATCHER": nil,
+            "SPACES_DB_PATH": dbPath, WorkspaceOrchestrator.terminalTrackingIDEnvVar: sessionID, WorkspaceOrchestrator.agentLabelEnvVar: label,
+            "CODEX_THREAD_ID": nil, "CODEX_MANAGED_BY_NPM": nil, "CLAUDE_CODE_ENTRYPOINT": nil, "OPENCODE_EXPERIMENTAL_FILEWATCHER": nil,
         ]
         return try withEnv(values, run: run)
     }

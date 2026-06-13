@@ -13,37 +13,27 @@ TMP_HOME="$(mktemp -d /tmp/spaces-smoke-home.XXXXXX)"
 trap 'rm -rf "$TMP_HOME"' EXIT
 export HOME="$TMP_HOME"
 
-# Workspace import + start
-TEST_REPO="$(mktemp -d /tmp/spaces-smoke-repo.XXXXXX)"
-(
-  cd "$TEST_REPO"
-  git init -q
-  git config user.email "smoke@example.com"
-  git config user.name "smoke"
-  echo hi > README.md
-  git add README.md
-  git commit -q -m init
-)
-
-IMPORT_ERR="$(mktemp)"
-if "$BIN" import "$TEST_REPO" --title "smoke" --notes "smoke test" >/dev/null 2>"$IMPORT_ERR"; then
-  echo "expected import without a registered project to fail"
+HELP_OUT="$(mktemp)"
+"$BIN" --help >"$HELP_OUT"
+grep -q -- "project" "$HELP_OUT"
+grep -q -- "workspace" "$HELP_OUT"
+grep -q -- "agent" "$HELP_OUT"
+grep -q -- "terminal" "$HELP_OUT"
+grep -q -- "mcp" "$HELP_OUT"
+if grep -q -- "import" "$HELP_OUT"; then
+  echo "expected public import command to be absent"
   exit 1
 fi
-grep -q -- "Add the project in the app" "$IMPORT_ERR"
 
-UP_ERR="$(mktemp)"
-if "$BIN" start "$TEST_REPO" >/dev/null 2>"$UP_ERR"; then
-  echo "expected start without a registered workspace to fail"
+"$BIN" project list >/dev/null
+"$BIN" workspace list >/dev/null
+"$BIN" terminal list >/dev/null
+
+START_ERR="$(mktemp)"
+if "$BIN" workspace start --workspace missing >/dev/null 2>"$START_ERR"; then
+  echo "expected workspace start with an unknown ID to fail"
   exit 1
 fi
-grep -q -- "Run \`spaces import \\[path\\]\` first" "$UP_ERR"
-
-UPDATE_ERR="$(mktemp)"
-if "$BIN" update "$TEST_REPO" >/dev/null 2>"$UPDATE_ERR"; then
-  echo "expected update without metadata flags to fail"
-  exit 1
-fi
-grep -q -- "at least one field" "$UPDATE_ERR"
+grep -q -- "Workspace not found" "$START_ERR"
 
 echo "smoke_cli.sh: PASS"

@@ -220,9 +220,9 @@
 
         private func send(_ request: TerminalControlRequest) -> TerminalControlResponse {
             guard ownerRequestIsCurrent(request) else { return TerminalControlResponse(ok: false, message: "Only the active owner can send input.") }
-            guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
-            let payload = text + (request.appendNewline ? "\n" : "")
-            ptyDriver.sendRawBytes(Data(payload.utf8))
+            guard var payload = request.inputPayload else { return TerminalControlResponse(ok: false, message: "Missing input payload.") }
+            if request.appendNewline { payload.append(0x0A) }
+            ptyDriver.sendRawBytes(payload)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.input)
             return TerminalControlResponse(ok: true, message: "Sent input.")
         }

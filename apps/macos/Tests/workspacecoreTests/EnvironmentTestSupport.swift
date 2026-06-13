@@ -67,6 +67,22 @@ func withTestAppleScriptOptIn(enabled: Bool, run: () throws -> Void) throws {
     try run()
 }
 
+func withSpacesProfileEnvironment<T>(dbPath: String, runtimeDir: String? = nil, run: () throws -> T) throws -> T {
+    let dbURL = URL(fileURLWithPath: dbPath)
+    let resolvedRuntimeDir = runtimeDir ?? dbURL.deletingLastPathComponent().appendingPathComponent("runtime", isDirectory: true).path
+    return try withEnvironmentValues(
+        [SpacesProfile.databasePathEnvironmentVariable: dbPath, SpacesProfile.runtimeDirectoryEnvironmentVariable: resolvedRuntimeDir], run: run)
+}
+
+func withEnvironmentValues<T>(_ values: [String: String?], run: () throws -> T) throws -> T {
+    sharedEnvironmentMutationLock.lock()
+    defer { sharedEnvironmentMutationLock.unlock() }
+    let previousValues = Dictionary(uniqueKeysWithValues: values.keys.map { name in (name, ProcessInfo.processInfo.environment[name]) })
+    for (name, value) in values { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
+    defer { for (name, value) in previousValues { if let value { setenv(name, value, 1) } else { unsetenv(name) } } }
+    return try run()
+}
+
 private func trackedTerminalSessionIDs() -> Set<String> { Set((try? TerminalSessionPersistence.listKnownSessions().map(\.sessionID)) ?? []) }
 
 private func terminateTrackedTerminalSessions(createdAfter baselineSessionIDs: Set<String>) {

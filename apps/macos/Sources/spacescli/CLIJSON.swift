@@ -106,6 +106,44 @@ extension WorkspaceSummaryPayload {
     }
 }
 
+struct WorkspaceRecordPayload: Encodable {
+    let id: String
+    let projectID: String
+    let hostID: String
+    let title: String
+    let dir: String
+    let runtimePath: String
+    let dirname: String?
+    let branch: String?
+    let targetBranch: String?
+    let isDefault: Bool
+    let isArchived: Bool
+    let isHidden: Bool
+    let isRunning: Bool
+    let lastLaunchedAt: String?
+    let notes: String?
+}
+
+extension WorkspaceRecordPayload {
+    init(_ value: WorkspaceRecord) {
+        id = value.id
+        projectID = value.projectID
+        hostID = value.hostID
+        title = value.title
+        dir = value.dir
+        runtimePath = value.runtimePath
+        dirname = value.dirname
+        branch = value.branch
+        targetBranch = value.targetBranch
+        isDefault = value.isDefault
+        isArchived = value.isArchived
+        isHidden = value.isHidden
+        isRunning = value.isRunning
+        lastLaunchedAt = value.lastLaunchedAt
+        notes = value.notes
+    }
+}
+
 struct WorkspaceSettingsPayload: Encodable {
     let stopScript: String?
     let ports: [PortDefinition]

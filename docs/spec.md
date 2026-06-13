@@ -40,7 +40,7 @@ Spaces provides a desktop app and a CLI for power users and coding agents.
 - Never control windows that Spaces does not explicitly track.
   Spaces should not hide, move, resize, or otherwise manipulate unrelated windows, because the user may intentionally keep an untracked window visible next to a tracked workspace window.
 - Keep coding-agent events explicit.
-  `spaces import`, `spaces start`, and `spaces restart` must not infer agent lifecycle, because only the agent can accurately report when it actually initialized, started active work, is waiting, is done, or exited.
+  Workspace creation, start, and restart actions must not infer agent lifecycle, because only the agent can accurately report when it actually initialized, started active work, is waiting, is done, or exited.
 - Use explicit names as the stable identity surface for focusable browser sessions, processes, and coding-agent terminals.
   Names express purpose and intent, stay meaningful when URLs or process commands change, and avoid collisions where multiple coding agents may run the same command. Those names must be unique within a workspace's combined focusable set so GUI and harness focus can target one unambiguous window by name.
 
@@ -121,10 +121,10 @@ Spaces focuses those windows; it does not decide their geometry.
 - Remote `spacesd` daemon traffic uses pinned TLS. Host records store the daemon certificate fingerprint, and clients reject endpoint identity mismatches before sending authenticated requests.
 - The Mac sidebar exposes a Remote Hosts utility panel for adding or updating named remote compute hosts. The panel asks for SSH host, SSH user, optional display name, and advanced SSH port; workspace root, daemon host, daemon port, auth token, host ID, and certificate pin are internal implementation details.
 - Remote host connection runs SSH bootstrap first, stores the generated daemon auth token in Keychain, saves the returned certificate fingerprint, validates the direct pinned-TLS `spacesd` endpoint, and saves the host only after validation succeeds. Direct reachability failures should explain that the Mac, iPhone, VPN, firewall, or cloud security group must allow access to `spacesd`.
-- The local Mac is the implicit default compute host and does not require a persisted host record.
-- Projects can define a default compute host, and workspaces can define an override host. Effective host selection uses workspace override first, project default second, and local Mac last.
-- Project settings expose the project default compute host. Workspace detail exposes an override selector that inherits the project default unless a remote host is selected for that workspace.
-- A workspace keeps one stable binding per selected remote host. The binding records the remote path and branch and is reused when the workspace returns to that host.
+- The local Mac is a first-class host record with the stable ID `local`.
+- Workspace host assignment is immutable. Projects do not define a default compute host, and workspaces do not expose a host override selector.
+- A project branch can have one active local workspace and any number of active remote workspaces, with at most one active workspace for each `(project, branch, host)` tuple.
+- Each workspace stores its runtime path directly. Remote workspaces use that path for setup, launch, terminal, browser-forwarding, and stop operations.
 - Remote workspace launch uses a manifest containing workspace ID, project ID, local path, remote path, branch, target branch, Git remote URL, named ports, process environment, and allowed file roots.
 - Remote workspace setup scripts, configured processes, coding-agent launchers, ad hoc terminals, and stop scripts execute on the selected host's `spacesd`; the Mac records the returned daemon session IDs and log paths while resolving daemon ownership from the workspace's effective host.
 - Remote configured process and coding-agent launches open a Spaces-owned Mac terminal window as the owner by default. Mac terminal windows for remote sessions attach, take over ownership, send input, resize, scroll, and refresh state through the selected host's daemon endpoint.
@@ -140,7 +140,10 @@ Spaces focuses those windows; it does not decide their geometry.
 
 ### Creation
 - Users can create, update, focus, stop, restart, and archive workspaces from the GUI.
-- The CLI should stay minimal and support `import`, `update`, `start`, `restart`, `signal`, and low-level `terminal` session commands for Spaces-owned PTY sessions. Those supported `spaces` commands must work when executed from Spaces-owned remote compute-host terminals as well as local Mac terminals. Terminal commands should support listing available sessions by session ID, runtime state, and working directory and printing a clear empty-state message when none are available, sending text, sending named keys, opening native Spaces-owned session windows in owner-seeking mode, and transferring input ownership between attached clients.
+- The CLI should expose `spaces project list`, `spaces workspace list`, `spaces workspace create --project <id> --branch <branch> --host <local|host-id>`, `spaces workspace start --workspace <id>`, `spaces workspace restart --workspace <id>`, `spaces agent signal --workspace <id> --session <terminal-session-id> <event>`, `spaces terminal list`, and `spaces mcp`.
+- `spaces mcp` exposes project, workspace, and terminal list/tail/send tools. Terminal send accepts either UTF-8 text or explicit byte values. Agent lifecycle signals are CLI-only hooks so coding-agent shell integrations can report explicit events without making those hooks available as agent-callable MCP tools.
+- `spaces import` is not a public command. Workspace creation must be explicit about project, branch, and host because registering a workspace creates profile state, allocates runtime resources such as ports, and can run setup work.
+- Mac-side workspace start, restart, and stop actions should report the effective host and route configured remote launches through the selected remote daemon. Terminal commands should support listing available sessions by session ID, runtime state, and working directory and printing a clear empty-state message when none are available, sending text, sending named keys, opening native Spaces-owned session windows in owner-seeking mode, and transferring input ownership between attached clients.
 - App-launched built-in workspace terminals, process windows, and coding-agent windows should be owned by the per-user `spacesd` daemon and reopen onto the same live shell session across `SpacesApp` quit and relaunch.
 - Quitting `SpacesApp` while service-owned terminal sessions are running should prompt the user to quit while keeping sessions running, stop all sessions and quit, or cancel. Keeping sessions running is the default.
 - `spaces terminal` sessions should remain owned by a per-user `spacesd` daemon so they can survive `SpacesApp` quit and reopen against the same live shell session as long as the service remains alive and the session lifetime is still valid.
@@ -159,11 +162,11 @@ Spaces focuses those windows; it does not decide their geometry.
 - Opening a native terminal window should auto-attempt ownership takeover instead of mounting a passive live terminal surface. While the window is not the active owner it should show takeover and status UI only, and once it becomes owner it should render the current terminal state without restarting or recreating the shell session.
 - `Spaces`-hosted terminal windows opened or focused from the app stay visible with the Spaces app instead of following the external-app hide behavior used for browsers, Finder, or editors.
 - The first-party iOS client should show a workspace-first home with every non-archived workspace and its mobile-controllable runtime rows inline: configured processes, configured coding agents, and workspace terminals.
-- The first-party iOS client should read project and workspace metadata through Mac `spacesd` and attach terminal detail, input, resize, scroll, and media preview requests to the local or remote `spacesd` that owns the session.
-- The iOS terminal path should use the Mac bridge for project, workspace, host, and runtime lifecycle mutations while sending terminal state, ownership, input, resize, scroll, and terminal-link preview requests directly to the owning local or remote daemon when the mobile overview includes a daemon endpoint.
+- The first-party iOS client should talk only to Mac `spacesd`. Mac `spacesd` owns pairing, auth, overview, workspace mutations, terminal list/state/control, previews, and remote terminal proxying.
+- Remote iOS terminal sessions should flow through Mac `spacesd`, which proxies state, ownership, input, resize, scroll, and terminal-link preview requests to the remote daemon that owns the session.
 - The iOS home should keep search and row filters local to the current app session. The search field should sit beside a filter button, and filter controls should cover row type (`Processes`, `Coding Agents`, `Workspace Terminals`) plus run state (`Not Started`, `Running`, `Exited`).
 - iOS row taps should open a terminal when the row has a session. Rows without a live session should route the primary action to running the configured process or coding agent when that action is available. Exited configured process rows with an inspectable terminal session should keep row tap for terminal inspection and expose an inline run action.
-- The iOS client should let users create a workspace in any existing project while Mac `spacesd` is reachable. Git projects should expose title, create-branch or existing-branch mode, branch name, target branch, optional directory name, and selected compute host behavior owned by the Mac; non-git projects should hide branch fields.
+- The iOS client should let users create a local or configured-remote workspace in any existing project while Mac `spacesd` is reachable. Git projects should expose title, create-branch or existing-branch mode, branch name, target branch, optional directory name, and host selection routed through the Mac; non-git projects should hide branch fields.
 - The iOS client should let users open and stop persistent workspace terminals rooted at the workspace directory, and run, stop, or restart configured processes and coding agents through the paired Mac bridge.
 - The iOS client should discover nearby Mac bridges, authenticate once from a Mac-approved `spacesmobile://` pairing link, store the issued credential, transport key, and daemon endpoint fingerprint, reconnect without prompting on later launches, treat bundle identity as policy metadata, and clear the stored credential with a re-pair prompt if the Mac later rejects that device token or endpoint identity.
 - The iOS recovery action should require an existing paired bridge connection. It recovers only the Mac app process after a quit or crash while `spacesd` remains reachable; daemon crashes, network loss, and unpaired devices still require normal Mac-side recovery or pairing.
@@ -218,11 +221,10 @@ Spaces focuses those windows; it does not decide their geometry.
 - The project and workspace editors validate process commands when they are saved. Process commands must be non-empty.
 - Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
 - Restart performs a stop followed by a fresh launch.
-- `start` is the idempotent "ensure running" path:
+- `workspace start` is the idempotent "ensure running" path:
   - if stopped, it launches the workspace
   - if running, it restores failed or exited runtime as defined by the command mode
-- `restart` forces a full restart
-- `update` should own post-creation workspace metadata edits such as title and notes.
+- `workspace restart` forces a full restart
 - Launch should wait for setup to finish and should surface setup failures clearly.
 - Workspaces with setup `pending`, `running`, or `failed` show a setup recovery screen instead of normal workspace detail controls.
 - The setup recovery screen shows setup status, timestamps, exit code, error text, and the setup log tail. It allows setup retry, Finder reveal, ad-hoc terminal access, and setup log copy/open actions. Failed setup also exposes inline setup script editing before retry.
@@ -313,18 +315,18 @@ Spaces focuses those windows; it does not decide their geometry.
 - Every keyboard shortcut the product supports must be configurable from the GUI settings panel.
 
 ## Coding-Agent Integration
-- Coding agents can explicitly report lifecycle events through `spaces signal`.
+- Coding agents can explicitly report lifecycle events through `spaces agent signal --workspace <id> --session <terminal-session-id> <event>`.
 - Agent status events are not implied by `import`, `start`, or `restart`, but workspace launch should open any configured coding-agent rows so they appear alongside runtime-managed agents under one `Coding Agents` section.
-- `spaces signal` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
-- `spaces signal` from a remote compute-host terminal should update the Mac profile database for the owning workspace after the Mac app observes and acknowledges the remote daemon's queued signal event.
+- `spaces agent signal` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
+- `spaces agent signal` from a remote compute-host terminal should update the Mac profile database for the owning workspace after the Mac app observes and acknowledges the remote daemon's queued signal event.
 - Agent events that cannot be reliably attributed to a terminal must be dropped, not guessed onto the frontmost window.
 - `init` should identify the originating terminal and either attach to an already tracked terminal row or create a new tracked terminal row for that coding agent.
 - Non-`init` signal events should update the existing agent row for the originating terminal. If no agent row exists, the event may establish one only when the signal context or current terminal runtime identifies the terminal as a coding agent; otherwise the event should be ignored.
 - Coding-agent rows should render after browser and process rows so non-agent shortcut ordering stays stable when agents appear or disappear.
 - Configured and ad-hoc coding agents should share the same `Coding Agents` section rather than rendering as separate launcher and runtime sections.
 - A Spaces-owned ad-hoc built-in terminal can appear in `Coding Agents` when its live foreground process is a known coding-agent command such as `codex`, `claude`, `claude-code`, or `opencode`. Once an agent row exists for that terminal session, foreground process changes do not demote or relabel it.
-- A signal-established ad-hoc agent row should remain in `Coding Agents` for its live terminal session even if the foreground process is a shell, wrapper, unknown command, or another known agent command. A live `spaces signal exit` records the session as idle instead of demoting it; Stop, terminal-session exit, and terminal cleanup own removal or completion.
-- Foreground process detection should not infer lifecycle state. `spaces signal` remains the source for agent status such as spinning, waiting, done, and exit.
+- A signal-established ad-hoc agent row should remain in `Coding Agents` for its live terminal session even if the foreground process is a shell, wrapper, unknown command, or another known agent command. A live `spaces agent signal ... exit` records the session as idle instead of demoting it; Stop, terminal-session exit, and terminal cleanup own removal or completion.
+- Foreground process detection should not infer lifecycle state. `spaces agent signal` remains the source for agent status such as spinning, waiting, done, and exit.
 - Every tracked window row should have a unique visible name within its workspace. Two coding-agent rows must not share the same name.
 - Configured coding-agent launcher names are reserved within the workspace. An ad-hoc coding agent that reports the same label should be auto-renamed with a numeric suffix instead of colliding with the configured launcher slot.
 - Launching a configured coding agent is idempotent for its reserved slot: if that coding agent still has a live tracked terminal, Spaces should keep the existing row instead of deleting and recreating it.

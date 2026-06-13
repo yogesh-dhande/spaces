@@ -48,9 +48,9 @@ Useful local entry points:
 apps/macos/.build/debug/SpacesApp
 apps/macos/.build/debug/spaces --help
 apps/macos/.build/debug/spacese2e --help
-apps/macos/.build/debug/spaces import --title "debug" --notes "Local debug session"
-apps/macos/.build/debug/spaces update --notes "Ready for review"
-apps/macos/.build/debug/spaces restart
+apps/macos/.build/debug/spaces project list
+apps/macos/.build/debug/spaces workspace create --project <project-id> --branch debug --host local --title "debug"
+apps/macos/.build/debug/spaces workspace restart --workspace <workspace-id>
 ```
 
 Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only the running app instance and spacesd daemon for that same profile before it relaunches.
@@ -157,7 +157,7 @@ The mobile E2E suite requires remote compute-host configuration. The macOS and m
 
 The daemon-hosted mobile bridge is the first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spacese2e mobile-serve` is available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spacese2e mobile-request` so local scripts use the same TLS-PSK transport as the iOS app. Standalone bridge processes reject daemon-only recovery commands such as `launchSpacesApp`.
 
-Remote compute-host E2E coverage uses a reachable host running a matching `spacesd`. App-level remote E2E uses another Mac, a loopback remote profile that binds the remote listener on a separate profile root, or the Ubuntu 24.04 x86_64 daemon artifact published as `spacesd-ubuntu-24.04-x86_64.tar.gz`. Compute-host bootstrap, status, and test automation belongs in `spacese2e` so the product `spaces` CLI remains workspace-oriented. Use `upsert-compute-host` and `list-compute-hosts` to seed and inspect host records, `set-project-default-compute-host` and `set-workspace-compute-host-override` to exercise selection precedence, and `plan-workspace-runtime` to inspect the stable binding, daemon target, Remote SSH URI, and runtime manifest for a workspace.
+Remote compute-host E2E coverage uses a reachable host running a matching `spacesd`. App-level remote E2E uses another Mac, a loopback remote profile that binds the remote listener on a separate profile root, or the Ubuntu 24.04 x86_64 daemon artifact published as `spacesd-ubuntu-24.04-x86_64.tar.gz`. Compute-host bootstrap, status, and test automation belongs in `spacese2e` so the product `spaces` CLI remains workspace-oriented. Use `upsert-compute-host` and `list-compute-hosts` to seed and inspect host records, `remote-compute-host-smoke` to exercise a configured host, and `plan-workspace-runtime` to inspect the workspace's immutable host binding, daemon target, Remote SSH URI, and runtime manifest.
 
 Build the Linux daemon artifact from a Linux x86_64 environment:
 
@@ -169,7 +169,7 @@ docker run --rm --platform linux/amd64 \
   bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh'
 ```
 
-The archive contains `bin/spacesd`, the minimal remote `bin/spaces signal` helper, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. Install it on the remote host by extracting the archive and putting its `bin` directory on the SSH PATH:
+The archive contains `bin/spacesd`, the Swift `bin/spaces` CLI, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. Install it on the remote host by extracting the archive and putting its `bin` directory on the SSH PATH:
 
 ```bash
 sudo tar -xzf spacesd-ubuntu-24.04-x86_64.tar.gz -C /opt
@@ -187,10 +187,10 @@ apps/macos/.build/debug/spacese2e remote-compute-host-smoke \
   --host-id lab-host \
   --ssh-host <ssh-host-or-alias> \
   --ssh-user <ssh-user> \
-  --daemon-host <direct-daemon-ip-or-dns-name>
+  --daemon-host <daemon-ip-or-dns-name>
 ```
 
-The command tears down the named remote E2E profile and requested daemon port, starts the remote daemon through `ComputeHostBootstrapper`, saves the host token for the current profile when it generated one, sets the project default compute host, asserts the workspace resolves to the host, opens one remote ad hoc Spaces terminal, stops the workspace, and prints JSON with the host, bootstrap metadata, daemon status, runtime plan, terminal session ID, and stop outcome.
+The command tears down the named remote E2E profile and requested daemon port, starts the remote daemon through `ComputeHostBootstrapper`, saves the host token for the current profile when it generated one, creates a host-scoped remote workspace, opens one remote ad hoc Spaces terminal, stops the workspace, and prints JSON with the host, bootstrap metadata, daemon status, runtime plan, terminal session ID, and stop outcome.
 
 A remote daemon listener uses pinned TLS. Print the daemon certificate fingerprint with the same profile environment used to run the listener:
 
@@ -224,7 +224,7 @@ apps/macos/.build/debug/spacese2e upsert-compute-host \
   --certificate-fingerprint 'SHA256:<fingerprint-hex>'
 ```
 
-The Mac-side host record can be created through the app. Open Remote Hosts from the sidebar, enter the SSH host and SSH user, optionally set a display name, and use Advanced only for SSH port. The remote Mac must accept non-interactive SSH from the Mac and have `spacesd` discoverable on the SSH PATH. Connect resolves the SSH host, creates a stable remote profile under `~/.spaces/compute-hosts/<host-id>`, creates the workspace root, starts the remote listener with an internally selected port, stores the auth token in Keychain, saves the returned certificate fingerprint, and verifies the direct pinned-TLS endpoint before saving the host. Project settings can select the host as the project default, and workspace detail can select a workspace-specific override. Manual workspace root, daemon host, daemon port, and certificate fingerprint fields are available only through `spacese2e` setup commands.
+The Mac-side host record can be created through the app. Open Remote Hosts from the sidebar, enter the SSH host and SSH user, optionally set a display name, and use Advanced only for SSH port. The remote Mac must accept non-interactive SSH from the Mac and have `spacesd` discoverable on the SSH PATH. Connect resolves the SSH host, creates a stable remote profile under `~/.spaces/compute-hosts/<host-id>`, creates the workspace root, starts the remote listener with an internally selected port, stores the auth token in Keychain, saves the returned certificate fingerprint, and verifies the direct pinned-TLS endpoint before saving the host. Workspaces choose a host at creation time, and that host assignment is immutable. Manual workspace root, daemon host, daemon port, and certificate fingerprint fields are available only through `spacese2e` setup commands.
 
 For focused terminal latency probes:
 

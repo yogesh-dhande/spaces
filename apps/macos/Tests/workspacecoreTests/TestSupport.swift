@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import spacesterminalcore
 import systembridge
 import workspacecore
 
@@ -12,6 +13,9 @@ func makeTempDirectory() throws -> URL {
 func makeTemporaryStore() throws -> SQLiteStore {
     let dir = try makeTempDirectory()
     let dbURL = dir.appendingPathComponent("spaces-test.db")
+    let runtimeURL = dir.appendingPathComponent("runtime", isDirectory: true)
+    setenv(SpacesProfile.databasePathEnvironmentVariable, dbURL.path, 1)
+    setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeURL.path, 1)
     return try SQLiteStore(path: dbURL.path)
 }
 

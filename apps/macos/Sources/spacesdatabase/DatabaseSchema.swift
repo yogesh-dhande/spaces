@@ -1,84 +1,16 @@
 import Foundation
 
-#if os(Linux)
-    import CSQLite3
-#else
-    import SQLite3
-#endif
-
 public enum DatabaseSchema {
-    public static let currentVersion = 11
+    public static let currentVersion = 1
 
-    public static let migrationSteps: [DatabaseMigrationStep] = [
-        DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "terminal metadata tables", requiresBackup: false) { database in
-            try executeBatch(sql: terminalSchemaSQL, database: database)
-        },
-        DatabaseMigrationStep(fromVersion: 2, toVersion: 3, description: "terminal final render state", requiresBackup: false) { database in
-            try executeBatch(sql: terminalRemoteSessionStateSQL, database: database)
-        },
-        DatabaseMigrationStep(fromVersion: 3, toVersion: 4, description: "configured terminal session identities", requiresBackup: false) {
-            database in
-            try addColumnIfNeeded(table: "running_processes", column: "terminal_session_id", definition: "TEXT", database: database)
-            try addColumnIfNeeded(table: "agent_sessions", column: "terminal_session_id", definition: "TEXT", database: database)
-            if try tableExists("running_processes", database: database), try tableExists("runtime_targets", database: database) {
-                try executeBatch(sql: configuredProcessTerminalSessionIdentityBackfillSQL, database: database)
-            }
-            if try tableExists("agent_sessions", database: database), try tableExists("runtime_targets", database: database) {
-                try executeBatch(sql: configuredAgentTerminalSessionIdentityBackfillSQL, database: database)
-            }
-        },
-        DatabaseMigrationStep(fromVersion: 4, toVersion: 5, description: "stable runtime configuration identifiers", requiresBackup: false) {
-            database in
-            try addColumnIfNeeded(table: "project_agent_launchers", column: "id", definition: "TEXT NOT NULL DEFAULT ''", database: database)
-            try addColumnIfNeeded(table: "workspace_agent_launchers", column: "id", definition: "TEXT NOT NULL DEFAULT ''", database: database)
-            try addColumnIfNeeded(table: "running_processes", column: "template_id", definition: "TEXT", database: database)
-            try addColumnIfNeeded(table: "agent_sessions", column: "claimed_launcher_id", definition: "TEXT", database: database)
-            if try tableExists("project_agent_launchers", database: database) {
-                try executeBatch(sql: projectAgentLauncherIdentityBackfillSQL, database: database)
-            }
-            if try tableExists("workspace_agent_launchers", database: database) {
-                try executeBatch(sql: workspaceAgentLauncherIdentityBackfillSQL, database: database)
-            }
-            if try tableExists("running_processes", database: database), try tableExists("workspace_processes", database: database) {
-                try executeBatch(sql: runningProcessTemplateIdentityBackfillSQL, database: database)
-            }
-            if try tableExists("agent_sessions", database: database), try tableExists("workspace_agent_launchers", database: database) {
-                try executeBatch(sql: agentSessionLauncherIdentityBackfillSQL, database: database)
-            }
-        },
-        DatabaseMigrationStep(fromVersion: 5, toVersion: 6, description: "durable terminal session ownership metadata", requiresBackup: false) {
-            database in
-            try addColumnIfNeeded(table: "terminal_sessions", column: "workspace_id", definition: "TEXT", database: database)
-            try addColumnIfNeeded(table: "terminal_sessions", column: "kind", definition: "TEXT NOT NULL DEFAULT 'shell'", database: database)
-            if try tableExists("terminal_sessions", database: database), try tableExists("running_processes", database: database) {
-                try executeBatch(sql: terminalSessionProcessOwnershipBackfillSQL, database: database)
-            }
-            if try tableExists("terminal_sessions", database: database), try tableExists("agent_sessions", database: database) {
-                try executeBatch(sql: terminalSessionAgentOwnershipBackfillSQL, database: database)
-            }
-            if try tableExists("terminal_sessions", database: database), try tableExists("runtime_targets", database: database) {
-                try executeBatch(sql: terminalSessionRuntimeTargetOwnershipBackfillSQL, database: database)
-            }
-        },
-        DatabaseMigrationStep(fromVersion: 6, toVersion: 7, description: "workspace setup result metadata", requiresBackup: false) { database in
-            try addWorkspaceSetupResultColumns(database: database)
-        },
-        DatabaseMigrationStep(fromVersion: 7, toVersion: 8, description: "terminal foreground process metadata", requiresBackup: false) { database in
-            try addTerminalForegroundRuntimeColumns(database: database)
-        },
-        DatabaseMigrationStep(fromVersion: 8, toVersion: 9, description: "legacy external terminal storage cleanup", requiresBackup: false) {
-            database in try dropLegacyExternalTerminalStorage(database: database)
-        },
-        DatabaseMigrationStep(fromVersion: 9, toVersion: 10, description: "compute host selection and workspace bindings", requiresBackup: false) {
-            database in
-            try executeBatch(sql: computeHostSchemaSQL, database: database)
-            try addColumnIfNeeded(table: "projects", column: "default_compute_host_id", definition: "TEXT", database: database)
-            try addColumnIfNeeded(table: "workspaces", column: "compute_host_override_id", definition: "TEXT", database: database)
-        },
-        DatabaseMigrationStep(fromVersion: 10, toVersion: 11, description: "remote terminal agent signal queue", requiresBackup: false) { database in
-            try executeBatch(sql: terminalAgentSignalEventsSQL, database: database)
-        },
-    ]
+    public static let migrationSteps: [DatabaseMigrationStep] = []
+
+    static let localComputeHostSQL = """
+            INSERT OR IGNORE INTO compute_hosts(
+              id, name, kind, ssh_host, ssh_user, ssh_port, workspace_root, daemon_host, daemon_port, daemon_certificate_fingerprint, created_at, updated_at
+            )
+            VALUES ('local', 'Local Mac', 'local', '', '', NULL, '', '', 0, '', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
+        """
 
     static let computeHostSchemaSQL = """
             CREATE TABLE IF NOT EXISTS compute_hosts (
@@ -96,46 +28,6 @@ public enum DatabaseSchema {
               updated_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS workspace_compute_bindings (
-              workspace_id TEXT NOT NULL,
-              host_id TEXT NOT NULL,
-              remote_path TEXT NOT NULL,
-              branch TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              PRIMARY KEY (workspace_id, host_id),
-              UNIQUE (host_id, remote_path),
-              FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-              FOREIGN KEY (host_id) REFERENCES compute_hosts(id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS workspace_compute_bindings_host_idx
-            ON workspace_compute_bindings(host_id);
-        """
-
-    static let configuredProcessTerminalSessionIdentityBackfillSQL = """
-            UPDATE running_processes
-            SET terminal_session_id = (
-              SELECT tracking_id
-              FROM runtime_targets
-              WHERE runtime_targets.id = running_processes.runtime_target_id
-                AND runtime_targets.app = 'Spaces'
-                AND length(runtime_targets.tracking_id) > 0
-            )
-            WHERE terminal_session_id IS NULL;
-        """
-
-    static let configuredAgentTerminalSessionIdentityBackfillSQL = """
-            UPDATE agent_sessions
-            SET terminal_session_id = (
-              SELECT tracking_id
-              FROM runtime_targets
-              WHERE runtime_targets.id = agent_sessions.runtime_target_id
-                AND runtime_targets.app = 'Spaces'
-                AND length(runtime_targets.tracking_id) > 0
-            )
-            WHERE terminal_session_id IS NULL
-              AND provider = 'spaces';
         """
 
     static let terminalRemoteSessionStateSQL = """
@@ -266,109 +158,6 @@ public enum DatabaseSchema {
             \(terminalAgentSignalEventsSQL)
         """
 
-    static let projectAgentLauncherIdentityBackfillSQL = """
-            UPDATE project_agent_launchers
-            SET id = lower(hex(randomblob(16)))
-            WHERE length(trim(id)) = 0;
-        """
-
-    static let workspaceAgentLauncherIdentityBackfillSQL = """
-            UPDATE workspace_agent_launchers
-            SET id = lower(hex(randomblob(16)))
-            WHERE length(trim(id)) = 0;
-        """
-
-    static let runningProcessTemplateIdentityBackfillSQL = """
-            UPDATE running_processes
-            SET template_id = (
-              SELECT workspace_processes.id
-              FROM workspace_processes
-              WHERE workspace_processes.workspace_id = running_processes.workspace_id
-                AND lower(coalesce(workspace_processes.name, '')) = lower(running_processes.template_name)
-              LIMIT 1
-            )
-            WHERE template_id IS NULL OR length(trim(template_id)) = 0;
-        """
-
-    static let agentSessionLauncherIdentityBackfillSQL = """
-            UPDATE agent_sessions
-            SET claimed_launcher_id = (
-              SELECT workspace_agent_launchers.id
-              FROM workspace_agent_launchers
-              WHERE workspace_agent_launchers.workspace_id = agent_sessions.workspace_id
-                AND lower(workspace_agent_launchers.name) = lower(agent_sessions.claimed_launcher_name)
-              LIMIT 1
-            )
-            WHERE (claimed_launcher_id IS NULL OR length(trim(claimed_launcher_id)) = 0)
-              AND claimed_launcher_name IS NOT NULL
-              AND length(trim(claimed_launcher_name)) > 0;
-        """
-
-    static let terminalSessionProcessOwnershipBackfillSQL = """
-            UPDATE terminal_sessions
-            SET workspace_id = (
-                  SELECT running_processes.workspace_id
-                  FROM running_processes
-                  WHERE running_processes.terminal_session_id = terminal_sessions.session_id
-                    AND length(trim(running_processes.workspace_id)) > 0
-                  ORDER BY COALESCE(running_processes.started_at, running_processes.exited_at, running_processes.last_output_at, '') DESC,
-                           running_processes.id
-                  LIMIT 1
-                ),
-                kind = 'process'
-            WHERE EXISTS (
-              SELECT 1
-              FROM running_processes
-              WHERE running_processes.terminal_session_id = terminal_sessions.session_id
-                AND length(trim(running_processes.workspace_id)) > 0
-            );
-        """
-
-    static let terminalSessionAgentOwnershipBackfillSQL = """
-            UPDATE terminal_sessions
-            SET workspace_id = (
-                  SELECT agent_sessions.workspace_id
-                  FROM agent_sessions
-                  WHERE agent_sessions.terminal_session_id = terminal_sessions.session_id
-                    AND agent_sessions.provider = 'spaces'
-                    AND length(trim(agent_sessions.workspace_id)) > 0
-                  ORDER BY agent_sessions.updated_at DESC, agent_sessions.created_at DESC, agent_sessions.id
-                  LIMIT 1
-                ),
-                kind = 'agent'
-            WHERE (workspace_id IS NULL OR length(trim(workspace_id)) = 0)
-              AND EXISTS (
-                SELECT 1
-                FROM agent_sessions
-                WHERE agent_sessions.terminal_session_id = terminal_sessions.session_id
-                  AND agent_sessions.provider = 'spaces'
-                  AND length(trim(agent_sessions.workspace_id)) > 0
-              );
-        """
-
-    static let terminalSessionRuntimeTargetOwnershipBackfillSQL = """
-            UPDATE terminal_sessions
-            SET workspace_id = (
-                  SELECT runtime_targets.workspace_id
-                  FROM runtime_targets
-                  WHERE runtime_targets.tracking_id = terminal_sessions.session_id
-                    AND runtime_targets.type = 'terminal'
-                    AND runtime_targets.app = 'Spaces'
-                    AND length(trim(runtime_targets.workspace_id)) > 0
-                  ORDER BY runtime_targets.updated_at DESC, runtime_targets.order_index
-                  LIMIT 1
-                )
-            WHERE (workspace_id IS NULL OR length(trim(workspace_id)) = 0)
-              AND EXISTS (
-                SELECT 1
-                FROM runtime_targets
-                WHERE runtime_targets.tracking_id = terminal_sessions.session_id
-                  AND runtime_targets.type = 'terminal'
-                  AND runtime_targets.app = 'Spaces'
-                  AND length(trim(runtime_targets.workspace_id)) > 0
-              );
-        """
-
     public static let latestSchemaSQL = """
             CREATE TABLE IF NOT EXISTS projects (
               id TEXT PRIMARY KEY,
@@ -378,9 +167,7 @@ public enum DatabaseSchema {
               default_branch TEXT,
               is_collapsed INTEGER NOT NULL DEFAULT 0,
               setup_script TEXT,
-              stop_script TEXT,
-              default_compute_host_id TEXT,
-              FOREIGN KEY (default_compute_host_id) REFERENCES compute_hosts(id) ON DELETE SET NULL
+              stop_script TEXT
             );
 
             CREATE TABLE IF NOT EXISTS project_port_definitions (
@@ -424,8 +211,10 @@ public enum DatabaseSchema {
             CREATE TABLE IF NOT EXISTS workspaces (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
+              host_id TEXT NOT NULL,
               title TEXT NOT NULL,
               dir TEXT NOT NULL,
+              runtime_path TEXT NOT NULL,
               dirname TEXT,
               branch TEXT,
               target_branch TEXT,
@@ -435,14 +224,13 @@ public enum DatabaseSchema {
               is_running INTEGER NOT NULL,
               last_launched_at TEXT,
               notes TEXT,
-              compute_host_override_id TEXT,
-              FOREIGN KEY (compute_host_override_id) REFERENCES compute_hosts(id) ON DELETE SET NULL,
+              FOREIGN KEY (host_id) REFERENCES compute_hosts(id) ON DELETE RESTRICT,
               FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
-            CREATE UNIQUE INDEX IF NOT EXISTS workspaces_project_branch_unique
-            ON workspaces(project_id, branch)
-            WHERE length(branch) > 0;
+            CREATE UNIQUE INDEX IF NOT EXISTS workspaces_project_branch_host_active_unique
+            ON workspaces(project_id, branch, host_id)
+            WHERE length(branch) > 0 AND is_archived = 0;
 
             CREATE TABLE IF NOT EXISTS workspace_ports (
               workspace_id TEXT NOT NULL,
@@ -538,6 +326,8 @@ public enum DatabaseSchema {
 
             \(computeHostSchemaSQL)
 
+            \(localComputeHostSQL)
+
             CREATE TABLE IF NOT EXISTS runtime_targets (
               id TEXT PRIMARY KEY,
               workspace_id TEXT NOT NULL,
@@ -606,80 +396,4 @@ public enum DatabaseSchema {
               current_version INTEGER NOT NULL
             );
         """
-
-    private static func executeBatch(sql: String, database: OpaquePointer) throws {
-        if sqlite3_exec(database, sql, nil, nil, nil) != SQLITE_OK {
-            let message = String(cString: sqlite3_errmsg(database))
-            throw NSError(domain: "spaces.database", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
-        }
-    }
-
-    private static func addColumnIfNeeded(table: String, column: String, definition: String, database: OpaquePointer) throws {
-        guard try tableExists(table, database: database), try !columnExists(table: table, column: column, database: database) else { return }
-        try executeBatch(sql: "ALTER TABLE \(table) ADD COLUMN \(column) \(definition);", database: database)
-    }
-
-    private static func addTerminalForegroundRuntimeColumns(database: OpaquePointer) throws {
-        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_pid", definition: "INTEGER", database: database)
-        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_executable_path", definition: "TEXT", database: database)
-        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_executable_name", definition: "TEXT", database: database)
-        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_argv_json", definition: "TEXT", database: database)
-        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_detected_agent_kind", definition: "TEXT", database: database)
-        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_display_label", definition: "TEXT", database: database)
-        try addColumnIfNeeded(table: "terminal_runtime_states", column: "foreground_display_command", definition: "TEXT", database: database)
-    }
-
-    private static func addWorkspaceSetupResultColumns(database: OpaquePointer) throws {
-        try addColumnIfNeeded(table: "workspace_settings", column: "setup_exit_code", definition: "INTEGER", database: database)
-        try addColumnIfNeeded(table: "workspace_settings", column: "setup_log_path", definition: "TEXT", database: database)
-    }
-
-    private static func dropLegacyExternalTerminalStorage(database: OpaquePointer) throws {
-        for column in [
-            "terminal_app", "window_id", "terminal_tracking_id", "terminal_native_id", "terminal_container_id", "iterm_tab_index", "tmux_window_id",
-        ] { try dropColumnIfNeeded(table: "running_processes", column: column, database: database) }
-        for column in ["native_id", "provider", "container_id"] {
-            try dropColumnIfNeeded(table: "runtime_targets", column: column, database: database)
-        }
-        for column in ["terminal_target_id", "terminal_tracking_id", "terminal_native_id", "yabai_window_id"] {
-            try dropColumnIfNeeded(table: "agent_sessions", column: column, database: database)
-        }
-        for table in ["agent_windows", "windows", "terminal_targets"] { try dropTableIfNeeded(table, database: database) }
-    }
-
-    private static func dropColumnIfNeeded(table: String, column: String, database: OpaquePointer) throws {
-        guard try tableExists(table, database: database), try columnExists(table: table, column: column, database: database) else { return }
-        try executeBatch(sql: "ALTER TABLE \(table) DROP COLUMN \(column);", database: database)
-    }
-
-    private static func dropTableIfNeeded(_ table: String, database: OpaquePointer) throws {
-        guard try tableExists(table, database: database) else { return }
-        try executeBatch(sql: "DROP TABLE \(table);", database: database)
-    }
-
-    private static func tableExists(_ table: String, database: OpaquePointer) throws -> Bool {
-        var statement: OpaquePointer?
-        defer { sqlite3_finalize(statement) }
-        guard sqlite3_prepare_v2(database, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1", -1, &statement, nil) == SQLITE_OK
-        else {
-            let message = String(cString: sqlite3_errmsg(database))
-            throw NSError(domain: "spaces.database", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
-        }
-        sqlite3_bind_text(statement, 1, table, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-        return sqlite3_step(statement) == SQLITE_ROW
-    }
-
-    private static func columnExists(table: String, column: String, database: OpaquePointer) throws -> Bool {
-        var statement: OpaquePointer?
-        defer { sqlite3_finalize(statement) }
-        guard sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil) == SQLITE_OK else {
-            let message = String(cString: sqlite3_errmsg(database))
-            throw NSError(domain: "spaces.database", code: 3, userInfo: [NSLocalizedDescriptionKey: message])
-        }
-        while sqlite3_step(statement) == SQLITE_ROW {
-            guard let rawName = sqlite3_column_text(statement, 1) else { continue }
-            if String(cString: rawName) == column { return true }
-        }
-        return false
-    }
 }

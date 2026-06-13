@@ -11,81 +11,116 @@ final class ComputeHostTests: XCTestCase {
             try ComputeHostCredentialStore.resolvedAuthToken(hostID: "Builder-A.1", environment: [key: "  remote-secret  "]), "remote-secret")
     }
 
-    func testStoreRoundTripsComputeHostAndWorkspaceBinding() throws {
+    func testFreshStoreIncludesLocalHost() throws {
         let store = try makeTemporaryStore()
+
+        let localHost = try XCTUnwrap(try store.computeHost(id: ComputeHostRecord.localHostID))
+
+        XCTAssertEqual(localHost, ComputeHostRecord.local())
+        XCTAssertEqual(try store.computeHosts(), [localHost])
+    }
+
+    func testStoreRoundTripsWorkspaceHostAndRuntimePath() throws {
+        let store = try makeTemporaryStore()
+        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
         let project = makeProjectRecord(id: "project-12345678", dir: try makeTempDirectory().path)
         let workspace = WorkspaceRecord(
-            id: "workspace-12345678", projectID: project.id, title: "Feature A", dir: try makeTempDirectory().path, dirname: "feature-a",
-            branch: "feature/a", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
-        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
+            id: "workspace-12345678", projectID: project.id, hostID: host.id, title: "Feature A", dir: try makeTempDirectory().path,
+            runtimePath: "/srv/spaces/project/feature-a", dirname: "feature-a", branch: "feature/a", isDefault: false, isArchived: false,
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(computeHost: host)
         try store.upsert(project: project)
+
         try store.upsert(workspace: workspace)
-        try store.updateProjectDefaultComputeHost(id: project.id, hostID: host.id)
-        try store.updateWorkspaceComputeHostOverride(id: workspace.id, hostID: host.id)
-        let binding = WorkspaceComputeBinding(
-            workspaceID: workspace.id, hostID: host.id, remotePath: "/srv/spaces/project/workspace", branch: "feature/a",
-            createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
 
-        try store.upsert(workspaceComputeBinding: binding)
-
+        let storedWorkspace = try XCTUnwrap(try store.workspace(id: workspace.id))
         XCTAssertEqual(try store.computeHost(id: host.id), host)
-        XCTAssertEqual(try store.project(id: project.id)?.defaultComputeHostID, host.id)
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.computeHostOverrideID, host.id)
-        XCTAssertEqual(try store.workspaceComputeBinding(workspaceID: workspace.id, hostID: host.id), binding)
+        XCTAssertEqual(storedWorkspace.id, workspace.id)
+        XCTAssertEqual(storedWorkspace.projectID, workspace.projectID)
+        XCTAssertEqual(storedWorkspace.hostID, workspace.hostID)
+        XCTAssertEqual(storedWorkspace.dir, workspace.dir)
+        XCTAssertEqual(storedWorkspace.runtimePath, workspace.runtimePath)
+        XCTAssertEqual(storedWorkspace.branch, workspace.branch)
     }
 
-    func testDeleteComputeHostClearsPreferencesAndBindings() throws {
+    func testSameProjectBranchCanExistOnDifferentHosts() throws {
         let store = try makeTemporaryStore()
         let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
         let project = makeProjectRecord(id: "project-12345678", dir: try makeTempDirectory().path)
-        let workspace = WorkspaceRecord(
-            id: "workspace-12345678", projectID: project.id, title: "Feature A", dir: try makeTempDirectory().path, dirname: "feature-a",
-            branch: "feature/a", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
-        let binding = WorkspaceComputeBinding(
-            workspaceID: workspace.id, hostID: host.id, remotePath: "/srv/spaces/project/workspace", branch: "feature/a",
-            createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+        let localWorkspace = WorkspaceRecord(
+            id: "workspace-local", projectID: project.id, title: "Local Feature", dir: try makeTempDirectory().path, dirname: "feature",
+            branch: "feature/shared", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        let remoteWorkspace = WorkspaceRecord(
+            id: "workspace-remote", projectID: project.id, hostID: host.id, title: "Remote Feature", dir: localWorkspace.dir,
+            runtimePath: "/srv/spaces/project/feature", dirname: "feature", branch: "feature/shared", isDefault: false, isArchived: false,
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(computeHost: host)
         try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-        try store.updateProjectDefaultComputeHost(id: project.id, hostID: host.id)
-        try store.updateWorkspaceComputeHostOverride(id: workspace.id, hostID: host.id)
-        try store.upsert(workspaceComputeBinding: binding)
 
-        try store.deleteComputeHost(id: host.id)
+        try store.upsert(workspace: localWorkspace)
+        try store.upsert(workspace: remoteWorkspace)
 
-        XCTAssertNil(try store.computeHost(id: host.id))
-        XCTAssertNil(try store.project(id: project.id)?.defaultComputeHostID)
-        XCTAssertNil(try store.workspace(id: workspace.id)?.computeHostOverrideID)
-        XCTAssertNil(try store.workspaceComputeBinding(workspaceID: workspace.id, hostID: host.id))
+        XCTAssertEqual(Set(try store.workspaces(projectID: project.id).map(\.id)), ["workspace-local", "workspace-remote"])
     }
 
-    func testComputeHostPrecedenceUsesWorkspaceOverrideThenProjectDefaultThenLocal() throws {
-        let defaultHost = makeComputeHostRecord(id: "host-default", name: "Default")
-        let overrideHost = makeComputeHostRecord(id: "host-override", name: "Override")
-        let hosts = [defaultHost.id: defaultHost, overrideHost.id: overrideHost]
-        let project = ProjectRecord(
-            id: "project", name: "Project", dir: "/project", isGitRepo: true, defaultBranch: "main", defaultComputeHostID: defaultHost.id)
-        let localProject = ProjectRecord(id: "local-project", name: "Local", dir: "/local", isGitRepo: true, defaultBranch: "main")
-        let workspace = WorkspaceRecord(
-            id: "workspace", projectID: project.id, title: "Workspace", dir: "/project", dirname: nil, branch: "feature", isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
-        let overrideWorkspace = WorkspaceRecord(
-            id: "workspace", projectID: project.id, title: "Workspace", dir: "/project", dirname: nil, branch: "feature", isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil, computeHostOverrideID: overrideHost.id)
+    func testSameProjectBranchCannotExistTwiceOnSameHost() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(id: "project-12345678", dir: try makeTempDirectory().path)
+        let first = WorkspaceRecord(
+            id: "workspace-one", projectID: project.id, title: "One", dir: try makeTempDirectory().path, dirname: "one", branch: "feature/shared",
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        let second = WorkspaceRecord(
+            id: "workspace-two", projectID: project.id, title: "Two", dir: try makeTempDirectory().path, dirname: "two", branch: "feature/shared",
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        try store.upsert(project: project)
+        try store.upsert(workspace: first)
 
-        XCTAssertEqual(ComputeHostPlanner.selectHost(project: project, workspace: overrideWorkspace, hostsByID: hosts), .remote(overrideHost))
-        XCTAssertEqual(ComputeHostPlanner.selectHost(project: project, workspace: workspace, hostsByID: hosts), .remote(defaultHost))
-        XCTAssertEqual(ComputeHostPlanner.selectHost(project: localProject, workspace: workspace, hostsByID: hosts), .localMac)
+        XCTAssertThrowsError(try store.upsert(workspace: second))
+    }
+
+    func testArchivedSameHostBranchCanCoexistWithActiveWorkspace() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(id: "project-12345678", dir: try makeTempDirectory().path)
+        let archived = WorkspaceRecord(
+            id: "workspace-archived", projectID: project.id, title: "Archived", dir: try makeTempDirectory().path, dirname: "archived",
+            branch: "feature/shared", isDefault: false, isArchived: true, isRunning: false, lastLaunchedAt: nil)
+        let active = WorkspaceRecord(
+            id: "workspace-active", projectID: project.id, title: "Active", dir: try makeTempDirectory().path, dirname: "active",
+            branch: "feature/shared", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        try store.upsert(project: project)
+
+        try store.upsert(workspace: archived)
+        try store.upsert(workspace: active)
+
+        XCTAssertEqual(Set(try store.workspaces(projectID: project.id, includeArchived: true).map(\.id)), ["workspace-active", "workspace-archived"])
+    }
+
+    func testComputeHostSelectionUsesWorkspaceHostID() throws {
+        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
+        let hosts = [ComputeHostRecord.localHostID: ComputeHostRecord.local(), host.id: host]
+        let project = ProjectRecord(id: "project", name: "Project", dir: "/project", isGitRepo: true, defaultBranch: "main")
+        let localWorkspace = WorkspaceRecord(
+            id: "workspace-local", projectID: project.id, title: "Local", dir: "/project", dirname: nil, branch: "feature", isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        let remoteWorkspace = WorkspaceRecord(
+            id: "workspace-remote", projectID: project.id, hostID: host.id, title: "Remote", dir: "/project/.worktrees/feature",
+            runtimePath: "/srv/spaces/project/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false, isRunning: false,
+            lastLaunchedAt: nil)
+
+        XCTAssertEqual(
+            ComputeHostPlanner.selectHost(project: project, workspace: localWorkspace, hostsByID: hosts), .local(ComputeHostRecord.local()))
+        XCTAssertEqual(ComputeHostPlanner.selectHost(project: project, workspace: remoteWorkspace, hostsByID: hosts), .remote(host))
     }
 
     func testDaemonEndpointSelectionUsesLocalSocketOrPinnedRemoteEndpoint() {
+        let localHost = ComputeHostRecord.local()
         let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
 
-        let local = ComputeHostPlanner.daemonTarget(selection: .localMac, localSocketPath: "/tmp/spacesd.sock")
+        let local = ComputeHostPlanner.daemonTarget(selection: .local(localHost), localSocketPath: "/tmp/spacesd.sock")
         let remote = ComputeHostPlanner.daemonTarget(selection: .remote(host), localSocketPath: "/tmp/spacesd.sock")
 
         XCTAssertEqual(local.transport, .localUnixSocket)
+        XCTAssertEqual(local.computeHostID, localHost.id)
         XCTAssertEqual(local.socketPath, "/tmp/spacesd.sock")
         XCTAssertNil(local.endpoint)
         XCTAssertEqual(remote.transport, .pinnedTLS)
@@ -93,62 +128,41 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertEqual(remote.endpoint?.certificateFingerprint, "SHA256:abcdef")
     }
 
-    func testOrchestratorCreatesStableBindingOncePerWorkspaceAndHost() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
-        let project = makeProjectRecord(id: "project-abcdef12", dir: try makeTempDirectory().path)
-        let workspace = WorkspaceRecord(
-            id: "workspace-fedcba98", projectID: project.id, title: "Feature One", dir: try makeTempDirectory().path, dirname: "feature-one",
-            branch: "feature/one", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
-        try orchestrator.upsertComputeHost(host)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-
-        let first = try orchestrator.stableComputeBinding(workspaceID: workspace.id, hostID: host.id)
-        try store.updateWorkspaceDirname(id: workspace.id, dirname: "renamed")
-        let second = try orchestrator.stableComputeBinding(workspaceID: workspace.id, hostID: host.id)
-
-        XCTAssertEqual(first.remotePath, "/srv/spaces/project-projecta/feature-one-workspac")
-        XCTAssertEqual(second.remotePath, first.remotePath)
-        XCTAssertEqual(try store.workspaceComputeBindings(workspaceID: workspace.id), [first])
-    }
-
-    func testRuntimeManifestUsesRemoteBindingPathPortsAndAllowedRoots() {
+    func testRuntimeManifestUsesWorkspaceRuntimePathPortsAndAllowedRoots() {
         let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
         let project = ProjectRecord(id: "project", name: "Project", dir: "/local/project", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace", projectID: project.id, title: "Feature", dir: "/local/project/.worktrees/feature", dirname: nil, branch: "feature",
-            targetBranch: "main", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
-        let binding = WorkspaceComputeBinding(
-            workspaceID: workspace.id, hostID: host.id, remotePath: "/srv/spaces/project/feature", branch: "feature",
-            createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+            id: "workspace", projectID: project.id, hostID: host.id, title: "Feature", dir: "/local/project/.worktrees/feature",
+            runtimePath: "/srv/spaces/project/feature", dirname: nil, branch: "feature", targetBranch: "main", isDefault: false, isArchived: false,
+            isRunning: false, lastLaunchedAt: nil)
         let ports = [WorkspaceRuntimePortMapping(id: "api", name: "API_PORT", port: 3001)]
 
-        let manifest = ComputeHostPlanner.runtimeManifest(
-            project: project, workspace: workspace, selection: .remote(host), binding: binding, namedPorts: ports)
+        let manifest = ComputeHostPlanner.runtimeManifest(project: project, workspace: workspace, selection: .remote(host), namedPorts: ports)
 
         XCTAssertEqual(manifest.location, .remote)
         XCTAssertEqual(manifest.computeHostID, host.id)
-        XCTAssertEqual(manifest.remotePath, binding.remotePath)
-        XCTAssertEqual(manifest.allowedFileRoots, [binding.remotePath])
-        XCTAssertEqual(manifest.processEnvironment["SPACES_COMPUTE_LOCATION"], "remote")
-        XCTAssertEqual(manifest.processEnvironment["SPACES_COMPUTE_HOST_ID"], host.id)
-        XCTAssertEqual(manifest.processEnvironment["SPACES_REMOTE_WORKSPACE_PATH"], binding.remotePath)
+        XCTAssertEqual(manifest.remotePath, workspace.runtimePath)
+        XCTAssertEqual(manifest.allowedFileRoots, [workspace.runtimePath])
+        XCTAssertEqual(manifest.namedPorts, ports)
+        XCTAssertEqual(manifest.processEnvironment["SPACES_WORKSPACE_ID"], workspace.id)
+        XCTAssertEqual(manifest.processEnvironment["SPACES_PROJECT_ID"], project.id)
         XCTAssertEqual(manifest.processEnvironment["API_PORT"], "3001")
+        XCTAssertNil(manifest.processEnvironment["SPACES_COMPUTE_LOCATION"])
+        XCTAssertNil(manifest.processEnvironment["SPACES_COMPUTE_HOST_ID"])
+        XCTAssertNil(manifest.processEnvironment["SPACES_REMOTE_WORKSPACE_PATH"])
     }
 
-    func testWorkspaceRuntimePlanCreatesStableRemoteBindingAndManifest() throws {
+    func testWorkspaceRuntimePlanUsesRemoteWorkspaceHostAndRuntimePath() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
         let api = PortDefinition(id: "api", name: "API_PORT")
         let project = ProjectRecord(
-            id: "project-abcdef12", name: "Project", dir: try makeTempDirectory().path, isGitRepo: true, defaultBranch: "main", ports: [api],
-            defaultComputeHostID: host.id)
+            id: "project-abcdef12", name: "Project", dir: try makeTempDirectory().path, isGitRepo: true, defaultBranch: "main", ports: [api])
         let workspace = WorkspaceRecord(
-            id: "workspace-fedcba98", projectID: project.id, title: "Feature One", dir: try makeTempDirectory().path, dirname: "feature-one",
-            branch: "feature/one", targetBranch: "main", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "workspace-fedcba98", projectID: project.id, hostID: host.id, title: "Feature One", dir: try makeTempDirectory().path,
+            runtimePath: "/srv/spaces/project/feature-one", dirname: "feature-one", branch: "feature/one", targetBranch: "main", isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try orchestrator.upsertComputeHost(host)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
@@ -159,22 +173,19 @@ final class ComputeHostTests: XCTestCase {
         let secondPlan = try orchestrator.workspaceRuntimePlan(workspaceID: workspace.id)
 
         guard case .remote(let selectedHost) = plan.selection else { return XCTFail("Expected remote compute host selection.") }
-        let binding = try XCTUnwrap(plan.binding)
         XCTAssertEqual(selectedHost, host)
-        XCTAssertEqual(binding.remotePath, ComputeHostPlanner.proposedRemoteWorkspacePath(host: host, project: project, workspace: workspace))
-        XCTAssertEqual(secondPlan.binding?.remotePath, binding.remotePath)
-        XCTAssertEqual(try store.workspaceComputeBindings(workspaceID: workspace.id).map(\.remotePath), [binding.remotePath])
+        XCTAssertEqual(secondPlan.workspace.runtimePath, workspace.runtimePath)
         XCTAssertEqual(plan.daemonTarget.transport, .pinnedTLS)
         XCTAssertEqual(plan.daemonTarget.endpoint, host.daemonEndpoint)
-        XCTAssertEqual(plan.remoteSSHURI, ComputeHostPlanner.remoteSSHURI(host: host, path: binding.remotePath))
+        XCTAssertEqual(plan.remoteSSHURI, ComputeHostPlanner.remoteSSHURI(host: host, path: workspace.runtimePath))
         XCTAssertEqual(plan.manifest.location, .remote)
         XCTAssertEqual(plan.manifest.computeHostID, host.id)
-        XCTAssertEqual(plan.manifest.remotePath, binding.remotePath)
+        XCTAssertEqual(plan.manifest.remotePath, workspace.runtimePath)
         XCTAssertEqual(plan.manifest.namedPorts, [WorkspaceRuntimePortMapping(id: api.id, name: api.name, port: 3001)])
         XCTAssertEqual(plan.manifest.processEnvironment["API_PORT"], "3001")
     }
 
-    func testBuildWorkspaceEnvIncludesLocalComputeMetadata() throws {
+    func testBuildWorkspaceEnvIncludesWorkspaceIdentityOnlyForLocalRuntime() throws {
         let orchestrator = WorkspaceOrchestrator(store: try makeTemporaryStore())
         let project = makeProjectRecord(id: "project-a", dir: "/projects/app")
         let workspace = makeWorkspaceRecord(id: "workspace-a", projectID: project.id, title: "dev", dir: "/projects/app")
@@ -184,15 +195,15 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertEqual(env["WEB_PORT"], "8080")
         XCTAssertEqual(env["SPACES_WORKSPACE_ID"], workspace.id)
         XCTAssertEqual(env["SPACES_PROJECT_ID"], project.id)
-        XCTAssertEqual(env["SPACES_WORKSPACE_DIR"], workspace.dir)
+        XCTAssertEqual(env["SPACES_WORKSPACE_DIR"], workspace.runtimePath)
         XCTAssertEqual(env["SPACES_PROJECT_DIR"], project.dir)
-        XCTAssertEqual(env["SPACES_COMPUTE_LOCATION"], "local")
+        XCTAssertNil(env["SPACES_COMPUTE_LOCATION"])
         XCTAssertNil(env["SPACES_COMPUTE_HOST_ID"])
         XCTAssertNil(env["SPACES_REMOTE_WORKSPACE_PATH"])
     }
 
     func testWorkspaceLaunchRunsRemoteSetupAndProcessThroughSpacesd() throws {
-        let store = try makeTemporaryStore()
+        let (store, dbPath) = try makeTemporaryStoreWithPath()
         let recorder = RemoteTerminalServiceRecorder()
         let openedWindows = BuiltInTerminalWindowOpenRecorder()
         let closedWindows = BuiltInTerminalWindowCloseRecorder()
@@ -205,65 +216,65 @@ final class ComputeHostTests: XCTestCase {
         let processMarker = projectDir.appendingPathComponent("process.marker")
         let project = ProjectRecord(
             id: "project-a", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main",
-            setupScript: "printf setup > setup.marker", processes: [ProcessTemplate(name: "Server", command: "printf process > process.marker")],
-            defaultComputeHostID: host.id)
-        let workspace = WorkspaceRecord(
-            id: "workspace-a", projectID: project.id, title: "dev", dir: projectDir.path, dirname: nil, branch: "feature", targetBranch: "main",
-            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            setupScript: "printf setup > setup.marker", processes: [ProcessTemplate(name: "Server", command: "printf process > process.marker")])
+        let workspace = remoteWorkspace(projectID: project.id, hostID: host.id, localDir: projectDir.path)
         try orchestrator.upsertComputeHost(host)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: project.processes)
         try store.setWorkspaceSetupState(workspaceID: workspace.id, status: .pending, errorMessage: nil, startedAt: nil, finishedAt: nil)
 
-        try orchestrator.upWorkspace(workspaceID: workspace.id)
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.upWorkspace(workspaceID: workspace.id)
 
-        let requests = recorder.requests()
-        XCTAssertEqual(requests.map(\.command), ["runWorkspaceCommand", "create"])
-        let setupRequest = try XCTUnwrap(requests.first)
-        XCTAssertEqual(setupRequest.runtimeManifest?.location, .remote)
-        XCTAssertEqual(setupRequest.runtimeManifest?.workspaceID, workspace.id)
-        XCTAssertEqual(setupRequest.workspaceCommand?.workingDirectory, setupRequest.runtimeManifest?.remotePath)
-        XCTAssertEqual(setupRequest.workspaceCommand?.environment["SPACES_WORKSPACE_DIR"], setupRequest.runtimeManifest?.remotePath)
-        XCTAssertEqual(setupRequest.worktreeRefresh?.branch, "feature")
+            let requests = recorder.requests()
+            XCTAssertEqual(requests.map(\.command), ["runWorkspaceCommand", "create"])
+            let setupRequest = try XCTUnwrap(requests.first)
+            XCTAssertEqual(setupRequest.runtimeManifest?.location, .remote)
+            XCTAssertEqual(setupRequest.runtimeManifest?.workspaceID, workspace.id)
+            XCTAssertEqual(setupRequest.workspaceCommand?.workingDirectory, workspace.runtimePath)
+            XCTAssertEqual(setupRequest.workspaceCommand?.environment["SPACES_WORKSPACE_DIR"], workspace.runtimePath)
+            XCTAssertEqual(setupRequest.workspaceCommand?.environment["SPACES_PROJECT_DIR"], workspace.runtimePath)
+            XCTAssertNil(setupRequest.workspaceCommand?.environment["SPACES_COMPUTE_HOST_ID"])
+            XCTAssertEqual(setupRequest.worktreeRefresh?.branch, "feature")
 
-        let createRequest = try XCTUnwrap(requests.last)
-        XCTAssertEqual(createRequest.launchConfiguration?.workingDirectory, createRequest.runtimeManifest?.remotePath)
-        XCTAssertEqual(createRequest.launchConfiguration?.shell, "/bin/bash")
-        XCTAssertEqual(createRequest.launchConfiguration?.kind, .process)
-        XCTAssertEqual(createRequest.worktreeRefresh?.path, createRequest.runtimeManifest?.remotePath)
-        let remoteSessionID = try XCTUnwrap(createRequest.launchConfiguration?.sessionID)
-        let openedWindow = try XCTUnwrap(openedWindows.opened().first)
-        XCTAssertEqual(openedWindows.opened().count, 1)
-        XCTAssertEqual(openedWindow.sessionID, remoteSessionID)
-        XCTAssertEqual(openedWindow.mode, .owner)
-        let mirroredPaths = try TerminalSessionPaths.forSession(id: openedWindow.sessionID)
-        let mirroredLaunchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: mirroredPaths)
-        let mirroredRuntimeState = try TerminalSessionPersistence.readRuntimeState(paths: mirroredPaths)
-        XCTAssertEqual(mirroredLaunchConfiguration.workspaceID, workspace.id)
-        XCTAssertEqual(mirroredLaunchConfiguration.kind, .process)
-        XCTAssertEqual(mirroredRuntimeState.servicePID, 42)
-        XCTAssertEqual(mirroredRuntimeState.childPID, 4242)
+            let createRequest = try XCTUnwrap(requests.last)
+            XCTAssertEqual(createRequest.launchConfiguration?.workingDirectory, workspace.runtimePath)
+            XCTAssertEqual(createRequest.launchConfiguration?.shell, "/bin/bash")
+            XCTAssertEqual(createRequest.launchConfiguration?.kind, .process)
+            XCTAssertEqual(createRequest.worktreeRefresh?.path, workspace.runtimePath)
+            let remoteSessionID = try XCTUnwrap(createRequest.launchConfiguration?.sessionID)
+            let openedWindow = try XCTUnwrap(openedWindows.opened().first)
+            XCTAssertEqual(openedWindows.opened().count, 1)
+            XCTAssertEqual(openedWindow.sessionID, remoteSessionID)
+            XCTAssertEqual(openedWindow.mode, .owner)
+            let mirroredPaths = try TerminalSessionPaths.forSession(id: openedWindow.sessionID)
+            let mirroredLaunchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: mirroredPaths)
+            let mirroredRuntimeState = try TerminalSessionPersistence.readRuntimeState(paths: mirroredPaths)
+            XCTAssertEqual(mirroredLaunchConfiguration.workspaceID, workspace.id)
+            XCTAssertEqual(mirroredLaunchConfiguration.kind, .process)
+            XCTAssertEqual(mirroredRuntimeState.servicePID, 42)
+            XCTAssertEqual(mirroredRuntimeState.childPID, 4242)
 
-        XCTAssertFalse(FileManager.default.fileExists(atPath: setupMarker.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: processMarker.path))
-        XCTAssertEqual(try store.workspaceSetupState(workspaceID: workspace.id)?.status, .succeeded)
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
-        let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
-        XCTAssertNotEqual(runningProcess.runtimeTargetID, host.id)
-        XCTAssertEqual(runningProcess.runtimeTargetID, runningProcess.id)
-        XCTAssertEqual(runningProcess.terminalTrackingID, remoteSessionID)
-        XCTAssertEqual(runningProcess.logPath, "/tmp/\(remoteSessionID).log")
-        XCTAssertNotNil(try store.workspaceComputeBinding(workspaceID: workspace.id, hostID: host.id))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: setupMarker.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: processMarker.path))
+            XCTAssertEqual(try store.workspaceSetupState(workspaceID: workspace.id)?.status, .succeeded)
+            XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+            let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
+            XCTAssertNotEqual(runningProcess.runtimeTargetID, host.id)
+            XCTAssertEqual(runningProcess.runtimeTargetID, runningProcess.id)
+            XCTAssertEqual(runningProcess.terminalTrackingID, remoteSessionID)
+            XCTAssertEqual(runningProcess.logPath, "/tmp/\(remoteSessionID).log")
 
-        _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+            _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
 
-        let stopRequests = recorder.requests()
-        XCTAssertEqual(stopRequests.map(\.command), ["runWorkspaceCommand", "create", "terminate"])
-        XCTAssertEqual(stopRequests.last?.sessionID, remoteSessionID)
-        XCTAssertEqual(closedWindows.closed(), [remoteSessionID])
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
-        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+            let stopRequests = recorder.requests()
+            XCTAssertEqual(stopRequests.map(\.command), ["runWorkspaceCommand", "create", "terminate"])
+            XCTAssertEqual(stopRequests.last?.sessionID, remoteSessionID)
+            XCTAssertEqual(closedWindows.closed(), [remoteSessionID])
+            XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+            XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+        }
     }
 
     func testRunWorkspaceSetupRunsRemoteCommandThroughSpacesd() throws {
@@ -274,11 +285,9 @@ final class ComputeHostTests: XCTestCase {
         let projectDir = try makeTempDirectory()
         let setupMarker = projectDir.appendingPathComponent("setup.marker")
         let project = ProjectRecord(
-            id: "project-a", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main",
-            setupScript: "printf setup > setup.marker", defaultComputeHostID: host.id)
-        let workspace = WorkspaceRecord(
-            id: "workspace-a", projectID: project.id, title: "dev", dir: projectDir.path, dirname: nil, branch: "feature", targetBranch: "main",
-            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "project-a", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", setupScript: "printf setup > setup.marker"
+        )
+        let workspace = remoteWorkspace(projectID: project.id, hostID: host.id, localDir: projectDir.path)
         try orchestrator.upsertComputeHost(host)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
@@ -288,8 +297,8 @@ final class ComputeHostTests: XCTestCase {
         let request = try XCTUnwrap(recorder.requests().first)
         XCTAssertEqual(request.command, "runWorkspaceCommand")
         XCTAssertEqual(request.runtimeManifest?.location, .remote)
-        XCTAssertEqual(request.workspaceCommand?.workingDirectory, request.runtimeManifest?.remotePath)
-        XCTAssertEqual(request.workspaceCommand?.environment["SPACES_COMPUTE_HOST_ID"], host.id)
+        XCTAssertEqual(request.workspaceCommand?.workingDirectory, workspace.runtimePath)
+        XCTAssertNil(request.workspaceCommand?.environment["SPACES_COMPUTE_HOST_ID"])
         XCTAssertEqual(request.worktreeRefresh?.branch, "feature")
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: setupMarker.path))
@@ -300,29 +309,26 @@ final class ComputeHostTests: XCTestCase {
     }
 
     func testOpenWorkspaceTerminalRunsRemoteShellThroughSpacesd() throws {
-        let store = try makeTemporaryStore()
+        let (store, dbPath) = try makeTemporaryStoreWithPath()
         let recorder = RemoteTerminalServiceRecorder()
         let openedWindows = BuiltInTerminalWindowOpenRecorder()
         let orchestrator = WorkspaceOrchestrator(
             store: store, builtInTerminalWindowOpener: openedWindows.open, remoteTerminalServiceClient: recorder.client)
         let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
         let projectDir = try makeTempDirectory()
-        let project = ProjectRecord(
-            id: "project-a", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", defaultComputeHostID: host.id)
-        let workspace = WorkspaceRecord(
-            id: "workspace-a", projectID: project.id, title: "dev", dir: projectDir.path, dirname: nil, branch: "feature", targetBranch: "main",
-            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        let project = ProjectRecord(id: "project-a", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+        let workspace = remoteWorkspace(projectID: project.id, hostID: host.id, localDir: projectDir.path)
         try orchestrator.upsertComputeHost(host)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
-        let sessionID = try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id)
+        let sessionID = try withEnv(name: "SPACES_DB_PATH", value: dbPath) { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
 
         let request = try XCTUnwrap(recorder.requests().first)
         XCTAssertEqual(request.command, "create")
         XCTAssertEqual(request.launchConfiguration?.sessionID, sessionID)
         XCTAssertEqual(request.launchConfiguration?.kind, .shell)
-        XCTAssertEqual(request.launchConfiguration?.workingDirectory, request.runtimeManifest?.remotePath)
+        XCTAssertEqual(request.launchConfiguration?.workingDirectory, workspace.runtimePath)
         XCTAssertEqual(request.launchConfiguration?.shell, "/bin/bash")
         XCTAssertEqual(request.worktreeRefresh?.branch, "feature")
         XCTAssertTrue(openedWindows.opened().isEmpty)
@@ -331,16 +337,13 @@ final class ComputeHostTests: XCTestCase {
     }
 
     func testRemoteWorkspaceTerminalReservationPersistsWindowAfterLaunchCompletes() throws {
-        let store = try makeTemporaryStore()
+        let (store, dbPath) = try makeTemporaryStoreWithPath()
         let recorder = RemoteTerminalServiceRecorder()
         let orchestrator = WorkspaceOrchestrator(store: store, remoteTerminalServiceClient: recorder.client)
         let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
         let projectDir = try makeTempDirectory()
-        let project = ProjectRecord(
-            id: "project-a", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", defaultComputeHostID: host.id)
-        let workspace = WorkspaceRecord(
-            id: "workspace-a", projectID: project.id, title: "dev", dir: projectDir.path, dirname: nil, branch: "feature", targetBranch: "main",
-            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        let project = ProjectRecord(id: "project-a", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+        let workspace = remoteWorkspace(projectID: project.id, hostID: host.id, localDir: projectDir.path)
         try orchestrator.upsertComputeHost(host)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
@@ -351,7 +354,7 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertTrue(recorder.requests().isEmpty)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
 
-        let sessionID = try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation)
+        let sessionID = try withEnv(name: "SPACES_DB_PATH", value: dbPath) { try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation) }
 
         XCTAssertEqual(sessionID, reservation.sessionID)
         XCTAssertEqual(recorder.requests().first?.command, "create")
@@ -381,93 +384,44 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertTrue(block.localizedDescription.contains("origin/feature is not an ancestor"))
     }
 
-    func testWorkspaceHostOverrideChangeBlocksWithPreservedSpacesSession() throws {
+    func testDeleteComputeHostBlocksWhenWorkspaceIsAssignedToHost() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
         let project = makeProjectRecord(id: "project-a", dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(id: "workspace-a", projectID: project.id, title: "Feature", dir: try makeTempDirectory().path)
+        let workspace = WorkspaceRecord(
+            id: "workspace-a", projectID: project.id, hostID: host.id, title: "Feature", dir: try makeTempDirectory().path,
+            runtimePath: "/srv/spaces/project/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false, isRunning: false,
+            lastLaunchedAt: nil)
         try orchestrator.upsertComputeHost(host)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
-        try insertPreservedProcessSession(store: store, workspaceID: workspace.id)
-
-        XCTAssertThrowsError(try orchestrator.setWorkspaceComputeHostOverride(workspaceID: workspace.id, hostID: host.id)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("live or preserved Spaces terminal sessions"))
-        }
-        XCTAssertNil(try store.workspace(id: workspace.id)?.computeHostOverrideID)
-    }
-
-    func testProjectDefaultHostChangeBlocksInheritingWorkspaceWithPreservedSpacesSession() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let hostA = makeComputeHostRecord(id: "host-a", name: "Builder A")
-        let hostB = makeComputeHostRecord(id: "host-b", name: "Builder B")
-        let project = ProjectRecord(
-            id: "project-a", name: "Project", dir: try makeTempDirectory().path, isGitRepo: true, defaultBranch: "main",
-            defaultComputeHostID: hostA.id)
-        let workspace = makeWorkspaceRecord(id: "workspace-a", projectID: project.id, title: "Feature", dir: try makeTempDirectory().path)
-        try orchestrator.upsertComputeHost(hostA)
-        try orchestrator.upsertComputeHost(hostB)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-        try insertPreservedProcessSession(store: store, workspaceID: workspace.id)
-
-        XCTAssertThrowsError(try orchestrator.setProjectDefaultComputeHost(projectID: project.id, hostID: hostB.id)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("live or preserved Spaces terminal sessions"))
-        }
-        XCTAssertEqual(try store.project(id: project.id)?.defaultComputeHostID, hostA.id)
-    }
-
-    func testDeleteComputeHostBlocksWhenResolvedWorkspaceHasPreservedSpacesSession() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
-        let project = ProjectRecord(
-            id: "project-a", name: "Project", dir: try makeTempDirectory().path, isGitRepo: true, defaultBranch: "main", defaultComputeHostID: host.id
-        )
-        let workspace = makeWorkspaceRecord(id: "workspace-a", projectID: project.id, title: "Feature", dir: try makeTempDirectory().path)
-        try orchestrator.upsertComputeHost(host)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-        try insertPreservedProcessSession(store: store, workspaceID: workspace.id)
 
         XCTAssertThrowsError(try orchestrator.deleteComputeHost(id: host.id)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("live or preserved Spaces terminal sessions"))
+            XCTAssertTrue(error.localizedDescription.contains("assigned to that host"))
         }
         XCTAssertEqual(try store.computeHost(id: host.id), host)
-        XCTAssertEqual(try store.project(id: project.id)?.defaultComputeHostID, host.id)
     }
 
-    func testDeleteComputeHostClearsSelectionsBindingsAndReportsCleanup() throws {
+    func testDeleteComputeHostRejectsLocalHost() throws {
+        let orchestrator = WorkspaceOrchestrator(store: try makeTemporaryStore())
+
+        XCTAssertThrowsError(try orchestrator.deleteComputeHost(id: ComputeHostRecord.localHostID)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("local host record cannot be removed"))
+        }
+    }
+
+    func testDeleteComputeHostDeletesUnassignedHostAndReportsCredentialCleanup() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let host = makeComputeHostRecord(id: "test-host-\(UUID().uuidString)", name: "Builder A")
-        let project = ProjectRecord(
-            id: "project-a", name: "Project", dir: try makeTempDirectory().path, isGitRepo: true, defaultBranch: "main", defaultComputeHostID: host.id
-        )
-        let workspace = WorkspaceRecord(
-            id: "workspace-a", projectID: project.id, title: "Feature", dir: try makeTempDirectory().path, dirname: nil, branch: "feature",
-            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil, computeHostOverrideID: host.id)
-        let binding = WorkspaceComputeBinding(
-            workspaceID: workspace.id, hostID: host.id, remotePath: "/srv/spaces/project/feature", branch: "feature",
-            createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
         try orchestrator.upsertComputeHost(host)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-        try store.upsert(workspaceComputeBinding: binding)
 
         let result = try orchestrator.deleteComputeHost(id: host.id)
 
         XCTAssertEqual(result.hostID, host.id)
-        XCTAssertEqual(result.clearedProjectDefaultIDs, [project.id])
-        XCTAssertEqual(result.clearedWorkspaceOverrideIDs, [workspace.id])
-        XCTAssertEqual(result.clearedWorkspaceBindingIDs, [binding.id])
         XCTAssertFalse(result.credentialTokenDeleted)
         XCTAssertNil(try store.computeHost(id: host.id))
-        XCTAssertNil(try store.project(id: project.id)?.defaultComputeHostID)
-        XCTAssertNil(try store.workspace(id: workspace.id)?.computeHostOverrideID)
-        XCTAssertNil(try store.workspaceComputeBinding(workspaceID: workspace.id, hostID: host.id))
     }
 
     func testBrowserSSHForwardResolverMapsRemoteNamedLocalServicePort() throws {
@@ -529,7 +483,8 @@ final class ComputeHostTests: XCTestCase {
     }
 
     func testBrowserSSHForwardResolverLeavesLocalRuntimeURLsUnchanged() throws {
-        let plan = makeRuntimePlan(selection: .localMac, ports: [WorkspaceRuntimePortMapping(id: "web", name: "WEB_PORT", port: 3000)])
+        let plan = makeRuntimePlan(
+            selection: .local(ComputeHostRecord.local()), ports: [WorkspaceRuntimePortMapping(id: "web", name: "WEB_PORT", port: 3000)])
 
         let mapped = try BrowserSSHForwardResolver.resolvedURL("http://localhost:3000/status", runtimePlan: plan) { _ in
             XCTFail("Local runtime URLs should not open SSH forwards.")
@@ -539,34 +494,37 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertEqual(mapped, "http://localhost:3000/status")
     }
 
-    private func insertPreservedProcessSession(store: SQLiteStore, workspaceID: String, sessionID: String = "session-preserved") throws {
-        try store.upsert(
-            runningProcess: RunningProcessRecord(
-                id: "process-\(sessionID)", workspaceID: workspaceID, templateName: "Server", command: "npm run dev",
-                terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil,
-                status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:00Z", exitedAt: "2026-01-01T00:00:01Z"))
+    private func remoteWorkspace(projectID: String, hostID: String, localDir: String) -> WorkspaceRecord {
+        WorkspaceRecord(
+            id: "workspace-a", projectID: projectID, hostID: hostID, title: "dev", dir: localDir, runtimePath: "/srv/spaces/project/feature",
+            dirname: nil, branch: "feature", targetBranch: "main", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+    }
+
+    private func makeTemporaryStoreWithPath() throws -> (SQLiteStore, String) {
+        let dir = try makeTempDirectory()
+        let dbURL = dir.appendingPathComponent("spaces-test.db")
+        return (try SQLiteStore(path: dbURL.path), dbURL.path)
+    }
+
+    private func withEnv<T>(name: String, value: String, run: () throws -> T) throws -> T {
+        let old = getenv(name).map { String(cString: $0) }
+        setenv(name, value, 1)
+        defer { if let old { setenv(name, old, 1) } else { unsetenv(name) } }
+        return try run()
     }
 
     private func makeRuntimePlan(selection: ComputeHostSelection, ports: [WorkspaceRuntimePortMapping]) -> WorkspaceRuntimePlan {
         let project = ProjectRecord(id: "project", name: "Project", dir: "/local/project", isGitRepo: true, defaultBranch: "main")
+        let workspaceHostID = selection.computeHostID ?? ComputeHostRecord.localHostID
+        let runtimePath = selection.isRemote ? "/srv/spaces/project/feature" : "/local/project/workspace"
         let workspace = WorkspaceRecord(
-            id: "workspace", projectID: project.id, title: "Feature", dir: "/local/project/workspace", dirname: nil, branch: "feature",
-            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
-        let binding: WorkspaceComputeBinding?
-        if case .remote(let host) = selection {
-            binding = WorkspaceComputeBinding(
-                workspaceID: workspace.id, hostID: host.id, remotePath: "/srv/spaces/project/feature", branch: "feature",
-                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
-        } else {
-            binding = nil
-        }
-        let manifest = ComputeHostPlanner.runtimeManifest(
-            project: project, workspace: workspace, selection: selection, binding: binding, namedPorts: ports)
+            id: "workspace", projectID: project.id, hostID: workspaceHostID, title: "Feature", dir: "/local/project/workspace",
+            runtimePath: runtimePath, dirname: nil, branch: "feature", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        let manifest = ComputeHostPlanner.runtimeManifest(project: project, workspace: workspace, selection: selection, namedPorts: ports)
         return WorkspaceRuntimePlan(
-            project: project, workspace: workspace, selection: selection, binding: binding, manifest: manifest,
+            project: project, workspace: workspace, selection: selection, manifest: manifest,
             daemonTarget: ComputeHostPlanner.daemonTarget(selection: selection, localSocketPath: "/tmp/spacesd.sock"), remoteSSHURI: nil)
     }
-
 }
 
 private final class BrowserForwardRecorder: @unchecked Sendable {

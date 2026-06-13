@@ -100,6 +100,23 @@ run_demo_env() {
   env "${env_args[@]}" "$@"
 }
 
+json_get() {
+  local file="$1"
+  local expr="$2"
+  python3 - "$file" "$expr" <<'PY'
+import json
+import sys
+
+path, expr = sys.argv[1:3]
+with open(path) as fh:
+    value = json.load(fh)
+for part in expr.split("."):
+    if part:
+        value = value[part]
+print("" if value is None else value)
+PY
+}
+
 prepare_ghostty_demo_config() {
   ghostty_demo_xdg_config_home="$source_xdg_config_home"
 }
@@ -317,13 +334,6 @@ prepare_remote_git_origin() {
 configure_demo_compute_hosts() {
   require_remote_configuration
   export_remote_auth_token
-  run_demo_env \
-    HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
-    SPACESD_EXECUTABLE="$terminal_service" \
-    "$spacese2e" set-project-default-compute-host --project-dir "$local_project_dir" --local \
-    >"$temp_root/local-compute-host.json"
 
   local slug
   slug="$(basename "$temp_root" | tr -cd 'A-Za-z0-9_.-')"
@@ -357,6 +367,11 @@ configure_demo_compute_hosts() {
       echo "Remote compute host smoke failed. See $temp_root/remote-compute-host-smoke.stderr.log" >&2
       exit 1
     }
+  remote_project_dir="$(json_get "$temp_root/remote-compute-host-smoke.json" "workspace.dir")"
+  if [[ -z "$remote_project_dir" ]]; then
+    echo "Remote compute host smoke did not return a workspace directory." >&2
+    exit 1
+  fi
 }
 
 create_demo_root() {

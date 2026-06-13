@@ -1,6 +1,9 @@
 import Foundation
 
-public enum ComputeHostKind: String, Codable, Sendable, Equatable { case remote }
+public enum ComputeHostKind: String, Codable, Sendable, Equatable {
+    case local
+    case remote
+}
 
 public struct SpacesDaemonEndpoint: Codable, Sendable, Equatable {
     public let host: String
@@ -15,6 +18,8 @@ public struct SpacesDaemonEndpoint: Codable, Sendable, Equatable {
 }
 
 public struct ComputeHostRecord: Codable, Sendable, Equatable, Identifiable {
+    public static let localHostID = "local"
+
     public let id: String
     public var name: String
     public var kind: ComputeHostKind
@@ -41,6 +46,14 @@ public struct ComputeHostRecord: Codable, Sendable, Equatable, Identifiable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
+
+    public static func local(createdAt: String = "1970-01-01T00:00:00Z", updatedAt: String = "1970-01-01T00:00:00Z") -> ComputeHostRecord {
+        ComputeHostRecord(
+            id: localHostID, name: "Local Mac", kind: .local, sshHost: "", sshUser: nil, sshPort: nil, workspaceRoot: "",
+            daemonEndpoint: SpacesDaemonEndpoint(host: "", port: 0, certificateFingerprint: ""), createdAt: createdAt, updatedAt: updatedAt)
+    }
+
+    public var isLocal: Bool { kind == .local }
 }
 
 public struct ComputeHostDraft: Sendable, Equatable {
@@ -145,65 +158,37 @@ public struct ComputeHostReachabilityError: LocalizedError, Sendable, Equatable 
     }
 }
 
-public struct WorkspaceComputeBinding: Codable, Sendable, Equatable, Identifiable {
-    public var id: String { "\(workspaceID):\(hostID)" }
-    public let workspaceID: String
-    public let hostID: String
-    public var remotePath: String
-    public var branch: String?
-    public var createdAt: String
-    public var updatedAt: String
-
-    public init(workspaceID: String, hostID: String, remotePath: String, branch: String?, createdAt: String, updatedAt: String) {
-        self.workspaceID = workspaceID
-        self.hostID = hostID
-        self.remotePath = remotePath
-        self.branch = branch
-        self.createdAt = createdAt
-        self.updatedAt = updatedAt
-    }
-}
-
 public struct ComputeHostDeletionResult: Codable, Sendable, Equatable {
     public let hostID: String
-    public let clearedProjectDefaultIDs: [String]
-    public let clearedWorkspaceOverrideIDs: [String]
-    public let clearedWorkspaceBindingIDs: [String]
     public let credentialTokenDeleted: Bool
 
-    public init(
-        hostID: String, clearedProjectDefaultIDs: [String], clearedWorkspaceOverrideIDs: [String], clearedWorkspaceBindingIDs: [String],
-        credentialTokenDeleted: Bool
-    ) {
+    public init(hostID: String, credentialTokenDeleted: Bool) {
         self.hostID = hostID
-        self.clearedProjectDefaultIDs = clearedProjectDefaultIDs
-        self.clearedWorkspaceOverrideIDs = clearedWorkspaceOverrideIDs
-        self.clearedWorkspaceBindingIDs = clearedWorkspaceBindingIDs
         self.credentialTokenDeleted = credentialTokenDeleted
     }
 }
 
 public enum ComputeHostSelection: Sendable, Equatable {
-    case localMac
+    case local(ComputeHostRecord)
     case remote(ComputeHostRecord)
 
     public var computeHostID: String? {
         switch self {
-        case .localMac: nil
+        case .local(let host): host.id
         case .remote(let host): host.id
         }
     }
 
     public var isRemote: Bool {
         switch self {
-        case .localMac: false
+        case .local: false
         case .remote: true
         }
     }
 
     public var displayName: String {
         switch self {
-        case .localMac: "local Mac"
+        case .local(let host): host.name
         case .remote(let host): host.name
         }
     }
@@ -285,19 +270,17 @@ public struct WorkspaceRuntimePlan: Sendable {
     public let project: ProjectRecord
     public let workspace: WorkspaceRecord
     public let selection: ComputeHostSelection
-    public let binding: WorkspaceComputeBinding?
     public let manifest: WorkspaceRuntimeManifest
     public let daemonTarget: SpacesDaemonConnectionTarget
     public let remoteSSHURI: String?
 
     public init(
-        project: ProjectRecord, workspace: WorkspaceRecord, selection: ComputeHostSelection, binding: WorkspaceComputeBinding?,
-        manifest: WorkspaceRuntimeManifest, daemonTarget: SpacesDaemonConnectionTarget, remoteSSHURI: String?
+        project: ProjectRecord, workspace: WorkspaceRecord, selection: ComputeHostSelection, manifest: WorkspaceRuntimeManifest,
+        daemonTarget: SpacesDaemonConnectionTarget, remoteSSHURI: String?
     ) {
         self.project = project
         self.workspace = workspace
         self.selection = selection
-        self.binding = binding
         self.manifest = manifest
         self.daemonTarget = daemonTarget
         self.remoteSSHURI = remoteSSHURI
@@ -307,16 +290,16 @@ public struct WorkspaceRuntimePlan: Sendable {
 public enum ComputeHostPlanner {
     public static func selectHost(project: ProjectRecord, workspace: WorkspaceRecord, hostsByID: [String: ComputeHostRecord]) -> ComputeHostSelection
     {
-        if let overrideID = normalized(workspace.computeHostOverrideID), let host = hostsByID[overrideID] { return .remote(host) }
-        if let defaultID = normalized(project.defaultComputeHostID), let host = hostsByID[defaultID] { return .remote(host) }
-        return .localMac
+        let hostID = normalized(workspace.hostID) ?? ComputeHostRecord.localHostID
+        let host = hostsByID[hostID] ?? ComputeHostRecord.local()
+        return host.isLocal ? .local(host) : .remote(host)
     }
 
     public static func daemonTarget(selection: ComputeHostSelection, localSocketPath: String) -> SpacesDaemonConnectionTarget {
         switch selection {
-        case .localMac:
+        case .local(let host):
             return SpacesDaemonConnectionTarget(
-                transport: .localUnixSocket, computeHostID: nil, displayName: "local Mac", socketPath: localSocketPath)
+                transport: .localUnixSocket, computeHostID: host.id, displayName: host.name, socketPath: localSocketPath)
         case .remote(let host):
             return SpacesDaemonConnectionTarget(transport: .pinnedTLS, computeHostID: host.id, displayName: host.name, endpoint: host.daemonEndpoint)
         }
@@ -331,15 +314,13 @@ public enum ComputeHostPlanner {
     }
 
     public static func runtimeManifest(
-        project: ProjectRecord, workspace: WorkspaceRecord, selection: ComputeHostSelection, binding: WorkspaceComputeBinding?,
-        namedPorts: [WorkspaceRuntimePortMapping], gitRemoteURL: String? = nil
+        project: ProjectRecord, workspace: WorkspaceRecord, selection: ComputeHostSelection, namedPorts: [WorkspaceRuntimePortMapping],
+        gitRemoteURL: String? = nil
     ) -> WorkspaceRuntimeManifest {
         let location: WorkspaceRuntimeManifest.Location = selection.isRemote ? .remote : .local
-        let remotePath = binding?.remotePath
-        let workingPath = remotePath ?? workspace.dir
-        var environment = ["SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id, "SPACES_COMPUTE_LOCATION": location.rawValue]
-        if let computeHostID = selection.computeHostID { environment["SPACES_COMPUTE_HOST_ID"] = computeHostID }
-        if let remotePath { environment["SPACES_REMOTE_WORKSPACE_PATH"] = remotePath }
+        let remotePath = location == .remote ? workspace.runtimePath : nil
+        let workingPath = remotePath ?? workspace.runtimePath
+        var environment = ["SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id]
         for mapping in namedPorts { environment[mapping.name] = String(mapping.port) }
 
         return WorkspaceRuntimeManifest(

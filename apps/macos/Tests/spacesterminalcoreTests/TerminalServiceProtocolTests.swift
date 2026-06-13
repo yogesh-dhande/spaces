@@ -22,9 +22,12 @@ final class TerminalServiceProtocolTests: XCTestCase {
             terminalLinkID: "link-1", chunkOffset: 128, chunkLimit: 4096,
             agentSignal: TerminalServiceAgentSignalEvent(
                 id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "waiting", label: "Mock Agent",
-                terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil,
-                environmentKeys: ["SPACES_TERMINAL_HOST", "SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-06-11T00:00:00Z"),
-            agentSignalEventIDs: ["event-1"])
+                terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil, environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"],
+                createdAt: "2026-06-11T00:00:00Z"), agentSignalEventIDs: ["event-1"],
+            profileCommand: TerminalServiceProfileCommandRequest(
+                operation: .workspaceCreate, projectID: "project-1", branch: "feature", hostID: "host-1", title: "Feature", targetBranch: "main",
+                existingBranch: true, terminalSessionID: "session-1", terminalText: "hello", terminalBytes: Data([0, 10, 255]), appendNewline: true,
+                lineCount: 40))
         let response = TerminalServiceResponse(
             ok: true, message: "Started.",
             session: TerminalServiceSessionSummary(
@@ -41,8 +44,14 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 TerminalServiceAgentSignalEvent(
                     id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "waiting",
                     label: "Mock Agent", terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil,
-                    environmentKeys: ["SPACES_TERMINAL_HOST", "SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-06-11T00:00:00Z")
-            ])
+                    environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-06-11T00:00:00Z")
+            ],
+            profile: TerminalServiceProfileCommandResponse(
+                message: "Created workspace.",
+                workspace: TerminalServiceProfileWorkspaceRecord(
+                    id: "workspace-1", projectID: "project-1", hostID: "host-1", title: "Feature", dir: "/srv/work", runtimePath: "/srv/work",
+                    dirname: "feature", branch: "feature", targetBranch: "main", isDefault: false, isArchived: false, isHidden: false,
+                    isRunning: false, lastLaunchedAt: nil, notes: nil), terminalOutput: "recent output"))
 
         XCTAssertEqual(try TerminalServiceCodec.decodeRequest(TerminalServiceCodec.encodeRequest(request)), request)
         XCTAssertEqual(try TerminalServiceCodec.decodeResponse(TerminalServiceCodec.encodeResponse(response)), response)

@@ -53,8 +53,8 @@ public final class SQLiteStore {
         try withImmediateTransaction {
             try execute(
                 sql: """
-                    INSERT INTO projects(id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script, default_compute_host_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+                    INSERT INTO projects(id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       name = excluded.name,
                       dir = excluded.dir,
@@ -62,12 +62,11 @@ public final class SQLiteStore {
                       default_branch = excluded.default_branch,
                       is_collapsed = excluded.is_collapsed,
                       setup_script = excluded.setup_script,
-                      stop_script = excluded.stop_script,
-                      default_compute_host_id = excluded.default_compute_host_id
+                      stop_script = excluded.stop_script
                     """,
                 bindings: [
                     project.id, project.name, project.dir, project.isGitRepo ? "1" : "0", project.defaultBranch ?? "",
-                    project.isCollapsed ? "1" : "0", project.setupScript ?? "", project.stopScript ?? "", project.defaultComputeHostID ?? "",
+                    project.isCollapsed ? "1" : "0", project.setupScript ?? "", project.stopScript ?? "",
                 ])
             try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [project.id])
             for (index, definition) in normalizedPortDefinitions.enumerated() {
@@ -100,7 +99,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script, default_compute_host_id
+                    SELECT id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script
                     FROM projects
                     WHERE id = ?
                     """, bindings: [id])
@@ -112,7 +111,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script, default_compute_host_id
+                    SELECT id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script
                     FROM projects
                     WHERE dir = ?
                     """, bindings: [dir])
@@ -123,7 +122,7 @@ public final class SQLiteStore {
     public func projects() throws -> [ProjectRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script, default_compute_host_id
+                SELECT id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script
                 FROM projects
                 ORDER BY name
                 """)
@@ -166,11 +165,13 @@ public final class SQLiteStore {
         try withImmediateTransaction {
             try execute(
                 sql: """
-                    INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes, compute_host_override_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+                    INSERT INTO workspaces(id, project_id, host_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
+                      host_id = excluded.host_id,
                       title = excluded.title,
                       dir = excluded.dir,
+                      runtime_path = excluded.runtime_path,
                       dirname = excluded.dirname,
                       branch = excluded.branch,
                       target_branch = excluded.target_branch,
@@ -179,13 +180,13 @@ public final class SQLiteStore {
                       is_hidden = excluded.is_hidden,
                       is_running = excluded.is_running,
                       last_launched_at = excluded.last_launched_at,
-                      notes = excluded.notes,
-                      compute_host_override_id = excluded.compute_host_override_id
+                      notes = excluded.notes
                     """,
                 bindings: [
-                    workspace.id, workspace.projectID, workspace.title, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
-                    workspace.targetBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isHidden ? "1" : "0",
-                    workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.notes ?? "", workspace.computeHostOverrideID ?? "",
+                    workspace.id, workspace.projectID, workspace.hostID, workspace.title, workspace.dir, workspace.runtimePath,
+                    workspace.dirname ?? "", workspace.branch ?? "", workspace.targetBranch ?? "", workspace.isDefault ? "1" : "0",
+                    workspace.isArchived ? "1" : "0", workspace.isHidden ? "1" : "0", workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "",
+                    workspace.notes ?? "",
                 ])
             try execute(sql: "DELETE FROM ignored_worktrees WHERE worktree_dir = ?", bindings: [workspace.dir])
         }
@@ -195,7 +196,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes, compute_host_override_id
+                    SELECT id, project_id, host_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                     FROM workspaces WHERE id = ?
                     """, bindings: [id])
         else { return nil }
@@ -206,7 +207,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes, compute_host_override_id
+                    SELECT id, project_id, host_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                     FROM workspaces WHERE project_id = ? AND title = ?
                     """, bindings: [projectID, title])
         else { return nil }
@@ -217,7 +218,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes, compute_host_override_id
+                    SELECT id, project_id, host_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                     FROM workspaces
                     WHERE dir = ?
                     ORDER BY is_archived ASC
@@ -230,7 +231,7 @@ public final class SQLiteStore {
     public func workspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes, compute_host_override_id
+                SELECT id, project_id, host_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                 FROM workspaces
                 WHERE project_id = ? AND (? = '1' OR is_archived = 0)
                 ORDER BY is_default DESC, title
@@ -296,14 +297,6 @@ public final class SQLiteStore {
         try execute(sql: "UPDATE workspaces SET notes = ? WHERE id = ?", bindings: [notes ?? "", id])
     }
 
-    public func updateProjectDefaultComputeHost(id: String, hostID: String?) throws {
-        try execute(sql: "UPDATE projects SET default_compute_host_id = NULLIF(?, '') WHERE id = ?", bindings: [hostID ?? "", id])
-    }
-
-    public func updateWorkspaceComputeHostOverride(id: String, hostID: String?) throws {
-        try execute(sql: "UPDATE workspaces SET compute_host_override_id = NULLIF(?, '') WHERE id = ?", bindings: [hostID ?? "", id])
-    }
-
     public func upsert(computeHost: ComputeHostRecord) throws {
         try execute(
             sql: """
@@ -354,47 +347,7 @@ public final class SQLiteStore {
     }
 
     public func deleteComputeHost(id: String) throws {
-        try withImmediateTransaction {
-            try execute(sql: "DELETE FROM workspace_compute_bindings WHERE host_id = ?", bindings: [id])
-            try execute(sql: "UPDATE projects SET default_compute_host_id = NULL WHERE default_compute_host_id = ?", bindings: [id])
-            try execute(sql: "UPDATE workspaces SET compute_host_override_id = NULL WHERE compute_host_override_id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM compute_hosts WHERE id = ?", bindings: [id])
-        }
-    }
-
-    public func upsert(workspaceComputeBinding binding: WorkspaceComputeBinding) throws {
-        try execute(
-            sql: """
-                INSERT INTO workspace_compute_bindings(workspace_id, host_id, remote_path, branch, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(workspace_id, host_id) DO UPDATE SET
-                  remote_path = workspace_compute_bindings.remote_path,
-                  branch = excluded.branch,
-                  updated_at = excluded.updated_at
-                """, bindings: [binding.workspaceID, binding.hostID, binding.remotePath, binding.branch ?? "", binding.createdAt, binding.updatedAt])
-    }
-
-    public func workspaceComputeBinding(workspaceID: String, hostID: String) throws -> WorkspaceComputeBinding? {
-        guard
-            let row = try queryRow(
-                sql: """
-                    SELECT workspace_id, host_id, remote_path, branch, created_at, updated_at
-                    FROM workspace_compute_bindings
-                    WHERE workspace_id = ? AND host_id = ?
-                    """, bindings: [workspaceID, hostID])
-        else { return nil }
-        return decodeWorkspaceComputeBinding(row: row)
-    }
-
-    public func workspaceComputeBindings(workspaceID: String) throws -> [WorkspaceComputeBinding] {
-        try queryRows(
-            sql: """
-                SELECT workspace_id, host_id, remote_path, branch, created_at, updated_at
-                FROM workspace_compute_bindings
-                WHERE workspace_id = ?
-                ORDER BY created_at, host_id
-                """, bindings: [workspaceID]
-        ).compactMap { decodeWorkspaceComputeBinding(row: $0) }
+        try withImmediateTransaction { try execute(sql: "DELETE FROM compute_hosts WHERE id = ?", bindings: [id]) }
     }
 
     public func updateWorkspaceTitle(id: String, title: String) throws {
@@ -1196,16 +1149,16 @@ public final class SQLiteStore {
         return ProjectRecord(
             id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4], isCollapsed: row[5] == "1",
             setupScript: row[6].isEmpty ? nil : row[6], stopScript: row[7].isEmpty ? nil : row[7], ports: ports, processes: processes,
-            browserSessions: browserSessions, agentLaunchers: agentLaunchers, defaultComputeHostID: normalizedOptional(row[safe: 8]))
+            browserSessions: browserSessions, agentLaunchers: agentLaunchers)
     }
 
     private func decodeWorkspace(row: [String]) -> WorkspaceRecord? {
-        guard row.count >= 13 else { return nil }
+        guard row.count >= 15 else { return nil }
         return WorkspaceRecord(
-            id: row[0], projectID: row[1], title: row[2], dir: row[3], dirname: row[4].isEmpty ? nil : row[4], branch: row[5].isEmpty ? nil : row[5],
-            targetBranch: row[6].isEmpty ? nil : row[6], isDefault: row[7] == "1", isArchived: row[8] == "1", isHidden: row[9] != "0",
-            isRunning: row[10] == "1", lastLaunchedAt: row[11].isEmpty ? nil : row[11], notes: row[12].isEmpty ? nil : row[12],
-            computeHostOverrideID: normalizedOptional(row[safe: 13]))
+            id: row[0], projectID: row[1], hostID: normalizedOptional(row[2]) ?? ComputeHostRecord.localHostID, title: row[3], dir: row[4],
+            runtimePath: row[5].isEmpty ? row[4] : row[5], dirname: row[6].isEmpty ? nil : row[6], branch: row[7].isEmpty ? nil : row[7],
+            targetBranch: row[8].isEmpty ? nil : row[8], isDefault: row[9] == "1", isArchived: row[10] == "1", isHidden: row[11] != "0",
+            isRunning: row[12] == "1", lastLaunchedAt: row[13].isEmpty ? nil : row[13], notes: row[14].isEmpty ? nil : row[14])
     }
 
     private func decodeComputeHost(row: [String]) -> ComputeHostRecord? {
@@ -1214,12 +1167,6 @@ public final class SQLiteStore {
             id: row[0], name: row[1], kind: kind, sshHost: row[3], sshUser: normalizedOptional(row[4]), sshPort: Int(row[5]), workspaceRoot: row[6],
             daemonEndpoint: SpacesDaemonEndpoint(host: row[7], port: daemonPort, certificateFingerprint: row[9]), createdAt: row[10],
             updatedAt: row[11])
-    }
-
-    private func decodeWorkspaceComputeBinding(row: [String]) -> WorkspaceComputeBinding? {
-        guard row.count >= 6 else { return nil }
-        return WorkspaceComputeBinding(
-            workspaceID: row[0], hostID: row[1], remotePath: row[2], branch: normalizedOptional(row[3]), createdAt: row[4], updatedAt: row[5])
     }
 
     private func normalizedOptional(_ value: String?) -> String? {

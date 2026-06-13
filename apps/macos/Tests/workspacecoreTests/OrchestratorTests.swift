@@ -529,6 +529,9 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let dbPath = root.appendingPathComponent("spaces-test.db").path
+        let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true).path
+        setenv(SpacesProfile.databasePathEnvironmentVariable, dbPath, 1)
+        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeDir, 1)
         let store = try SQLiteStore(path: dbPath)
         let openCapture = TerminalOpenCapture()
         let focusCapture = TerminalFocusCapture()
@@ -2938,11 +2941,11 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
-        let project = ProjectRecord(
-            id: "project-remote", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", defaultComputeHostID: host.id)
+        let project = ProjectRecord(id: "project-remote", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-remote", projectID: project.id, title: "feature", dir: projectDir.path, dirname: "feature", branch: "feature",
-            targetBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: "now")
+            id: "workspace-remote", projectID: project.id, hostID: host.id, title: "feature", dir: projectDir.path,
+            runtimePath: remoteWorkingDirectory, dirname: "feature", branch: "feature", targetBranch: "main", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: "now")
         try orchestrator.upsertComputeHost(host)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
@@ -6250,19 +6253,43 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
+        let dbPath = root.appendingPathComponent("spaces-test.db").path
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(
             store: store, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval,
             terminalFocusPulseController: terminalFocusPulseController,
             builtInTerminalWindowOpener: { sessionID, _ in
-                let paths = try! TerminalSessionPaths.forSession(id: sessionID)
-                try! paths.ensureDirectories()
-                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
-                try! TerminalSessionPersistence.writeRuntimeState(
-                    .init(
-                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
-                        updatedAt: "2026-05-15T18:00:00Z"), paths: paths)
-                try! "test output\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+                try! withSpacesProfileEnvironment(dbPath: dbPath) {
+                    let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                    try paths.ensureDirectories()
+                    FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    try TerminalSessionPersistence.writeRuntimeState(
+                        .init(
+                            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
+                            updatedAt: "2026-05-15T18:00:00Z"), paths: paths)
+                    try "test output\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+                }
+            },
+            builtInTerminalSessionLauncher: { configuration in
+                try withSpacesProfileEnvironment(dbPath: dbPath) {
+                    let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
+                    try paths.ensureDirectories()
+                    try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+                    FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+                    let runtimeState =
+                        (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
+                        ?? TerminalSessionRuntimeState(
+                            sessionID: configuration.sessionID, backend: configuration.backend,
+                            servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 4321, state: .running,
+                            updatedAt: "2026-05-15T18:00:00Z", title: configuration.title, workingDirectory: configuration.workingDirectory)
+                    try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+                    return TerminalServiceSessionSummary(
+                        id: configuration.sessionID, title: runtimeState.title ?? configuration.title,
+                        workingDirectory: runtimeState.workingDirectory ?? configuration.workingDirectory, backend: configuration.backend,
+                        lifetimePolicy: configuration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
+                        childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
+                }
             }, currentDate: currentDate)
         if let editor { _ = try orchestrator.updateEditorPreference(editor) }
 
@@ -6304,6 +6331,10 @@ final class OrchestratorTests: XCTestCase {
     }
 
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
+        if name == SpacesProfile.databasePathEnvironmentVariable {
+            try withSpacesProfileEnvironment(dbPath: value, run: run)
+            return
+        }
         let original = ProcessInfo.processInfo.environment[name]
         setenv(name, value, 1)
         defer { if let original { setenv(name, original, 1) } else { unsetenv(name) } }

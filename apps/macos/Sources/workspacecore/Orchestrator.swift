@@ -386,60 +386,15 @@ public final class WorkspaceOrchestrator {
 
     @discardableResult public func deleteComputeHost(id: String) throws -> ComputeHostDeletionResult {
         let hostID = normalizedComputeHostID(id) ?? id
-        let blockedWorkspaces = try workspacesResolving(toComputeHostID: hostID).filter {
-            try workspaceHasRetainedSpacesTerminalSession(workspaceID: $0.id)
-        }
-        if !blockedWorkspaces.isEmpty {
-            throw computeHostChangeBlockedError(action: "remove compute host '\(hostID)'", workspaces: blockedWorkspaces)
+        if hostID == ComputeHostRecord.localHostID { throw WorkspaceError.invalidArgument(message: "The local host record cannot be removed.") }
+        let assignedWorkspaces = try workspacesResolving(toComputeHostID: hostID)
+        if !assignedWorkspaces.isEmpty {
+            throw computeHostChangeBlockedError(action: "remove compute host '\(hostID)'", workspaces: assignedWorkspaces)
         }
         let deletionResult = try computeHostDeletionResult(hostID: hostID)
         try store.deleteComputeHost(id: hostID)
         try ComputeHostCredentialStore.deleteAuthToken(hostID: hostID)
         return deletionResult
-    }
-
-    public func setProjectDefaultComputeHost(projectID: String, hostID: String?) throws {
-        let nextHostID = normalizedComputeHostID(hostID)
-        if let nextHostID, try store.computeHost(id: nextHostID) == nil {
-            throw WorkspaceError.invalidArgument(message: "Compute host '\(nextHostID)' is not configured.")
-        }
-        guard let project = try store.project(id: projectID) else { throw WorkspaceError.invalidArgument(message: "Project not found.") }
-        let hostsByID = try computeHostsByID()
-        var proposedProject = project
-        proposedProject.defaultComputeHostID = nextHostID
-        let blockedWorkspaces = try store.workspaces(projectID: project.id, includeArchived: true).filter { workspace in
-            let currentSelection = ComputeHostPlanner.selectHost(project: project, workspace: workspace, hostsByID: hostsByID)
-            let proposedSelection = ComputeHostPlanner.selectHost(project: proposedProject, workspace: workspace, hostsByID: hostsByID)
-            guard computeHostSelectionKey(currentSelection) != computeHostSelectionKey(proposedSelection) else { return false }
-            return try workspaceHasRetainedSpacesTerminalSession(workspaceID: workspace.id)
-        }
-        if !blockedWorkspaces.isEmpty {
-            throw computeHostChangeBlockedError(action: "change the project default compute host", workspaces: blockedWorkspaces)
-        }
-        try store.updateProjectDefaultComputeHost(id: projectID, hostID: nextHostID)
-    }
-
-    public func setWorkspaceComputeHostOverride(workspaceID: String, hostID: String?) throws {
-        let nextHostID = normalizedComputeHostID(hostID)
-        if let nextHostID, try store.computeHost(id: nextHostID) == nil {
-            throw WorkspaceError.invalidArgument(message: "Compute host '\(nextHostID)' is not configured.")
-        }
-        guard let workspace = try store.workspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
-        guard let project = try store.project(id: workspace.projectID) else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
-        let hostsByID = try computeHostsByID()
-        let currentSelection = ComputeHostPlanner.selectHost(project: project, workspace: workspace, hostsByID: hostsByID)
-        let proposedWorkspace = WorkspaceRecord(
-            id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: workspace.dir, dirname: workspace.dirname,
-            branch: workspace.branch, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
-            isHidden: workspace.isHidden, isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes,
-            computeHostOverrideID: nextHostID)
-        let proposedSelection = ComputeHostPlanner.selectHost(project: project, workspace: proposedWorkspace, hostsByID: hostsByID)
-        if computeHostSelectionKey(currentSelection) != computeHostSelectionKey(proposedSelection),
-            try workspaceHasRetainedSpacesTerminalSession(workspaceID: workspace.id)
-        {
-            throw computeHostChangeBlockedError(action: "change compute host for workspace '\(workspace.title)'", workspaces: [workspace])
-        }
-        try store.updateWorkspaceComputeHostOverride(id: workspaceID, hostID: nextHostID)
     }
 
     public func effectiveComputeHost(workspaceID: String) throws -> ComputeHostSelection {
@@ -460,16 +415,8 @@ public final class WorkspaceOrchestrator {
 
     private func computeHostSelectionKey(_ selection: ComputeHostSelection) -> String {
         switch selection {
-        case .localMac: return "local"
+        case .local(let host): return "local:\(host.id)"
         case .remote(let host): return "remote:\(host.id)"
-        }
-    }
-
-    private func workspaceHasRetainedSpacesTerminalSession(workspaceID: String) throws -> Bool {
-        if try store.runningProcesses(workspaceID: workspaceID).contains(where: { builtInTerminalSessionID(for: $0) != nil }) { return true }
-        if try store.agentWindows(workspaceID: workspaceID).contains(where: { builtInTerminalSessionID(for: $0) != nil }) { return true }
-        return try store.windows(workspaceID: workspaceID).contains {
-            $0.role == "terminal" && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) != nil
         }
     }
 
@@ -487,23 +434,8 @@ public final class WorkspaceOrchestrator {
     }
 
     private func computeHostDeletionResult(hostID: String) throws -> ComputeHostDeletionResult {
-        var clearedProjectDefaultIDs: [String] = []
-        var clearedWorkspaceOverrideIDs: [String] = []
-        var clearedWorkspaceBindingIDs: [String] = []
-        for project in try store.projects() {
-            if normalizedComputeHostID(project.defaultComputeHostID) == hostID { clearedProjectDefaultIDs.append(project.id) }
-            for workspace in try store.workspaces(projectID: project.id, includeArchived: true) {
-                if normalizedComputeHostID(workspace.computeHostOverrideID) == hostID { clearedWorkspaceOverrideIDs.append(workspace.id) }
-                for binding in try store.workspaceComputeBindings(workspaceID: workspace.id) where binding.hostID == hostID {
-                    clearedWorkspaceBindingIDs.append(binding.id)
-                }
-            }
-        }
         let tokenWasStored = (try? ComputeHostCredentialStore.authToken(hostID: hostID)) != nil
-        return ComputeHostDeletionResult(
-            hostID: hostID, clearedProjectDefaultIDs: clearedProjectDefaultIDs.sorted(),
-            clearedWorkspaceOverrideIDs: clearedWorkspaceOverrideIDs.sorted(), clearedWorkspaceBindingIDs: clearedWorkspaceBindingIDs.sorted(),
-            credentialTokenDeleted: tokenWasStored)
+        return ComputeHostDeletionResult(hostID: hostID, credentialTokenDeleted: tokenWasStored)
     }
 
     private func computeHostChangeBlockedError(action: String, workspaces: [WorkspaceRecord]) -> WorkspaceError {
@@ -512,26 +444,7 @@ public final class WorkspaceOrchestrator {
         let suffix = workspaceNames.count > 3 ? " and \(workspaceNames.count - 3) more" : ""
         let noun = workspaceNames.count == 1 ? "workspace" : "workspaces"
         let verb = workspaceNames.count == 1 ? "has" : "have"
-        return WorkspaceError.invalidArgument(
-            message:
-                "Cannot \(action) while \(noun) \(visibleNames)\(suffix) \(verb) live or preserved Spaces terminal sessions. Stop or close those sessions first."
-        )
-    }
-
-    public func stableComputeBinding(workspaceID: String, hostID: String) throws -> WorkspaceComputeBinding {
-        guard let workspace = try store.workspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
-        guard let project = try store.project(id: workspace.projectID) else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
-        guard let host = try store.computeHost(id: hostID) else {
-            throw WorkspaceError.invalidArgument(message: "Compute host '\(hostID)' is not configured.")
-        }
-        if let existing = try store.workspaceComputeBinding(workspaceID: workspace.id, hostID: host.id) { return existing }
-        let now = nowISO8601()
-        let binding = WorkspaceComputeBinding(
-            workspaceID: workspace.id, hostID: host.id,
-            remotePath: ComputeHostPlanner.proposedRemoteWorkspacePath(host: host, project: project, workspace: workspace), branch: workspace.branch,
-            createdAt: now, updatedAt: now)
-        try store.upsert(workspaceComputeBinding: binding)
-        return try store.workspaceComputeBinding(workspaceID: workspace.id, hostID: host.id) ?? binding
+        return WorkspaceError.invalidArgument(message: "Cannot \(action) while \(noun) \(visibleNames)\(suffix) \(verb) assigned to that host.")
     }
 
     public func workspaceRuntimePlan(workspaceID: String) throws -> WorkspaceRuntimePlan {
@@ -721,7 +634,9 @@ public final class WorkspaceOrchestrator {
                 throw WorkspaceError.invalidArgument(message: "Protected branches main/master cannot be renamed.")
             }
             if trimmedBranch != workspace.branch {
-                if let existing = try workspaceForBranch(projectID: workspace.projectID, branch: trimmedBranch), existing.id != workspace.id {
+                if let existing = try workspaceForBranch(projectID: workspace.projectID, branch: trimmedBranch, hostID: workspace.hostID),
+                    existing.id != workspace.id
+                {
                     throw WorkspaceError.invalidArgument(message: "Branch '\(trimmedBranch)' is already used by workspace '\(existing.title)'.")
                 }
                 try git.renameCurrentBranch(path: workspace.dir, to: trimmedBranch)
@@ -1017,7 +932,7 @@ public final class WorkspaceOrchestrator {
             resolvedTargetBranch = nil
         }
         if project.isGitRepo, let branchName = resolvedBranch {
-            if let existing = try workspaceForBranch(projectID: projectID, branch: branchName) {
+            if let existing = try workspaceForBranch(projectID: projectID, branch: branchName, hostID: ComputeHostRecord.localHostID) {
                 if existing.isArchived {
                     guard allowExistingBranchReuse else {
                         throw WorkspaceError.invalidArgument(
@@ -1037,7 +952,9 @@ public final class WorkspaceOrchestrator {
                     message: "Branch '\(branchName)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
         }
-        if project.isGitRepo, let branchName = resolvedBranch, let existing = try archivedWorkspace(projectID: projectID, branch: branchName) {
+        if project.isGitRepo, let branchName = resolvedBranch,
+            let existing = try archivedWorkspace(projectID: projectID, branch: branchName, hostID: ComputeHostRecord.localHostID)
+        {
             let revivedDir: String
             let revivedDirname: String?
             let revivedBranch: String?
@@ -1105,6 +1022,74 @@ public final class WorkspaceOrchestrator {
         return workspace
     }
 
+    public func createWorkspaceOnHost(
+        projectID: String, name: String, branch: String, hostID: String, targetBranch: String? = nil, directoryName: String? = nil,
+        notes: String? = nil, runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false
+    ) throws -> WorkspaceRecord {
+        let normalizedHostID = hostID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedHostID.isEmpty else { throw WorkspaceError.invalidArgument(message: "Host is required.") }
+        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Workspace name is required.") }
+        let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBranch.isEmpty else { throw WorkspaceError.invalidArgument(message: "Branch name is required for git projects.") }
+
+        if normalizedHostID == ComputeHostRecord.localHostID {
+            var workspace = try createWorkspace(
+                projectID: projectID, name: trimmedName, branch: trimmedBranch, targetBranch: targetBranch, directoryName: directoryName,
+                runSetupScript: runSetupScript, allowRemoteBranchLookup: allowRemoteBranchLookup, allowExistingBranchReuse: allowExistingBranchReuse)
+            if let notes {
+                try updateWorkspaceNotes(workspaceID: workspace.id, notes: notes)
+                workspace = try store.workspace(id: workspace.id) ?? workspace
+            }
+            return workspace
+        }
+
+        guard let host = try store.computeHost(id: normalizedHostID) else {
+            throw WorkspaceError.invalidArgument(message: "Compute host not found: \(normalizedHostID)")
+        }
+        guard !host.isLocal else {
+            return try createWorkspaceOnHost(
+                projectID: projectID, name: trimmedName, branch: trimmedBranch, hostID: ComputeHostRecord.localHostID, targetBranch: targetBranch,
+                directoryName: directoryName, notes: notes, runSetupScript: runSetupScript, allowRemoteBranchLookup: allowRemoteBranchLookup,
+                allowExistingBranchReuse: allowExistingBranchReuse)
+        }
+        guard project.isGitRepo else { throw WorkspaceError.invalidArgument(message: "Branch name is only supported for git projects.") }
+
+        let resolvedTargetBranch = try resolveWorkspaceTargetBranch(project: project, targetBranch: targetBranch)
+        let branchExists = try branchExistsForNewWorkspace(project: project, branch: trimmedBranch, allowRemoteBranchLookup: allowRemoteBranchLookup)
+        if allowExistingBranchReuse, !branchExists {
+            throw WorkspaceError.invalidArgument(
+                message: "Branch '\(trimmedBranch)' was not found. Choose an existing branch or switch to Create branch.")
+        }
+        if !allowExistingBranchReuse, branchExists {
+            throw WorkspaceError.invalidArgument(
+                message: "Branch '\(trimmedBranch)' already exists. Choose it from Existing branch or enter a different new branch name.")
+        }
+        if let existing = try workspaceForBranch(projectID: projectID, branch: trimmedBranch, hostID: host.id), !existing.isArchived {
+            throw WorkspaceError.invalidArgument(
+                message: "Branch '\(trimmedBranch)' is already used by workspace '\(existing.title)' on host '\(host.id)'.")
+        }
+
+        let trimmedDirectoryName = directoryName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedDirectoryName, !trimmedDirectoryName.isEmpty { try validateWorkspaceDirname(trimmedDirectoryName) }
+        let workspaceID = UUID().uuidString
+        let remoteDirname = trimmedDirectoryName?.isEmpty == false ? trimmedDirectoryName : nil
+        let template = WorkspaceRecord(
+            id: workspaceID, projectID: project.id, hostID: host.id, title: trimmedName, dir: project.dir, runtimePath: project.dir,
+            dirname: remoteDirname, branch: trimmedBranch, targetBranch: resolvedTargetBranch, isDefault: false, isArchived: false, isRunning: false,
+            lastLaunchedAt: nil, notes: notes)
+        let remotePath = ComputeHostPlanner.proposedRemoteWorkspacePath(host: host, project: project, workspace: template)
+        let workspace = WorkspaceRecord(
+            id: workspaceID, projectID: project.id, hostID: host.id, title: trimmedName, dir: remotePath, runtimePath: remotePath,
+            dirname: remoteDirname, branch: trimmedBranch, targetBranch: resolvedTargetBranch, isDefault: false, isArchived: false, isRunning: false,
+            lastLaunchedAt: nil, notes: notes)
+        try store.upsert(workspace: workspace)
+        try seedWorkspaceSettings(project: project, workspace: workspace)
+        try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: runSetupScript)
+        return workspace
+    }
+
     private func resolveWorkspaceTargetBranch(project: ProjectRecord, targetBranch: String?) throws -> String {
         if let targetBranch = targetBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !targetBranch.isEmpty { return targetBranch }
         if let configured = project.defaultBranch, !configured.isEmpty { return configured }
@@ -1144,7 +1129,7 @@ public final class WorkspaceOrchestrator {
         } else {
             inferredName = branch
         }
-        if let existing = try workspaceForBranch(projectID: project.id, branch: branch) {
+        if let existing = try workspaceForBranch(projectID: project.id, branch: branch, hostID: ComputeHostRecord.localHostID) {
             if existing.isArchived {
                 throw WorkspaceError.invalidArgument(
                     message: "Workspace already exists for archived branch '\(branch)': \(existing.title). Unarchive it or use a different worktree.")
@@ -1191,6 +1176,7 @@ public final class WorkspaceOrchestrator {
                     try store.upsert(workspace: updatedWorkspace)
                 }
 
+                guard workspace.hostID == ComputeHostRecord.localHostID else { continue }
                 guard !workspace.isArchived, !workspace.isDefault else { continue }
                 guard discoverableWorktreeByPath[normalizedWorkspacePath] == nil else { continue }
                 try archiveWorkspaceBecauseWorktreeIsInvalid(workspaceID: workspace.id)
@@ -1216,12 +1202,12 @@ public final class WorkspaceOrchestrator {
         return createdWorkspaces
     }
 
-    private func workspaceForBranch(projectID: String, branch: String) throws -> WorkspaceRecord? {
-        try store.workspaces(projectID: projectID, includeArchived: true).first(where: { $0.branch == branch })
+    private func workspaceForBranch(projectID: String, branch: String, hostID: String) throws -> WorkspaceRecord? {
+        try store.workspaces(projectID: projectID, includeArchived: true).first { $0.branch == branch && $0.hostID == hostID }
     }
 
-    private func archivedWorkspace(projectID: String, branch: String) throws -> WorkspaceRecord? {
-        try store.workspaces(projectID: projectID, includeArchived: true).first(where: { $0.branch == branch && $0.isArchived })
+    private func archivedWorkspace(projectID: String, branch: String, hostID: String) throws -> WorkspaceRecord? {
+        try store.workspaces(projectID: projectID, includeArchived: true).first { $0.branch == branch && $0.hostID == hostID && $0.isArchived }
     }
 
     private func archivedWorkspace(projectID: String, dir: String) throws -> WorkspaceRecord? {
@@ -1507,7 +1493,7 @@ public final class WorkspaceOrchestrator {
         guard !workspace.isDefault else { throw WorkspaceError.invalidArgument(message: "Default workspace cannot be archived.") }
         _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
         try store.deleteAgentWindows(workspaceID: workspaceID)
-        if project.isGitRepo {
+        if project.isGitRepo, workspace.hostID == ComputeHostRecord.localHostID {
             do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }
         }
         try PortAllocator(store: store).releasePorts(workspaceID: workspace.id)
@@ -3370,7 +3356,6 @@ public final class WorkspaceOrchestrator {
                 }
             }
         }
-        env["SPACES_TERMINAL_HOST"] = TerminalHost.spaces.rawValue
         env[Self.terminalTrackingIDEnvVar] = env[Self.terminalTrackingIDEnvVar] ?? UUID().uuidString
         return env
     }
@@ -3396,7 +3381,7 @@ public final class WorkspaceOrchestrator {
 
     private func runtimeWorkingDirectory(for plan: WorkspaceRuntimePlan) throws -> String {
         switch plan.selection {
-        case .localMac: return plan.workspace.dir
+        case .local: return plan.workspace.runtimePath
         case .remote:
             guard let remotePath = plan.manifest.remotePath?.trimmingCharacters(in: .whitespacesAndNewlines), !remotePath.isEmpty else {
                 throw WorkspaceError.invalidArgument(message: "Remote workspace path is missing for \(plan.daemonTarget.displayName).")
@@ -4669,11 +4654,12 @@ public final class WorkspaceOrchestrator {
         let manifest =
             runtimeManifest
             ?? ComputeHostPlanner.runtimeManifest(
-                project: project, workspace: workspace, selection: .localMac, binding: nil,
+                project: project, workspace: workspace, selection: .local(ComputeHostRecord.local()),
                 namedPorts: namedPorts.map { WorkspaceRuntimePortMapping(id: $0.name, name: $0.name, port: $0.port) })
         env.merge(manifest.processEnvironment) { _, new in new }
-        let runtimeWorkspacePath = manifest.location == .remote ? manifest.remotePath?.trimmingCharacters(in: .whitespacesAndNewlines) : nil
-        let workspacePath = runtimeWorkspacePath.flatMap { $0.isEmpty ? nil : $0 } ?? workspace.dir
+        let runtimeWorkspacePath =
+            manifest.location == .remote ? manifest.remotePath?.trimmingCharacters(in: .whitespacesAndNewlines) : workspace.runtimePath
+        let workspacePath = runtimeWorkspacePath.flatMap { $0.isEmpty ? nil : $0 } ?? workspace.runtimePath
         env["SPACES_WORKSPACE_DIR"] = workspacePath
         env["SPACES_PROJECT_DIR"] = manifest.location == .remote ? workspacePath : project.dir
         return env
@@ -4683,35 +4669,30 @@ public final class WorkspaceOrchestrator {
         project: ProjectRecord, workspace: WorkspaceRecord, assignedPorts: [(definitionID: String, port: Int, name: String)]
     ) throws -> WorkspaceRuntimePlan {
         let selection = try effectiveComputeHost(workspaceID: workspace.id)
-        let binding: WorkspaceComputeBinding?
-        switch selection {
-        case .localMac: binding = nil
-        case .remote(let host): binding = try stableComputeBinding(workspaceID: workspace.id, hostID: host.id)
-        }
         let namedPorts = assignedPorts.map {
             WorkspaceRuntimePortMapping(id: $0.definitionID.isEmpty ? $0.name : $0.definitionID, name: $0.name, port: $0.port)
         }
         let manifest = ComputeHostPlanner.runtimeManifest(
-            project: project, workspace: workspace, selection: selection, binding: binding, namedPorts: namedPorts,
+            project: project, workspace: workspace, selection: selection, namedPorts: namedPorts,
             gitRemoteURL: gitRemoteURLForRuntime(project: project, selection: selection))
         let daemonTarget = ComputeHostPlanner.daemonTarget(selection: selection, localSocketPath: try TerminalServicePaths.socketPath())
         let remoteSSHURI: String?
-        if case .remote(let host) = selection, let remotePath = binding?.remotePath {
+        if case .remote(let host) = selection {
+            let remotePath = workspace.runtimePath
             remoteSSHURI = ComputeHostPlanner.remoteSSHURI(host: host, path: remotePath)
         } else {
             remoteSSHURI = nil
         }
         return WorkspaceRuntimePlan(
-            project: project, workspace: workspace, selection: selection, binding: binding, manifest: manifest, daemonTarget: daemonTarget,
-            remoteSSHURI: remoteSSHURI)
+            project: project, workspace: workspace, selection: selection, manifest: manifest, daemonTarget: daemonTarget, remoteSSHURI: remoteSSHURI)
     }
 
     private func requireLocalWorkspaceRuntime(_ plan: WorkspaceRuntimePlan) throws {
         guard case .remote(let host) = plan.selection else { return }
-        let remotePath = plan.binding?.remotePath ?? host.workspaceRoot
+        let remotePath = plan.manifest.remotePath ?? plan.workspace.runtimePath
         throw WorkspaceError.invalidArgument(
             message:
-                "Remote compute host launch is not available for '\(host.name)' at \(remotePath). Use spacese2e plan-workspace-runtime to inspect the binding and run locally or clear the host selection before launching."
+                "Remote compute host launch is not available for '\(host.name)' at \(remotePath). Use spacese2e plan-workspace-runtime to inspect the workspace runtime path."
         )
     }
 

@@ -26,13 +26,13 @@ struct SpacesE2ECommand: ParsableCommand {
             RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self, FocusWorkspaceWindowIndexCommand.self,
             CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
             CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self,
-            DumpTerminalSessionWindowStateCommand.self, StartTerminalSessionCommand.self, StartWorkspaceTerminalSessionCommand.self,
-            TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, UpsertComputeHostCommand.self,
-            ListComputeHostsCommand.self, DeleteComputeHostCommand.self, SetProjectDefaultComputeHostCommand.self,
-            SetWorkspaceComputeHostOverrideCommand.self, PlanWorkspaceRuntimeCommand.self, RemoteComputeHostSmokeCommand.self,
-            OpenMobilePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
-            ProfileDesktopControlOwnerCommand.self, ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self,
-            MobileRequestCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self, StartTerminalSessionCommand.self,
+            StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self,
+            TerminalServiceControlCommand.self, UpsertComputeHostCommand.self, ListComputeHostsCommand.self, DeleteComputeHostCommand.self,
+            PlanWorkspaceRuntimeCommand.self, RemoteComputeHostSmokeCommand.self, OpenMobilePairingWindowCommand.self, RecordScreenCommand.self,
+            ProfileShowCommand.self, ProfileAppOwnerCommand.self, ProfileDesktopControlOwnerCommand.self, ProfileWaitForDesktopControlCommand.self,
+            MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self, ScrollApplicationWindowCommand.self,
+            TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
         ])
 }
 
@@ -308,6 +308,9 @@ private struct TerminalServiceControlCommand: ParsableCommand {
     @Option(name: .long) var clientDeviceName: String?
     @Option(name: .long) var clientNetworkAddress: String?
     @Option(name: .long) var attachmentMode: String?
+    @Option(name: .long) var scrollHorizontal: Double?
+    @Option(name: .long) var scrollVertical: Double?
+    @Option(name: .long) var scrollMods: Int32?
     @Flag(name: .long) var directControl = false
     @Flag(name: .long) var appendNewline = false
 
@@ -319,8 +322,8 @@ private struct TerminalServiceControlCommand: ParsableCommand {
         let parsedAttachmentMode = try terminalAttachmentModeFromOption(attachmentMode)
         let controlRequest = TerminalControlRequest(
             command: trimmedCommand, text: text, key: key, clientID: normalizedClientID, client: client, attachmentMode: parsedAttachmentMode,
-            columns: nil, rows: nil, ownerEpoch: nil, resizeSerial: nil, scrollHorizontal: nil, scrollVertical: nil, scrollMods: nil,
-            appendNewline: appendNewline)
+            columns: nil, rows: nil, ownerEpoch: nil, resizeSerial: nil, scrollHorizontal: scrollHorizontal, scrollVertical: scrollVertical,
+            scrollMods: scrollMods, appendNewline: appendNewline)
         if directControl {
             let paths = try TerminalSessionPaths.forSession(id: trimmedSessionID)
             let response = try TerminalControlClient.send(request: controlRequest, socketPath: paths.controlSocketPath)
@@ -784,52 +787,6 @@ private struct DeleteComputeHostCommand: ParsableCommand {
     }
 }
 
-private struct SetProjectDefaultComputeHostCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "set-project-default-compute-host")
-
-    @Option(name: .long) var projectDir: String
-    @Option(name: .long) var hostID: String?
-    @Flag(name: .long) var local = false
-
-    func run() throws {
-        let orchestrator = try makeOrchestrator()
-        guard local != (normalizedOptional(hostID) != nil) else { throw ValidationError("Pass exactly one of --host-id or --local.") }
-        let normalizedProjectDir = normalizePath(projectDir)
-        guard let project = try orchestrator.project(dir: normalizedProjectDir) else {
-            throw ValidationError("Project not found at: \(normalizedProjectDir)")
-        }
-        let resolvedHostID = local ? nil : normalizedOptional(hostID)
-        try orchestrator.setProjectDefaultComputeHost(projectID: project.id, hostID: resolvedHostID)
-        guard let updated = try orchestrator.project(id: project.id) else { throw ValidationError("Project disappeared: \(project.id)") }
-        try emitJSON(ProjectComputeHostPayload(projectID: updated.id, projectDir: updated.dir, defaultComputeHostID: updated.defaultComputeHostID))
-    }
-}
-
-private struct SetWorkspaceComputeHostOverrideCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "set-workspace-compute-host-override")
-
-    @Option(name: .long) var workspaceDir: String
-    @Option(name: .long) var hostID: String?
-    @Flag(name: .long) var inherit = false
-
-    func run() throws {
-        let orchestrator = try makeOrchestrator()
-        guard inherit != (normalizedOptional(hostID) != nil) else { throw ValidationError("Pass exactly one of --host-id or --inherit.") }
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
-        let resolvedHostID = inherit ? nil : normalizedOptional(hostID)
-        try orchestrator.setWorkspaceComputeHostOverride(workspaceID: workspace.id, hostID: resolvedHostID)
-        guard let updated = try orchestrator.store.workspace(id: workspace.id) else {
-            throw ValidationError("Workspace disappeared: \(workspace.id)")
-        }
-        try emitJSON(
-            WorkspaceComputeHostOverridePayload(
-                workspaceID: updated.id, workspaceDir: updated.dir, computeHostOverrideID: updated.computeHostOverrideID))
-    }
-}
-
 private struct PlanWorkspaceRuntimeCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "plan-workspace-runtime")
 
@@ -845,8 +802,8 @@ private struct PlanWorkspaceRuntimeCommand: ParsableCommand {
         try emitJSON(
             WorkspaceRuntimePlanPayload(
                 projectID: plan.project.id, workspace: workspaceSummaryPayload(plan.workspace),
-                selection: computeHostSelectionPayload(plan.selection), daemonTarget: daemonTargetPayload(plan.daemonTarget),
-                binding: plan.binding.map(workspaceComputeBindingPayload), manifest: plan.manifest, remoteSSHURI: plan.remoteSSHURI))
+                selection: computeHostSelectionPayload(plan.selection), daemonTarget: daemonTargetPayload(plan.daemonTarget), manifest: plan.manifest,
+                remoteSSHURI: plan.remoteSSHURI))
     }
 }
 
@@ -886,25 +843,30 @@ private struct RemoteComputeHostSmokeCommand: ParsableCommand {
         } else {
             fputs("spacese2e: skipping Keychain token storage because --auth-token was supplied.\n", stderr)
         }
-        try orchestrator.setProjectDefaultComputeHost(projectID: project.id, hostID: readyHost.id)
-        let runtimePlan = try orchestrator.workspaceRuntimePlan(workspaceID: workspace.id)
+        guard let remoteBranch = workspace.branch ?? project.defaultBranch else {
+            throw ValidationError("Default workspace branch not found for project: \(project.dir)")
+        }
+        let remoteWorkspace = try orchestrator.createWorkspaceOnHost(
+            projectID: project.id, name: "\(workspace.title) on \(readyHost.name)", branch: remoteBranch, hostID: readyHost.id,
+            targetBranch: workspace.targetBranch ?? project.defaultBranch, notes: workspace.notes, runSetupScript: false,
+            allowRemoteBranchLookup: false, allowExistingBranchReuse: true)
+        let runtimePlan = try orchestrator.workspaceRuntimePlan(workspaceID: remoteWorkspace.id)
         guard runtimePlan.selection.computeHostID == readyHost.id else {
             throw ValidationError("Workspace runtime plan did not resolve to compute host \(readyHost.id).")
         }
         guard runtimePlan.selection.isRemote else { throw ValidationError("Workspace runtime plan resolved to local Mac.") }
 
-        let terminalSessionID = try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id)
-        let stopOutcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+        let terminalSessionID = try orchestrator.openWorkspaceTerminal(workspaceID: remoteWorkspace.id)
+        let stopOutcome = try orchestrator.stopWorkspace(workspaceID: remoteWorkspace.id)
         try emitJSON(
             RemoteComputeHostSmokePayload(
                 host: computeHostPayload(readyHost), bootstrap: bootstrapOutcomePayload(outcome),
                 status: RemoteComputeHostSmokeStatusPayload(ok: status.ok, message: status.message, servicePID: status.servicePID),
-                projectID: project.id, workspace: workspaceSummaryPayload(workspace),
+                projectID: project.id, workspace: workspaceSummaryPayload(remoteWorkspace),
                 runtimePlan: WorkspaceRuntimePlanPayload(
                     projectID: runtimePlan.project.id, workspace: workspaceSummaryPayload(runtimePlan.workspace),
                     selection: computeHostSelectionPayload(runtimePlan.selection), daemonTarget: daemonTargetPayload(runtimePlan.daemonTarget),
-                    binding: runtimePlan.binding.map(workspaceComputeBindingPayload), manifest: runtimePlan.manifest,
-                    remoteSSHURI: runtimePlan.remoteSSHURI), terminalSessionID: terminalSessionID,
+                    manifest: runtimePlan.manifest, remoteSSHURI: runtimePlan.remoteSSHURI), terminalSessionID: terminalSessionID,
                 stopOutcome: WorkspaceStopOutcomePayload(
                     skippedStopScriptBecauseWorkspaceDirectoryMissing: stopOutcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)))
     }
@@ -1109,6 +1071,7 @@ private struct CreateWorkspaceCommand: ParsableCommand {
     @Option(name: .long) var projectDir: String
     @Option(name: .long) var title: String
     @Option(name: .long) var branch: String
+    @Option(name: .long) var host: String = ComputeHostRecord.localHostID
     @Option(name: .long) var targetBranch: String?
     @Option(name: .long) var directoryName: String?
     @Option(name: .long) var notes: String?
@@ -1124,13 +1087,9 @@ private struct CreateWorkspaceCommand: ParsableCommand {
         guard let project = try orchestrator.project(dir: normalizedProjectDir) else {
             throw ValidationError("Project not found: \(normalizedProjectDir)")
         }
-        var workspace = try orchestrator.createWorkspace(
-            projectID: project.id, name: title, branch: branch, targetBranch: targetBranch, directoryName: directoryName, runSetupScript: false,
-            allowRemoteBranchLookup: false, allowExistingBranchReuse: existingBranch)
-        if let notes {
-            try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes)
-            workspace = try orchestrator.store.workspace(dir: workspace.dir) ?? workspace
-        }
+        let workspace = try orchestrator.createWorkspaceOnHost(
+            projectID: project.id, name: title, branch: branch, hostID: host, targetBranch: targetBranch, directoryName: directoryName, notes: notes,
+            runSetupScript: false, allowRemoteBranchLookup: false, allowExistingBranchReuse: existingBranch)
         try emitJSON(
             WorkspaceSummaryPayload(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
@@ -1325,6 +1284,26 @@ private struct CloseTerminalSessionWindowCommand: ParsableCommand {
             IPCNotification.closeTerminalSessionWindow, object: try IPCNotification.currentObject(),
             userInfo: [IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID], options: [.deliverImmediately])
         try emitJSON(["sessionID": trimmedSessionID])
+    }
+}
+
+private struct FocusTerminalSessionWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "focus-terminal-session-window")
+
+    @Option(name: .long) var sessionID: String
+    @Option(name: .long) var requestID: String?
+
+    func run() throws {
+        let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session id.") }
+        let trimmedRequestID = requestID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveRequestID = if let trimmedRequestID, !trimmedRequestID.isEmpty { trimmedRequestID } else { UUID().uuidString }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.focusTerminalSessionWindow, object: try IPCNotification.currentObject(),
+            userInfo: [
+                IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID, IPCNotification.focusRequestIDUserInfoKey: effectiveRequestID,
+            ], options: [.deliverImmediately])
+        try emitJSON(["sessionID": trimmedSessionID, "requestID": effectiveRequestID])
     }
 }
 
@@ -1632,9 +1611,6 @@ private struct ComputeHostListPayload: Codable { let hosts: [ComputeHostPayload]
 
 private struct DeleteComputeHostPayload: Codable {
     let hostID: String
-    let clearedProjectDefaultIDs: [String]
-    let clearedWorkspaceOverrideIDs: [String]
-    let clearedWorkspaceBindingIDs: [String]
     let credentialTokenDeleted: Bool
 }
 
@@ -1653,24 +1629,11 @@ private struct ComputeHostPayload: Codable {
     let updatedAt: String
 }
 
-private struct ProjectComputeHostPayload: Codable {
-    let projectID: String
-    let projectDir: String
-    let defaultComputeHostID: String?
-}
-
-private struct WorkspaceComputeHostOverridePayload: Codable {
-    let workspaceID: String
-    let workspaceDir: String
-    let computeHostOverrideID: String?
-}
-
 private struct WorkspaceRuntimePlanPayload: Codable {
     let projectID: String
     let workspace: WorkspaceSummaryPayload
     let selection: ComputeHostSelectionPayload
     let daemonTarget: SpacesDaemonConnectionTargetPayload
-    let binding: WorkspaceComputeBindingPayload?
     let manifest: WorkspaceRuntimeManifest
     let remoteSSHURI: String?
 }
@@ -1722,15 +1685,6 @@ private struct SpacesDaemonEndpointPayload: Codable {
     let host: String
     let port: Int
     let certificateFingerprint: String
-}
-
-private struct WorkspaceComputeBindingPayload: Codable {
-    let workspaceID: String
-    let hostID: String
-    let remotePath: String
-    let branch: String?
-    let createdAt: String
-    let updatedAt: String
 }
 
 private struct WorkspaceSummaryPayload: Codable {
@@ -1922,10 +1876,7 @@ private func computeHostPayload(_ host: ComputeHostRecord) -> ComputeHostPayload
 }
 
 private func deleteComputeHostPayload(_ result: ComputeHostDeletionResult) -> DeleteComputeHostPayload {
-    DeleteComputeHostPayload(
-        hostID: result.hostID, clearedProjectDefaultIDs: result.clearedProjectDefaultIDs,
-        clearedWorkspaceOverrideIDs: result.clearedWorkspaceOverrideIDs, clearedWorkspaceBindingIDs: result.clearedWorkspaceBindingIDs,
-        credentialTokenDeleted: result.credentialTokenDeleted)
+    DeleteComputeHostPayload(hostID: result.hostID, credentialTokenDeleted: result.credentialTokenDeleted)
 }
 
 private func bootstrapOutcomePayload(_ outcome: ComputeHostBootstrapOutcome) -> ComputeHostBootstrapOutcomePayload {
@@ -1936,7 +1887,8 @@ private func bootstrapOutcomePayload(_ outcome: ComputeHostBootstrapOutcome) -> 
 
 private func computeHostSelectionPayload(_ selection: ComputeHostSelection) -> ComputeHostSelectionPayload {
     switch selection {
-    case .localMac: return ComputeHostSelectionPayload(location: "local", computeHostID: nil, displayName: selection.displayName, host: nil)
+    case .local(let host):
+        return ComputeHostSelectionPayload(location: "local", computeHostID: host.id, displayName: selection.displayName, host: nil)
     case .remote(let host):
         return ComputeHostSelectionPayload(
             location: "remote", computeHostID: host.id, displayName: selection.displayName, host: computeHostPayload(host))
@@ -1948,12 +1900,6 @@ private func daemonTargetPayload(_ target: SpacesDaemonConnectionTarget) -> Spac
         transport: target.transport.rawValue, computeHostID: target.computeHostID, displayName: target.displayName, socketPath: target.socketPath,
         endpoint: target.endpoint.map { SpacesDaemonEndpointPayload(host: $0.host, port: $0.port, certificateFingerprint: $0.certificateFingerprint) }
     )
-}
-
-private func workspaceComputeBindingPayload(_ binding: WorkspaceComputeBinding) -> WorkspaceComputeBindingPayload {
-    WorkspaceComputeBindingPayload(
-        workspaceID: binding.workspaceID, hostID: binding.hostID, remotePath: binding.remotePath, branch: binding.branch,
-        createdAt: binding.createdAt, updatedAt: binding.updatedAt)
 }
 
 extension ComputeHostRecord {

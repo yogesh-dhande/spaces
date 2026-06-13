@@ -66,6 +66,18 @@ import Foundation
             return response.sessions ?? []
         }
 
+        public static func sendProfileCommand(_ profileCommand: TerminalServiceProfileCommandRequest, timeout: TimeInterval = 15) throws
+            -> TerminalServiceProfileCommandResponse
+        {
+            try ensureRunning(timeout: min(timeout, 5))
+            let socketPath = try TerminalServicePaths.socketPath()
+            let response = try TerminalServiceClient.send(
+                request: TerminalServiceRequest(command: "profileCommand", profileCommand: profileCommand), socketPath: socketPath, timeout: timeout)
+            guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
+            guard let profile = response.profile else { throw TerminalServiceError.requestFailed("spacesd did not return a profile response.") }
+            return profile
+        }
+
         @discardableResult public static func ensureRunning(timeout: TimeInterval = 5) throws -> Bool {
             let startedAt = Date()
             let socketPath = try TerminalServicePaths.socketPath()

@@ -18,16 +18,141 @@ public struct SpacesCommand: ParsableCommand {
               - Repo-local development builds default to a per-worktree profile under ~/.spaces-dev/profiles/spaces.
               - Installed or non-dev builds default to ~/.spaces/spaces.db.
               - Runtime state defaults to <profile-root>/runtime unless `SPACES_RUNTIME_DIR` overrides it.
-              - Paths default to the current directory when omitted.
-              - `import` registers the current directory by default and can apply `--title` or `--notes` when creating or re-importing a workspace.
-              - `update` mutates workspace metadata after creation.
-              - `start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
-              - `restart` forces a full stop and relaunch for a workspace.
-              - Agent events stay explicit. `import`, `start`, and `restart` do not imply agent lifecycle. `signal <event>` records those lifecycle transitions. Only built-in Spaces terminal sessions are accepted as coding-agent sources.
+              - Workspace and agent commands require explicit IDs.
+              - `workspace create` requires project, branch, and host so workspace identity is host-scoped.
+              - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
+              - `workspace restart` forces a full stop and relaunch for a workspace.
+              - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for an explicit workspace and terminal session.
             """, version: AppVersion.current,
-        subcommands: [ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, SignalCommand.self, TerminalCommand.self])
+        subcommands: [ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, MCPCommand.self])
 
     public init() {}
+}
+
+struct ProjectCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "project", abstract: "Manage Spaces projects.", subcommands: [ProjectListCommand.self])
+}
+
+struct ProjectListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List projects.")
+
+    func run() throws {
+        let context = CLIContext()
+        let projects = try TerminalService.sendProfileCommand(.init(operation: .projectList)).projects ?? []
+        try context.output.emitLines(text: projects.map { "\($0.id)\tname=\($0.name)\tdir=\($0.dir)" }, json: projects)
+    }
+}
+
+struct WorkspaceCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "workspace", abstract: "Manage Spaces workspaces.",
+        subcommands: [WorkspaceListCommand.self, WorkspaceCreateCommand.self, WorkspaceStartCommand.self, WorkspaceRestartCommand.self])
+}
+
+struct WorkspaceListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List workspaces.")
+
+    @Option(name: .long, help: "Project ID. When omitted, lists workspaces from every project.") var project: String?
+    @Flag(name: .long, help: "Include archived workspaces.") var includeArchived = false
+
+    func run() throws {
+        let context = CLIContext()
+        let workspaces =
+            try TerminalService.sendProfileCommand(.init(operation: .workspaceList, projectID: project, includeArchived: includeArchived)).workspaces
+            ?? []
+        try context.output.emitLines(
+            text: workspaces.map {
+                "\($0.id)\tproject=\($0.projectID)\thost=\($0.hostID)\tbranch=\($0.branch ?? "-")\trunning=\($0.isRunning)\ttitle=\($0.title)"
+            }, json: workspaces)
+    }
+}
+
+struct WorkspaceCreateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create an explicit host-scoped workspace.")
+
+    @Option(name: .long, help: "Project ID.") var project: String
+    @Option(name: .long, help: "Workspace branch.") var branch: String
+    @Option(name: .long, help: "Host ID, or local for the Mac.") var host: String
+    @Option(name: .long, help: "Workspace title. Defaults to the branch name.") var title: String?
+    @Option(name: .long, help: "Target branch for new branch creation.") var targetBranch: String?
+    @Flag(name: .long, help: "Use an existing branch instead of creating a new branch.") var existingBranch = false
+
+    func run() throws {
+        let context = CLIContext()
+        let workspace = try requireProfileWorkspace(
+            try TerminalService.sendProfileCommand(
+                .init(
+                    operation: .workspaceCreate, projectID: project, branch: branch, hostID: host, title: title, targetBranch: targetBranch,
+                    existingBranch: existingBranch)))
+        try context.output.emit(
+            text: "Created workspace \(workspace.id)\tproject=\(workspace.projectID)\thost=\(workspace.hostID)\tbranch=\(workspace.branch ?? "-")",
+            json: MutationResultPayload(message: "Created workspace.", resource: workspace))
+    }
+}
+
+struct WorkspaceStartCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "start", abstract: "Ensure a workspace is running.")
+
+    @Option(name: .long, help: "Workspace ID.") var workspace: String
+
+    func run() throws {
+        let context = CLIContext()
+        let updated = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceStart, workspaceID: workspace)))
+        try context.output.emit(
+            text: "Workspace is running \(workspace)\thost=\(updated.hostID)",
+            json: MutationResultPayload(message: "Workspace is running.", resource: updated))
+    }
+}
+
+struct WorkspaceRestartCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "restart", abstract: "Force a full stop and relaunch for a workspace.")
+
+    @Option(name: .long, help: "Workspace ID.") var workspace: String
+
+    func run() throws {
+        let context = CLIContext()
+        let updated = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceRestart, workspaceID: workspace)))
+        try context.output.emit(
+            text: "Workspace restarted \(workspace)\thost=\(updated.hostID)",
+            json: MutationResultPayload(message: "Workspace restarted.", resource: updated))
+    }
+}
+
+struct AgentCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "agent", abstract: "Manage coding-agent lifecycle state.", subcommands: [AgentSignalCommand.self])
+}
+
+struct AgentSignalCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "signal", abstract: "Record a lifecycle event for an explicit terminal session.")
+
+    @Option(name: .long, help: "Workspace ID.") var workspace: String
+    @Option(name: .long, help: "Spaces terminal session ID.") var session: String
+    @Argument(
+        help: ArgumentHelp("Lifecycle event to record.", discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."))
+    var type: AgentEventType
+
+    func run() throws {
+        let context = CLIContext()
+        let response = try TerminalService.sendProfileCommand(
+            .init(operation: .agentSignal, workspaceID: workspace, terminalSessionID: session, agentEvent: type.rawValue))
+        try context.output.emit(
+            text: "Agent \(type.rawValue): workspace=\(workspace)",
+            json: MutationResultPayload(
+                message: response.message, resource: ["workspaceID": workspace, "sessionID": session, "status": type.status.rawValue]))
+    }
+}
+
+struct MCPCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "mcp", abstract: "Run the Spaces MCP stdio server.")
+
+    func run() throws { try SpacesMCPStdioServer().run() }
+}
+
+private func requireProfileWorkspace(_ response: TerminalServiceProfileCommandResponse) throws -> TerminalServiceProfileWorkspaceRecord {
+    guard let workspace = response.workspace else { throw ValidationError("spacesd did not return a workspace.") }
+    return workspace
 }
 
 struct TerminalCommand: ParsableCommand {
@@ -43,7 +168,8 @@ struct TerminalListCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list", abstract: "List available Spaces terminal sessions.")
 
     func run() throws {
-        let rows = try availableTerminalSessionRows()
+        let sessions = try TerminalService.sendProfileCommand(.init(operation: .terminalList), timeout: 5).terminalSessions ?? []
+        let rows = terminalSessionRows(sessions)
         if rows.isEmpty {
             print("No terminal sessions.")
             return
@@ -53,9 +179,13 @@ struct TerminalListCommand: ParsableCommand {
     }
 }
 
+func terminalSessionRows(_ sessions: [TerminalServiceSessionSummary]) -> [String] {
+    sessions.map { session in "\(session.id)\tstate=\(session.state.rawValue)\tcwd=\(session.workingDirectory)" }
+}
+
 func availableTerminalSessionRows(fileManager: FileManager = .default) throws -> [String] {
-    try TerminalSessionCatalog.listLiveSessions(fileManager: fileManager).map { session in
-        "\(session.sessionID)\tstate=\(session.runtimeState.state.rawValue)\tcwd=\(session.effectiveWorkingDirectory)"
+    try TerminalSessionCatalog.listLiveSessions(fileManager: fileManager).map {
+        "\($0.sessionID)\tstate=\($0.runtimeState.state.rawValue)\tcwd=\($0.effectiveWorkingDirectory)"
     }
 }
 
@@ -509,28 +639,20 @@ private func requireWorkspace(path: String?, orchestrator: WorkspaceOrchestrator
     let directory = path ?? context.currentDirectoryPath()
     let normalizedDirectory = context.normalizePath(directory)
     guard let workspace = try orchestrator.store.workspace(dir: normalizedDirectory) else {
-        throw ValidationError("Workspace not found at: \(normalizedDirectory). Run `spaces import [path]` first.")
+        throw ValidationError("Workspace not found at: \(normalizedDirectory). Create a workspace with `spaces workspace create` first.")
     }
 
     return workspace
 }
 
 private func resolveProvider(environment: [String: String]) -> AgentProvider? {
-    let spacesTerminalHost = environment["SPACES_TERMINAL_HOST"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-    if spacesTerminalHost == TerminalHost.spaces.rawValue { return .spaces }
-    return nil
+    normalizedNonEmpty(environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]).map { _ in .spaces }
 }
 
 func agentEventDropResult(type: AgentEventType, environment: [String: String], context: CLIContext) -> (
     text: String, payload: MutationResultPayload<[String: String]>
 )? {
-    guard let provider = resolveProvider(environment: environment) else {
-        return (
-            "Dropped agent event \(type.rawValue): non-Spaces terminal",
-            MutationResultPayload<[String: String]>(message: "Dropped non-Spaces agent event.", resource: nil)
-        )
-    }
-    if provider == .spaces, environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.isEmpty != false {
+    guard resolveProvider(environment: environment) != nil else {
         return (
             "Dropped agent event \(type.rawValue): untracked Spaces terminal",
             MutationResultPayload<[String: String]>(message: "Dropped untracked Spaces agent event.", resource: nil)

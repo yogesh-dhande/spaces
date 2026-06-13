@@ -14,7 +14,7 @@ This document describes the built-in terminal runtime in Spaces: what owns a ses
 - `spacesd` owns built-in terminal sessions, including workspace terminals, built-in process windows, built-in coding-agent windows, mobile-visible sessions, and sessions created through `spaces terminal ...`.
 - The service is a per-profile background executable started on demand by first-party clients and can outlive `SpacesApp`.
 - First-party clients attach through SQLite-backed session metadata, the per-session control socket, and the render-frame stream.
-- The Mac daemon remains authoritative for project/workspace metadata and workspace creation, while the daemon selected by a workspace compute binding owns that workspace's PTYs and render streams.
+- The Mac daemon remains authoritative for project/workspace metadata and workspace creation. The workspace's immutable host assignment determines whether local `spacesd` or a configured remote `spacesd` owns PTYs and render streams.
 
 ## Session Boundary
 Each session keeps canonical metadata in SQLite and runtime-only files under `<profile-root>/runtime/terminal/sessions/<session-id>/`.
@@ -39,8 +39,8 @@ Each live session also participates in a service-level control path:
 ## Local and Remote Daemons
 - Local Mac workspaces use the same `spacesd` protocol as remote compute-host workspaces.
 - Remote `spacesd` owns remote PTYs, headless Ghostty sessions, render-frame export, terminal input, resize, scroll, file-link preview chunks, remote process execution, and clone or worktree preparation for its bound workspaces.
-- Remote hosts expose `spacesd` on their configured private/LAN/VPN listener for direct iOS terminal traffic. Mac `spacesd` uses SSH for bootstrap and control setup and sends the runtime manifest before launch.
-- Mac terminal windows for remote sessions use the same terminal service state and control commands as iOS direct-daemon terminal detail. The Mac app keeps a local SQLite mirror of remote launch, runtime, attachment, and final render-state metadata, while live attach, takeover, input, resize, scroll, and state refresh requests are sent to the workspace's effective daemon endpoint.
+- Remote hosts expose `spacesd` to the Mac profile over the authenticated bridge. Mac `spacesd` uses SSH for bootstrap and control setup and sends the runtime manifest before launch.
+- Mac terminal windows and iOS terminal detail use Mac `spacesd` as the single profile endpoint. The Mac app keeps a local SQLite mirror of remote launch, runtime, attachment, and final render-state metadata, while live attach, takeover, input, resize, scroll, and state refresh requests are proxied to the workspace's owning daemon.
 - Remote agent lifecycle signals are queued in the remote terminal database and carried on state refresh responses. The Mac app applies handled events to the Mac profile database and acknowledges them back to the owning daemon.
 - Browser sessions remain Mac-opened. Remote processes bind remote ports, and Mac `spacesd` maps named browser URLs to local forwarded ports.
 - Terminal link preview resolution runs in the owning daemon. Local or remote file previews stream as authorized chunks from that daemon; direct HTTPS media downloads remain client-side.

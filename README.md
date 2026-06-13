@@ -26,14 +26,15 @@ Worktrees, clones, and concurrent process trees stay isolated — ports are rese
 
 ## CLI
 
-The `spaces` CLI is workspace-oriented and path-based. From inside a workspace directory:
+The `spaces` CLI is workspace-oriented and ID-based:
 
 ```
-spaces import              # register the current directory as a workspace
-spaces start               # launch configured processes
-spaces restart             # full stop + launch
-spaces signal <event>      # coding-agent lifecycle: init|start|waiting|done|exit
-spaces update --notes "…"  # edit workspace metadata
+spaces project list
+spaces workspace list
+spaces workspace create --project <id> --branch feature/demo --host local
+spaces workspace start --workspace <id>
+spaces workspace restart --workspace <id>
+spaces agent signal --workspace <id> --session <terminal-session-id> waiting
 spaces terminal command --command "cat"   # start a Spaces terminal session
 spaces terminal list                      # inspect live session IDs and working directories
 spaces terminal send <session> "hello"    # write input to a session
@@ -43,7 +44,7 @@ spaces terminal show <session>            # open an owner-seeking window for a s
 spaces terminal takeover <session> <id>   # hand input ownership to another client
 ```
 
-Coding agents emit `spaces signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).
+Coding agents emit explicit `spaces agent signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).
 
 ## Features
 
@@ -64,7 +65,7 @@ Coding agents emit `spaces signal` events from their terminals so the GUI knows 
 
 - [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
 - Built-in process and ad hoc terminals run through `spacesd`, so sessions survive app quits and lifetime, takeover, and `spaces terminal` controls share one daemon-owned boundary.
-- Compute host selection resolves through workspace override, project default, then the local Mac, with stable per-workspace bindings for remote worktrees and pinned-TLS `spacesd` execution on the selected host.
+- Workspace identity is scoped to project, branch, and host. The local Mac is a first-class host, and remote hosts run pinned-TLS `spacesd` execution with each workspace storing its runtime path directly.
 - The first-party iOS client discovers the Mac bridge advertised by `spacesd`, pairs through a Mac-approved QR/deep link, browses live Spaces terminal sessions, auto-takes ownership when opening one for live rendering, and can ask the still-running daemon to launch the Mac app after an app quit or crash.
 - Browser sessions automate Google Chrome so you can quickly switch to view output without typing the URL or clicking through tabs.
 

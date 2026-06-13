@@ -211,6 +211,7 @@ SUMMARY_JSON="$SUMMARY_JSON" \
 PERFORMANCE_LOG_PATH="$PERF_JSONL" \
 WORK_ROOT="$WORK_ROOT" \
 SPACES_CLI="$SPACES_CLI" \
+SPACES_E2E="$SPACES_E2E" \
 python3 - "${SELECTED_SCENARIOS[@]}" <<'PY'
 import base64
 import json
@@ -239,6 +240,7 @@ performance_log_path = Path(os.environ["PERFORMANCE_LOG_PATH"])
 work_root = Path(os.environ["WORK_ROOT"])
 profile_root = Path(os.environ["SPACES_DB_PATH"]).expanduser().resolve().parent
 spaces_cli = os.environ["SPACES_CLI"]
+spacese2e = os.environ["SPACES_E2E"]
 base_env = os.environ.copy()
 
 events: list[dict] = []
@@ -381,9 +383,8 @@ def request(payload: dict) -> tuple[dict, float]:
     started = time.perf_counter()
     completed = run(
         [
-            spaces_cli,
-            "mobile",
-            "request",
+            spacese2e,
+            "mobile-request",
             "--host",
             host,
             "--port",
@@ -401,9 +402,8 @@ def request(payload: dict) -> tuple[dict, float]:
 def connect_stream(payload: dict) -> subprocess.Popen:
     return subprocess.Popen(
         [
-            spaces_cli,
-            "mobile",
-            "request",
+            spacese2e,
+            "mobile-request",
             "--host",
             host,
             "--port",

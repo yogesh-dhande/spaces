@@ -4459,44 +4459,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return field
     }
 
-    private func computeHostPopup(includeInheritItemTitle inheritTitle: String? = nil) -> NSPopUpButton {
-        let popup = NSPopUpButton()
-        popup.autoenablesItems = false
-        if let inheritTitle {
-            popup.addItem(withTitle: inheritTitle)
-            popup.itemArray.last?.representedObject = "__inherit__"
-        } else {
-            popup.addItem(withTitle: "Local Mac")
-            popup.itemArray.last?.representedObject = ""
-        }
-        let hosts = (try? orchestrator.listComputeHosts()) ?? []
-        if !hosts.isEmpty { popup.menu?.addItem(.separator()) }
-        for host in hosts {
-            popup.addItem(withTitle: host.name)
-            popup.itemArray.last?.representedObject = host.id
-        }
-        popup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        return popup
-    }
-
-    private func selectComputeHostItem(in popup: NSPopUpButton, hostID: String?, localTitle: String) {
-        if let hostID, let item = popup.itemArray.first(where: { ($0.representedObject as? String) == hostID }) {
-            popup.select(item)
-            return
-        }
-        if let item = popup.itemArray.first(where: { ($0.representedObject as? String) == "" }) {
-            item.title = localTitle
-            popup.select(item)
-        } else {
-            popup.selectItem(at: 0)
-        }
-    }
-
-    private func selectedComputeHostID(from popup: NSPopUpButton) -> String? {
-        guard let value = popup.selectedItem?.representedObject as? String, !value.isEmpty, value != "__inherit__" else { return nil }
-        return value
-    }
-
     private func populateComputeHostForm(_ refs: ComputeHostFormRefs, host: ComputeHostRecord) {
         refs.editingHostID = host.id
         refs.hostField.stringValue = host.sshHost
@@ -4829,12 +4791,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             self?.presentProjectAgentLauncherRemoveConfirmation(launcher: launcher, confirm: confirm)
         }
 
-        if let fullProject {
-            let computeSection = projectComputeHostSection(project: fullProject)
-            stack.addArrangedSubview(computeSection)
-            constrainFormFieldToFillWidth(computeSection, in: stack)
-        }
-
         for section in [
             setupScriptSection.view, portsSection.view, processesSection.view, browserSessionsSection.view, agentLaunchersSection.view,
             stopScriptSection.view,
@@ -4898,44 +4854,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         registerDirtyTracking(
             setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
-    }
-
-    private func projectComputeHostSection(project: ProjectRecord) -> NSView {
-        let popup = computeHostPopup()
-        popup.identifier = NSUserInterfaceItemIdentifier(project.id)
-        popup.target = self
-        popup.action = #selector(projectDefaultComputeHostChanged(_:))
-        popup.setAccessibilityIdentifier("project-settings-compute-host")
-        selectComputeHostItem(in: popup, hostID: project.defaultComputeHostID, localTitle: "Local Mac")
-        return formSectionCard(
-            icon: "cpu", title: "Compute", subtitle: "Choose where this project's workspaces launch by default.",
-            contentViews: [settingsSettingRow(name: "Default host", hint: "Workspace overrides take precedence when set.", control: popup)])
-    }
-
-    private func workspaceComputeHostRow(projectID: String, workspaceID: String) -> NSView? {
-        guard let project = try? orchestrator.store.project(id: projectID), let workspace = try? orchestrator.store.workspace(id: workspaceID) else {
-            return nil
-        }
-        let projectDefaultName: String
-        if let defaultHostID = project.defaultComputeHostID, let host = try? orchestrator.store.computeHost(id: defaultHostID) {
-            projectDefaultName = host.name
-        } else {
-            projectDefaultName = "Local Mac"
-        }
-        let popup = computeHostPopup(includeInheritItemTitle: "Use project default (\(projectDefaultName))")
-        popup.identifier = NSUserInterfaceItemIdentifier(workspaceID)
-        popup.target = self
-        popup.action = #selector(workspaceComputeHostOverrideChanged(_:))
-        popup.setAccessibilityIdentifier("workspace-detail-compute-host")
-        if let overrideID = workspace.computeHostOverrideID,
-            let item = popup.itemArray.first(where: { ($0.representedObject as? String) == overrideID })
-        {
-            popup.select(item)
-        } else {
-            popup.selectItem(at: 0)
-        }
-        let effective = (try? orchestrator.effectiveComputeHost(workspaceID: workspaceID).displayName) ?? projectDefaultName
-        return settingsSettingRow(name: "Compute host", hint: "Effective host: \(effective)", control: popup)
     }
 
     private func formSectionCard(
@@ -5646,8 +5564,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let inlineNotesRow = makeInlineWorkspaceMetadataEditRow(
             workspaceID: workspace.id, field: .notes, icon: "info.circle", labelText: "Notes", value: workspace.notes ?? "",
             placeholder: "Optional workspace context", isEditable: true)
-        let computeHostRow = workspaceComputeHostRow(projectID: project.id, workspaceID: workspace.id)
-
         // --- Action buttons (icon-only) ---
         let iconSymbolConfig = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
         let launchOrRestartButton: NSButton
@@ -5737,11 +5653,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         stack.addArrangedSubview(headerAndActionsRow)
         stack.addArrangedSubview(inlineNotesRow)
-        if let computeHostRow {
-            stack.addArrangedSubview(computeHostRow)
-            constrainFormFieldToFillWidth(computeHostRow, in: stack)
-            stack.setCustomSpacing(20, after: computeHostRow)
-        }
         for section in Self.orderedWorkspaceDetailSections(
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
             portsSection: portsSection, stopScriptSection: stopScriptSection)
@@ -8238,21 +8149,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     refreshVisibleRemoteHostsPanel()
                 } catch { showError(error) }
             }
-        } catch { showError(error) }
-    }
-
-    @objc private func projectDefaultComputeHostChanged(_ sender: NSPopUpButton) {
-        guard let projectID = sender.identifier?.rawValue else { return }
-        do { try orchestrator.setProjectDefaultComputeHost(projectID: projectID, hostID: selectedComputeHostID(from: sender)) } catch {
-            showError(error)
-        }
-    }
-
-    @objc private func workspaceComputeHostOverrideChanged(_ sender: NSPopUpButton) {
-        guard let workspaceID = sender.identifier?.rawValue else { return }
-        do {
-            try orchestrator.setWorkspaceComputeHostOverride(workspaceID: workspaceID, hostID: selectedComputeHostID(from: sender))
-            if let (project, workspace) = findWorkspace(id: workspaceID) { showWorkspaceDetail(project: project, workspace: workspace) }
         } catch { showError(error) }
     }
 
@@ -11361,7 +11257,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let alert = NSAlert()
         alert.messageText = "Remove \(host.name)?"
         alert.informativeText =
-            "This removes the remote host, clears project and workspace selections that point to it, clears workspace bindings, and deletes its saved daemon token."
+            "This removes the remote host and deletes its saved daemon token. Workspaces assigned to the host must be removed first."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")

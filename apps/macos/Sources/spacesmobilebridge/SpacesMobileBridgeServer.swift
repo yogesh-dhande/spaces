@@ -628,7 +628,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         -> SpacesMobileTerminalDaemonEndpoint?
     {
         switch ComputeHostPlanner.selectHost(project: project, workspace: workspace, hostsByID: hostsByID) {
-        case .localMac: return nil
+        case .local: return nil
         case .remote(let host):
             return SpacesMobileTerminalDaemonEndpoint(
                 host: host.daemonEndpoint.host, port: host.daemonEndpoint.port,

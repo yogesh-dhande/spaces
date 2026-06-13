@@ -202,14 +202,142 @@ public struct ComputeHostBootstrapper {
               *) workspace_root="${HOME}/${workspace_root_input}" ;;
             esac
             \(cleanProfileScript)
-            mkdir -p "${profile_root}" "${runtime_root}" "${workspace_root}"
+            mkdir -p "${profile_root}" "${runtime_root}" "${workspace_root}" "${profile_root}/bin"
+            cat >"${profile_root}/bin/spaces" <<'SPACES_REMOTE_HELPER'
+            #!/usr/bin/env bash
+            set -euo pipefail
+
+            usage() {
+              echo "usage: spaces agent signal --workspace <id> --session <terminal-session-id> <init|start|waiting|done|exit>" >&2
+              exit 64
+            }
+
+            if [ "${1:-}" != "agent" ] || [ "${2:-}" != "signal" ]; then
+              usage
+            fi
+            shift 2
+
+            workspace_id=""
+            session_id=""
+            event_type=""
+            while [ "$#" -gt 0 ]; do
+              case "${1}" in
+                --workspace)
+                  [ "$#" -ge 2 ] || usage
+                  workspace_id="${2}"
+                  shift 2
+                  ;;
+                --workspace=*)
+                  workspace_id="${1#--workspace=}"
+                  shift
+                  ;;
+                --session)
+                  [ "$#" -ge 2 ] || usage
+                  session_id="${2}"
+                  shift 2
+                  ;;
+                --session=*)
+                  session_id="${1#--session=}"
+                  shift
+                  ;;
+                init|start|waiting|done|exit)
+                  [ -z "${event_type}" ] || usage
+                  event_type="${1}"
+                  shift
+                  ;;
+                *)
+                  usage
+                  ;;
+              esac
+            done
+            [ -n "${workspace_id}" ] || usage
+            [ -n "${session_id}" ] || usage
+            [ -n "${event_type}" ] || usage
+
+            python3 - "${workspace_id}" "${session_id}" "${event_type}" <<'PY'
+            import datetime
+            import json
+            import os
+            import socket
+            import sys
+            import uuid
+
+            workspace_id, session_id, event_type = [argument.strip() for argument in sys.argv[1:4]]
+            allowed = {"init", "start", "waiting", "done", "exit"}
+            if event_type not in allowed:
+                print(f"unsupported agent signal event: {event_type}", file=sys.stderr)
+                sys.exit(64)
+
+            runtime_root = os.environ.get("SPACES_RUNTIME_DIR", "").strip()
+            if not runtime_root:
+                print("SPACES_RUNTIME_DIR is required for remote spaces agent signal.", file=sys.stderr)
+                sys.exit(64)
+
+            def socket_path():
+                override = os.environ.get("SPACESD_SERVICE_SOCKET", "").strip()
+                if override:
+                    return override
+                terminal_root = os.path.abspath(os.path.join(runtime_root, "terminal"))
+                value = 5381
+                for byte in terminal_root.encode("utf-8"):
+                    value = (((value << 5) + value) + byte) & 0xFFFFFFFFFFFFFFFF
+                return f"/tmp/spaces-terminal-sockets/service-{value:016x}.sock"
+
+            def optional_env(name):
+                value = os.environ.get(name, "").strip()
+                return value or None
+
+            created_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            event = {
+                "id": str(uuid.uuid4()),
+                "sessionID": session_id,
+                "workspaceID": workspace_id,
+                "workspacePath": optional_env("SPACES_WORKSPACE_DIR"),
+                "type": event_type,
+                "provider": "spaces",
+                "label": optional_env("SPACES_AGENT_LABEL"),
+                "terminalTrackingID": session_id,
+                "terminalNativeID": session_id,
+                "codexThreadID": optional_env("CODEX_THREAD_ID"),
+                "environmentKeys": sorted(os.environ.keys()),
+                "createdAt": created_at,
+            }
+            request = {"command": "agentSignal", "sessionID": session_id, "agentSignal": event}
+
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            try:
+                sock.connect(socket_path())
+                sock.sendall(json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\\n")
+                sock.shutdown(socket.SHUT_WR)
+                data = bytearray()
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                    if b"\\n" in chunk:
+                        break
+            finally:
+                sock.close()
+
+            line = bytes(data).split(b"\\n", 1)[0]
+            response = json.loads(line.decode("utf-8"))
+            if not response.get("ok"):
+                print(response.get("message") or "remote spacesd rejected agent signal", file=sys.stderr)
+                sys.exit(1)
+
+            print(f"Agent {event_type}: queued remote signal\\tsession={session_id}")
+            PY
+            SPACES_REMOTE_HELPER
+            chmod +x "${profile_root}/bin/spaces"
             spacesd_path="$(command -v spacesd || true)"
             if [ -z "${spacesd_path}" ]; then
               echo "spacesd executable not found on remote host PATH." >&2
               exit 127
             fi
             spacesd_bin_dir="$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "${spacesd_path}" 2>/dev/null || dirname "${spacesd_path}")"
-            PATH="${spacesd_bin_dir}:$PATH"
+            PATH="${profile_root}/bin:${spacesd_bin_dir}:$PATH"
             fingerprint="$(SPACES_DB_PATH="${db_path}" SPACES_RUNTIME_DIR="${runtime_root}" SPACESD_PRINT_CERTIFICATE_FINGERPRINT=1 "${spacesd_path}")"
             if [ -z "${fingerprint}" ]; then
               echo "spacesd did not print a certificate fingerprint." >&2

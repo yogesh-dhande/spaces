@@ -138,6 +138,7 @@ let executableTargets: [Target] = [
     .executableTarget(
         name: "spacesd",
         dependencies: [
+            "workspacecore",
             "spacesterminalcore",
             "spacesterminalghostty",
             "spacesmobilecore",

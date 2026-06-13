@@ -632,13 +632,13 @@
             guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
             if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
             if let rejection = ownerRequestRejection(for: request, commandName: "send", startedAt: startedAt) { return rejection }
-            guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
-            let payload = text + (request.appendNewline ? "\n" : "")
-            if payload.contains("\n") { markLocalOwnerCommandInputOutputResyncPending() }
-            rendererHostStorage.sendRawBytes(Data(payload.utf8))
+            guard var payload = request.inputPayload else { return TerminalControlResponse(ok: false, message: "Missing input payload.") }
+            if request.appendNewline { payload.append(0x0A) }
+            markLocalOwnerCommandInputOutputResyncPending()
+            rendererHostStorage.sendRawBytes(payload)
             TerminalPerformance.logMetric(
                 "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.utf8.count)")
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.count)")
             return TerminalControlResponse(ok: true, message: "Sent input.")
         }
 

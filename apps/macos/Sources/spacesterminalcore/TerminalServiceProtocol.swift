@@ -22,13 +22,14 @@ public struct TerminalServiceRequest: Codable, Sendable, Equatable {
     public let chunkLimit: Int?
     public let agentSignal: TerminalServiceAgentSignalEvent?
     public let agentSignalEventIDs: [String]?
+    public let profileCommand: TerminalServiceProfileCommandRequest?
 
     public init(
         command: String, authToken: String? = nil, launchConfiguration: TerminalSessionLaunchConfiguration? = nil, sessionID: String? = nil,
         runtimeManifest: TerminalServiceWorkspaceRuntimeManifest? = nil, worktreeRefresh: TerminalServiceWorktreeRefreshRequest? = nil,
         workspaceCommand: TerminalServiceWorkspaceCommandRequest? = nil, controlRequest: TerminalControlRequest? = nil, terminalLink: String? = nil,
         terminalLinkID: String? = nil, chunkOffset: Int64? = nil, chunkLimit: Int? = nil, agentSignal: TerminalServiceAgentSignalEvent? = nil,
-        agentSignalEventIDs: [String]? = nil
+        agentSignalEventIDs: [String]? = nil, profileCommand: TerminalServiceProfileCommandRequest? = nil
     ) {
         self.command = command
         self.authToken = authToken
@@ -44,6 +45,21 @@ public struct TerminalServiceRequest: Codable, Sendable, Equatable {
         self.chunkLimit = chunkLimit
         self.agentSignal = agentSignal
         self.agentSignalEventIDs = agentSignalEventIDs
+        self.profileCommand = profileCommand
+    }
+
+    public init(
+        command: String, authToken: String? = nil, launchConfiguration: TerminalSessionLaunchConfiguration? = nil, sessionID: String? = nil,
+        runtimeManifest: TerminalServiceWorkspaceRuntimeManifest? = nil, worktreeRefresh: TerminalServiceWorktreeRefreshRequest? = nil,
+        workspaceCommand: TerminalServiceWorkspaceCommandRequest? = nil, controlRequest: TerminalControlRequest? = nil, terminalLink: String? = nil,
+        terminalLinkID: String? = nil, chunkOffset: Int64? = nil, chunkLimit: Int? = nil, agentSignal: TerminalServiceAgentSignalEvent? = nil,
+        agentSignalEventIDs: [String]? = nil
+    ) {
+        self.init(
+            command: command, authToken: authToken, launchConfiguration: launchConfiguration, sessionID: sessionID, runtimeManifest: runtimeManifest,
+            worktreeRefresh: worktreeRefresh, workspaceCommand: workspaceCommand, controlRequest: controlRequest, terminalLink: terminalLink,
+            terminalLinkID: terminalLinkID, chunkOffset: chunkOffset, chunkLimit: chunkLimit, agentSignal: agentSignal,
+            agentSignalEventIDs: agentSignalEventIDs, profileCommand: nil)
     }
 
     public func withAuthToken(_ authToken: String?) -> TerminalServiceRequest {
@@ -51,7 +67,139 @@ public struct TerminalServiceRequest: Codable, Sendable, Equatable {
             command: command, authToken: authToken, launchConfiguration: launchConfiguration, sessionID: sessionID, runtimeManifest: runtimeManifest,
             worktreeRefresh: worktreeRefresh, workspaceCommand: workspaceCommand, controlRequest: controlRequest, terminalLink: terminalLink,
             terminalLinkID: terminalLinkID, chunkOffset: chunkOffset, chunkLimit: chunkLimit, agentSignal: agentSignal,
-            agentSignalEventIDs: agentSignalEventIDs)
+            agentSignalEventIDs: agentSignalEventIDs, profileCommand: profileCommand)
+    }
+}
+
+public enum TerminalServiceProfileCommandOperation: String, Codable, Sendable, Equatable {
+    case projectList
+    case workspaceList
+    case workspaceCreate
+    case workspaceStart
+    case workspaceRestart
+    case agentSignal
+    case terminalList
+    case terminalSend
+    case terminalTail
+}
+
+public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable {
+    public let operation: TerminalServiceProfileCommandOperation
+    public let projectID: String?
+    public let includeArchived: Bool?
+    public let workspaceID: String?
+    public let branch: String?
+    public let hostID: String?
+    public let title: String?
+    public let targetBranch: String?
+    public let existingBranch: Bool?
+    public let terminalSessionID: String?
+    public let agentEvent: String?
+    public let terminalText: String?
+    public let terminalBytes: Data?
+    public let appendNewline: Bool?
+    public let lineCount: Int?
+
+    public init(
+        operation: TerminalServiceProfileCommandOperation, projectID: String? = nil, includeArchived: Bool? = nil, workspaceID: String? = nil,
+        branch: String? = nil, hostID: String? = nil, title: String? = nil, targetBranch: String? = nil, existingBranch: Bool? = nil,
+        terminalSessionID: String? = nil, agentEvent: String? = nil, terminalText: String? = nil, terminalBytes: Data? = nil,
+        appendNewline: Bool? = nil, lineCount: Int? = nil
+    ) {
+        self.operation = operation
+        self.projectID = projectID
+        self.includeArchived = includeArchived
+        self.workspaceID = workspaceID
+        self.branch = branch
+        self.hostID = hostID
+        self.title = title
+        self.targetBranch = targetBranch
+        self.existingBranch = existingBranch
+        self.terminalSessionID = terminalSessionID
+        self.agentEvent = agentEvent
+        self.terminalText = terminalText
+        self.terminalBytes = terminalBytes
+        self.appendNewline = appendNewline
+        self.lineCount = lineCount
+    }
+}
+
+public struct TerminalServiceProfileProjectSummary: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let name: String
+    public let dir: String
+    public let isGitRepo: Bool
+    public let defaultBranch: String?
+    public let isCollapsed: Bool
+
+    public init(id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isCollapsed: Bool) {
+        self.id = id
+        self.name = name
+        self.dir = dir
+        self.isGitRepo = isGitRepo
+        self.defaultBranch = defaultBranch
+        self.isCollapsed = isCollapsed
+    }
+}
+
+public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let projectID: String
+    public let hostID: String
+    public let title: String
+    public let dir: String
+    public let runtimePath: String
+    public let dirname: String?
+    public let branch: String?
+    public let targetBranch: String?
+    public let isDefault: Bool
+    public let isArchived: Bool
+    public let isHidden: Bool
+    public let isRunning: Bool
+    public let lastLaunchedAt: String?
+    public let notes: String?
+
+    public init(
+        id: String, projectID: String, hostID: String, title: String, dir: String, runtimePath: String, dirname: String?, branch: String?,
+        targetBranch: String?, isDefault: Bool, isArchived: Bool, isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
+    ) {
+        self.id = id
+        self.projectID = projectID
+        self.hostID = hostID
+        self.title = title
+        self.dir = dir
+        self.runtimePath = runtimePath
+        self.dirname = dirname
+        self.branch = branch
+        self.targetBranch = targetBranch
+        self.isDefault = isDefault
+        self.isArchived = isArchived
+        self.isHidden = isHidden
+        self.isRunning = isRunning
+        self.lastLaunchedAt = lastLaunchedAt
+        self.notes = notes
+    }
+}
+
+public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatable {
+    public let message: String
+    public let projects: [TerminalServiceProfileProjectSummary]?
+    public let workspaces: [TerminalServiceProfileWorkspaceRecord]?
+    public let workspace: TerminalServiceProfileWorkspaceRecord?
+    public let terminalSessions: [TerminalServiceSessionSummary]?
+    public let terminalOutput: String?
+
+    public init(
+        message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
+        workspace: TerminalServiceProfileWorkspaceRecord? = nil, terminalSessions: [TerminalServiceSessionSummary]? = nil,
+        terminalOutput: String? = nil
+    ) {
+        self.message = message
+        self.projects = projects
+        self.workspaces = workspaces
+        self.workspace = workspace
+        self.terminalSessions = terminalSessions
+        self.terminalOutput = terminalOutput
     }
 }
 
@@ -268,12 +416,14 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
     public let terminalLinkMetadata: TerminalServiceTerminalLinkMetadata?
     public let terminalLinkChunk: TerminalServiceTerminalLinkChunk?
     public let agentSignals: [TerminalServiceAgentSignalEvent]?
+    public let profile: TerminalServiceProfileCommandResponse?
 
     public init(
         ok: Bool, message: String, session: TerminalServiceSessionSummary? = nil, sessions: [TerminalServiceSessionSummary]? = nil,
         servicePID: Int32? = nil, commandResult: TerminalServiceCommandResult? = nil, sessionState: GhosttyRemoteSessionStatePayload? = nil,
         controlResponse: TerminalControlResponse? = nil, terminalLinkMetadata: TerminalServiceTerminalLinkMetadata? = nil,
-        terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil, agentSignals: [TerminalServiceAgentSignalEvent]? = nil
+        terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil, agentSignals: [TerminalServiceAgentSignalEvent]? = nil,
+        profile: TerminalServiceProfileCommandResponse? = nil
     ) {
         self.ok = ok
         self.message = message
@@ -286,6 +436,19 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
         self.terminalLinkMetadata = terminalLinkMetadata
         self.terminalLinkChunk = terminalLinkChunk
         self.agentSignals = agentSignals
+        self.profile = profile
+    }
+
+    public init(
+        ok: Bool, message: String, session: TerminalServiceSessionSummary? = nil, sessions: [TerminalServiceSessionSummary]? = nil,
+        servicePID: Int32? = nil, commandResult: TerminalServiceCommandResult? = nil, sessionState: GhosttyRemoteSessionStatePayload? = nil,
+        controlResponse: TerminalControlResponse? = nil, terminalLinkMetadata: TerminalServiceTerminalLinkMetadata? = nil,
+        terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil, agentSignals: [TerminalServiceAgentSignalEvent]? = nil
+    ) {
+        self.init(
+            ok: ok, message: message, session: session, sessions: sessions, servicePID: servicePID, commandResult: commandResult,
+            sessionState: sessionState, controlResponse: controlResponse, terminalLinkMetadata: terminalLinkMetadata,
+            terminalLinkChunk: terminalLinkChunk, agentSignals: agentSignals, profile: nil)
     }
 }
 
