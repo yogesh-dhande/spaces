@@ -130,6 +130,43 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(driver.foregroundPID(), foregroundPID)
     }
 
+    @MainActor func testHostManagedPTYResetsIgnoredInterruptSignalBeforeExec() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let markerPath = root.appendingPathComponent("interrupt-marker")
+        let scriptPath = root.appendingPathComponent("interrupt-target.sh")
+        try """
+        #!/bin/sh
+        printf 'ready\\n' > "\(markerPath.path)"
+        sleep 20
+        printf 'survived\\n' >> "\(markerPath.path)"
+        """.write(to: scriptPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
+
+        // Simulate a daemon launched from a background/noninteractive shell where
+        // SIGINT can be inherited as ignored by child terminal sessions.
+        let previousInterruptHandler = signal(SIGINT, SIG_IGN)
+        defer { _ = signal(SIGINT, previousInterruptHandler) }
+
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "interrupt-signal-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "interrupt", workingDirectory: root.path,
+                shell: "/bin/zsh", command: scriptPath.path, createdAt: "2026-06-06T00:00:00Z"))
+        defer { driver.terminate() }
+
+        try driver.startIfNeeded()
+        try waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
+        driver.sendRawBytes(Data([0x03]))
+        try waitUntil(timeout: 5) { driver.childPID() == nil }
+
+        let markerText = try String(contentsOf: markerPath, encoding: .utf8)
+        XCTAssertTrue(markerText.contains("ready"))
+        // If the child inherited ignored SIGINT, sleep completes and writes this.
+        XCTAssertFalse(markerText.contains("survived"))
+    }
+
     func testHostManagedPTYForegroundPIDFallsBackToLiveChildPID() {
         let currentPID = getpid()
 

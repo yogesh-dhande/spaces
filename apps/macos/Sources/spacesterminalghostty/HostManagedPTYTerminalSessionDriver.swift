@@ -64,6 +64,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         let pid = Self.forkPTY(master: &master, windowSize: &windowSize)
         guard pid >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         if pid == 0 {
+            Self.resetSignalDispositionsForExec()
             Self.closeInheritedFileDescriptorsForExec()
             if !launchConfiguration.workingDirectory.isEmpty { _ = chdir(launchConfiguration.workingDirectory) }
             setenv("TERM", "xterm-256color", 1)
@@ -275,6 +276,13 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         let upperBound = rawLimit > 3 ? Int32(clamping: rawLimit) : 1024
         guard upperBound > 3 else { return }
         for fd in Int32(3)..<upperBound { _ = close(fd) }
+    }
+
+    private static func resetSignalDispositionsForExec() {
+        // Remote daemons may be launched by noninteractive shells or nohup, which can
+        // leave terminal signals ignored. PTY children need defaults so VINTR/VSUSP
+        // behave like a normal terminal without changing the daemon's handlers.
+        for signalNumber in [SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGPIPE, SIGTSTP, SIGTTIN, SIGTTOU] { _ = signal(signalNumber, SIG_DFL) }
     }
 
     private static func defaultShellPath() -> String {

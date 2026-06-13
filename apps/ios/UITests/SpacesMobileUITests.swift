@@ -312,34 +312,40 @@ final class SpacesMobileUITests: XCTestCase {
     }
 
     private func launchConfiguredApp(_ configuration: UITestConfiguration) -> XCUIApplication {
-        let app = if configuration.attachToExistingApp {
-            XCUIApplication(bundleIdentifier: configuration.bundleID)
-        } else {
-            XCUIApplication()
-        }
         if configuration.attachToExistingApp {
-            app.activate()
-            XCTAssertTrue(waitForRunningApp(app, timeout: 20), "Timed out waiting for attached app \(configuration.bundleID) to become active")
-        } else {
-            app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
-            app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
-            app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
-            app.launchEnvironment["SPACES_MOBILE_TEST_TRANSPORT_KEY"] = configuration.transportKey
-            app.launchEnvironment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"] = configuration.certificateFingerprint
-            app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
-            app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
-            if let secondarySessionID = configuration.secondarySessionID {
-                app.launchEnvironment["SPACES_MOBILE_E2E_SECONDARY_SESSION_ID"] = secondarySessionID
+            let app = XCUIApplication(bundleIdentifier: configuration.bundleID)
+            if app.state != .notRunning {
+                app.activate()
+                XCTAssertTrue(waitForRunningApp(app, timeout: 20), "Timed out waiting for attached app \(configuration.bundleID) to become active")
+                return app
             }
-            if let renderDumpPath = configuration.renderDumpPath {
-                app.launchEnvironment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"] = renderDumpPath
-            }
-            if let eventLogPath = configuration.eventLogPath {
-                app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
-            }
-            app.launch()
         }
+
+        // The primary target launch path reliably carries launchEnvironment into
+        // cold starts; bundle-identifier launches can come up unconfigured.
+        let app = XCUIApplication()
+        applyConfiguredLaunchEnvironment(to: app, configuration: configuration)
+        app.launch()
         return app
+    }
+
+    private func applyConfiguredLaunchEnvironment(to app: XCUIApplication, configuration: UITestConfiguration) {
+        app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
+        app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
+        app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
+        app.launchEnvironment["SPACES_MOBILE_TEST_TRANSPORT_KEY"] = configuration.transportKey
+        app.launchEnvironment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"] = configuration.certificateFingerprint
+        app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
+        app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
+        if let secondarySessionID = configuration.secondarySessionID {
+            app.launchEnvironment["SPACES_MOBILE_E2E_SECONDARY_SESSION_ID"] = secondarySessionID
+        }
+        if let renderDumpPath = configuration.renderDumpPath {
+            app.launchEnvironment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"] = renderDumpPath
+        }
+        if let eventLogPath = configuration.eventLogPath {
+            app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
+        }
     }
 
     private func waitForButton(in app: XCUIApplication, identifier: String, fallbackLabel: String, timeout: TimeInterval) -> XCUIElement? {
@@ -682,13 +688,13 @@ final class SpacesMobileUITests: XCTestCase {
 
         let sessionDetail = app.descendants(matching: .any)["terminal.detail.\(sessionID)"]
         XCTAssertTrue(sessionDetail.waitForExistence(timeout: 8), "Terminal detail \(sessionID) did not appear during \(context)")
-        if waitForOwnerState(in: app, timeout: 4) == nil,
+        if !waitForOwnerState(in: app, configuration: configuration, sessionID: sessionID, timeout: 4),
            let takeOverButton = waitForButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 8)
         {
             takeOverButton.tap()
         }
 
-        guard waitForOwnerState(in: app, timeout: 45) != nil else {
+        guard waitForOwnerState(in: app, configuration: configuration, sessionID: sessionID, timeout: 45) else {
             XCTFail("Timed out waiting for owner state after taking over session \(sessionID) during \(context)")
             return
         }

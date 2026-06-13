@@ -31,24 +31,18 @@ USER_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$USER_HOME/.config}"
 E2E_GHOSTTY_XDG_CONFIG_HOME="${SPACES_MOBILE_GHOSTTY_XDG_CONFIG_HOME:-$USER_XDG_CONFIG_HOME}"
 FIXTURE_LINE_COUNT=520
 SCROLLBACK_SWIPE_COUNT=2
-TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-Screen Recording 2026-03-20 at 11.17.57 AM.png}"
+TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-spaces-link-preview.png}"
 TERMINAL_LINK_PREVIEW_PATH="${SPACES_MOBILE_E2E_LINK_PREVIEW_PATH:-/tmp/$TERMINAL_LINK_PREVIEW_IMAGE_NAME}"
 
 SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard app-recovery)
 SELECTED_SCENARIOS=()
-SELECTED_TARGETS=()
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
 DEMO_PORT="${SPACES_MOBILE_DEMO_PORT:-}"
-REMOTE_HOST_ID="${SPACES_E2E_REMOTE_HOST_ID:-mobile-e2e-remote}"
-REMOTE_HOST_NAME="${SPACES_E2E_REMOTE_NAME:-Mobile E2E Remote}"
+REMOTE_HOST_ID="${SPACES_E2E_REMOTE_HOST_ID:-mobile-demo-remote}"
+REMOTE_AUTH_TOKEN="${SPACES_E2E_REMOTE_AUTH_TOKEN:-}"
 REMOTE_SSH_HOST="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 REMOTE_SSH_USER="${SPACES_E2E_REMOTE_SSH_USER:-}"
 REMOTE_SSH_PORT="${SPACES_E2E_REMOTE_SSH_PORT:-}"
-REMOTE_WORKSPACE_ROOT="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/workspaces}"
-REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-$REMOTE_SSH_HOST}"
-REMOTE_DAEMON_PORT="${SPACES_E2E_REMOTE_DAEMON_PORT:-7443}"
-REMOTE_AUTH_TOKEN="${SPACES_E2E_REMOTE_AUTH_TOKEN:-}"
-REMOTE_GIT_ROOT="${SPACES_E2E_REMOTE_GIT_ROOT:-~/.spaces/e2e-git}"
 
 SUITE_ROOT=""
 IOS_DERIVED_DATA=""
@@ -62,6 +56,10 @@ DEMO_TERMINAL_SERVICE_PID=""
 DEMO_ROOT=""
 PROJECT_DIR=""
 DEMO_PROJECT_DIR=""
+LOCAL_PROJECT_DIR=""
+REMOTE_PROJECT_DIR=""
+LOCAL_SESSION_ID=""
+REMOTE_SESSION_ID=""
 DB_PATH=""
 RUNTIME_DIR=""
 BRIDGE_HOST=""
@@ -86,7 +84,6 @@ Usage: apps/macos/Tests/e2e_mobile.sh [options]
 Options:
   --list                 List available mobile E2E scenarios.
   --scenario NAME        Run only one scenario. May be passed multiple times.
-  --target NAME          Run against local, remote, or all. May be passed multiple times.
   --keep-root            Preserve the shared demo root after a successful run.
   --port PORT            Use a specific daemon mobile bridge port.
   --help                 Show this help text.
@@ -115,13 +112,6 @@ scenario_exists() {
   return 1
 }
 
-target_exists() {
-  case "$1" in
-    local|remote|all) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -133,16 +123,6 @@ parse_args() {
         [[ $# -ge 2 ]] || fail "missing value for --scenario"
         scenario_exists "$2" || fail "unknown scenario: $2"
         SELECTED_SCENARIOS+=("$2")
-        shift 2
-        ;;
-      --target)
-        [[ $# -ge 2 ]] || fail "missing value for --target"
-        target_exists "$2" || fail "unknown target: $2"
-        if [[ "$2" == "all" ]]; then
-          SELECTED_TARGETS+=(local remote)
-        else
-          SELECTED_TARGETS+=("$2")
-        fi
         shift 2
         ;;
       --keep-root)
@@ -167,26 +147,48 @@ parse_args() {
   if [[ ${#SELECTED_SCENARIOS[@]} -eq 0 ]]; then
     SELECTED_SCENARIOS=("${SCENARIOS[@]}")
   fi
-  if [[ ${#SELECTED_TARGETS[@]} -eq 0 ]]; then
-    if [[ -n "${SPACES_MOBILE_E2E_TARGETS:-}" ]]; then
-      read -r -a SELECTED_TARGETS <<<"$SPACES_MOBILE_E2E_TARGETS"
-    elif [[ -n "$REMOTE_SSH_HOST" ]]; then
-      SELECTED_TARGETS=(local remote)
-    else
-      SELECTED_TARGETS=(local)
-    fi
+}
+
+require_remote_configuration() {
+  [[ -n "$REMOTE_SSH_HOST" ]] || fail "SPACES_E2E_REMOTE_SSH_HOST is required for mixed local/remote mobile E2E runs."
+}
+
+remote_auth_token_env_key() {
+  printf 'SPACESD_AUTH_TOKEN_%s\n' "$(printf '%s' "$REMOTE_HOST_ID" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]/_/g')"
+}
+
+export_remote_auth_token() {
+  [[ -n "$REMOTE_AUTH_TOKEN" ]] || return 0
+  local key
+  key="$(remote_auth_token_env_key)"
+  export "$key=$REMOTE_AUTH_TOKEN"
+}
+
+shell_quote() {
+  python3 - "$1" <<'PY'
+import shlex
+import sys
+print(shlex.quote(sys.argv[1]))
+PY
+}
+
+remote_ssh_destination() {
+  if [[ -n "$REMOTE_SSH_USER" ]]; then
+    printf '%s@%s' "$REMOTE_SSH_USER" "$REMOTE_SSH_HOST"
+  else
+    printf '%s' "$REMOTE_SSH_HOST"
   fi
-  local expanded_targets=()
-  local selected_target
-  for selected_target in "${SELECTED_TARGETS[@]}"; do
-    target_exists "$selected_target" || fail "unknown target: $selected_target"
-    if [[ "$selected_target" == "all" ]]; then
-      expanded_targets+=(local remote)
-    else
-      expanded_targets+=("$selected_target")
-    fi
-  done
-  SELECTED_TARGETS=("${expanded_targets[@]}")
+}
+
+remote_ssh() {
+  [[ -n "$REMOTE_SSH_HOST" ]] || fail "Remote target requires SPACES_E2E_REMOTE_SSH_HOST."
+  local destination
+  destination="$(remote_ssh_destination)"
+  local -a args=(-o BatchMode=yes)
+  if [[ -n "$REMOTE_SSH_PORT" ]]; then
+    args+=(-p "$REMOTE_SSH_PORT")
+  fi
+  ssh "${args[@]}" "$destination" "$@"
 }
 
 run_demo_env() {
@@ -203,17 +205,21 @@ run_demo_env() {
 }
 
 demo_env() {
-  run_demo_env \
-    HOME="$DEMO_ROOT/home" \
-    CODEX_HOME="$E2E_CODEX_HOME" \
-    XDG_CONFIG_HOME="$E2E_GHOSTTY_XDG_CONFIG_HOME" \
-    SPACES_DB_PATH="$DB_PATH" \
-    SPACES_RUNTIME_DIR="$RUNTIME_DIR" \
-    SPACESD_EXECUTABLE="$TERMINAL_SERVICE_BIN" \
-    SPACESD_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
-    SPACES_MOBILE_BRIDGE_HOST="${SPACES_MOBILE_DEMO_BIND_HOST:-0.0.0.0}" \
-    SPACES_MOBILE_BRIDGE_PORT="$BRIDGE_PORT" \
-    "$@"
+  local -a env_args=(
+    HOME="$DEMO_ROOT/home"
+    CODEX_HOME="$E2E_CODEX_HOME"
+    XDG_CONFIG_HOME="$E2E_GHOSTTY_XDG_CONFIG_HOME"
+    SPACES_DB_PATH="$DB_PATH"
+    SPACES_RUNTIME_DIR="$RUNTIME_DIR"
+    SPACESD_EXECUTABLE="$TERMINAL_SERVICE_BIN"
+    SPACESD_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT"
+    SPACES_MOBILE_BRIDGE_HOST="${SPACES_MOBILE_DEMO_BIND_HOST:-0.0.0.0}"
+    SPACES_MOBILE_BRIDGE_PORT="$BRIDGE_PORT"
+  )
+  if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then
+    env_args+=("$(remote_auth_token_env_key)=$REMOTE_AUTH_TOKEN")
+  fi
+  run_demo_env "${env_args[@]}" "$@"
 }
 
 tail_if_present() {
@@ -412,9 +418,18 @@ while True:
         index = start + 1
         continue
     if isinstance(payload, dict) and payload.get("root") and payload.get("sessionID"):
+        required_keys = ["localProjectDir", "remoteProjectDir", "localSessionID", "remoteSessionID"]
+        missing = [key for key in required_keys if not payload.get(key)]
+        if missing:
+            print(f"DEMO_METADATA_ERROR={shlex.quote('Mobile demo metadata is missing: ' + ', '.join(missing))}")
+            raise SystemExit(0)
         fields = {
             "DEMO_ROOT": payload["root"],
             "PROJECT_DIR": payload["projectDir"],
+            "LOCAL_PROJECT_DIR": payload["localProjectDir"],
+            "REMOTE_PROJECT_DIR": payload["remoteProjectDir"],
+            "LOCAL_SESSION_ID": payload["localSessionID"],
+            "REMOTE_SESSION_ID": payload["remoteSessionID"],
             "DB_PATH": payload["dbPath"],
             "RUNTIME_DIR": payload.get("runtimeDir") or str(pathlib.Path(payload["root"]) / "runtime"),
             "BRIDGE_HOST": payload["bridgeHost"],
@@ -440,6 +455,9 @@ PY
     sleep 0.25
   done
   eval "$metadata"
+  if [[ -n "${DEMO_METADATA_ERROR:-}" ]]; then
+    fail "$DEMO_METADATA_ERROR"
+  fi
 }
 
 start_demo() {
@@ -466,156 +484,27 @@ start_demo() {
     "$DEMO_SCRIPT" >"$DEMO_STDOUT_LOG" 2>&1 &
   DEMO_PID=$!
   wait_for_demo_metadata
-  DEMO_PROJECT_DIR="$PROJECT_DIR"
+  DEMO_PROJECT_DIR="$LOCAL_PROJECT_DIR"
+  PROJECT_DIR="$LOCAL_PROJECT_DIR"
+  [[ -n "$REMOTE_PROJECT_DIR" ]] || fail "Mobile demo metadata did not include remoteProjectDir."
+  [[ -n "$REMOTE_SESSION_ID" ]] || fail "Mobile demo metadata did not include remoteSessionID."
   printf 'Shared demo root: %s\n' "$DEMO_ROOT"
-}
-
-shell_quote() {
-  python3 - "$1" <<'PY'
-import shlex
-import sys
-print(shlex.quote(sys.argv[1]))
-PY
-}
-
-remote_ssh_destination() {
-  if [[ -n "$REMOTE_SSH_USER" ]]; then
-    printf '%s@%s' "$REMOTE_SSH_USER" "$REMOTE_SSH_HOST"
-  else
-    printf '%s' "$REMOTE_SSH_HOST"
-  fi
-}
-
-remote_ssh() {
-  [[ -n "$REMOTE_SSH_HOST" ]] || fail "Remote target requires SPACES_E2E_REMOTE_SSH_HOST."
-  local destination
-  destination="$(remote_ssh_destination)"
-  local -a args=(-o BatchMode=yes)
-  if [[ -n "$REMOTE_SSH_PORT" ]]; then
-    args+=(-p "$REMOTE_SSH_PORT")
-  fi
-  ssh "${args[@]}" "$destination" "$@"
-}
-
-remote_expand_path() {
-  local raw_path="$1"
-  local quoted
-  quoted="$(shell_quote "$raw_path")"
-  remote_ssh "python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' $quoted"
-}
-
-remote_push_url_for_path() {
-  local remote_path="$1"
-  local user_prefix=""
-  local port_part=""
-  if [[ -n "$REMOTE_SSH_USER" ]]; then
-    user_prefix="$REMOTE_SSH_USER@"
-  fi
-  if [[ -n "$REMOTE_SSH_PORT" ]]; then
-    port_part=":$REMOTE_SSH_PORT"
-  fi
-  printf 'ssh://%s%s%s%s\n' "$user_prefix" "$REMOTE_SSH_HOST" "$port_part" "$remote_path"
-}
-
-remote_auth_token_env_key() {
-  printf 'SPACESD_AUTH_TOKEN_%s\n' "$(printf '%s' "$REMOTE_HOST_ID" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]/_/g')"
-}
-
-export_remote_auth_token() {
-  [[ -n "$REMOTE_AUTH_TOKEN" ]] || return 0
-  local key
-  key="$(remote_auth_token_env_key)"
-  export "$key=$REMOTE_AUTH_TOKEN"
-}
-
-prepare_remote_git_origin() {
-  local project_dir="$1"
-  local slug="$2"
-  local git_root
-  git_root="$(remote_expand_path "$REMOTE_GIT_ROOT")"
-  local remote_origin="$git_root/$slug.git"
-  local quoted_root quoted_origin
-  quoted_root="$(shell_quote "$git_root")"
-  quoted_origin="$(shell_quote "$remote_origin")"
-  remote_ssh "mkdir -p $quoted_root && rm -rf $quoted_origin && git init --bare -q $quoted_origin"
-  local push_url
-  push_url="$(remote_push_url_for_path "$remote_origin")"
-  local ssh_command="ssh"
-  if [[ -n "$REMOTE_SSH_PORT" ]]; then
-    ssh_command+=" -p $REMOTE_SSH_PORT"
-  fi
-  git -C "$project_dir" remote remove origin >/dev/null 2>&1 || true
-  git -C "$project_dir" remote add origin "$remote_origin"
-  git -C "$project_dir" -c core.sshCommand="$ssh_command" push -q "$push_url" main
-  printf '%s\n' "$remote_origin"
-}
-
-prepare_remote_target_project() {
-  local source_project_dir="$PROJECT_DIR"
-  local remote_project_dir="$DEMO_ROOT/remote-project"
-  if [[ ! -d "$remote_project_dir/.git" ]]; then
-    mkdir -p "$remote_project_dir"
-    (cd "$source_project_dir" && tar --exclude .git -cf - .) | (cd "$remote_project_dir" && tar -xf -)
-    git -C "$remote_project_dir" init -q
-    git -C "$remote_project_dir" checkout -q -B main
-    git -C "$remote_project_dir" config user.email "e2e@example.com"
-    git -C "$remote_project_dir" config user.name "Spaces E2E"
-    git -C "$remote_project_dir" add .
-    git -C "$remote_project_dir" commit -q -m "seed remote mobile e2e fixture"
-    demo_env "$SPACES_E2E_BIN" seed-fixture \
-      --project-dir "$remote_project_dir" \
-      --docs-url "http://127.0.0.1:20001" \
-      --admin-url "http://127.0.0.1:20002" >/dev/null
-  fi
-  PROJECT_DIR="$remote_project_dir"
-}
-
-configure_local_target() {
-  PROJECT_DIR="$DEMO_PROJECT_DIR"
-  demo_env "$SPACES_E2E_BIN" set-project-default-compute-host --project-dir "$PROJECT_DIR" --local >"$DEMO_ROOT/local-compute-host-target.json" 2>/dev/null || true
-}
-
-configure_remote_target() {
-  [[ -n "$REMOTE_SSH_HOST" ]] || fail "Remote target requires SPACES_E2E_REMOTE_SSH_HOST."
-  export_remote_auth_token
-  prepare_remote_target_project
-  local slug
-  slug="$(basename "$DEMO_ROOT" | tr -cd 'A-Za-z0-9_.-')"
-  [[ -n "$slug" ]] || slug="mobile-e2e"
-  prepare_remote_git_origin "$PROJECT_DIR" "mobile-$slug" >>"$DEMO_ROOT/remote-git-origin.log" 2>&1
-
-  local -a args=(
-    remote-compute-host-smoke
-    --project-dir "$PROJECT_DIR"
-    --host-id "$REMOTE_HOST_ID"
-    --name "$REMOTE_HOST_NAME"
-    --ssh-host "$REMOTE_SSH_HOST"
-    --workspace-root "$REMOTE_WORKSPACE_ROOT"
-    --daemon-port "$REMOTE_DAEMON_PORT"
-  )
-  if [[ -n "$REMOTE_SSH_USER" ]]; then args+=(--ssh-user "$REMOTE_SSH_USER"); fi
-  if [[ -n "$REMOTE_SSH_PORT" ]]; then args+=(--ssh-port "$REMOTE_SSH_PORT"); fi
-  if [[ -n "$REMOTE_DAEMON_HOST" ]]; then args+=(--daemon-host "$REMOTE_DAEMON_HOST"); fi
-  if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then args+=(--auth-token "$REMOTE_AUTH_TOKEN"); fi
-  demo_env "$SPACES_E2E_BIN" "${args[@]}" >"$DEMO_ROOT/remote-compute-host-smoke.json" 2>"$DEMO_ROOT/remote-compute-host-smoke.stderr.log" \
-    || fail "Remote compute host smoke failed. See $DEMO_ROOT/remote-compute-host-smoke.stderr.log"
 }
 
 configure_target() {
   CURRENT_TARGET="$1"
   case "$CURRENT_TARGET" in
     local)
-      printf '\n[%s] Configuring local mobile E2E target.\n' "$(date +%H:%M:%S)"
-      configure_local_target
+      PROJECT_DIR="$LOCAL_PROJECT_DIR"
       ;;
     remote)
-      printf '\n[%s] Configuring remote mobile E2E target: %s\n' "$(date +%H:%M:%S)" "$REMOTE_HOST_ID"
-      configure_remote_target
+      PROJECT_DIR="$REMOTE_PROJECT_DIR"
       ;;
     *)
       fail "unknown target: $CURRENT_TARGET"
       ;;
   esac
+  printf '\n[%s] Using mobile E2E target: %s project=%s\n' "$(date +%H:%M:%S)" "$CURRENT_TARGET" "$PROJECT_DIR"
 }
 
 begin_scenario() {
@@ -682,6 +571,7 @@ profile_app_owner_json() {
 profile_app_owner_pid() {
   python3 -c '
 import json
+import os
 import sys
 
 try:
@@ -695,8 +585,41 @@ if not owner:
 pid = owner.get("pid")
 if not isinstance(pid, int) or pid <= 0:
     raise SystemExit(1)
+try:
+    os.kill(pid, 0)
+except OSError:
+    raise SystemExit(1)
 print(pid)
 '
+}
+
+record_profile_app_owner_pid() {
+  local owner_pid="$1"
+  [[ -n "$owner_pid" && "$owner_pid" =~ ^[0-9]+$ ]] || return 0
+  if [[ -n "$DEMO_ROOT" && -d "$DEMO_ROOT" && -n "$DEMO_APP_PID" && "$DEMO_APP_PID" != "$owner_pid" ]]; then
+    python3 - "$DEMO_ROOT/app-recovery-state.json" "$DEMO_APP_PID" "$owner_pid" <<'PY' || true
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+old_pid = int(sys.argv[2])
+new_pid = int(sys.argv[3])
+if path.exists():
+    raise SystemExit(0)
+payload = {
+    "status": "recovered",
+    "oldAppPID": old_pid,
+    "newAppPID": new_pid,
+    "observedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+}
+temp_path = path.with_suffix(".tmp")
+temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+temp_path.replace(path)
+PY
+  fi
+  DEMO_APP_PID="$owner_pid"
 }
 
 mobile_bridge_request() {
@@ -843,7 +766,7 @@ wait_for_profile_app_owner() {
   local owner_pid=""
   while (( SECONDS < deadline )); do
     if owner_json="$(profile_app_owner_json 2>&1)" && owner_pid="$(printf '%s' "$owner_json" | profile_app_owner_pid 2>/dev/null)"; then
-      DEMO_APP_PID="$owner_pid"
+      record_profile_app_owner_pid "$owner_pid"
       printf 'profile app owner ready: pid=%s\n' "$owner_pid" >>"$log_path" || true
       return 0
     fi
@@ -866,7 +789,7 @@ ensure_profile_app_owner() {
       printf '%s\n' "$owner_json"
     } >>"$log_path" || true
     if owner_pid="$(printf '%s' "$owner_json" | profile_app_owner_pid 2>/dev/null)"; then
-      DEMO_APP_PID="$owner_pid"
+      record_profile_app_owner_pid "$owner_pid"
       return 0
     fi
   else
@@ -1055,8 +978,39 @@ cleanup_current_scenario_sessions() {
 }
 
 reset_mobile_app() {
+  local launch_env=()
+  local assignment
+  while IFS= read -r assignment; do
+    [[ -n "$assignment" ]] && launch_env+=("$assignment")
+  done < <(python3 - "$UI_TEST_CONFIG" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+payload = json.loads(config_path.read_text())
+mapping = {
+    "host": "SPACES_MOBILE_TEST_HOST",
+    "port": "SPACES_MOBILE_TEST_PORT",
+    "authToken": "SPACES_MOBILE_TEST_AUTH_TOKEN",
+    "transportKey": "SPACES_MOBILE_TEST_TRANSPORT_KEY",
+    "certificateFingerprint": "SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT",
+    "installationID": "SPACES_MOBILE_TEST_INSTALLATION_ID",
+    "sessionID": "SPACES_MOBILE_E2E_TARGET_SESSION_ID",
+    "secondarySessionID": "SPACES_MOBILE_E2E_SECONDARY_SESSION_ID",
+    "renderDumpPath": "SPACES_MOBILE_E2E_RENDER_DUMP_PATH",
+    "eventLogPath": "SPACES_MOBILE_E2E_EVENT_LOG_PATH",
+}
+for json_key, environment_key in mapping.items():
+    value = payload.get(json_key)
+    if value is not None and str(value).strip():
+        print(f"SIMCTL_CHILD_{environment_key}={value}")
+print(f"SIMCTL_CHILD_SPACES_MOBILE_UI_TEST_CONFIG_PATH={config_path}")
+PY
+  )
   xcrun simctl terminate "$MOBILE_UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
   env \
+    "${launch_env[@]}" \
     SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE=1 \
     SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERFORMANCE_LOG_PATH" \
     xcrun simctl launch "$MOBILE_UDID" "$BUNDLE_ID" >>"$SCENARIO_LOG" 2>&1 || fail "Failed to launch SpacesMobile on the $MOBILE_DEVICE_LABEL simulator."
@@ -1126,6 +1080,8 @@ payload = {
     "proceedFinishPath": None,
     "firstCommandText": "",
     "secondCommandText": None,
+    "firstCommandOutputText": None,
+    "secondCommandOutputText": None,
     "manualRetakeoverAttempts": 0,
     "manualRetakeoverObservedPrefix": None,
     "manualRetakeoverContinuePrefix": None,
@@ -1170,8 +1126,10 @@ elif scenario == "roundtrip":
         "secondCommandCompletedPath": str(artifacts_dir / f"{artifact_prefix}-second-command-completed"),
         "secondCommandObservedPath": str(artifacts_dir / f"{artifact_prefix}-second-command-observed"),
         "proceedFinishPath": str(artifacts_dir / f"{artifact_prefix}-proceed-finish"),
-        "firstCommandText": f"echo __roundtrip_{mobile_artifact_name}_one__",
-        "secondCommandText": f"echo __roundtrip_{mobile_artifact_name}_two__",
+        "firstCommandText": "printf '__rt_i1__\\n\\n\\n'",
+        "secondCommandText": "printf '__rt_i2__\\n\\n\\n'",
+        "firstCommandOutputText": "__rt_i1__",
+        "secondCommandOutputText": "__rt_i2__",
         "manualRetakeoverAttempts": 2,
         "manualRetakeoverObservedPrefix": str(artifacts_dir / f"{artifact_prefix}-manual-retakeover-observed"),
         "manualRetakeoverContinuePrefix": str(artifacts_dir / f"{artifact_prefix}-manual-retakeover-continue"),
@@ -1256,6 +1214,7 @@ launch_codex_on_mac_owner() {
   python3 - "$DEMO_ROOT" "$session_id" "$SPACES_E2E_BIN" "$command_text" "$SCENARIO_DIR" "$output_path" <<'PY'
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -1320,6 +1279,23 @@ def send_request(request: dict) -> dict:
     completed = subprocess.run(command, env=env, capture_output=True, text=True, check=True)
     return json.loads(completed.stdout)
 
+def wait_for_owner_control_ready(owner_client_id: str) -> None:
+    deadline = time.time() + 15
+    last_response = None
+    while time.time() < deadline:
+        response = send_request(
+            {"command": "key", "key": "__spaces_e2e_owner_probe__", "clientID": owner_client_id}
+        )
+        last_response = response
+        message = response.get("message", "")
+        if message == "Unsupported terminal key.":
+            return
+        if "Only the active owner" in message:
+            time.sleep(0.1)
+            continue
+        raise RuntimeError(f"Owner control readiness probe failed: {response}")
+    raise RuntimeError(f"Timed out waiting for owner control readiness. last_response={last_response!r}")
+
 def dump_owner_window() -> dict:
     if owner_dump_path.exists():
         owner_dump_path.unlink()
@@ -1341,6 +1317,7 @@ def dump_owner_window() -> dict:
     )
 
 owner_client_id = current_owner_client_id()
+wait_for_owner_control_ready(owner_client_id)
 for request in (
     {"command": "send", "text": command_text, "clientID": owner_client_id},
     {"command": "key", "key": "enter", "clientID": owner_client_id},
@@ -1741,7 +1718,6 @@ run_roundtrip_scenario() {
 import json
 import os
 import re
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -1795,9 +1771,9 @@ mac_prepare_commands = [
     "printf '__roundtrip_mac_before_takeover_two__\\n'",
 ]
 ios_first_command = config["firstCommandText"]
-ios_first_output = f"__roundtrip_{mobile_artifact_name}_one__"
+ios_first_output = config.get("firstCommandOutputText") or f"__roundtrip_{mobile_artifact_name}_one__"
 ios_second_command = config["secondCommandText"]
-ios_second_output = f"__roundtrip_{mobile_artifact_name}_two__"
+ios_second_output = config.get("secondCommandOutputText") or f"__roundtrip_{mobile_artifact_name}_two__"
 bare_command_lines = (
     "s",
     ios_first_command,
@@ -1823,12 +1799,6 @@ def wait_for_file(path: Path, timeout: float, process: subprocess.Popen[str]) ->
 def write_marker(path: Path, value: str = "done\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(value)
-
-def socket_path(root: Path, session_id: str) -> Path:
-    hash_value = 5381
-    for byte in f"{root}|{session_id}".encode("utf-8"):
-        hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
-    return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
 
 def current_owner_client_id(excluded_client_ids: set[str] | None = None) -> str:
     excluded_client_ids = excluded_client_ids or set()
@@ -1874,33 +1844,29 @@ def wait_for_active_owner(excluded_client_ids: set[str] | None = None, timeout: 
         time.sleep(0.1)
     raise RuntimeError(f"Timed out waiting for active owner.\n{last_snapshot}")
 
-def send_unix_control_request(request: dict) -> dict:
-    path = socket_path(demo_root, session_id)
-    deadline = time.time() + 10
-    while True:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.settimeout(5)
-        try:
-            client.connect(str(path))
-            client.sendall(json.dumps(request).encode("utf-8"))
-            client.shutdown(socket.SHUT_WR)
-            response = bytearray()
-            while True:
-                chunk = client.recv(4096)
-                if not chunk:
-                    break
-                response.extend(chunk)
-            return json.loads(response.decode("utf-8"))
-        except (ConnectionRefusedError, FileNotFoundError):
-            if time.time() >= deadline:
-                raise
-            time.sleep(0.2)
-        finally:
-            client.close()
+def send_terminal_control_request(request: dict) -> dict:
+    command = [
+        str(spacese2e),
+        "terminal-service-control",
+        "--session-id",
+        session_id,
+        "--command",
+        request["command"],
+    ]
+    if request.get("clientID") is not None:
+        command.extend(["--client-id", request["clientID"]])
+    if request.get("text") is not None:
+        command.extend(["--text", request["text"]])
+    if request.get("key") is not None:
+        command.extend(["--key", request["key"]])
+    if request.get("appendNewline"):
+        command.append("--append-newline")
+    completed = subprocess.run(command, env=env, capture_output=True, text=True, check=True)
+    return json.loads(completed.stdout)
 
 def send_owner_command(command_text: str) -> None:
     owner_client_id = current_owner_client_id()
-    response = send_unix_control_request(
+    response = send_terminal_control_request(
         {"command": "send", "text": command_text, "appendNewline": True, "clientID": owner_client_id}
     )
     if not response.get("ok"):
@@ -1962,7 +1928,7 @@ def contains_command_output(text: str, command_text: str, output_text: str) -> b
     compact_text = re.sub(r"\s+", "", text)
     compact_command = re.sub(r"\s+", "", command_text)
     return (
-        f"%{compact_command}" in compact_text
+        any(f"{prompt}{compact_command}" in compact_text for prompt in ("%", "$", "#"))
         and any(line.strip() == output_text for line in lines)
     )
 
@@ -1977,7 +1943,7 @@ def assert_prompt_rendered_after_output(label: str, text: str, output_text: str)
                 continue
             if output_text in stripped or "printf " in stripped or "echo " in stripped:
                 continue
-            if re.search(r"%\s*$", next_line):
+            if re.search(r"[%#$]\s*$", next_line):
                 return
         raise RuntimeError(f"{label} did not render the next shell prompt after {output_text!r}:\n{text}")
     raise RuntimeError(f"{label} did not render output marker {output_text!r}:\n{text}")
@@ -2059,14 +2025,29 @@ def write_command_request(command_text: str, send_enter: bool = True) -> None:
 def wait_for_output_log_text(text: str, timeout: float, process: subprocess.Popen[str]) -> None:
     deadline = time.time() + timeout
     last_output = ""
+    last_render_payload = None
     while time.time() < deadline:
         check_ui_test_alive(process)
         if output_log_path.exists():
             last_output = output_log_path.read_text(errors="replace")
             if text in last_output:
                 return
+        if render_dump_path.exists():
+            try:
+                last_render_payload = json.loads(render_dump_path.read_text())
+            except json.JSONDecodeError:
+                last_render_payload = None
+            if last_render_payload is not None:
+                rendered_text = last_render_payload.get("renderedText") or ""
+                snapshot_text = last_render_payload.get("snapshotText") or ""
+                if text in rendered_text or text in snapshot_text:
+                    return
         time.sleep(0.2)
-    raise RuntimeError(f"Timed out waiting for {text!r} in {output_log_path}.\nLast output tail:\n{last_output[-4000:]}")
+    raise RuntimeError(
+        f"Timed out waiting for {text!r} in {output_log_path} or the {mobile_device_label} render dump.\n"
+        f"Last output tail:\n{last_output[-4000:]}\n"
+        f"Last render payload:\n{json.dumps(last_render_payload or {}, indent=2)}"
+    )
 
 def assert_status_shell_hides_live_content(label: str, payload: dict) -> None:
     if payload.get("showsTerminalSurface") is not False:
@@ -2346,7 +2327,6 @@ launch_scrollback_fixture_on_mac_owner() {
 import json
 import os
 import shlex
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -2368,50 +2348,87 @@ env = os.environ | {
     "SPACES_RUNTIME_DIR": str(runtime_root),
 }
 
-fixture_command = (
-    f"python3 {shlex.quote(str(repo_root / 'apps/macos/Tests/terminal_stress_fixture.py'))} "
-    f"--mode lines --lines {line_count} --width 32"
+fixture_command = "\n".join(
+    [
+        "python3 - <<'PY'",
+        "import random",
+        "import string",
+        "import sys",
+        f"line_count = {line_count}",
+        "width = 32",
+        "rng = random.Random(7)",
+        "alphabet = string.ascii_letters + string.digits",
+        (
+            "print("
+            "f'FIXTURE_START mode=lines lines={line_count} frames=300 rows=24 width={width} seed=7', "
+            "flush=True)"
+        ),
+        "for seq in range(1, line_count + 1):",
+        "    payload = ''.join(rng.choice(alphabet) for _ in range(max(width, 1)))",
+        "    print(f'SEQ {seq:08d} {payload}')",
+        "    if seq % 100 == 0:",
+        "        sys.stdout.flush()",
+        "sys.stdout.flush()",
+        "print(f'FIXTURE_DONE mode=lines emitted={line_count}', flush=True)",
+        "PY",
+    ]
 )
-
-def socket_path(root: Path, session_id: str) -> Path:
-    hash_value = 5381
-    for byte in f"{root}|{session_id}".encode("utf-8"):
-        hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
-    return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
 
 def current_owner_client_id() -> str:
     root_directory = os.path.normpath(str(runtime_root / "terminal" / "sessions" / session_id))
-    with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
-        row = db.execute(
-            """
-            SELECT client_id
-            FROM terminal_attachments
-            WHERE root_directory = ?
-              AND mode = 'owner'
-              AND detached_at IS NULL
-            ORDER BY attached_at DESC
-            LIMIT 1
-            """,
-            (root_directory,),
-        ).fetchone()
-    if row:
-        return row[0]
-    raise RuntimeError("No active owner attachment was found for the demo session.")
+    deadline = time.time() + 30
+    rows = []
+    while time.time() < deadline:
+        with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
+            rows = db.execute(
+                """
+                SELECT client_id, mode, detached_at
+                FROM terminal_attachments
+                WHERE root_directory = ?
+                ORDER BY attached_at DESC
+                """,
+                (root_directory,),
+            ).fetchall()
+        for client_id, mode, detached_at in rows:
+            if client_id and mode == "owner" and detached_at is None:
+                return client_id
+        time.sleep(0.1)
+    raise RuntimeError(f"No active owner attachment was found for the demo session. rows={rows!r}")
 
 def send_request(request: dict) -> dict:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(5)
-    client.connect(str(socket_path(demo_root, session_id)))
-    client.sendall(json.dumps(request).encode("utf-8"))
-    client.shutdown(socket.SHUT_WR)
-    response = bytearray()
-    while True:
-        chunk = client.recv(4096)
-        if not chunk:
-            break
-        response.extend(chunk)
-    client.close()
-    return json.loads(response.decode("utf-8"))
+    command = [
+        str(spacese2e),
+        "terminal-service-control",
+        "--session-id",
+        session_id,
+        "--command",
+        request["command"],
+    ]
+    if request.get("clientID") is not None:
+        command.extend(["--client-id", request["clientID"]])
+    if request.get("text") is not None:
+        command.extend(["--text", request["text"]])
+    if request.get("key") is not None:
+        command.extend(["--key", request["key"]])
+    completed = subprocess.run(command, env=env, capture_output=True, text=True, check=True)
+    return json.loads(completed.stdout)
+
+def wait_for_owner_control_ready(owner_client_id: str) -> None:
+    deadline = time.time() + 15
+    last_response = None
+    while time.time() < deadline:
+        response = send_request(
+            {"command": "key", "key": "__spaces_e2e_owner_probe__", "clientID": owner_client_id}
+        )
+        last_response = response
+        message = response.get("message", "")
+        if message == "Unsupported terminal key.":
+            return
+        if "Only the active owner" in message:
+            time.sleep(0.1)
+            continue
+        raise RuntimeError(f"Owner control readiness probe failed: {response}")
+    raise RuntimeError(f"Timed out waiting for owner control readiness. last_response={last_response!r}")
 
 def dump_owner_window() -> dict:
     if owner_dump_path.exists():
@@ -2434,6 +2451,7 @@ def dump_owner_window() -> dict:
     )
 
 owner_client_id = current_owner_client_id()
+wait_for_owner_control_ready(owner_client_id)
 for request in (
     {"command": "send", "text": fixture_command, "clientID": owner_client_id},
     {"command": "key", "key": "enter", "clientID": owner_client_id},
@@ -2442,10 +2460,27 @@ for request in (
     if not response.get("ok"):
         raise RuntimeError(f"Fixture launch request failed: {response}")
 
+final_sequence = f"SEQ {line_count:08d}"
+done_marker = f"FIXTURE_DONE mode=lines emitted={line_count}"
+
+def rendered_fixture_complete(rendered_output: str) -> bool:
+    if final_sequence not in rendered_output:
+        return False
+    if done_marker in rendered_output:
+        return True
+    saw_final_sequence = False
+    for line in rendered_output.splitlines():
+        if final_sequence in line:
+            saw_final_sequence = True
+            continue
+        if saw_final_sequence and line.strip().endswith(("%", "$", "#")):
+            return True
+    return False
+
 deadline = time.time() + 60
 while time.time() < deadline:
     rendered_output = dump_owner_window().get("renderedOutput") or ""
-    if f"FIXTURE_DONE mode=lines emitted={line_count}" in rendered_output and f"SEQ {line_count:08d}" in rendered_output:
+    if rendered_fixture_complete(rendered_output):
         raise SystemExit(0)
     time.sleep(0.25)
 
@@ -2627,7 +2662,24 @@ if not any(event.get("kind") == "e2e_scroll_gesture_applied" for event in event_
     raise SystemExit(f"The {mobile_device_label} app never applied the scrollback drag gesture.")
 if not any(event.get("kind") == "e2e_command_request_consumed" for event in event_payloads):
     raise SystemExit(f"The {mobile_device_label} app never consumed the post-scrollback owner command.")
-if f"FIXTURE_DONE mode=lines emitted={fixture_line_count}" not in owner_text:
+final_sequence = f"SEQ {fixture_line_count:08d}"
+done_marker = f"FIXTURE_DONE mode=lines emitted={fixture_line_count}"
+
+def rendered_fixture_complete(rendered_output: str) -> bool:
+    if final_sequence not in rendered_output:
+        return False
+    if done_marker in rendered_output:
+        return True
+    saw_final_sequence = False
+    for line in rendered_output.splitlines():
+        if final_sequence in line:
+            saw_final_sequence = True
+            continue
+        if saw_final_sequence and line.strip().endswith(("%", "$", "#")):
+            return True
+    return False
+
+if not rendered_fixture_complete(owner_text):
     raise SystemExit("Owner baseline did not reach the bottom of the long-output fixture.")
 if not mobile_text.strip():
     raise SystemExit(f"{mobile_device_label} render dump was blank after scrollback.")
@@ -2668,17 +2720,26 @@ PY
 }
 
 write_terminal_link_preview_fixture() {
-  python3 - "$TERMINAL_LINK_PREVIEW_PATH" <<'PY'
+  local image_base64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+  python3 - "$TERMINAL_LINK_PREVIEW_PATH" "$image_base64" <<'PY'
 import base64
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_bytes(base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
-))
+path.write_bytes(base64.b64decode(sys.argv[2]))
 PY
+
+  if [[ "$CURRENT_TARGET" != "remote" ]]; then
+    return 0
+  fi
+
+  local quoted_path
+  local quoted_image_base64
+  quoted_path="$(shell_quote "$TERMINAL_LINK_PREVIEW_PATH")"
+  quoted_image_base64="$(shell_quote "$image_base64")"
+  remote_ssh "python3 -c 'import base64, sys; from pathlib import Path; path = Path(sys.argv[1]); path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(base64.b64decode(sys.argv[2]))' $quoted_path $quoted_image_base64"
 }
 
 run_terminal_link_preview_scenario() {
@@ -2687,7 +2748,7 @@ run_terminal_link_preview_scenario() {
   local command_text
   local quoted_link_path
   printf -v quoted_link_path '%q' "$TERMINAL_LINK_PREVIEW_PATH"
-  command_text="printf '__spaces_mobile_link_preview__\\n%s\\n' $quoted_link_path; exec /bin/zsh -l"
+  command_text="printf '__spaces_mobile_link_preview__\\n%s\\n' $quoted_link_path; exec /bin/bash -l"
   local session_id
   session_id="$(new_terminal_session "e2e-terminal-link-preview" "$command_text")"
   track_current_scenario_session "$session_id"
@@ -2713,9 +2774,10 @@ assert_ctrl_c_final_frame_scenario() {
   local session_id="$1"
   local secondary_session_id="$2"
   local expected_service_pid="$3"
-  python3 - "$DEMO_ROOT" "$SCENARIO_DIR" "$UI_TEST_CONFIG" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$session_id" "$secondary_session_id" "$expected_service_pid" "$BRIDGE_HOST" "$BRIDGE_PORT" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$MOBILE_DEVICE_LABEL" <<'PY'
+  python3 - "$DEMO_ROOT" "$SCENARIO_DIR" "$UI_TEST_CONFIG" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$session_id" "$secondary_session_id" "$expected_service_pid" "$BRIDGE_HOST" "$BRIDGE_PORT" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$MOBILE_DEVICE_LABEL" "$CURRENT_TARGET" <<'PY'
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -2736,6 +2798,7 @@ bundle_id = sys.argv[11]
 mobile_device_key = sys.argv[12]
 mobile_device_name = sys.argv[13]
 mobile_device_label = sys.argv[14]
+current_target = sys.argv[15]
 runtime_root = demo_root / "runtime"
 config = json.loads(ui_test_config.read_text())
 expected_interrupted_text = config["expectedInterruptedText"]
@@ -2764,7 +2827,21 @@ def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
 
+def remote_ssh(remote_command: str) -> subprocess.CompletedProcess[str]:
+    remote_host = os.environ.get("SPACES_E2E_REMOTE_SSH_HOST", "").strip()
+    remote_user = os.environ.get("SPACES_E2E_REMOTE_SSH_USER", "").strip()
+    remote_port = os.environ.get("SPACES_E2E_REMOTE_SSH_PORT", "").strip()
+    require(remote_host, "Remote target assertions require SPACES_E2E_REMOTE_SSH_HOST.")
+    destination = f"{remote_user}@{remote_host}" if remote_user else remote_host
+    command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    if remote_port:
+        command += ["-p", remote_port]
+    command += [destination, remote_command]
+    return subprocess.run(command, capture_output=True, text=True, timeout=20)
+
 def process_is_alive(pid: int) -> bool:
+    if current_target == "remote":
+        return remote_ssh(f"/bin/kill -0 {pid}").returncode == 0
     return subprocess.run(["/bin/kill", "-0", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 def send_mobile_request(request: dict, attempts: int = 3) -> dict:
@@ -2794,6 +2871,37 @@ def send_mobile_request(request: dict, attempts: int = 3) -> dict:
             )
         time.sleep(1)
     raise RuntimeError(f"Mobile bridge request failed after {attempts} attempts: {request}\n{last_detail}")
+
+def terminal_tail(session: str) -> str:
+    if current_target == "remote":
+        host_id = os.environ.get("SPACES_E2E_REMOTE_HOST_ID", "mobile-demo-remote").strip() or "mobile-demo-remote"
+        session_root = (
+            "$HOME/.spaces/compute-hosts/"
+            + shlex.quote(host_id)
+            + "/runtime/terminal/sessions/"
+            + shlex.quote(session)
+        )
+        completed = remote_ssh(f'path={session_root}/output.log; if [ -f "$path" ]; then tail -c 200000 "$path"; fi')
+        require(
+            completed.returncode == 0,
+            f"Failed to read remote terminal output for {session}: stdout={completed.stdout}\nstderr={completed.stderr}",
+        )
+        return completed.stdout
+    output_path = runtime_root / "terminal" / "sessions" / session / "output.log"
+    if output_path.exists():
+        return output_path.read_text(errors="replace")
+    completed = subprocess.run(
+        [str(spaces_cli), "terminal", "tail", session],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
+    )
+    require(
+        completed.returncode == 0,
+        f"Failed to read terminal output for {session}: stdout={completed.stdout}\nstderr={completed.stderr}",
+    )
+    return completed.stdout
 
 require(interrupted_dump_path.exists(), f"Missing interrupted {mobile_device_label} render dump at {interrupted_dump_path}")
 interrupted_dump = json.loads(interrupted_dump_path.read_text())
@@ -2915,9 +3023,8 @@ primary_window_text = combined_terminal_text(primary_window)
 require("final render was available" not in primary_window_text, f"Mac primary window used the ended fallback:\n{primary_window_text}")
 require("Final terminal render unavailable" not in primary_window_text, f"Mac primary window used the unavailable fallback:\n{primary_window_text}")
 
-secondary_output_path = runtime_root / "terminal" / "sessions" / secondary_session_id / "output.log"
-secondary_output = secondary_output_path.read_text(errors="replace") if secondary_output_path.exists() else ""
 if expected_secondary_text:
+    secondary_output = terminal_tail(secondary_session_id)
     require(expected_secondary_text in secondary_output, f"Secondary output log missed {expected_secondary_text!r}:\n{secondary_output[-4000:]}")
 wait_for_terminal_window_dump(
     secondary_session_id,
@@ -3460,18 +3567,33 @@ PY
   printf 'Mobile scenario passed: app-recovery\n'
 }
 
+scenario_remote_skip_reason() {
+  case "$1" in
+    codex|codex-resume-reopen|ctrl-c-final-frame-codex-survivor)
+      printf 'requires local Codex'
+      return 0
+      ;;
+    ownership-guard)
+      printf 'uses Mac-local terminal service direct-control assertions'
+      return 0
+      ;;
+    app-recovery)
+      printf 'validates Mac app-owner recovery for the local profile'
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 run_selected_scenarios() {
   local scenario
   for scenario in "${SELECTED_SCENARIOS[@]}"; do
-    if [[ "$CURRENT_TARGET" == "remote" ]]; then
-      case "$scenario" in
-        takeover|two-session)
-          ;;
-        *)
-          printf '[%s] Skipping mobile scenario on remote target: %s\n' "$(date +%H:%M:%S)" "$scenario"
-          continue
-          ;;
-      esac
+    local remote_skip_reason=""
+    if [[ "$CURRENT_TARGET" == "remote" ]] && remote_skip_reason="$(scenario_remote_skip_reason "$scenario")"; then
+      printf '[%s] Skipping mobile scenario on remote target: %s (%s).\n' "$(date +%H:%M:%S)" "$scenario" "$remote_skip_reason"
+      continue
     fi
     case "$scenario" in
       takeover)
@@ -3513,6 +3635,8 @@ run_selected_scenarios() {
 }
 
 parse_args "$@"
+require_remote_configuration
+export_remote_auth_token
 case "$MOBILE_DEVICE_KEY" in
   iphone|ipad)
     ;;
@@ -3524,21 +3648,14 @@ SUITE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-e2e.XXXXXX")"
 MOBILE_UDID="$(resolve_simulator_udid "$MOBILE_DEVICE_NAME")"
 build_macos_debug_products
 build_ios_for_testing "$MOBILE_UDID"
-export_remote_auth_token
 start_demo
 case "$MOBILE_DEVICE_KEY" in
   iphone) MOBILE_UDID="$IPHONE_UDID" ;;
   ipad) MOBILE_UDID="$IPAD_UDID" ;;
 esac
-target_seen=" "
-for target in "${SELECTED_TARGETS[@]}"; do
-  target_exists "$target" || fail "unknown target: $target"
-  if [[ "$target_seen" == *" $target "* ]]; then
-    continue
-  fi
-  target_seen+=" $target "
+for target in local remote; do
   configure_target "$target"
   run_selected_scenarios
 done
 
-printf '\nMobile E2E passed: scenarios=%s targets=%s\n' "${SELECTED_SCENARIOS[*]}" "${SELECTED_TARGETS[*]}"
+printf '\nMobile E2E passed: scenarios=%s targets=local remote\n' "${SELECTED_SCENARIOS[*]}"

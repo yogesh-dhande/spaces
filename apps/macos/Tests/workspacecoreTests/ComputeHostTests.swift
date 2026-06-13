@@ -195,8 +195,10 @@ final class ComputeHostTests: XCTestCase {
         let store = try makeTemporaryStore()
         let recorder = RemoteTerminalServiceRecorder()
         let openedWindows = BuiltInTerminalWindowOpenRecorder()
+        let closedWindows = BuiltInTerminalWindowCloseRecorder()
         let orchestrator = WorkspaceOrchestrator(
-            store: store, builtInTerminalWindowOpener: openedWindows.open, remoteTerminalServiceClient: recorder.client)
+            store: store, builtInTerminalWindowOpener: openedWindows.open, builtInTerminalWindowCloser: closedWindows.close,
+            remoteTerminalServiceClient: recorder.client)
         let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
         let projectDir = try makeTempDirectory()
         let setupMarker = projectDir.appendingPathComponent("setup.marker")
@@ -230,9 +232,10 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertEqual(createRequest.launchConfiguration?.shell, "/bin/bash")
         XCTAssertEqual(createRequest.launchConfiguration?.kind, .process)
         XCTAssertEqual(createRequest.worktreeRefresh?.path, createRequest.runtimeManifest?.remotePath)
+        let remoteSessionID = try XCTUnwrap(createRequest.launchConfiguration?.sessionID)
         let openedWindow = try XCTUnwrap(openedWindows.opened().first)
         XCTAssertEqual(openedWindows.opened().count, 1)
-        XCTAssertEqual(openedWindow.sessionID, createRequest.launchConfiguration?.sessionID)
+        XCTAssertEqual(openedWindow.sessionID, remoteSessionID)
         XCTAssertEqual(openedWindow.mode, .owner)
         let mirroredPaths = try TerminalSessionPaths.forSession(id: openedWindow.sessionID)
         let mirroredLaunchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: mirroredPaths)
@@ -249,15 +252,16 @@ final class ComputeHostTests: XCTestCase {
         let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
         XCTAssertNotEqual(runningProcess.runtimeTargetID, host.id)
         XCTAssertEqual(runningProcess.runtimeTargetID, runningProcess.id)
-        XCTAssertEqual(runningProcess.terminalTrackingID, createRequest.launchConfiguration?.sessionID)
-        XCTAssertEqual(runningProcess.logPath, "/tmp/\(createRequest.launchConfiguration?.sessionID ?? "missing").log")
+        XCTAssertEqual(runningProcess.terminalTrackingID, remoteSessionID)
+        XCTAssertEqual(runningProcess.logPath, "/tmp/\(remoteSessionID).log")
         XCTAssertNotNil(try store.workspaceComputeBinding(workspaceID: workspace.id, hostID: host.id))
 
         _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
 
         let stopRequests = recorder.requests()
         XCTAssertEqual(stopRequests.map(\.command), ["runWorkspaceCommand", "create", "terminate"])
-        XCTAssertEqual(stopRequests.last?.sessionID, createRequest.launchConfiguration?.sessionID)
+        XCTAssertEqual(stopRequests.last?.sessionID, remoteSessionID)
+        XCTAssertEqual(closedWindows.closed(), [remoteSessionID])
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
@@ -324,6 +328,37 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertTrue(openedWindows.opened().isEmpty)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).first?.terminalTrackingID, sessionID)
+    }
+
+    func testRemoteWorkspaceTerminalReservationPersistsWindowAfterLaunchCompletes() throws {
+        let store = try makeTemporaryStore()
+        let recorder = RemoteTerminalServiceRecorder()
+        let orchestrator = WorkspaceOrchestrator(store: store, remoteTerminalServiceClient: recorder.client)
+        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
+        let projectDir = try makeTempDirectory()
+        let project = ProjectRecord(
+            id: "project-a", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main", defaultComputeHostID: host.id)
+        let workspace = WorkspaceRecord(
+            id: "workspace-a", projectID: project.id, title: "dev", dir: projectDir.path, dirname: nil, branch: "feature", targetBranch: "main",
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        try orchestrator.upsertComputeHost(host)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspace.id)
+
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(recorder.requests().isEmpty)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+
+        let sessionID = try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation)
+
+        XCTAssertEqual(sessionID, reservation.sessionID)
+        XCTAssertEqual(recorder.requests().first?.command, "create")
+        let terminalWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first)
+        XCTAssertEqual(terminalWindow.terminalTrackingID, sessionID)
+        XCTAssertEqual(terminalWindow.name, "shell-1")
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
     }
 
     func testRemoteSSHURIIncludesUserHostPortAndPath() {
@@ -590,6 +625,23 @@ private final class BuiltInTerminalWindowOpenRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return entries
+    }
+}
+
+private final class BuiltInTerminalWindowCloseRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sessionIDs: [String] = []
+
+    func close(sessionID: String) {
+        lock.lock()
+        sessionIDs.append(sessionID)
+        lock.unlock()
+    }
+
+    func closed() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return sessionIDs
     }
 }
 

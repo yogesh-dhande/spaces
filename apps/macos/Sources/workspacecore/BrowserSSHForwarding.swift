@@ -137,7 +137,7 @@ final class BrowserSSHForwardManager: @unchecked Sendable {
     }
 
     private func waitForForward(process: Process, port: Int, standardError: Pipe, displayName: String) throws {
-        let deadline = Date().addingTimeInterval(2)
+        let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
             if !process.isRunning {
                 throw WorkspaceError.invalidArgument(

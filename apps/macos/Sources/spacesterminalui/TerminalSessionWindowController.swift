@@ -133,6 +133,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var rendererMode: TerminalRendererMode
     private var backend: TerminalSessionBackendKind
     private var preferredAttachmentMode: TerminalAttachmentMode
+    private var ownerAttachmentRequested: Bool
     private let titleLabel = NSTextField(labelWithString: "")
     private let summaryLabel = NSTextField(labelWithString: "")
     private let stateLabel = NSTextField(labelWithString: "")
@@ -275,6 +276,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         self.sessionID = sessionID
         self.paths = paths
         self.preferredAttachmentMode = preferredAttachmentMode
+        ownerAttachmentRequested = preferredAttachmentMode == .owner
         let resolvedLaunchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
         launchConfiguration = resolvedLaunchConfiguration
         let resolvedBackend = resolvedLaunchConfiguration?.backend ?? .ghosttyEmbedded
@@ -526,6 +528,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     public func requestOwnershipIfNeeded() {
         guard backend == .ghosttyEmbedded else { return }
+        ownerAttachmentRequested = true
         preferredAttachmentMode = .owner
         if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
         lastObservedRuntimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastObservedRuntimeState
@@ -540,6 +543,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             refreshNow(allowGhosttyOwnerAttach: false)
             return
         }
+        attachLocalClientIfNeeded(mode: .owner, force: true)
         ensureGhosttyHostAttached(reason: "request_owner_mode")
         refreshNow()
     }
@@ -797,6 +801,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                         self.updateInputStatus(message: response.message, isError: true)
                         return
                     }
+                    self.ownerAttachmentRequested = true
                     self.preferredAttachmentMode = .owner
                     let attachStartedAt = Date()
                     self.ensureGhosttyHostAttached(reason: "takeover")
@@ -1237,10 +1242,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                     }
                 }
                 let canAttachAsOwner = canAttachToRuntime && (currentOwnerClient == nil || currentOwnerClient?.id == client.id)
+                let wantsOwnerAttachment = ownerAttachmentRequested || preferredAttachmentMode == .owner
                 let attachmentModeToRequest: TerminalAttachmentMode?
                 if !canAttachToRuntime {
                     attachmentModeToRequest = nil
-                } else if preferredAttachmentMode == .owner {
+                } else if wantsOwnerAttachment {
                     if canAttachAsOwner {
                         attachmentModeToRequest = allowGhosttyOwnerAttach && activeAttachment?.mode != .owner ? .owner : nil
                     } else {
@@ -1256,7 +1262,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 }
             }
             let isOwner =
-                canAttachToRuntime && (currentOwnerClient?.id == client.id || (currentOwnerClient == nil && preferredAttachmentMode == .owner))
+                canAttachToRuntime
+                && (currentOwnerClient?.id == client.id
+                    || (currentOwnerClient == nil && (ownerAttachmentRequested || preferredAttachmentMode == .owner)))
             let currentTitle = currentWindowTitle(fallback: currentLaunchConfiguration.title, isOwner: isOwner)
             let currentWorkingDirectory = currentSummaryWorkingDirectory(fallback: currentLaunchConfiguration.workingDirectory)
             if let window {
@@ -1271,7 +1279,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             if backend == .ghosttyEmbedded {
                 let activeAttachment = attachmentSnapshot?.attachments.last(where: { $0.clientID == client.id && $0.detachedAt == nil })
                 if let activeAttachment {
-                    preferredAttachmentMode = activeAttachment.mode
+                    let canKeepOwnerRequest = canAttachToRuntime && (currentOwnerClient == nil || currentOwnerClient?.id == client.id)
+                    let shouldPreserveOwnerRequest =
+                        (ownerAttachmentRequested || preferredAttachmentMode == .owner) && activeAttachment.mode == .viewer && canKeepOwnerRequest
+                    if !shouldPreserveOwnerRequest { preferredAttachmentMode = activeAttachment.mode }
                     if lastObservedAttachmentMode != activeAttachment.mode {
                         beginOwnershipTransition(activeAttachment.mode == .owner ? .owner : .viewer, reason: "attachment_mode_changed")
                         lastObservedAttachmentMode = activeAttachment.mode
@@ -1434,10 +1445,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         updateHeaderLayoutVisibility()
     }
 
-    private func attachLocalClientIfNeeded(mode: TerminalAttachmentMode? = nil) {
+    private func attachLocalClientIfNeeded(mode: TerminalAttachmentMode? = nil, force: Bool = false) {
         guard backend != .ghosttyEmbedded || canAttachToGhosttyRuntime(lastObservedRuntimeState) else { return }
-        let attachmentMode = mode ?? preferredAttachmentMode
-        guard !isClientAttached || lastRequestedAttachmentMode != attachmentMode else { return }
+        let attachmentMode = mode ?? (ownerAttachmentRequested ? .owner : preferredAttachmentMode)
+        guard force || !isClientAttached || lastRequestedAttachmentMode != attachmentMode else { return }
         do {
             try attachClientAction(client, attachmentMode)
             isClientAttached = true

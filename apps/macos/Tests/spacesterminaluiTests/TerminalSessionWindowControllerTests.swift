@@ -113,6 +113,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
     private final class ClientCapture: @unchecked Sendable {
         var attachedClientID: String?
         var attachedMode: TerminalAttachmentMode?
+        var attachedModes: [TerminalAttachmentMode] = []
         var detachedClientID: String?
     }
 
@@ -817,6 +818,176 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(activeAttachments.first { $0.mode == .owner }?.clientID, remoteOwner.id)
         XCTAssertEqual(activeAttachments.first { $0.clientID == controller.clientID }?.mode, .viewer)
         XCTAssertEqual(controller.attachmentMode, .viewer)
+    }
+
+    @MainActor func testOwnerSeekingWindowReattachesAsOwnerWhenPreviousOwnerDetachedAfterViewerAttach() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-owner-reopen-viewer"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "owner-reopen", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let capture = ClientCapture()
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost,
+            attachClientAction: { client, mode in
+                capture.attachedClientID = client.id
+                capture.attachedMode = mode
+                capture.attachedModes.append(mode)
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:01Z")
+            }, detachClientAction: { _ in })
+
+        controller.show()
+
+        XCTAssertEqual(capture.attachedModes, [.viewer])
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .viewer)
+        XCTAssertEqual(controller.attachmentMode, .viewer)
+
+        try TerminalSessionPersistence.detachClient(id: remoteOwner.id, paths: paths, detachedAt: "2026-05-20T00:00:02Z")
+        controller.requestOwnershipIfNeeded()
+
+        fakeHost.hasSurface = true
+        fakeHost.snapshotValue = ghosttySnapshot(text: "owned")
+        fakeHost.snapshotTextValue = "owned"
+        controller.debugForceRefresh()
+
+        let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+        XCTAssertEqual(capture.attachedClientID, controller.clientID)
+        XCTAssertEqual(capture.attachedModes, [.viewer, .owner])
+        XCTAssertEqual(activeAttachments.first { $0.clientID == controller.clientID }?.mode, .owner)
+        XCTAssertNil(activeAttachments.first { $0.mode == .owner && $0.clientID != controller.clientID })
+        XCTAssertEqual(controller.attachmentMode, .owner)
+        XCTAssertEqual(fakeHost.attachedModes.last, .owner)
+        XCTAssertTrue(controller.debugShowsTerminalSurface)
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror")
+    }
+
+    @MainActor func testOwnerSeekingWindowPromotesWhenBlockingOwnerDetachesAfterViewerAttach() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-owner-detached-after-viewer"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "owner-reopen", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let capture = ClientCapture()
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = true
+        fakeHost.snapshotValue = ghosttySnapshot(text: "owned")
+        fakeHost.snapshotTextValue = "owned"
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost,
+            attachClientAction: { client, mode in
+                capture.attachedClientID = client.id
+                capture.attachedMode = mode
+                capture.attachedModes.append(mode)
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:\(capture.attachedModes.count)Z")
+            }, detachClientAction: { _ in })
+
+        controller.show()
+
+        XCTAssertEqual(capture.attachedModes, [.viewer])
+        XCTAssertEqual(controller.attachmentMode, .viewer)
+
+        try TerminalSessionPersistence.detachClient(id: remoteOwner.id, paths: paths, detachedAt: "2026-05-20T00:00:02Z")
+        controller.debugForceRefresh()
+
+        let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+        XCTAssertEqual(capture.attachedClientID, controller.clientID)
+        XCTAssertEqual(capture.attachedModes, [.viewer, .owner])
+        XCTAssertEqual(activeAttachments.first { $0.clientID == controller.clientID }?.mode, .owner)
+        XCTAssertEqual(controller.attachmentMode, .owner)
+        XCTAssertEqual(fakeHost.attachedModes.last, .owner)
+    }
+
+    @MainActor func testOwnerSeekingWindowKeepsOwnerRequestAfterViewerMirrorDuringFocusRefresh() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-owner-viewer-mirror"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "owner-mirror", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let capture = ClientCapture()
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost,
+            attachClientAction: { client, mode in
+                capture.attachedClientID = client.id
+                capture.attachedMode = mode
+                capture.attachedModes.append(mode)
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:\(capture.attachedModes.count)Z")
+            }, detachClientAction: { _ in })
+
+        controller.show()
+        try TerminalSessionPersistence.detachClient(id: remoteOwner.id, paths: paths, detachedAt: "2026-05-20T00:00:02Z")
+        controller.requestOwnershipIfNeeded()
+        XCTAssertEqual(capture.attachedModes, [.viewer, .owner])
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .owner)
+
+        let mirroredViewer = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-20T00:00:03Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: mirroredViewer, mode: .viewer, paths: paths, attachedAt: "2026-05-20T00:00:03Z")
+
+        controller.debugForceRefreshSkippingOwnerAttach()
+
+        XCTAssertEqual(controller.attachmentMode, .owner)
+        XCTAssertEqual(capture.attachedModes, [.viewer, .owner])
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .viewer)
+
+        controller.debugForceRefresh()
+
+        XCTAssertEqual(capture.attachedClientID, controller.clientID)
+        XCTAssertEqual(capture.attachedModes, [.viewer, .owner, .owner])
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .owner)
+        XCTAssertEqual(controller.attachmentMode, .owner)
     }
 
     @MainActor func testOwnerSeekingWindowRequestsTakeoverAfterShowWhenAnotherClientOwnsSession() async throws {

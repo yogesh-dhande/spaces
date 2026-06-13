@@ -10,6 +10,7 @@ source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
 spaces_e2e_load_env "$ROOT_DIR"
 source "$ROOT_DIR/scripts/spaces-profile-helpers.sh"
 MACOS_DIR="$ROOT_DIR/apps/macos"
+source "$MACOS_DIR/Tests/e2e_fixture_repos.sh"
 # scripts/swiftpm.sh already changes into apps/macos internally, so the default
 # build command must not add a second package-path override.
 BUILD_CMD="${BUILD_CMD:-$ROOT_DIR/scripts/swiftpm.sh build}"
@@ -24,6 +25,7 @@ RESULTS_LOG="${RESULTS_LOG:-/tmp/spaces-e2e-results.log}"
 RECORDER_LOG="${RECORDER_LOG:-/tmp/spaces-e2e-recorder.log}"
 ACTION_TIMEOUT_SECONDS="${ACTION_TIMEOUT_SECONDS:-20}"
 AX_PROBE_TIMEOUT_SECONDS="${AX_PROBE_TIMEOUT_SECONDS:-3}"
+AX_ACTION_TIMEOUT_SECONDS="${AX_ACTION_TIMEOUT_SECONDS:-8}"
 SURFACE_SNAPSHOT_TIMEOUT_SECONDS="${SURFACE_SNAPSHOT_TIMEOUT_SECONDS:-3}"
 SEED_FILE="${SEED_FILE:-/tmp/spaces-e2e-seed.json}"
 SECOND_SEED_FILE="${SECOND_SEED_FILE:-/tmp/spaces-e2e-seed-2.json}"
@@ -48,8 +50,6 @@ SPACES_CPU_SAMPLE_COUNT="${SPACES_CPU_SAMPLE_COUNT:-6}"
 SPACES_CPU_SAMPLE_INTERVAL_SECONDS="${SPACES_CPU_SAMPLE_INTERVAL_SECONDS:-0.5}"
 HIGH_OUTPUT_PROCESS_NAME="${HIGH_OUTPUT_PROCESS_NAME:-noisy}"
 HIGH_OUTPUT_PROCESS_COMMAND="${HIGH_OUTPUT_PROCESS_COMMAND:-}"
-MACOS_E2E_TARGETS_RAW="${SPACES_MACOS_E2E_TARGETS:-}"
-SELECTED_TARGETS=()
 REMOTE_HOST_ID="${SPACES_E2E_REMOTE_HOST_ID:-macos-e2e-remote}"
 REMOTE_HOST_NAME="${SPACES_E2E_REMOTE_NAME:-macOS E2E Remote}"
 REMOTE_SSH_HOST="${SPACES_E2E_REMOTE_SSH_HOST:-}"
@@ -81,6 +81,7 @@ SCOUT_BRANCH_WORKSPACE_BRANCH="redesign-hero"
 SCOUT_BRANCH_WORKSPACE_NOTES="Redesign the error console hero section"
 MOCK_AGENT_LABEL="Mock Agent"
 SPACES_PID=""
+CAFFEINATE_PID=""
 RECORDER_PID=""
 RECORDER_READY_FILE=""
 FINAL_RECORDING_PATH=""
@@ -140,6 +141,7 @@ cleanup() {
   # Always tear down the isolated Spaces instance, helper fixtures, and optional
   # recorder. Recording mode intentionally starts from a minimized desktop.
   stop_screen_recording
+  stop_desktop_awake_assertion
   "$SPACES_E2E_CLI" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-stop-fixtures-exit.json 2>/dev/null || true
   close_fixture_chrome_windows
   if [[ -n "${SPACES_PID}" ]]; then
@@ -230,7 +232,7 @@ skip_case() {
 }
 
 is_spaces_terminal_target() {
-  [[ "$1" == "spaces" || "$1" == "remote" ]]
+  [[ "$1" == "spaces" || "$1" == "remote" || "$1" == "mixed" ]]
 }
 
 require_cmd() {
@@ -252,26 +254,9 @@ Options:
   --pause-transitions            Add a 1 second pause after visible transitions.
   --setup-fixtures-only          Create projects/workspaces and leave the manual test environment running.
   --only-window-cycle-profile    Run only the single-workspace focus/cycle profiling path.
-  --target NAME                  Run against local, remote, or all. May be passed multiple times.
   --transition-pause-seconds N   Override the transition pause duration.
   --help                         Show this help text.
 EOF
-}
-
-target_exists() {
-  case "$1" in
-    local|remote|all) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-selected_targets_include() {
-  local expected="$1"
-  local selected_target
-  for selected_target in "${SELECTED_TARGETS[@]}"; do
-    [[ "$selected_target" == "$expected" ]] && return 0
-  done
-  return 1
 }
 
 parse_args() {
@@ -304,16 +289,6 @@ parse_args() {
         ONLY_WINDOW_CYCLE_PROFILE=1
         shift
         ;;
-      --target)
-        [[ $# -ge 2 ]] || fail "missing value for --target"
-        target_exists "$2" || fail "unknown target: $2"
-        if [[ "$2" == "all" ]]; then
-          SELECTED_TARGETS+=(local remote)
-        else
-          SELECTED_TARGETS+=("$2")
-        fi
-        shift 2
-        ;;
       --transition-pause-seconds)
         [[ $# -ge 2 ]] || fail "missing value for --transition-pause-seconds"
         TRANSITION_PAUSE_SECONDS="$2"
@@ -329,26 +304,10 @@ parse_args() {
         ;;
     esac
   done
-  if [[ ${#SELECTED_TARGETS[@]} -eq 0 ]]; then
-    if [[ -n "$MACOS_E2E_TARGETS_RAW" ]]; then
-      read -r -a SELECTED_TARGETS <<<"$MACOS_E2E_TARGETS_RAW"
-    elif [[ -n "$REMOTE_SSH_HOST" ]]; then
-      SELECTED_TARGETS=(local remote)
-    else
-      SELECTED_TARGETS=(local)
-    fi
-  fi
-  local expanded_targets=()
-  local selected_target
-  for selected_target in "${SELECTED_TARGETS[@]}"; do
-    target_exists "$selected_target" || fail "unknown target: $selected_target"
-    if [[ "$selected_target" == "all" ]]; then
-      expanded_targets+=(local remote)
-    else
-      expanded_targets+=("$selected_target")
-    fi
-  done
-  SELECTED_TARGETS=("${expanded_targets[@]}")
+}
+
+require_remote_configuration() {
+  [[ -n "$REMOTE_SSH_HOST" ]] || fail "SPACES_E2E_REMOTE_SSH_HOST is required for mixed local/remote macOS E2E runs."
 }
 
 transition_pause() {
@@ -640,6 +599,22 @@ stop_screen_recording() {
   RECORDER_PID=""
 }
 
+start_desktop_awake_assertion() {
+  command -v caffeinate >/dev/null 2>&1 || return 0
+  [[ -n "$SPACES_PID" ]] || return 0
+  caffeinate -dimsu -w "$SPACES_PID" >/dev/null 2>&1 &
+  CAFFEINATE_PID=$!
+}
+
+stop_desktop_awake_assertion() {
+  [[ -n "$CAFFEINATE_PID" ]] || return 0
+  if kill -0 "$CAFFEINATE_PID" >/dev/null 2>&1; then
+    kill "$CAFFEINATE_PID" >/dev/null 2>&1 || true
+    wait "$CAFFEINATE_PID" >/dev/null 2>&1 || true
+  fi
+  CAFFEINATE_PID=""
+}
+
 open_final_recording() {
   [[ -n "$FINAL_RECORDING_PATH" ]] || return 0
   [[ -s "$FINAL_RECORDING_PATH" ]] || return 0
@@ -672,6 +647,7 @@ launch_spaces() {
   env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" SPACES_E2E_EVENTS_LOG="$EVENT_LOG" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
   SPACES_PID=$!
   ensure_profile_spaces_owner "$SPACES_PID"
+  start_desktop_awake_assertion
   wait_for_spaces_launch_ready
   transition_pause "Spaces launch"
 }
@@ -856,35 +832,7 @@ wait_for_spaces_frontmost_pid() {
 wait_for_spaces_splitter_ready() {
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    if osascript - "$SPACES_PID" <<'APPLESCRIPT' 2>/dev/null | grep -q '^1$'; then
-on run argv
-  set targetPID to (item 1 of argv) as integer
-  tell application "System Events"
-    repeat with proc in every process whose unix id is targetPID
-      if (count of windows of proc) is 0 then return 0
-      repeat with targetWindow in windows of proc
-        set windowTitle to ""
-        set windowIdentifier to ""
-        try
-          set windowTitle to (name of targetWindow) as text
-        end try
-        try
-          set windowIdentifier to (value of attribute "AXIdentifier" of targetWindow) as text
-        end try
-        if windowIdentifier is "spaces-main-window" or windowTitle is "Spaces" then
-          try
-            set _ to splitter group 1 of targetWindow
-            return 1
-          on error
-            return 0
-          end try
-        end if
-      end repeat
-    end repeat
-  end tell
-  return 0
-end run
-APPLESCRIPT
+    if [[ "$(spaces_splitter_ready_state)" == "1" ]]; then
       return 0
     fi
     sleep 0.2
@@ -892,8 +840,14 @@ APPLESCRIPT
   fail "timed out waiting for Spaces splitter layout"
 }
 
-spaces_splitter_ready() {
-  osascript - "$SPACES_PID" <<'APPLESCRIPT' 2>/dev/null | grep -q '^1$'
+spaces_splitter_ready_state() {
+  python3 - "$SPACES_PID" "$AX_ACTION_TIMEOUT_SECONDS" <<'PY' | tr -d '\n'
+import subprocess
+import sys
+
+target_pid = sys.argv[1]
+timeout_seconds = float(sys.argv[2])
+script = r'''
 on run argv
   set targetPID to (item 1 of argv) as integer
   tell application "System Events"
@@ -921,54 +875,31 @@ on run argv
   end tell
   return 0
 end run
-APPLESCRIPT
+'''
+try:
+    result = subprocess.run(
+        ["osascript", "-e", script, target_pid],
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+except subprocess.TimeoutExpired:
+    print("unknown")
+    sys.exit(0)
+if result.returncode != 0:
+    print("unknown")
+    sys.exit(0)
+sys.stdout.write(result.stdout)
+PY
 }
 
-install_demo_fixture_branch() {
-  local variant="$1"
-  local repo_dir="$2"
-  local branch_name="$3"
-  (
-    cd "$repo_dir"
-    git checkout -q -b "$branch_name"
-    rm -rf .spaces-e2e-demo/site
-    rm -rf .spaces-e2e-demo/api
-    cp -R "$FIXTURE_TEMPLATE_DIR/templates/$variant/site" .spaces-e2e-demo/site
-    cp -R "$FIXTURE_TEMPLATE_DIR/templates/$variant/api" .spaces-e2e-demo/api
-    git add .spaces-e2e-demo/site .spaces-e2e-demo/api
-    git commit -q -m "redesign hero section"
-    git checkout -q main
-  )
+spaces_splitter_ready() {
+  [[ "$(spaces_splitter_ready_state)" == "1" ]]
 }
 
 setup_git_fixture() {
   log_step "creating git fixture repos"
-  mkdir -p "$TEST_REPO" "$TEST_REPO_2" "$TEST_REPO_3"
-  install_demo_fixture "beacon"  "$TEST_REPO"  "# Beacon Status"
-  install_demo_fixture_branch "beacon-redesign-hero" "$TEST_REPO" "redesign-hero"
-  install_demo_fixture "scout"   "$TEST_REPO_2" "# Scout Errors"
-  install_demo_fixture_branch "scout-redesign-hero" "$TEST_REPO_2" "redesign-hero"
-  install_demo_fixture "prism"   "$TEST_REPO_3" "# Prism Analytics"
-}
-
-install_demo_fixture() {
-  local variant="$1"
-  local repo_dir="$2"
-  local readme_title="$3"
-  (
-    cd "$repo_dir"
-    git init -q -b main
-    git config user.email "spaces-e2e@example.com"
-    git config user.name "spaces-e2e"
-    mkdir -p .spaces-e2e-demo
-    cp "$FIXTURE_TEMPLATE_DIR/pyproject.toml" .spaces-e2e-demo/pyproject.toml
-    cp -R "$FIXTURE_TEMPLATE_DIR/src" .spaces-e2e-demo/src
-    cp -R "$FIXTURE_TEMPLATE_DIR/templates/$variant/site" .spaces-e2e-demo/site
-    cp -R "$FIXTURE_TEMPLATE_DIR/templates/$variant/api" .spaces-e2e-demo/api
-    printf '%s\n' "$readme_title" >README.md
-    git add README.md .spaces-e2e-demo
-    git commit -q -m init
-  )
+  spaces_e2e_create_standard_fixture_repos "$FIXTURE_TEMPLATE_DIR" "$TEST_REPO" "$TEST_REPO_2" "$TEST_REPO_3"
 }
 
 seed_fixture() {
@@ -1062,12 +993,12 @@ prepare_remote_git_origin() {
   local project_dir="$1"
   local slug="$2"
   local git_root
-  git_root="$(remote_expand_path "$REMOTE_GIT_ROOT")"
+  git_root="$(remote_expand_path "$REMOTE_GIT_ROOT")" || return
   local remote_origin="$git_root/$slug.git"
   local quoted_root quoted_origin
   quoted_root="$(shell_quote "$git_root")"
   quoted_origin="$(shell_quote "$remote_origin")"
-  remote_ssh "mkdir -p $quoted_root && rm -rf $quoted_origin && git init --bare -q $quoted_origin"
+  remote_ssh "mkdir -p $quoted_root && rm -rf $quoted_origin && git init --bare -q $quoted_origin" || return
   local push_url
   push_url="$(remote_push_url_for_path "$remote_origin")"
   local ssh_command="ssh"
@@ -1075,71 +1006,53 @@ prepare_remote_git_origin() {
     ssh_command+=" -p $REMOTE_SSH_PORT"
   fi
   git -C "$project_dir" remote remove origin >/dev/null 2>&1 || true
-  git -C "$project_dir" remote add origin "$remote_origin"
-  git -C "$project_dir" -c core.sshCommand="$ssh_command" push -q "$push_url" --all
+  git -C "$project_dir" remote add origin "$remote_origin" || return
+  git -C "$project_dir" -c core.sshCommand="$ssh_command" push -q "$push_url" --all || return
   printf '%s\n' "$remote_origin"
 }
 
-prepare_remote_git_origins() {
+prepare_remote_scout_git_origin() {
   local slug
   slug="$(basename "$TMP_ROOT" | tr -cd 'A-Za-z0-9_.-')"
   [[ -n "$slug" ]] || slug="macos-e2e"
-  prepare_remote_git_origin "$TEST_REPO" "macos-$slug-beacon" >>"$TMP_ROOT/remote-git-origins.log" 2>&1
-  prepare_remote_git_origin "$TEST_REPO_2" "macos-$slug-scout" >>"$TMP_ROOT/remote-git-origins.log" 2>&1
-  prepare_remote_git_origin "$TEST_REPO_3" "macos-$slug-prism" >>"$TMP_ROOT/remote-git-origins.log" 2>&1
+  prepare_remote_git_origin "$TEST_REPO_2" "macos-$slug-scout" >>"$TMP_ROOT/remote-git-origin.log" 2>&1
 }
 
 set_project_target_local() {
-  "$SPACES_E2E_CLI" set-project-default-compute-host --project-dir "$1" --local >/tmp/spaces-e2e-target-local.json 2>/dev/null || true
+  "$SPACES_E2E_CLI" set-project-default-compute-host --project-dir "$1" --local >/tmp/spaces-e2e-target-local.json
 }
 
 set_project_target_remote() {
   "$SPACES_E2E_CLI" set-project-default-compute-host --project-dir "$1" --host-id "$REMOTE_HOST_ID" >/tmp/spaces-e2e-target-remote.json
 }
 
-configure_e2e_target() {
-  local target="$1"
+configure_mixed_e2e_targets() {
   if [[ -z "$SPACES_CYCLE_LATENCY_BUDGET_MS_WAS_SET" ]]; then
-    case "$target" in
-      remote) SPACES_CYCLE_LATENCY_BUDGET_MS=3000 ;;
-      *) SPACES_CYCLE_LATENCY_BUDGET_MS=2000 ;;
-    esac
+    SPACES_CYCLE_LATENCY_BUDGET_MS=3000
   fi
-  case "$target" in
-    local)
-      log_step "configuring local compute target"
-      set_project_target_local "$TEST_REPO"
-      set_project_target_local "$TEST_REPO_2"
-      set_project_target_local "$TEST_REPO_3"
-      ;;
-    remote)
-      log_step "configuring remote compute target: $REMOTE_HOST_ID"
-      [[ -n "$REMOTE_SSH_HOST" ]] || fail "Remote target requires SPACES_E2E_REMOTE_SSH_HOST."
-      export_remote_auth_token
-      prepare_remote_git_origins
-      local -a args=(
-        remote-compute-host-smoke
-        --project-dir "$TEST_REPO"
-        --host-id "$REMOTE_HOST_ID"
-        --name "$REMOTE_HOST_NAME"
-        --ssh-host "$REMOTE_SSH_HOST"
-        --workspace-root "$REMOTE_WORKSPACE_ROOT"
-        --daemon-port "$REMOTE_DAEMON_PORT"
-      )
-      if [[ -n "$REMOTE_SSH_USER" ]]; then args+=(--ssh-user "$REMOTE_SSH_USER"); fi
-      if [[ -n "$REMOTE_SSH_PORT" ]]; then args+=(--ssh-port "$REMOTE_SSH_PORT"); fi
-      if [[ -n "$REMOTE_DAEMON_HOST" ]]; then args+=(--daemon-host "$REMOTE_DAEMON_HOST"); fi
-      if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then args+=("--auth-token=$REMOTE_AUTH_TOKEN"); fi
-      "$SPACES_E2E_CLI" "${args[@]}" >"$TMP_ROOT/remote-compute-host-smoke.json" 2>"$TMP_ROOT/remote-compute-host-smoke.stderr.log" \
-        || fail "Remote compute host smoke failed. See $TMP_ROOT/remote-compute-host-smoke.stderr.log"
-      set_project_target_remote "$TEST_REPO"
-      set_project_target_remote "$TEST_REPO_2"
-      set_project_target_remote "$TEST_REPO_3"
-      ;;
-    *)
-      fail "unknown target: $target"
-      ;;
-  esac
+  log_step "configuring mixed local/remote compute targets"
+  require_remote_configuration
+  export_remote_auth_token
+  set_project_target_local "$TEST_REPO"
+  set_project_target_local "$TEST_REPO_3"
+  prepare_remote_scout_git_origin \
+    || fail "Remote git fixture setup failed. See $TMP_ROOT/remote-git-origin.log"
+  local -a args=(
+    remote-compute-host-smoke
+    --project-dir "$TEST_REPO_2"
+    --host-id "$REMOTE_HOST_ID"
+    --name "$REMOTE_HOST_NAME"
+    --ssh-host "$REMOTE_SSH_HOST"
+    --workspace-root "$REMOTE_WORKSPACE_ROOT"
+    --daemon-port "$REMOTE_DAEMON_PORT"
+  )
+  if [[ -n "$REMOTE_SSH_USER" ]]; then args+=(--ssh-user "$REMOTE_SSH_USER"); fi
+  if [[ -n "$REMOTE_SSH_PORT" ]]; then args+=(--ssh-port "$REMOTE_SSH_PORT"); fi
+  if [[ -n "$REMOTE_DAEMON_HOST" ]]; then args+=(--daemon-host "$REMOTE_DAEMON_HOST"); fi
+  if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then args+=("--auth-token=$REMOTE_AUTH_TOKEN"); fi
+  "$SPACES_E2E_CLI" "${args[@]}" >"$TMP_ROOT/remote-compute-host-smoke.json" 2>"$TMP_ROOT/remote-compute-host-smoke.stderr.log" \
+    || fail "Remote compute host smoke failed. See $TMP_ROOT/remote-compute-host-smoke.stderr.log"
+  set_project_target_remote "$TEST_REPO_2"
 }
 
 add_workspace_process() {
@@ -1539,6 +1452,85 @@ wait_for_remote_tcp_listener_port() {
   fail "timed out waiting for remote TCP listener on port $port"
 }
 
+remote_tcp_listener_exists() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] || fail "invalid remote listener port: $port"
+  remote_ssh "lsof -tiTCP:$port -sTCP:LISTEN >/dev/null 2>&1"
+}
+
+remote_listener_process_rows() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] || fail "invalid remote listener port: $port"
+  remote_ssh bash -s -- "$port" <<'REMOTE_SCRIPT'
+port="$1"
+pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+for pid in $pids; do
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [[ -n "$command" ]] || continue
+  printf '%s\t%s\n' "$pid" "$command"
+done
+REMOTE_SCRIPT
+}
+
+stop_remote_listener_processes() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] || fail "invalid remote listener port: $port"
+  local rows
+  rows="$(remote_listener_process_rows "$port")"
+  [[ -n "$rows" ]] || return 0
+
+  local -a e2e_pids=()
+  local non_e2e_rows=""
+  local pid
+  local command
+  while IFS=$'\t' read -r pid command; do
+    [[ -n "$pid" ]] || continue
+    if [[ "$command" == *"spaces_e2e_demo"* ]]; then
+      e2e_pids+=("$pid")
+    else
+      non_e2e_rows+="$pid $command"$'\n'
+    fi
+  done <<<"$rows"
+
+  if [[ -n "$non_e2e_rows" ]]; then
+    fail "remote TCP listener on port $port is not an E2E demo process: ${non_e2e_rows%$'\n'}"
+  fi
+
+  [[ ${#e2e_pids[@]} -gt 0 ]] || return 0
+  remote_ssh bash -s -- "${e2e_pids[@]}" <<'REMOTE_SCRIPT'
+for pid in "$@"; do
+  kill "$pid" >/dev/null 2>&1 || true
+done
+sleep 0.5
+for pid in "$@"; do
+  kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true
+done
+REMOTE_SCRIPT
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    rows="$(remote_listener_process_rows "$port")"
+    if [[ -z "$rows" ]]; then
+      return 0
+    fi
+    if [[ "$rows" != *"spaces_e2e_demo"* ]]; then
+      fail "remote TCP listener on port $port is not an E2E demo process after cleanup: $rows"
+    fi
+    sleep 0.2
+  done
+  fail "remote TCP listener on port $port did not stop"
+}
+
+stop_remote_workspace_port_listeners() {
+  local workspace_dir="$1"
+  local port_name
+  local port
+  for port_name in "$APP_PORT_NAME" "$API_PORT_NAME"; do
+    port="$(workspace_named_port "$workspace_dir" "$port_name")"
+    [[ -n "$port" ]] || continue
+    stop_remote_listener_processes "$port"
+  done
+}
+
 ui_click_identifier() {
   # The GUI identifiers added for this suite keep the AppleScript automation
   # resilient when labels or ordering change.
@@ -1566,7 +1558,14 @@ APPLESCRIPT
 
 ui_click_workspace_detail_header_button() {
   local description="$1"
-  osascript - "$SPACES_PID" "$description" <<'APPLESCRIPT'
+  python3 - "$SPACES_PID" "$description" "$AX_ACTION_TIMEOUT_SECONDS" <<'PY'
+import subprocess
+import sys
+
+target_pid = sys.argv[1]
+target_description = sys.argv[2]
+timeout_seconds = float(sys.argv[3])
+script = r'''
 on run argv
   set targetPID to (item 1 of argv) as integer
   set targetDescription to item 2 of argv
@@ -1598,7 +1597,16 @@ on run argv
   end tell
   error "workspace-detail header button not found: " & targetDescription
 end run
-APPLESCRIPT
+'''
+try:
+    result = subprocess.run(
+        ["osascript", "-e", script, target_pid, target_description],
+        timeout=timeout_seconds,
+    )
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+sys.exit(result.returncode)
+PY
 }
 
 ui_set_identifier_value() {
@@ -2584,7 +2592,13 @@ spaces_built_in_terminal_focus_state() {
 }
 
 spaces_main_window_visible() {
-  osascript - "$SPACES_PID" <<'APPLESCRIPT'
+  python3 - "$SPACES_PID" "$AX_ACTION_TIMEOUT_SECONDS" <<'PY' | tr -d '\n'
+import subprocess
+import sys
+
+target_pid = sys.argv[1]
+timeout_seconds = float(sys.argv[2])
+script = r'''
 on run argv
   set targetPID to (item 1 of argv) as integer
   tell application "System Events"
@@ -2615,7 +2629,22 @@ on run argv
   end tell
   return "0"
 end run
-APPLESCRIPT
+'''
+try:
+    result = subprocess.run(
+        ["osascript", "-e", script, target_pid],
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+except subprocess.TimeoutExpired:
+    print("unknown")
+    sys.exit(0)
+if result.returncode != 0:
+    print("unknown")
+    sys.exit(0)
+sys.stdout.write(result.stdout)
+PY
 }
 
 activate_google_chrome() {
@@ -4065,6 +4094,62 @@ PY
   fail "timed out waiting for Spaces terminal window controller: $session_id"
 }
 
+terminal_window_has_live_render() {
+  local out_file="$1"
+  python3 - "$out_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+
+rendered_output = data.get("visibleSurfaceOutput") or data.get("renderedOutput") or ""
+renderer = data.get("rendererSummary") or ""
+placeholder_fragments = (
+    "Terminal render unavailable.",
+    "Final terminal render unavailable.",
+    "The live terminal renderer did not become ready",
+    "Live terminal rendering is limited to the active owner.",
+    "Waiting for terminal ownership",
+)
+
+checks = [
+    data.get("found") is True,
+    data.get("showsTerminalSurface") is True,
+    "ghostty-mirror" in renderer,
+    bool(rendered_output.strip()),
+    not any(fragment in rendered_output for fragment in placeholder_fragments),
+]
+raise SystemExit(0 if all(checks) else 1)
+PY
+}
+
+wait_for_terminal_session_live_render() {
+  local session_id="$1"
+  local label="$2"
+  local out_file="$TMP_ROOT/terminal-live-render-$session_id.json"
+  local command_file="${out_file%.json}-command.json"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    rm -f "$out_file" "$command_file"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" \
+      dump-terminal-session-window-state --session-id "$session_id" --output-path "$out_file" >"$command_file" 2>>"$DEBUG_LOG" || true
+    sleep 0.2
+    if [[ -f "$out_file" ]] && terminal_window_has_live_render "$out_file"; then
+      return 0
+    fi
+    sleep 0.3
+  done
+  {
+    printf 'terminal live render assertion failed: %s session=%s\n' "$label" "$session_id"
+    if [[ -f "$out_file" ]]; then
+      cat "$out_file"
+      printf '\n'
+    fi
+  } >>"$DEBUG_LOG"
+  fail "timed out waiting for live terminal render: $label session=$session_id"
+}
+
 workspace_window_id_by_name() {
   local workspace_dir="$1"
   local target_name="$2"
@@ -4279,6 +4364,8 @@ measure_spaces_cycle_transition() {
 run_launch_and_focus_assertions() {
   local host="$1"
   local workspace_dir="$2"
+  local docs_expected="${3:-Beacon docs sentinel}"
+  local backend_expected="${4:-\"workspace\": \"beacon-status\"}"
   local dump_file="$TMP_ROOT/$host-dump.json"
   local agent_script
 
@@ -4288,6 +4375,9 @@ run_launch_and_focus_assertions() {
   set_workspace_agent_launcher "$workspace_dir" "$MOCK_AGENT_LABEL" "$agent_script"
 
   begin_case "$host: launch workspace and persist terminal host"
+  if [[ "$host" == "remote" ]]; then
+    stop_remote_workspace_port_listeners "$workspace_dir"
+  fi
   run_spaces_logged /tmp/spaces-e2e-launch.log start "$workspace_dir"
   if is_spaces_terminal_target "$host"; then
     activate_spaces_pid "$SPACES_PID"
@@ -4315,7 +4405,9 @@ run_launch_and_focus_assertions() {
   local terminal_app
   terminal_app="$(json_get "$dump_file" "runningProcesses[0].terminalApp")"
   assert_equals "Spaces" "$terminal_app" "Spaces launch"
-  ensure_workspace_http_ready "$host" "$workspace_dir" "$browser_docs_url" "Beacon docs sentinel" "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "beacon-status"'
+  local backend_status_url
+  backend_status_url="$(backend_url_for_workspace "$workspace_dir" "/api/launch-status")"
+  ensure_workspace_http_ready "$host" "$workspace_dir" "$browser_docs_url" "$docs_expected" "$backend_status_url" "$backend_expected"
   pass_case
 
   begin_case "$host: focus tracked Chrome tab with extra user tab present"
@@ -4379,6 +4471,9 @@ run_launch_and_focus_assertions() {
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single" "$spaces_terminal_focus_request_id" "$spaces_terminal_focus_log"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
     wait_for_spaces_front_window_title "frontend"
+    local frontend_focus_session_id
+    frontend_focus_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
+    wait_for_terminal_session_live_render "$frontend_focus_session_id" "$host frontend terminal focus"
     pass_case
 
     begin_case "$host: closing ad hoc Spaces terminal removes runtime row"
@@ -4485,6 +4580,7 @@ PY
     wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
     wait_for_spaces_front_window_title "frontend"
+    wait_for_terminal_session_live_render "$frontend_session_before_close" "$host frontend terminal reopen"
     pass_case
 
   local docs_shortcut_index=1
@@ -4545,6 +4641,7 @@ PY
   record_metric_sample "spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab" "$frontend_focus_elapsed_ms" "$host" "single"
   wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
   wait_for_spaces_front_window_title "frontend"
+  wait_for_terminal_session_live_render "$frontend_session_id" "$host frontend shortcut focus"
   assert_shortcut_focus_surface_state
 
   if is_spaces_terminal_target "$host"; then
@@ -4898,7 +4995,9 @@ PY
   wait_for_workspace_process_status "$workspace_dir" "backend" "running"
   local browser_docs_url
   browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
-  ensure_workspace_http_ready "$host" "$workspace_dir" "$browser_docs_url" "Beacon docs sentinel" "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "beacon-status"'
+  local backend_status_url
+  backend_status_url="$(backend_url_for_workspace "$workspace_dir" "/api/launch-status")"
+  ensure_workspace_http_ready "$host" "$workspace_dir" "$browser_docs_url" "$docs_expected" "$backend_status_url" "$backend_expected"
   wait_for_workspace_running_state "$workspace_dir" "true"
   dump_workspace "$workspace_dir" "$dump_file"
   assert_equals "true" "$(json_get "$dump_file" "workspace.isRunning")" "workspace running after restart"
@@ -5121,10 +5220,13 @@ run_multi_workspace_focus_and_cycle_assertions() {
   dump_workspace "$primary_workspace_dir" "$primary_dump"
   primary_docs_url="$(window_url_for_name "$primary_dump" "docs")"
   [[ -n "$primary_docs_url" ]] || primary_docs_url="$PRIMARY_DOCS_URL"
+  stop_remote_workspace_port_listeners "$secondary_workspace_dir"
   run_spaces_logged /tmp/spaces-e2e-multi-secondary-launch.log start "$secondary_workspace_dir"
   run_spaces_logged /tmp/spaces-e2e-multi-secondary-launch-focus.log open docs "$secondary_workspace_dir"
   transition_pause "$host launch secondary workspace"
   log_debug "$host multi secondary launch complete"
+  wait_for_workspace_running_state "$primary_workspace_dir" "true"
+  wait_for_workspace_running_state "$secondary_workspace_dir" "true"
   dump_workspace "$secondary_workspace_dir" "$secondary_dump"
   secondary_docs_url="$(window_url_for_name "$secondary_dump" "docs")"
   [[ -n "$secondary_docs_url" ]] || secondary_docs_url="$SECONDARY_DOCS_URL"
@@ -5282,6 +5384,9 @@ run_agent_status_assertions() {
   if [[ -f "$EVENT_LOG" ]]; then
     event_start_line=$(( $(wc -l <"$EVENT_LOG") + 1 ))
   fi
+  if [[ "$host" == "remote" ]]; then
+    stop_remote_workspace_port_listeners "$workspace_dir"
+  fi
   run_spaces_logged "/tmp/spaces-e2e-$host-agent-launch.log" start "$workspace_dir"
   transition_pause "$host launch workspace with agent"
 
@@ -5304,6 +5409,7 @@ main() {
   # These checks are intentionally explicit because this script targets the real
   # machine, not the hermetic unit-test environment.
   parse_args "$@"
+  require_remote_configuration
   require_cmd git
   require_cmd osascript
   require_cmd python3
@@ -5317,7 +5423,7 @@ main() {
   seed_fixture
   seed_second_fixture
   seed_third_fixture
-  export_remote_auth_token
+  configure_mixed_e2e_targets
   if [[ -n "$RECORD_VIDEO_PATH" ]]; then
     hide_all_visible_windows
     start_screen_recording
@@ -5385,41 +5491,41 @@ EOF
     return 0
   fi
 
-  target_seen=" "
-  for target in "${SELECTED_TARGETS[@]}"; do
-    target_exists "$target" || fail "unknown target: $target"
-    if [[ "$target_seen" == *" $target "* ]]; then
-      continue
-    fi
-    target_seen+=" $target "
-    configure_e2e_target "$target"
-    local host="spaces"
-    if [[ "$target" == "remote" ]]; then
-      host="remote"
-    fi
-    run_launch_and_focus_assertions "$host" "$workspace_dir"
-    if (( ONLY_WINDOW_CYCLE_PROFILE == 1 )); then
-      continue
-    fi
-    run_multi_workspace_focus_and_cycle_assertions "$host" "$workspace_dir" "$second_workspace_dir"
-    run_agent_status_assertions "$host" "$workspace_dir"
-  done
+  run_launch_and_focus_assertions "spaces" "$workspace_dir" "Beacon docs sentinel" '"workspace": "beacon-status"'
+  run_launch_and_focus_assertions "remote" "$second_workspace_dir" "Scout docs sentinel" '"workspace": "scout-errors"'
   if (( ONLY_WINDOW_CYCLE_PROFILE == 1 )); then
     return 0
   fi
-  if selected_targets_include local; then
-    assert_file_contains "$EVENT_LOG" "$stop_marker"
-  fi
-  configure_e2e_target local
+  run_multi_workspace_focus_and_cycle_assertions "mixed" "$workspace_dir" "$second_workspace_dir"
+  run_agent_status_assertions "spaces" "$workspace_dir"
+  run_agent_status_assertions "remote" "$second_workspace_dir"
+  assert_file_contains "$EVENT_LOG" "$stop_marker"
 
   begin_case "branch and tertiary workspaces serve correct content"
-  local branch_check_out="$TMP_ROOT/branch-content-check.json"
   run_spaces_logged /tmp/spaces-e2e-beacon-branch-start.log start "$created_workspace_dir"
   wait_for_workspace_running_state "$created_workspace_dir" "true"
   wait_for_http_body_contains "$BEACON_BRANCH_DOCS_URL" "Beacon redesign-hero docs sentinel"
+  stop_remote_workspace_port_listeners "$scout_branch_workspace_dir"
   run_spaces_logged /tmp/spaces-e2e-scout-branch-start.log start "$scout_branch_workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-scout-branch-open-docs.log open docs "$scout_branch_workspace_dir"
   wait_for_workspace_running_state "$scout_branch_workspace_dir" "true"
-  wait_for_http_body_contains "$SCOUT_BRANCH_DOCS_URL" "Scout redesign-hero docs sentinel"
+  SCOUT_BRANCH_DOCS_URL="$(wait_for_workspace_window_url_by_name "$scout_branch_workspace_dir" "docs")"
+  ensure_workspace_http_ready "remote" "$scout_branch_workspace_dir" "$SCOUT_BRANCH_DOCS_URL" "Scout redesign-hero docs sentinel" "$SCOUT_BRANCH_BACKEND_STATUS_URL" '"workspace": "scout-errors"'
+  local scout_branch_dump_file="$TMP_ROOT/scout-branch-render-dump.json"
+  local scout_branch_frontend_session_id
+  local scout_branch_backend_session_id
+  run_spaces_logged /tmp/spaces-e2e-scout-branch-open-frontend.log open frontend "$scout_branch_workspace_dir"
+  transition_pause "remote scout branch frontend terminal focus"
+  scout_branch_frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$scout_branch_workspace_dir" "frontend" "$scout_branch_dump_file")"
+  wait_for_condition "spaces_front_window_identifier" "spaces-terminal:${scout_branch_frontend_session_id}"
+  wait_for_spaces_front_window_title "frontend"
+  wait_for_terminal_session_live_render "$scout_branch_frontend_session_id" "remote scout branch frontend"
+  run_spaces_logged /tmp/spaces-e2e-scout-branch-open-backend.log open backend "$scout_branch_workspace_dir"
+  transition_pause "remote scout branch backend terminal focus"
+  scout_branch_backend_session_id="$(wait_for_workspace_terminal_tracking_id "$scout_branch_workspace_dir" "backend" "$scout_branch_dump_file")"
+  wait_for_condition "spaces_front_window_identifier" "spaces-terminal:${scout_branch_backend_session_id}"
+  wait_for_spaces_front_window_title "backend"
+  wait_for_terminal_session_live_render "$scout_branch_backend_session_id" "remote scout branch backend"
   run_spaces_logged /tmp/spaces-e2e-prism-start.log start "$third_workspace_dir"
   wait_for_workspace_running_state "$third_workspace_dir" "true"
   wait_for_http_body_contains "$TERTIARY_DOCS_URL" "Prism docs sentinel"

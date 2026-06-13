@@ -128,6 +128,17 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertEqual(response, TerminalServiceResponse(ok: true, message: "pong"))
     }
 
+    func testTLSIdentityStoreReloadsExistingIdentity() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let first = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
+        let second = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
+
+        XCTAssertEqual(second.certificateFingerprint, first.certificateFingerprint)
+    }
+
     func testPinnedTLSClientRejectsCertificateMismatch() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

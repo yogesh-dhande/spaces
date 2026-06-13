@@ -39,6 +39,7 @@ import Foundation
             guard let config = ghostty_config_new() else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_config_new failed") }
             ghostty_config_load_default_files(config)
             ghostty_config_load_recursive_files(config)
+            try Self.embeddedConfigOverridesPath().withCString { path in ghostty_config_load_file(config, path) }
             ghostty_config_finalize(config)
 
             var runtimeConfig = ghostty_runtime_config_s()
@@ -71,6 +72,14 @@ import Foundation
             ghostty_app_set_color_scheme(app, Self.currentColorScheme())
             self.config = config
             self.app = app
+        }
+
+        private static func embeddedConfigOverridesPath() throws -> String {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-ghostty", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("embedded-config.ghostty", isDirectory: false)
+            try "window-vsync = false\n".write(to: url, atomically: true, encoding: .utf8)
+            return url.path
         }
 
         public func tick() {

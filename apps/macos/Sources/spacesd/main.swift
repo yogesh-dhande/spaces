@@ -294,7 +294,7 @@ import spacesterminalghostty
         }
         if let liveCore = sessionCores[sessionID] {
             let response = liveCore.handleControlRequest(controlRequest)
-            return TerminalServiceResponse(ok: response.ok, message: response.message, controlResponse: response)
+            return terminalControlResponse(sessionID: sessionID, controlResponse: response)
         }
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -305,8 +305,13 @@ import spacesterminalghostty
                 return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.")
             }
             let response = try TerminalControlClient.send(request: controlRequest, socketPath: paths.controlSocketPath)
-            return TerminalServiceResponse(ok: response.ok, message: response.message, controlResponse: response)
+            return terminalControlResponse(sessionID: sessionID, controlResponse: response)
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
+    }
+
+    private func terminalControlResponse(sessionID: String, controlResponse response: TerminalControlResponse) -> TerminalServiceResponse {
+        let sessionState = response.ok ? try? loadCurrentState(sessionID: sessionID) : nil
+        return TerminalServiceResponse(ok: response.ok, message: response.message, sessionState: sessionState, controlResponse: response)
     }
 
     private func resolveTerminalLink(_ request: TerminalServiceRequest) -> TerminalServiceResponse {

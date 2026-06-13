@@ -3,7 +3,10 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../../.. && pwd)"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$repo_root/scripts/spaces-e2e-env.sh"
+spaces_e2e_load_env "$repo_root"
 source "$script_dir/terminal_harness_lock.sh"
+source "$script_dir/e2e_fixture_repos.sh"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
 spaces_app="${SPACES_APP:-$repo_root/apps/macos/.build/debug/SpacesApp}"
 spaces_cli="${SPACES_CLI:-$repo_root/apps/macos/.build/debug/spaces}"
@@ -11,6 +14,7 @@ spacese2e="${SPACES_E2E:-$repo_root/apps/macos/.build/debug/spacese2e}"
 terminal_service="${SPACESD_EXECUTABLE:-$repo_root/apps/macos/.build/debug/spacesd}"
 ghostty_xcframework="${SPACES_GHOSTTYKIT_XCFRAMEWORK:-$repo_root/apps/macos/.local/ghosttykit/GhosttyKit.xcframework}"
 ghostty_resources="${SPACES_GHOSTTY_RESOURCES_DIR:-$repo_root/apps/macos/.local/ghosttykit/Resources/ghostty}"
+fixture_template_dir="$repo_root/apps/macos/Tests/fixtures/e2e_demo"
 user_home="${HOME:?}"
 source_xdg_config_home="${SPACES_MOBILE_GHOSTTY_XDG_CONFIG_HOME:-${XDG_CONFIG_HOME:-$user_home/.config}}"
 profile_mode="${SPACES_MOBILE_DEMO_PROFILE_MODE:-isolated}"
@@ -25,6 +29,7 @@ pairing_nonce=""
 transport_key=""
 certificate_fingerprint=""
 workspace_title="${SPACES_MOBILE_DEMO_WORKSPACE_TITLE:-Spaces Demo}"
+remote_workspace_title="${SPACES_MOBILE_DEMO_REMOTE_WORKSPACE_TITLE:-Scout Remote Demo}"
 ipad_name="${SPACES_MOBILE_DEMO_IPAD_NAME:-iPad Pro 13-inch (M5)}"
 iphone_name="${SPACES_MOBILE_DEMO_IPHONE_NAME:-iPhone 17 Pro}"
 bundle_id="dev.usespaces.spacesmobile"
@@ -32,6 +37,16 @@ keep_root="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
 app_path_override="${SPACES_MOBILE_DEMO_APP_PATH:-}"
 demo_trace="${SPACES_MOBILE_DEMO_TRACE:-1}"
 build_macos="${SPACES_MOBILE_DEMO_BUILD_MACOS:-1}"
+remote_host_id="${SPACES_E2E_REMOTE_HOST_ID:-mobile-demo-remote}"
+remote_host_name="${SPACES_E2E_REMOTE_NAME:-Mobile Demo Remote}"
+remote_ssh_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
+remote_ssh_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
+remote_ssh_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
+remote_workspace_root="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/workspaces}"
+remote_daemon_host="${SPACES_E2E_REMOTE_DAEMON_HOST:-$remote_ssh_host}"
+remote_daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:-7443}"
+remote_auth_token="${SPACES_E2E_REMOTE_AUTH_TOKEN:-}"
+remote_git_root="${SPACES_E2E_REMOTE_GIT_ROOT:-~/.spaces/e2e-git}"
 
 app_pid=""
 bridge_pid=""
@@ -39,7 +54,11 @@ temp_root=""
 spaces_db_path=""
 spaces_runtime_dir=""
 project_dir=""
+local_project_dir=""
+remote_project_dir=""
 session_id=""
+local_session_id=""
+remote_session_id=""
 secondary_session_id=""
 ipad_udid=""
 iphone_udid=""
@@ -85,8 +104,9 @@ prepare_ghostty_demo_config() {
   ghostty_demo_xdg_config_home="$source_xdg_config_home"
 }
 
-stop_demo_workspace() {
-  if [[ -z "$project_dir" || -z "$spaces_db_path" || -z "$spaces_runtime_dir" ]]; then
+stop_demo_workspace_dir() {
+  local workspace_dir="$1"
+  if [[ -z "$workspace_dir" || -z "$spaces_db_path" || -z "$spaces_runtime_dir" ]]; then
     return
   fi
   if [[ ! -e "$spaces_db_path" ]]; then
@@ -100,7 +120,12 @@ stop_demo_workspace() {
     SPACESD_EXECUTABLE="$terminal_service" \
     SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
     SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
-    "$spacese2e" stop-workspace --workspace-dir "$project_dir" >/dev/null 2>&1 || true
+    "$spacese2e" stop-workspace --workspace-dir "$workspace_dir" >/dev/null 2>&1 || true
+}
+
+stop_demo_workspace() {
+  stop_demo_workspace_dir "$local_project_dir"
+  stop_demo_workspace_dir "$remote_project_dir"
 }
 
 terminal_service_socket_path() {
@@ -200,6 +225,138 @@ validate_profile_mode() {
       exit 1
       ;;
   esac
+}
+
+require_remote_configuration() {
+  if [[ -z "$remote_ssh_host" ]]; then
+    echo "SPACES_E2E_REMOTE_SSH_HOST is required for the mixed local/remote mobile demo." >&2
+    exit 1
+  fi
+}
+
+shell_quote() {
+  python3 - "$1" <<'PY'
+import shlex
+import sys
+print(shlex.quote(sys.argv[1]))
+PY
+}
+
+remote_ssh_destination() {
+  if [[ -n "$remote_ssh_user" ]]; then
+    printf '%s@%s' "$remote_ssh_user" "$remote_ssh_host"
+  else
+    printf '%s' "$remote_ssh_host"
+  fi
+}
+
+remote_ssh() {
+  require_remote_configuration
+  local destination
+  destination="$(remote_ssh_destination)"
+  local -a args=(-o BatchMode=yes)
+  if [[ -n "$remote_ssh_port" ]]; then
+    args+=(-p "$remote_ssh_port")
+  fi
+  ssh "${args[@]}" "$destination" "$@"
+}
+
+remote_expand_path() {
+  local raw_path="$1"
+  local quoted
+  quoted="$(shell_quote "$raw_path")"
+  remote_ssh "python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' $quoted"
+}
+
+remote_push_url_for_path() {
+  local remote_path="$1"
+  local user_prefix=""
+  local port_part=""
+  if [[ -n "$remote_ssh_user" ]]; then
+    user_prefix="$remote_ssh_user@"
+  fi
+  if [[ -n "$remote_ssh_port" ]]; then
+    port_part=":$remote_ssh_port"
+  fi
+  printf 'ssh://%s%s%s%s\n' "$user_prefix" "$remote_ssh_host" "$port_part" "$remote_path"
+}
+
+remote_auth_token_env_key() {
+  printf 'SPACESD_AUTH_TOKEN_%s\n' "$(printf '%s' "$remote_host_id" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]/_/g')"
+}
+
+export_remote_auth_token() {
+  [[ -n "$remote_auth_token" ]] || return 0
+  local key
+  key="$(remote_auth_token_env_key)"
+  export "$key=$remote_auth_token"
+}
+
+prepare_remote_git_origin() {
+  local project_dir_for_origin="$1"
+  local slug="$2"
+  local git_root
+  git_root="$(remote_expand_path "$remote_git_root")" || return
+  local remote_origin="$git_root/$slug.git"
+  local quoted_root quoted_origin
+  quoted_root="$(shell_quote "$git_root")"
+  quoted_origin="$(shell_quote "$remote_origin")"
+  remote_ssh "mkdir -p $quoted_root && rm -rf $quoted_origin && git init --bare -q $quoted_origin" || return
+  local push_url
+  push_url="$(remote_push_url_for_path "$remote_origin")"
+  local ssh_command="ssh"
+  if [[ -n "$remote_ssh_port" ]]; then
+    ssh_command+=" -p $remote_ssh_port"
+  fi
+  git -C "$project_dir_for_origin" remote remove origin >/dev/null 2>&1 || true
+  git -C "$project_dir_for_origin" remote add origin "$remote_origin" || return
+  git -C "$project_dir_for_origin" -c core.sshCommand="$ssh_command" push -q "$push_url" --all || return
+  printf '%s\n' "$remote_origin"
+}
+
+configure_demo_compute_hosts() {
+  require_remote_configuration
+  export_remote_auth_token
+  run_demo_env \
+    HOME="$demo_home" \
+    SPACES_DB_PATH="$spaces_db_path" \
+    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+    SPACESD_EXECUTABLE="$terminal_service" \
+    "$spacese2e" set-project-default-compute-host --project-dir "$local_project_dir" --local \
+    >"$temp_root/local-compute-host.json"
+
+  local slug
+  slug="$(basename "$temp_root" | tr -cd 'A-Za-z0-9_.-')"
+  [[ -n "$slug" ]] || slug="mobile-demo"
+  prepare_remote_git_origin "$remote_project_dir" "mobile-demo-$slug-scout" >>"$temp_root/remote-git-origin.log" 2>&1 \
+    || {
+      echo "Remote git fixture setup failed. See $temp_root/remote-git-origin.log" >&2
+      exit 1
+    }
+
+  local -a args=(
+    remote-compute-host-smoke
+    --project-dir "$remote_project_dir"
+    --host-id "$remote_host_id"
+    --name "$remote_host_name"
+    --ssh-host "$remote_ssh_host"
+    --workspace-root "$remote_workspace_root"
+    --daemon-port "$remote_daemon_port"
+  )
+  if [[ -n "$remote_ssh_user" ]]; then args+=(--ssh-user "$remote_ssh_user"); fi
+  if [[ -n "$remote_ssh_port" ]]; then args+=(--ssh-port "$remote_ssh_port"); fi
+  if [[ -n "$remote_daemon_host" ]]; then args+=(--daemon-host "$remote_daemon_host"); fi
+  if [[ -n "$remote_auth_token" ]]; then args+=(--auth-token "$remote_auth_token"); fi
+  run_demo_env \
+    HOME="$demo_home" \
+    SPACES_DB_PATH="$spaces_db_path" \
+    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+    SPACESD_EXECUTABLE="$terminal_service" \
+    "$spacese2e" "${args[@]}" >"$temp_root/remote-compute-host-smoke.json" 2>"$temp_root/remote-compute-host-smoke.stderr.log" \
+    || {
+      echo "Remote compute host smoke failed. See $temp_root/remote-compute-host-smoke.stderr.log" >&2
+      exit 1
+    }
 }
 
 create_demo_root() {
@@ -605,15 +762,6 @@ for session_id in ids:
 PY
 }
 
-load_discovered_session_ids() {
-  discovered_session_ids=()
-  while IFS= read -r discovered_session_id; do
-    if [[ -n "$discovered_session_id" ]]; then
-      discovered_session_ids+=("$discovered_session_id")
-    fi
-  done < <(discover_session_ids)
-}
-
 wait_for_session_owner() {
   local owner_session_id="$1"
   python3 - "$spaces_db_path" "$spaces_runtime_dir" "$owner_session_id" <<'PY'
@@ -675,6 +823,7 @@ PY
 }
 
 open_demo_workspace_terminal() {
+  local workspace_dir="$1"
   run_demo_env \
     HOME="$demo_home" \
     SPACES_DB_PATH="$spaces_db_path" \
@@ -682,7 +831,7 @@ open_demo_workspace_terminal() {
     SPACESD_EXECUTABLE="$terminal_service" \
     SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
     SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
-    "$spacese2e" open-workspace-terminal --workspace-dir "$project_dir"
+    "$spacese2e" open-workspace-terminal --workspace-dir "$workspace_dir"
 }
 
 extract_workspace_id() {
@@ -693,6 +842,58 @@ import sys
 payload = json.loads(sys.argv[1])
 print(payload.get("id", ""))
 PY
+}
+
+new_session_id_since() {
+  local before_file="$1"
+  python3 - "$spaces_runtime_dir" "$before_file" <<'PY'
+import pathlib
+import sys
+
+runtime_dir = pathlib.Path(sys.argv[1])
+before_path = pathlib.Path(sys.argv[2])
+known = {line.strip() for line in before_path.read_text().splitlines() if line.strip()} if before_path.exists() else set()
+sessions_root = runtime_dir / "terminal" / "sessions"
+if not sessions_root.exists():
+    raise SystemExit(1)
+for path in sorted(sessions_root.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
+    if path.is_dir() and path.name not in known:
+        print(path.name)
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+open_workspace_terminal_session() {
+  local workspace_dir="$1"
+  local label="$2"
+  local before_file="$temp_root/$label-session-ids-before.txt"
+  local workspace_open_payload workspace_id discovered_session_id
+
+  discover_session_ids >"$before_file"
+  workspace_open_payload="$(open_demo_workspace_terminal "$workspace_dir")"
+  workspace_id="$(extract_workspace_id "$workspace_open_payload")"
+  for attempt in $(seq 1 3); do
+    for _ in $(seq 1 20); do
+      discovered_session_id="$(new_session_id_since "$before_file" 2>/dev/null || true)"
+      if [[ -n "$discovered_session_id" ]]; then
+        printf '%s\n' "$discovered_session_id"
+        return 0
+      fi
+      if [[ -n "$workspace_id" ]] && [[ "$(discover_workspace_running_state "$workspace_id")" == "1" ]]; then
+        sleep 1
+        continue
+      fi
+      sleep 1
+    done
+    if [[ "$attempt" -lt 3 ]]; then
+      workspace_open_payload="$(open_demo_workspace_terminal "$workspace_dir")"
+      workspace_id="$(extract_workspace_id "$workspace_open_payload")"
+    fi
+  done
+
+  echo "Failed to discover the $label terminal session." >&2
+  exit 1
 }
 
 generate_installation_id() {
@@ -829,7 +1030,7 @@ PY
 }
 
 print_summary() {
-  python3 - "$temp_root" "$profile_mode" "$demo_home" "$app_pid" "$bridge_pid" "$terminal_service_pid" "$session_id" "$secondary_session_id" "$spaces_db_path" "$spaces_runtime_dir" "$project_dir" "$app_log" "$bridge_log" "$performance_log_path" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_bind_host" "$bridge_host" "$bridge_port" "$workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
+  python3 - "$temp_root" "$profile_mode" "$demo_home" "$app_pid" "$bridge_pid" "$terminal_service_pid" "$local_session_id" "$remote_session_id" "$spaces_db_path" "$spaces_runtime_dir" "$local_project_dir" "$remote_project_dir" "$app_log" "$bridge_log" "$performance_log_path" "$ipad_screenshot" "$iphone_screenshot" "$ipad_udid" "$iphone_udid" "$bridge_bind_host" "$bridge_host" "$bridge_port" "$workspace_title" "$remote_workspace_title" "$ios_app_path" "$ios_build_log" "$ios_derived_data" "$ipad_app_stdout_log" "$ipad_app_stderr_log" "$iphone_app_stdout_log" "$iphone_app_stderr_log" <<'PY'
 import json
 import sys
 
@@ -840,11 +1041,12 @@ import sys
     app_pid,
     bridge_pid,
     terminal_service_pid,
-    session_id,
-    secondary_session_id,
+    local_session_id,
+    remote_session_id,
     db_path,
     runtime_dir,
-    project_dir,
+    local_project_dir,
+    remote_project_dir,
     app_log,
     bridge_log,
     performance_log_path,
@@ -856,6 +1058,7 @@ import sys
     bridge_host,
     bridge_port,
     workspace_title,
+    remote_workspace_title,
     ios_app_path,
     ios_build_log,
     ios_derived_data,
@@ -874,13 +1077,19 @@ payload = {
     "bridgeBindHost": bridge_bind_host,
     "bridgeHost": bridge_host,
     "bridgePort": int(bridge_port),
-    "sessionID": session_id,
-    "secondarySessionID": secondary_session_id or None,
-    "sessionIDs": [value for value in (session_id, secondary_session_id) if value],
+    "sessionID": local_session_id,
+    "localSessionID": local_session_id,
+    "remoteSessionID": remote_session_id,
+    "secondarySessionID": remote_session_id or None,
+    "sessionIDs": [value for value in (local_session_id, remote_session_id) if value],
     "workspaceTitle": workspace_title,
+    "localWorkspaceTitle": workspace_title,
+    "remoteWorkspaceTitle": remote_workspace_title,
     "dbPath": db_path,
     "runtimeDir": runtime_dir,
-    "projectDir": project_dir,
+    "projectDir": local_project_dir,
+    "localProjectDir": local_project_dir,
+    "remoteProjectDir": remote_project_dir,
     "appLog": app_log,
     "bridgeLog": bridge_log,
     "performanceLogPath": performance_log_path,
@@ -916,9 +1125,13 @@ export SPACES_MOBILE_BRIDGE_PORT=$(printf '%q' "$bridge_port")
 export SPACES_MOBILE_PAIRING_LINK=$(printf '%q' "$pairing_link")
 export SPACES_MOBILE_TRANSPORT_KEY=$(printf '%q' "$transport_key")
 export SPACES_DEMO_ROOT=$(printf '%q' "$temp_root")
-export SPACES_DEMO_SESSION_ID=$(printf '%q' "$session_id")
-export SPACES_DEMO_SECONDARY_SESSION_ID=$(printf '%q' "$secondary_session_id")
-export SPACES_DEMO_PROJECT_DIR=$(printf '%q' "$project_dir")
+export SPACES_DEMO_SESSION_ID=$(printf '%q' "$local_session_id")
+export SPACES_DEMO_LOCAL_SESSION_ID=$(printf '%q' "$local_session_id")
+export SPACES_DEMO_REMOTE_SESSION_ID=$(printf '%q' "$remote_session_id")
+export SPACES_DEMO_SECONDARY_SESSION_ID=$(printf '%q' "$remote_session_id")
+export SPACES_DEMO_PROJECT_DIR=$(printf '%q' "$local_project_dir")
+export SPACES_DEMO_LOCAL_PROJECT_DIR=$(printf '%q' "$local_project_dir")
+export SPACES_DEMO_REMOTE_PROJECT_DIR=$(printf '%q' "$remote_project_dir")
 export SPACES_DEMO_IPAD_UDID=$(printf '%q' "$ipad_udid")
 export SPACES_DEMO_IPHONE_UDID=$(printf '%q' "$iphone_udid")
 export SPACES_CLI=$(printf '%q' "$spaces_cli")
@@ -934,7 +1147,7 @@ spaces_demo_tail() {
 }
 
 spaces_demo_tail_secondary() {
-  "\$SPACES_CLI" terminal tail "\$SPACES_DEMO_SECONDARY_SESSION_ID"
+  "\$SPACES_CLI" terminal tail "\$SPACES_DEMO_REMOTE_SESSION_ID"
 }
 
 spaces_demo_send() {
@@ -942,7 +1155,7 @@ spaces_demo_send() {
 }
 
 spaces_demo_send_secondary() {
-  "\$SPACES_CLI" terminal send "\$SPACES_DEMO_SECONDARY_SESSION_ID" "\$@"
+  "\$SPACES_CLI" terminal send "\$SPACES_DEMO_REMOTE_SESSION_ID" "\$@"
 }
 
 spaces_demo_sendline() {
@@ -950,7 +1163,7 @@ spaces_demo_sendline() {
 }
 
 spaces_demo_sendline_secondary() {
-  "\$SPACES_CLI" terminal send "\$SPACES_DEMO_SECONDARY_SESSION_ID" "\$1" --newline
+  "\$SPACES_CLI" terminal send "\$SPACES_DEMO_REMOTE_SESSION_ID" "\$1" --newline
 }
 
 spaces_demo_enter() {
@@ -961,8 +1174,16 @@ spaces_demo_mac_takeover() {
   "\$SPACES_CLI" terminal show "\$SPACES_DEMO_SESSION_ID"
 }
 
+spaces_demo_remote_mac_takeover() {
+  "\$SPACES_CLI" terminal show "\$SPACES_DEMO_REMOTE_SESSION_ID"
+}
+
 spaces_demo_reopen() {
   "\$SPACES_E2E" open-workspace-terminal --workspace-dir "\$SPACES_DEMO_PROJECT_DIR"
+}
+
+spaces_demo_reopen_remote() {
+  "\$SPACES_E2E" open-workspace-terminal --workspace-dir "\$SPACES_DEMO_REMOTE_PROJECT_DIR"
 }
 
 spaces_demo_tail_mac_log() {
@@ -981,12 +1202,18 @@ spaces_demo_tail_ipad_stderr() {
   tail -f "\$SPACES_DEMO_ROOT/ipad-app.stderr.log"
 }
 EOF
+  if [[ -n "$remote_auth_token" ]]; then
+    local remote_auth_key
+    remote_auth_key="$(remote_auth_token_env_key)"
+    printf 'export %s=%q\n' "$remote_auth_key" "$remote_auth_token" >>"$manual_shell_path"
+  fi
   chmod +x "$manual_shell_path"
 }
 
 require_path "$ghostty_xcframework" "GhosttyKit.xcframework"
 require_path "$ghostty_resources" "Ghostty resources"
 validate_profile_mode
+require_remote_configuration
 build_macos_debug_products
 require_executable "$spaces_app" "SpacesApp"
 require_executable "$spaces_cli" "spaces CLI"
@@ -994,7 +1221,9 @@ require_executable "$spacese2e" "spacese2e"
 require_executable "$terminal_service" "spacesd"
 
 create_demo_root
-project_dir="$temp_root/project"
+project_dir="$temp_root/beacon-status"
+local_project_dir="$project_dir"
+remote_project_dir="$temp_root/scout-errors"
 app_log="$temp_root/app.log"
 bridge_log="$temp_root/bridge.log"
 app_recovery_state_path="$temp_root/app-recovery-state.json"
@@ -1009,6 +1238,39 @@ prepare_demo_profile
 stop_existing_profile_app_owner
 stop_existing_demo_profile_services
 stop_bridge_port_listeners
+
+spaces_e2e_create_beacon_fixture_repo "$fixture_template_dir" "$local_project_dir"
+spaces_e2e_create_scout_fixture_repo "$fixture_template_dir" "$remote_project_dir"
+
+run_demo_env \
+  HOME="$demo_home" \
+  SPACES_DB_PATH="$spaces_db_path" \
+  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+  SPACESD_EXECUTABLE="$terminal_service" \
+  SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
+  SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
+  SPACES_PROJECT_DIR="$repo_root" \
+  "$spacese2e" seed-fixture \
+    --project-dir "$local_project_dir" \
+    --docs-url "http://127.0.0.1:20001" \
+    --admin-url "http://127.0.0.1:20002" \
+    --workspace-title "$workspace_title" >/dev/null
+
+run_demo_env \
+  HOME="$demo_home" \
+  SPACES_DB_PATH="$spaces_db_path" \
+  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+  SPACESD_EXECUTABLE="$terminal_service" \
+  SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
+  SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
+  SPACES_PROJECT_DIR="$repo_root" \
+  "$spacese2e" seed-fixture \
+    --project-dir "$remote_project_dir" \
+    --docs-url "http://127.0.0.1:20003" \
+    --admin-url "http://127.0.0.1:20004" \
+    --workspace-title "$remote_workspace_title" >/dev/null
+
+configure_demo_compute_hosts
 
 ipad_udid="$(resolve_device_udid "$ipad_name")"
 iphone_udid="$(resolve_device_udid "$iphone_name")"
@@ -1027,18 +1289,6 @@ require_path "$ios_app_path" "SpacesMobile.app"
 open_simulator_app
 boot_device "$ipad_udid"
 boot_device "$iphone_udid"
-
-(
-  cd "$project_dir"
-  git init -q -b main
-  printf '# Spaces Demo\n\nFresh demo repo.\n' > README.md
-  mkdir -p src
-  printf 'print("hello demo")\n' > src/demo.py
-  git add README.md src/demo.py
-  GIT_AUTHOR_NAME=Codex GIT_AUTHOR_EMAIL=codex@example.com \
-    GIT_COMMITTER_NAME=Codex GIT_COMMITTER_EMAIL=codex@example.com \
-    git commit -q -m 'Initial demo repo'
-)
 
 env \
   -u NO_COLOR \
@@ -1064,79 +1314,15 @@ env \
 app_pid=$!
 wait_for_pid "$app_pid" "SpacesApp"
 
-run_demo_env \
-  HOME="$demo_home" \
-  SPACES_DB_PATH="$spaces_db_path" \
-  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
-  SPACESD_EXECUTABLE="$terminal_service" \
-  SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
-  SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
-  SPACES_PROJECT_DIR="$repo_root" \
-  "$spacese2e" seed-fixture \
-    --project-dir "$project_dir" \
-    --docs-url "http://127.0.0.1:20001" \
-    --admin-url "http://127.0.0.1:20002" \
-    --workspace-title "$workspace_title" >/dev/null
+local_session_id="$(open_workspace_terminal_session "$local_project_dir" "local")"
+session_id="$local_session_id"
+show_session_on_mac "$local_session_id"
+wait_for_session_owner "$local_session_id"
 
-workspace_open_payload="$(open_demo_workspace_terminal)"
-workspace_id="$(extract_workspace_id "$workspace_open_payload")"
-discovered_session_ids=()
-for attempt in $(seq 1 3); do
-  for _ in $(seq 1 20); do
-    load_discovered_session_ids
-    if [[ ${#discovered_session_ids[@]} -ge 1 ]]; then
-      session_id="${discovered_session_ids[0]}"
-      break 2
-    fi
-    if [[ -n "$workspace_id" ]] && [[ "$(discover_workspace_running_state "$workspace_id")" == "1" ]]; then
-      sleep 1
-      continue
-    fi
-    sleep 1
-  done
-  if [[ "$attempt" -lt 3 ]]; then
-    workspace_open_payload="$(open_demo_workspace_terminal)"
-    workspace_id="$(extract_workspace_id "$workspace_open_payload")"
-  fi
-done
-
-if [[ -z "$session_id" ]]; then
-  echo "Failed to discover the primary terminal session." >&2
-  exit 1
-fi
-show_session_on_mac "$session_id"
-wait_for_session_owner "$session_id"
-
-for attempt in $(seq 1 3); do
-  workspace_open_payload="$(open_demo_workspace_terminal)"
-  workspace_id="$(extract_workspace_id "$workspace_open_payload")"
-  for _ in $(seq 1 20); do
-    load_discovered_session_ids
-    if [[ ${#discovered_session_ids[@]} -ge 2 ]]; then
-      for candidate_session_id in "${discovered_session_ids[@]}"; do
-        if [[ "$candidate_session_id" != "$session_id" ]]; then
-          secondary_session_id="$candidate_session_id"
-          break
-        fi
-      done
-      if [[ -n "$secondary_session_id" ]]; then
-        break 2
-      fi
-    fi
-    if [[ -n "$workspace_id" ]] && [[ "$(discover_workspace_running_state "$workspace_id")" == "1" ]]; then
-      sleep 1
-      continue
-    fi
-    sleep 1
-  done
-done
-
-if [[ -z "$secondary_session_id" ]]; then
-  echo "Failed to discover the secondary terminal session." >&2
-  exit 1
-fi
-show_session_on_mac "$secondary_session_id"
-wait_for_session_owner "$secondary_session_id"
+remote_session_id="$(open_workspace_terminal_session "$remote_project_dir" "remote")"
+secondary_session_id="$remote_session_id"
+show_session_on_mac "$remote_session_id"
+wait_for_session_owner "$remote_session_id"
 
 start_mobile_bridge
 wait_for_bridge_port
@@ -1184,9 +1370,11 @@ printf -v demo_env_prefix 'HOME=%q XDG_CONFIG_HOME=%q SPACES_DB_PATH=%q SPACES_R
 echo "Manual demo env: $demo_env_prefix"
 echo "Helper shell: source $manual_shell_path"
 printf 'List sessions: %s %q terminal list\n' "$demo_env_prefix" "$spaces_cli"
-printf 'Mac retakeover: %s %q terminal show %q\n' "$demo_env_prefix" "$spaces_cli" "$session_id"
-printf 'Secondary session tail: %s %q terminal tail %q\n' "$demo_env_prefix" "$spaces_cli" "$secondary_session_id"
-printf 'Workspace terminal reopen: %s %q open-workspace-terminal --workspace-dir %q\n' "$demo_env_prefix" "$spacese2e" "$project_dir"
+printf 'Local Mac retakeover: %s %q terminal show %q\n' "$demo_env_prefix" "$spaces_cli" "$local_session_id"
+printf 'Remote Mac retakeover: %s %q terminal show %q\n' "$demo_env_prefix" "$spaces_cli" "$remote_session_id"
+printf 'Remote session tail: %s %q terminal tail %q\n' "$demo_env_prefix" "$spaces_cli" "$remote_session_id"
+printf 'Local workspace terminal reopen: %s %q open-workspace-terminal --workspace-dir %q\n' "$demo_env_prefix" "$spacese2e" "$local_project_dir"
+printf 'Remote workspace terminal reopen: %s %q open-workspace-terminal --workspace-dir %q\n' "$demo_env_prefix" "$spacese2e" "$remote_project_dir"
 echo "Helper commands after sourcing:"
 echo "  spaces_demo_list"
 echo "  spaces_demo_tail"
@@ -1194,7 +1382,9 @@ echo "  spaces_demo_tail_secondary"
 echo "  spaces_demo_sendline 'pwd'"
 echo "  spaces_demo_sendline_secondary 'pwd'"
 echo "  spaces_demo_mac_takeover"
+echo "  spaces_demo_remote_mac_takeover"
 echo "  spaces_demo_reopen"
+echo "  spaces_demo_reopen_remote"
 echo "  spaces_demo_tail_mac_log"
 echo "  spaces_demo_tail_bridge_log"
 echo "  spaces_demo_mobile_status"

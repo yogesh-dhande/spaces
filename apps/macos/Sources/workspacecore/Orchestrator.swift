@@ -224,6 +224,7 @@ public final class WorkspaceOrchestrator {
         public let sessionID: String
         let workspaceID: String
         let windowRecordID: String
+        let windowRecordInsertedBeforeLaunch: Bool
         let appName: String
         let title: String
         let launchConfiguration: TerminalSessionLaunchConfiguration
@@ -2172,22 +2173,27 @@ public final class WorkspaceOrchestrator {
         let nextOrder = Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200)
         let windowRecordID = UUID().uuidString
         let appName = TerminalHost.spaces.appName
-        try store.upsert(
-            window: WindowRecord(
-                id: windowRecordID, workspaceID: workspace.id, app: appName, name: generatedTitle, detail: nil, targetURL: nil, windowID: nil,
-                terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
-        if !workspace.isRunning {
+        if !isRemote {
+            try store.upsert(
+                window: WindowRecord(
+                    id: windowRecordID, workspaceID: workspace.id, app: appName, name: generatedTitle, detail: nil, targetURL: nil, windowID: nil,
+                    terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
+        }
+        if !isRemote && !workspace.isRunning {
             let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
             try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
         }
         return WorkspaceTerminalLaunchReservation(
-            sessionID: sessionID, workspaceID: workspace.id, windowRecordID: windowRecordID, appName: appName, title: generatedTitle,
-            launchConfiguration: launchConfiguration, runtimePlan: isRemote ? runtimePlan : nil, createdAt: createdAt, orderIndex: nextOrder)
+            sessionID: sessionID, workspaceID: workspace.id, windowRecordID: windowRecordID, windowRecordInsertedBeforeLaunch: !isRemote,
+            appName: appName, title: generatedTitle, launchConfiguration: launchConfiguration, runtimePlan: isRemote ? runtimePlan : nil,
+            createdAt: createdAt, orderIndex: nextOrder)
     }
 
     @discardableResult public func finishReservedWorkspaceTerminalLaunch(_ reservation: WorkspaceTerminalLaunchReservation) throws -> String {
         do {
-            guard try reservedWorkspaceTerminalWindowExists(reservation) else { return reservation.sessionID }
+            if reservation.windowRecordInsertedBeforeLaunch {
+                guard try reservedWorkspaceTerminalWindowExists(reservation) else { return reservation.sessionID }
+            }
             let session: SpacesTerminalSessionHandle
             if let runtimePlan = reservation.runtimePlan {
                 session = try launchRemoteTerminalSession(
@@ -2202,13 +2208,15 @@ public final class WorkspaceOrchestrator {
                     lifetimePolicy: reservation.launchConfiguration.lifetimePolicy, workspaceID: reservation.launchConfiguration.workspaceID,
                     kind: reservation.launchConfiguration.kind)
             }
-            guard try reservedWorkspaceTerminalWindowExists(reservation) else {
-                if let runtimePlan = reservation.runtimePlan {
-                    terminateRemoteTerminalSession(reservation.sessionID, plan: runtimePlan)
-                } else {
-                    builtInTerminalSessionTerminator(reservation.sessionID)
+            if reservation.windowRecordInsertedBeforeLaunch {
+                guard try reservedWorkspaceTerminalWindowExists(reservation) else {
+                    if let runtimePlan = reservation.runtimePlan {
+                        terminateRemoteTerminalSession(reservation.sessionID, plan: runtimePlan)
+                    } else {
+                        builtInTerminalSessionTerminator(reservation.sessionID)
+                    }
+                    return session.sessionID
                 }
-                return session.sessionID
             }
             let existingWindow = try store.windows(workspaceID: reservation.workspaceID).first { $0.id == reservation.windowRecordID }
             try store.upsert(
@@ -2216,6 +2224,7 @@ public final class WorkspaceOrchestrator {
                     id: reservation.windowRecordID, workspaceID: reservation.workspaceID, app: reservation.appName, name: reservation.title,
                     detail: nil, targetURL: nil, windowID: session.windowID ?? existingWindow?.windowID, terminalTrackingID: session.sessionID,
                     terminalNativeID: session.sessionID, role: "terminal", orderIndex: reservation.orderIndex, lastSeenAt: nowISO8601()))
+            try markWorkspaceRunningIfNeeded(workspaceID: reservation.workspaceID, launchedAtFallback: reservation.createdAt)
             return session.sessionID
         } catch {
             try? store.deleteWindow(id: reservation.windowRecordID)
@@ -2226,6 +2235,11 @@ public final class WorkspaceOrchestrator {
             }
             throw error
         }
+    }
+
+    private func markWorkspaceRunningIfNeeded(workspaceID: String, launchedAtFallback: String) throws {
+        guard let workspace = try store.workspace(id: workspaceID), !workspace.isRunning else { return }
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: workspace.lastLaunchedAt ?? launchedAtFallback)
     }
 
     private func reservedWorkspaceTerminalWindowExists(_ reservation: WorkspaceTerminalLaunchReservation) throws -> Bool {
@@ -2455,7 +2469,6 @@ public final class WorkspaceOrchestrator {
         }.map(\.id)
         let runtimePlan = try workspaceRuntimePlan(workspaceID: workspaceID)
         if runtimePlan.selection.isRemote {
-            builtInTerminalWindowCloser(sessionID)
             terminateRemoteTerminalSession(sessionID, plan: runtimePlan)
         } else {
             terminateBuiltInTerminalSession(sessionID)
@@ -6395,6 +6408,7 @@ public final class WorkspaceOrchestrator {
 
     private func terminateRemoteTerminalSession(_ sessionID: String?, plan: WorkspaceRuntimePlan) {
         guard let sessionID = normalizedTerminalSessionID(sessionID) else { return }
+        builtInTerminalWindowCloser(sessionID)
         _ = try? sendRemoteTerminalServiceRequest(plan: plan, command: "terminate", sessionID: sessionID, refreshWorktree: false)
     }
 
@@ -6749,9 +6763,6 @@ public final class WorkspaceOrchestrator {
             project: project, workspace: workspace, assignedPorts: try store.workspacePortsAssigned(workspaceID: workspaceID))
         if runtimePlan.selection.isRemote {
             terminateRemoteTerminalSession(for: process, plan: runtimePlan)
-            if let sessionID = normalizedTerminalSessionID(process.terminalNativeID ?? process.terminalTrackingID) {
-                builtInTerminalWindowCloser(sessionID)
-            }
             if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
                 try store.deleteWindow(id: terminalWindow.id)
             }

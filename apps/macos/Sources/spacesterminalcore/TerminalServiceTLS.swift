@@ -42,10 +42,12 @@ public enum TerminalServiceTLSFingerprint {
     public struct TerminalServiceTLSIdentity: @unchecked Sendable {
         public let identity: SecIdentity
         public let certificateFingerprint: String
+        private let keychain: SecKeychain?
 
-        public init(identity: SecIdentity, certificateFingerprint: String) {
+        public init(identity: SecIdentity, certificateFingerprint: String, keychain: SecKeychain? = nil) {
             self.identity = identity
             self.certificateFingerprint = certificateFingerprint
+            self.keychain = keychain
         }
     }
 
@@ -59,24 +61,25 @@ public enum TerminalServiceTLSFingerprint {
             try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
             let p12URL = root.appendingPathComponent("identity.p12", isDirectory: false)
             let passphraseURL = root.appendingPathComponent("identity.passphrase", isDirectory: false)
+            let keychain = try serviceKeychain(root: root, fileManager: fileManager)
 
             if fileManager.fileExists(atPath: p12URL.path), fileManager.fileExists(atPath: passphraseURL.path) {
-                return try importIdentity(p12URL: p12URL, passphraseURL: passphraseURL)
+                return try importIdentity(p12URL: p12URL, passphraseURL: passphraseURL, keychain: keychain)
             }
 
             try generateIdentity(root: root, p12URL: p12URL, passphraseURL: passphraseURL, fileManager: fileManager)
-            return try importIdentity(p12URL: p12URL, passphraseURL: passphraseURL)
+            return try importIdentity(p12URL: p12URL, passphraseURL: passphraseURL, keychain: keychain)
         }
 
         public static func rootDirectory(fileManager: FileManager = .default) throws -> URL {
             try TerminalServicePaths.terminalRootDirectory(fileManager: fileManager).appendingPathComponent("daemon-tls", isDirectory: true)
         }
 
-        private static func importIdentity(p12URL: URL, passphraseURL: URL) throws -> TerminalServiceTLSIdentity {
+        private static func importIdentity(p12URL: URL, passphraseURL: URL, keychain: SecKeychain) throws -> TerminalServiceTLSIdentity {
             let p12Data = try Data(contentsOf: p12URL)
             let passphrase = try String(contentsOf: passphraseURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
             var importedItems: CFArray?
-            let options = [kSecImportExportPassphrase as String: passphrase] as CFDictionary
+            let options = [kSecImportExportPassphrase as String: passphrase, kSecImportExportKeychain as String: keychain] as CFDictionary
             let status = SecPKCS12Import(p12Data as CFData, options, &importedItems)
             guard status == errSecSuccess, let items = importedItems as? [[String: Any]],
                 let importedIdentity = items.first?[kSecImportItemIdentity as String]
@@ -89,7 +92,45 @@ public enum TerminalServiceTLSFingerprint {
                 throw TerminalServiceTLSError.certificateExportFailed(certificateStatus)
             }
             return TerminalServiceTLSIdentity(
-                identity: identity, certificateFingerprint: TerminalServiceTLSFingerprint.fingerprint(certificate: certificate))
+                identity: identity, certificateFingerprint: TerminalServiceTLSFingerprint.fingerprint(certificate: certificate), keychain: keychain)
+        }
+
+        private static func serviceKeychain(root: URL, fileManager: FileManager) throws -> SecKeychain {
+            // SecPKCS12Import accepts a SecKeychain import target; using our own keychain avoids login-keychain UI in daemon contexts.
+            let keychainURL = root.appendingPathComponent("identity.keychain-db", isDirectory: false)
+            let passphraseURL = root.appendingPathComponent("identity.keychain.passphrase", isDirectory: false)
+
+            if fileManager.fileExists(atPath: keychainURL.path), fileManager.fileExists(atPath: passphraseURL.path) {
+                let passphrase = try String(contentsOf: passphraseURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+                if let keychain = try openServiceKeychain(url: keychainURL, passphrase: passphrase) { return keychain }
+                try? fileManager.removeItem(at: keychainURL)
+                try? fileManager.removeItem(at: passphraseURL)
+            }
+
+            let passphrase = randomPassphrase()
+            var keychain: SecKeychain?
+            let status = passphrase.withCString { passphrasePointer in
+                SecKeychainCreate(keychainURL.path, UInt32(strlen(passphrasePointer)), passphrasePointer, false, nil, &keychain)
+            }
+            guard status == errSecSuccess, let keychain else { throw TerminalServiceTLSError.identityImportFailed(status) }
+            try passphrase.write(to: passphraseURL, atomically: true, encoding: .utf8)
+            chmod(keychainURL.path, S_IRUSR | S_IWUSR)
+            chmod(passphraseURL.path, S_IRUSR | S_IWUSR)
+            return keychain
+        }
+
+        private static func openServiceKeychain(url: URL, passphrase: String) throws -> SecKeychain? {
+            var keychain: SecKeychain?
+            let openStatus = SecKeychainOpen(url.path, &keychain)
+            guard openStatus == errSecSuccess, let keychain else { return nil }
+            let unlockStatus = passphrase.withCString { passphrasePointer in
+                SecKeychainUnlock(keychain, UInt32(strlen(passphrasePointer)), passphrasePointer, true)
+            }
+            guard unlockStatus == errSecSuccess else {
+                if unlockStatus == errSecNoSuchKeychain { return nil }
+                throw TerminalServiceTLSError.identityImportFailed(unlockStatus)
+            }
+            return keychain
         }
 
         private static func generateIdentity(root: URL, p12URL: URL, passphraseURL: URL, fileManager: FileManager) throws {

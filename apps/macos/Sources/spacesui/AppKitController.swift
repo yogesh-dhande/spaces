@@ -677,240 +677,298 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func setupAgentEventIPCObserver() {
-        agentEventIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.agentEventFired, object: ipcNotificationObject, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.reloadData()
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleAgentEventIPC(_:)), name: IPCNotification.agentEventFired, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        agentEventIPCObserver = self
     }
 
     private func setupShowMainWindowIPCObserver() {
-        showMainWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.showMainWindow, object: ipcNotificationObject, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let window = self.window else { return }
-                self.revealTargetedHotkeyWindow(window)
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleShowMainWindowIPC(_:)), name: IPCNotification.showMainWindow, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        showMainWindowIPCObserver = self
     }
 
     private func setupHideMainWindowIPCObserver() {
-        hideMainWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.hideMainWindow, object: ipcNotificationObject, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let window = self.window else { return }
-                // This IPC is only used by the real-system E2E harness. Hide the
-                // entire app process so the setup state is deterministic before
-                // profiling external-app -> main-window hotkey flows.
-                window.orderOut(nil)
-                NSApp.hide(nil)
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleHideMainWindowIPC(_:)), name: IPCNotification.hideMainWindow, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        hideMainWindowIPCObserver = self
     }
 
     private func setupShowWindowIssueModalIPCObserver() {
-        showWindowIssueModalIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.showWindowIssueModal, object: ipcNotificationObject, queue: .main
-        ) { [weak self] notification in
-            guard let title = notification.userInfo?[IPCNotification.titleUserInfoKey] as? String else { return }
-            guard let detail = notification.userInfo?[IPCNotification.detailUserInfoKey] as? String else { return }
-            Task { @MainActor [weak self, title, detail] in
-                guard let self else { return }
-                self.showWindowIssueModal(title: title, detail: detail)
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleShowWindowIssueModalIPC(_:)), name: IPCNotification.showWindowIssueModal, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        showWindowIssueModalIPCObserver = self
     }
 
     private func setupCycleWorkspaceWindowIPCObserver() {
-        cycleWorkspaceWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.cycleWorkspaceWindow, object: ipcNotificationObject, queue: .main
-        ) { [weak self] notification in
-            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
-            guard let direction = notification.userInfo?[IPCNotification.cycleDirectionUserInfoKey] as? String else { return }
-            let requestID = (notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String)?.trimmingCharacters(
-                in: .whitespacesAndNewlines)
-            let preferredFocusedBuiltInTerminalSessionID = (notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            Task { @MainActor [weak self, workspaceID, direction, requestID, preferredFocusedBuiltInTerminalSessionID] in
-                guard let self else { return }
-                do {
-                    let effectiveRequestID = (requestID?.isEmpty == false) ? requestID : UUID().uuidString
-                    let effectivePreferredTerminalSessionID =
-                        (preferredFocusedBuiltInTerminalSessionID?.isEmpty == false)
-                        ? preferredFocusedBuiltInTerminalSessionID : self.activeBuiltInTerminalSessionID()
-                    let hidesApp: Bool
-                    switch direction {
-                    case "next":
-                        hidesApp = try self.orchestrator.focusNextWindowHidesApp(
-                            workspaceID: workspaceID, requestID: effectiveRequestID,
-                            preferredFocusedBuiltInTerminalSessionID: effectivePreferredTerminalSessionID)
-                    case "previous":
-                        hidesApp = try self.orchestrator.focusPreviousWindowHidesApp(
-                            workspaceID: workspaceID, requestID: effectiveRequestID,
-                            preferredFocusedBuiltInTerminalSessionID: effectivePreferredTerminalSessionID)
-                    default: return
-                    }
-                    if hidesApp {
-                        self.hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true))
-                    } else {
-                        self.dismissCommandPaletteForBuiltInWindowNavigation()
-                    }
-                } catch { self.showError(error) }
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleCycleWorkspaceWindowIPC(_:)), name: IPCNotification.cycleWorkspaceWindow, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        cycleWorkspaceWindowIPCObserver = self
     }
 
     private func setupSelectWorkspaceDetailIPCObserver() {
-        selectWorkspaceDetailIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.selectWorkspaceDetail, object: ipcNotificationObject, queue: .main
-        ) { [weak self] notification in
-            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
-            Task { @MainActor [weak self, workspaceID] in
-                guard let self else { return }
-                guard let (_, workspace) = self.findWorkspace(id: workspaceID) else {
-                    self.logWorkspaceDetailIPC("workspace_not_found id=\(workspaceID)")
-                    return
-                }
-                self.logWorkspaceDetailIPC("selecting id=\(workspaceID) title=\(workspace.title)")
-                self.showingAlerts = false
-                self.showingSettings = false
-                self.selectWorkspace(workspace)
-                self.refreshSelection()
-                if let window = self.window { self.revealTargetedHotkeyWindow(window) }
-                self.logWorkspaceDetailIPC("selected id=\(workspaceID) title=\(workspace.title)")
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleSelectWorkspaceDetailIPC(_:)), name: IPCNotification.selectWorkspaceDetail, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        selectWorkspaceDetailIPCObserver = self
     }
 
     private func setupOpenWorkspaceTerminalIPCObserver() {
-        openWorkspaceTerminalIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.openWorkspaceTerminal, object: ipcNotificationObject, queue: .main
-        ) { [weak self] notification in
-            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
-            Task { @MainActor [weak self, workspaceID] in
-                guard let self else { return }
-                self.openWorkspaceTerminal(workspaceID: workspaceID, route: .ipc)
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleOpenWorkspaceTerminalIPC(_:)), name: IPCNotification.openWorkspaceTerminal, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        openWorkspaceTerminalIPCObserver = self
     }
 
     private func setupRunWorkspaceProcessIPCObserver() {
-        runWorkspaceProcessIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.runWorkspaceProcess, object: nil, queue: .main
-        ) { [weak self] notification in
-            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
-            guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
-            Task { @MainActor [weak self, workspaceID, processName] in
-                guard let self else { return }
-                self.runWorkspaceProcess(workspaceID: workspaceID, processName: processName)
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleRunWorkspaceProcessIPC(_:)), name: IPCNotification.runWorkspaceProcess, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        runWorkspaceProcessIPCObserver = self
     }
 
     private func setupStopWorkspaceProcessIPCObserver() {
-        stopWorkspaceProcessIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.stopWorkspaceProcess, object: nil, queue: .main
-        ) { [weak self] notification in
-            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
-            guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
-            Task { @MainActor [weak self, workspaceID, processName] in
-                guard let self else { return }
-                self.stopWorkspaceProcess(workspaceID: workspaceID, processName: processName)
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleStopWorkspaceProcessIPC(_:)), name: IPCNotification.stopWorkspaceProcess, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        stopWorkspaceProcessIPCObserver = self
     }
 
     private func setupRestartWorkspaceProcessIPCObserver() {
-        restartWorkspaceProcessIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.restartWorkspaceProcess, object: nil, queue: .main
-        ) { [weak self] notification in
-            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
-            guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
-            Task { @MainActor [weak self, workspaceID, processName] in
-                guard let self else { return }
-                self.restartWorkspaceProcess(workspaceID: workspaceID, processName: processName)
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleRestartWorkspaceProcessIPC(_:)), name: IPCNotification.restartWorkspaceProcess, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        restartWorkspaceProcessIPCObserver = self
     }
 
     private func setupLaunchWorkspaceAgentIPCObserver() {
-        launchWorkspaceAgentIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.launchWorkspaceAgent, object: nil, queue: .main
-        ) { [weak self] notification in
-            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
-            guard let launcherName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
-            Task { @MainActor [weak self, workspaceID, launcherName] in
-                guard let self else { return }
-                self.launchWorkspaceAgent(workspaceID: workspaceID, launcherName: launcherName)
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleLaunchWorkspaceAgentIPC(_:)), name: IPCNotification.launchWorkspaceAgent, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        launchWorkspaceAgentIPCObserver = self
     }
 
     private func setupOpenTerminalSessionWindowIPCObserver() {
-        openTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.openTerminalSessionWindow, object: ipcNotificationObject, queue: .main
-        ) { [weak self] notification in
-            guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
-            let modeRawValue = notification.userInfo?[IPCNotification.terminalAttachmentModeUserInfoKey] as? String
-            let mode = modeRawValue.flatMap(TerminalAttachmentMode.init(rawValue:)) ?? .owner
-            let requestID = notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String
-            Task { @MainActor [weak self, sessionID, mode, requestID] in
-                guard let self else { return }
-                self.openTerminalSessionWindow(sessionID: sessionID, mode: mode, requestID: requestID)
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleOpenTerminalSessionWindowIPC(_:)), name: IPCNotification.openTerminalSessionWindow, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        openTerminalSessionWindowIPCObserver = self
     }
 
     private func setupCloseTerminalSessionWindowIPCObserver() {
-        closeTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.closeTerminalSessionWindow, object: ipcNotificationObject, queue: .main
-        ) { [weak self] notification in
-            guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
-            let sessionIsTerminating =
-                (notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? Bool)
-                ?? ((notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? String) == "true")
-            TerminalPerformance.logMetric(
-                "terminal_window_close_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
-                detail: "terminating=\(sessionIsTerminating ? 1 : 0)")
-            Task { @MainActor [weak self, sessionID, sessionIsTerminating] in
-                guard let self else { return }
-                self.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: sessionIsTerminating)
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleCloseTerminalSessionWindowIPC(_:)), name: IPCNotification.closeTerminalSessionWindow, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        closeTerminalSessionWindowIPCObserver = self
     }
 
     private func setupDumpTerminalSessionWindowStateIPCObserver() {
-        dumpTerminalSessionWindowStateIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.dumpTerminalSessionWindowState, object: ipcNotificationObject, queue: .main
-        ) { [weak self] notification in
-            guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
-            guard let outputPath = notification.userInfo?[IPCNotification.outputPathUserInfoKey] as? String else { return }
-            let modeRawValue = notification.userInfo?[IPCNotification.terminalAttachmentModeUserInfoKey] as? String
-            let mode = modeRawValue.flatMap(TerminalAttachmentMode.init(rawValue:))
-            Task { @MainActor [weak self, sessionID, outputPath, mode] in
-                guard let self else { return }
-                self.dumpTerminalSessionWindowState(sessionID: sessionID, mode: mode, outputPath: outputPath)
-            }
-        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleDumpTerminalSessionWindowStateIPC(_:)), name: IPCNotification.dumpTerminalSessionWindowState, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        dumpTerminalSessionWindowStateIPCObserver = self
     }
 
     private func setupFocusTerminalSessionWindowIPCObserver() {
-        focusTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.focusTerminalSessionWindow, object: ipcNotificationObject, queue: .main
-        ) { [weak self] notification in
-            guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
-            let requestID = notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String
-            Task { @MainActor [weak self, sessionID, requestID] in
-                guard let self else { return }
-                self.focusTerminalSessionWindow(sessionID: sessionID, requestID: requestID)
-            }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleFocusTerminalSessionWindowIPC(_:)), name: IPCNotification.focusTerminalSessionWindow, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        focusTerminalSessionWindowIPCObserver = self
+    }
+
+    @objc private nonisolated func handleAgentEventIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        Task { @MainActor [weak self, object] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            self.reloadData()
         }
     }
+
+    @objc private nonisolated func handleShowMainWindowIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        Task { @MainActor [weak self, object] in
+            guard let self, self.matchesProfileIPCObject(object), let window = self.window else { return }
+            self.revealTargetedHotkeyWindow(window)
+        }
+    }
+
+    @objc private nonisolated func handleHideMainWindowIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        Task { @MainActor [weak self, object] in
+            guard let self, self.matchesProfileIPCObject(object), let window = self.window else { return }
+            // This IPC is only used by the real-system E2E harness. Hide the
+            // entire app process so the setup state is deterministic before
+            // profiling external-app -> main-window hotkey flows.
+            window.orderOut(nil)
+            NSApp.hide(nil)
+        }
+    }
+
+    @objc private nonisolated func handleShowWindowIssueModalIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let title = notification.userInfo?[IPCNotification.titleUserInfoKey] as? String else { return }
+        guard let detail = notification.userInfo?[IPCNotification.detailUserInfoKey] as? String else { return }
+        Task { @MainActor [weak self, object, title, detail] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            self.showWindowIssueModal(title: title, detail: detail)
+        }
+    }
+
+    @objc private nonisolated func handleCycleWorkspaceWindowIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+        guard let direction = notification.userInfo?[IPCNotification.cycleDirectionUserInfoKey] as? String else { return }
+        let requestID = (notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String)?.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        let preferredFocusedBuiltInTerminalSessionID = (notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        Task { @MainActor [weak self, object, workspaceID, direction, requestID, preferredFocusedBuiltInTerminalSessionID] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            do {
+                let effectiveRequestID = (requestID?.isEmpty == false) ? requestID : UUID().uuidString
+                let effectivePreferredTerminalSessionID =
+                    (preferredFocusedBuiltInTerminalSessionID?.isEmpty == false)
+                    ? preferredFocusedBuiltInTerminalSessionID : self.activeBuiltInTerminalSessionID()
+                let hidesApp: Bool
+                switch direction {
+                case "next":
+                    hidesApp = try self.orchestrator.focusNextWindowHidesApp(
+                        workspaceID: workspaceID, requestID: effectiveRequestID,
+                        preferredFocusedBuiltInTerminalSessionID: effectivePreferredTerminalSessionID)
+                case "previous":
+                    hidesApp = try self.orchestrator.focusPreviousWindowHidesApp(
+                        workspaceID: workspaceID, requestID: effectiveRequestID,
+                        preferredFocusedBuiltInTerminalSessionID: effectivePreferredTerminalSessionID)
+                default: return
+                }
+                if hidesApp {
+                    self.hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true))
+                } else {
+                    self.dismissCommandPaletteForBuiltInWindowNavigation()
+                }
+            } catch { self.showError(error) }
+        }
+    }
+
+    @objc private nonisolated func handleSelectWorkspaceDetailIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+        Task { @MainActor [weak self, object, workspaceID] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            guard let (_, workspace) = self.findWorkspace(id: workspaceID) else {
+                self.logWorkspaceDetailIPC("workspace_not_found id=\(workspaceID)")
+                return
+            }
+            self.logWorkspaceDetailIPC("selecting id=\(workspaceID) title=\(workspace.title)")
+            self.showingAlerts = false
+            self.showingSettings = false
+            self.selectWorkspace(workspace)
+            self.refreshSelection()
+            if let window = self.window { self.revealTargetedHotkeyWindow(window) }
+            self.logWorkspaceDetailIPC("selected id=\(workspaceID) title=\(workspace.title)")
+        }
+    }
+
+    @objc private nonisolated func handleOpenWorkspaceTerminalIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+        Task { @MainActor [weak self, object, workspaceID] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            self.openWorkspaceTerminal(workspaceID: workspaceID, route: .ipc)
+        }
+    }
+
+    @objc private nonisolated func handleRunWorkspaceProcessIPC(_ notification: Notification) {
+        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+        guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+        Task { @MainActor [weak self, workspaceID, processName] in
+            guard let self else { return }
+            self.runWorkspaceProcess(workspaceID: workspaceID, processName: processName)
+        }
+    }
+
+    @objc private nonisolated func handleStopWorkspaceProcessIPC(_ notification: Notification) {
+        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+        guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+        Task { @MainActor [weak self, workspaceID, processName] in
+            guard let self else { return }
+            self.stopWorkspaceProcess(workspaceID: workspaceID, processName: processName)
+        }
+    }
+
+    @objc private nonisolated func handleRestartWorkspaceProcessIPC(_ notification: Notification) {
+        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+        guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+        Task { @MainActor [weak self, workspaceID, processName] in
+            guard let self else { return }
+            self.restartWorkspaceProcess(workspaceID: workspaceID, processName: processName)
+        }
+    }
+
+    @objc private nonisolated func handleLaunchWorkspaceAgentIPC(_ notification: Notification) {
+        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+        guard let launcherName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+        Task { @MainActor [weak self, workspaceID, launcherName] in
+            guard let self else { return }
+            self.launchWorkspaceAgent(workspaceID: workspaceID, launcherName: launcherName)
+        }
+    }
+
+    @objc private nonisolated func handleOpenTerminalSessionWindowIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+        let modeRawValue = notification.userInfo?[IPCNotification.terminalAttachmentModeUserInfoKey] as? String
+        let mode = modeRawValue.flatMap(TerminalAttachmentMode.init(rawValue:)) ?? .owner
+        let requestID = notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String
+        Task { @MainActor [weak self, object, sessionID, mode, requestID] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            self.openTerminalSessionWindow(sessionID: sessionID, mode: mode, requestID: requestID)
+        }
+    }
+
+    @objc private nonisolated func handleCloseTerminalSessionWindowIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+        let sessionIsTerminating =
+            (notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? Bool)
+            ?? ((notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? String) == "true")
+        Task { @MainActor [weak self, object, sessionID, sessionIsTerminating] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            TerminalPerformance.logMetric(
+                "terminal_window_close_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
+                detail: "terminating=\(sessionIsTerminating ? 1 : 0)")
+            self.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: sessionIsTerminating)
+        }
+    }
+
+    @objc private nonisolated func handleDumpTerminalSessionWindowStateIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+        guard let outputPath = notification.userInfo?[IPCNotification.outputPathUserInfoKey] as? String else { return }
+        let modeRawValue = notification.userInfo?[IPCNotification.terminalAttachmentModeUserInfoKey] as? String
+        let mode = modeRawValue.flatMap(TerminalAttachmentMode.init(rawValue:))
+        Task { @MainActor [weak self, object, sessionID, outputPath, mode] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            self.dumpTerminalSessionWindowState(sessionID: sessionID, mode: mode, outputPath: outputPath)
+        }
+    }
+
+    @objc private nonisolated func handleFocusTerminalSessionWindowIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+        let requestID = notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String
+        Task { @MainActor [weak self, object, sessionID, requestID] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            self.focusTerminalSessionWindow(sessionID: sessionID, requestID: requestID)
+        }
+    }
+
+    private func matchesProfileIPCObject(_ object: String?) -> Bool { object == ipcNotificationObject }
 
     private func dumpTerminalSessionWindowState(sessionID: String, mode: TerminalAttachmentMode?, outputPath: String) {
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
@@ -1617,7 +1675,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     if (refreshResult.didMutateDB || windowCountsChanged) && self.canReloadAfterBackgroundWorkspaceRefresh() {
                         self.requestSidebarReload()
                     }
-                case .failure(let error): if !self.handleDeferredSetupRequirementIfNeeded(error) { self.showError(error) }
+                case .failure(let error): self.handleBackgroundRefreshFailure(error, source: "workspace_window_refresh")
                 }
                 do { try await Task.sleep(for: .seconds(PollingConstants.workspaceWindowRefreshInterval)) } catch { break }
             }
@@ -1743,6 +1801,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let workspacesByProject: [String: [WorkspaceSummary]]
         let workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus]
         let alertsGroups: [AlertsGroup]
+    }
+
+    enum BackgroundRefreshFailureAction: Equatable {
+        case deferredSetup
+        case logOnly
     }
 
     /// Holds a click closure and serves as the NSGestureRecognizer target for clickable row views.
@@ -3712,15 +3775,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {
-        guard shouldRouteToDeferredSetup(for: error) else { return false }
+        guard Self.shouldRouteToDeferredSetup(for: error) else { return false }
         enterSetupFlow(preferredInitialCheckID: .yabaiServiceRunning, entryContext: .deferredRequirement)
         return true
     }
 
-    private func shouldRouteToDeferredSetup(for error: Error) -> Bool {
+    static func shouldRouteToDeferredSetup(for error: Error) -> Bool {
         if case WorkspaceError.yabaiUnavailable(let message) = error { return message.localizedStandardContains("failed to connect to socket") }
         let message = error.localizedDescription
         return message.localizedStandardContains("yabai-msg") && message.localizedStandardContains("failed to connect to socket")
+    }
+
+    static func backgroundRefreshFailureAction(for error: Error) -> BackgroundRefreshFailureAction {
+        shouldRouteToDeferredSetup(for: error) ? .deferredSetup : .logOnly
+    }
+
+    private func handleBackgroundRefreshFailure(_ error: Error, source: String) {
+        switch Self.backgroundRefreshFailureAction(for: error) {
+        case .deferredSetup: _ = handleDeferredSetupRequirementIfNeeded(error)
+        case .logOnly: logBackgroundRefreshFailure(error, source: source)
+        }
+    }
+
+    private func logBackgroundRefreshFailure(_ error: Error, source: String) {
+        guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
+        fputs("spaces: background_refresh_failure source=\(source) error=\(String(describing: error))\n", stderr)
     }
 
     private func loadInitialSidebarData() async {
@@ -3766,7 +3845,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard !Task.isCancelled else { return }
             switch result {
             case .success(let snapshot): self.applySidebarDataSnapshot(snapshot, preserveDetailPane: true)
-            case .failure(let error): if !self.handleDeferredSetupRequirementIfNeeded(error) { self.showError(error) }
+            case .failure(let error): self.handleBackgroundRefreshFailure(error, source: "sidebar_reload")
             }
             self.sidebarReloadTask = nil
             if self.pendingSidebarReloadRequest {
@@ -3870,7 +3949,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 guard outcome.didChangeVisibleState else { return }
                 guard self.canReloadAfterBackgroundWorkspaceRefresh() else { return }
                 self.reloadData()
-            case .failure(let error): if !self.handleDeferredSetupRequirementIfNeeded(error) { self.showError(error) }
+            case .failure(let error): self.handleBackgroundRefreshFailure(error, source: "workspace_detail_refresh")
             }
         }
     }
