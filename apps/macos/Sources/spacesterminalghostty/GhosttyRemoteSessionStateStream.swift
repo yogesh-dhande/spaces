@@ -15,7 +15,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
 
     private let socketPath: String
     private let queue: DispatchQueue
-    private let initialStateProvider: @Sendable () -> GhosttyRemoteSessionStatePayload?
+    private let initialStateProvider: @Sendable (_ hasExistingClients: Bool) -> GhosttyRemoteSessionStatePayload?
     private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
     private var clientSources: [Int32: DispatchSourceRead] = [:]
@@ -23,7 +23,16 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
     init(socketPath: String, queue: DispatchQueue, initialStateProvider: @escaping @Sendable () -> GhosttyRemoteSessionStatePayload?) {
         self.socketPath = socketPath
         self.queue = queue
-        self.initialStateProvider = initialStateProvider
+        self.initialStateProvider = { _ in initialStateProvider() }
+    }
+
+    init(
+        socketPath: String, queue: DispatchQueue,
+        initialStateProviderWithConnectionState: @escaping @Sendable (_ hasExistingClients: Bool) -> GhosttyRemoteSessionStatePayload?
+    ) {
+        self.socketPath = socketPath
+        self.queue = queue
+        initialStateProvider = initialStateProviderWithConnectionState
     }
 
     func start() throws {
@@ -93,12 +102,13 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
                 Self.applySocketBuffers(clientFD)
                 try Self.setNonBlocking(clientFD)
                 Self.applySocketTimeouts(clientFD)
+                let hasExistingClients = !clientSources.isEmpty
                 let source = DispatchSource.makeReadSource(fileDescriptor: clientFD, queue: queue)
                 source.setEventHandler { [weak self] in self?.drainClientInput(clientFD) }
                 source.setCancelHandler { close(clientFD) }
                 clientSources[clientFD] = source
                 source.resume()
-                if let payload = initialStateProvider(), let data = try? GhosttyRemoteSessionStateCodec.encodeLine(payload) {
+                if let payload = initialStateProvider(hasExistingClients), let data = try? GhosttyRemoteSessionStateCodec.encodeLine(payload) {
                     if !Self.writeAll(data: data, to: clientFD) { closeClient(clientFD) }
                 }
             } catch { close(clientFD) }
@@ -339,8 +349,9 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         return pendingEvents.removeFirst()
     }
 
-    private static func canCoalescePendingEvent(_ pending: GhosttyRemoteSessionStatePayload, with update: GhosttyRemoteSessionStatePayload) -> Bool {
+    static func canCoalescePendingEvent(_ pending: GhosttyRemoteSessionStatePayload, with update: GhosttyRemoteSessionStatePayload) -> Bool {
         guard pending.sessionID == update.sessionID, pending.reason == update.reason else { return false }
+        guard !containsDeltaRenderUpdate(pending), !containsDeltaRenderUpdate(update) else { return false }
         switch update.reason {
         case TerminalRemoteSessionStateReason.initial, TerminalRemoteSessionStateReason.runtimeState, TerminalRemoteSessionStateReason.resize,
             TerminalRemoteSessionStateReason.stateChange:
@@ -348,6 +359,8 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         default: return false
         }
     }
+
+    private static func containsDeltaRenderUpdate(_ payload: GhosttyRemoteSessionStatePayload) -> Bool { payload.decodedRenderUpdate?.kind == .delta }
 
     private static func shutdownSocket(_ fileDescriptor: Int32) {
         #if canImport(Darwin)
