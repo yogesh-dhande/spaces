@@ -85,7 +85,7 @@ public enum ComputeHostDraftBuilder {
         let hostID = existing?.id ?? slug(source: enteredDisplayName ?? resolvedHostname, fallback: resolvedHostname)
         let formatter = ISO8601DateFormatter()
         let timestamp = formatter.string(from: now)
-        let workspaceRoot = normalized(draft.workspaceRoot) ?? defaultWorkspaceRoot
+        let workspaceRoot = existing?.workspaceRoot ?? normalized(draft.workspaceRoot) ?? defaultWorkspaceRoot
 
         let host = ComputeHostRecord(
             id: hostID, name: displayName, sshHost: enteredHost, sshUser: normalized(draft.sshUser) ?? resolvedSSH?.user,

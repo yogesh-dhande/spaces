@@ -119,7 +119,7 @@ Spaces focuses those windows; it does not decide their geometry.
 ## Compute Hosts
 - The Mac profile owns named compute-host configuration, including SSH bootstrap details, workspace root, daemon endpoint, and daemon endpoint fingerprint.
 - Remote `spacesd` daemon traffic uses pinned TLS. Host records store the daemon certificate fingerprint, and clients reject endpoint identity mismatches before sending authenticated requests.
-- The Mac sidebar exposes a Remote Hosts utility panel for adding or updating named remote compute hosts. The panel asks for SSH host, SSH user, optional display name, and advanced SSH port or workspace folder overrides; daemon host, daemon port, auth token, host ID, and certificate pin are internal implementation details.
+- The Mac sidebar exposes a Remote Hosts utility panel for adding or updating named remote compute hosts. The panel asks for SSH host, SSH user, optional display name, and advanced SSH port; workspace root, daemon host, daemon port, auth token, host ID, and certificate pin are internal implementation details.
 - Remote host connection runs SSH bootstrap first, stores the generated daemon auth token in Keychain, saves the returned certificate fingerprint, validates the direct pinned-TLS `spacesd` endpoint, and saves the host only after validation succeeds. Direct reachability failures should explain that the Mac, iPhone, VPN, firewall, or cloud security group must allow access to `spacesd`.
 - The local Mac is the implicit default compute host and does not require a persisted host record.
 - Projects can define a default compute host, and workspaces can define an override host. Effective host selection uses workspace override first, project default second, and local Mac last.

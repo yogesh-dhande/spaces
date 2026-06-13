@@ -53,18 +53,13 @@ private final class CommandPalettePanel: NSPanel {
     let sshUserField: NSTextField
     let sshPortField: NSTextField
     let displayNameField: NSTextField
-    let workspaceRootField: NSTextField
     var editingHostID: String?
 
-    init(
-        hostField: NSTextField, sshUserField: NSTextField, displayNameField: NSTextField, sshPortField: NSTextField, workspaceRootField: NSTextField,
-        editingHostID: String? = nil
-    ) {
+    init(hostField: NSTextField, sshUserField: NSTextField, displayNameField: NSTextField, sshPortField: NSTextField, editingHostID: String? = nil) {
         self.hostField = hostField
         self.sshUserField = sshUserField
         self.displayNameField = displayNameField
         self.sshPortField = sshPortField
-        self.workspaceRootField = workspaceRootField
         self.editingHostID = editingHostID
     }
 }
@@ -1432,12 +1427,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         let slug = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         return slug.isEmpty ? "remote-host" : slug
-    }
-
-    static func normalizedRemoteWorkspaceRoot(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        let stripped = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        return stripped.isEmpty ? "/" : "/\(stripped)"
     }
 
     private static func terminalSessionIsRunning(sessionID: String) -> Bool {
@@ -4514,7 +4503,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.sshUserField.stringValue = host.sshUser ?? ""
         refs.displayNameField.stringValue = host.name
         refs.sshPortField.stringValue = host.sshPort.map(String.init) ?? ""
-        refs.workspaceRootField.stringValue = host.workspaceRoot
     }
 
     private func clearComputeHostForm(_ refs: ComputeHostFormRefs) {
@@ -4523,7 +4511,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.sshUserField.stringValue = ""
         refs.displayNameField.stringValue = ""
         refs.sshPortField.stringValue = ""
-        refs.workspaceRootField.stringValue = ComputeHostDraftBuilder.defaultWorkspaceRoot
     }
 
     private func computeHostDraft(from refs: ComputeHostFormRefs) throws -> ComputeHostDraft {
@@ -4531,8 +4518,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let sshPort = try optionalComputeHostPort(refs.sshPortField.stringValue, label: "SSH port")
         return ComputeHostDraft(
             host: host, sshUser: Self.trimmedNonEmpty(refs.sshUserField.stringValue),
-            displayName: Self.trimmedNonEmpty(refs.displayNameField.stringValue), sshPort: sshPort,
-            workspaceRoot: Self.trimmedNonEmpty(refs.workspaceRootField.stringValue))
+            displayName: Self.trimmedNonEmpty(refs.displayNameField.stringValue), sshPort: sshPort)
     }
 
     private func computeHostPort(_ value: String, label: String) throws -> Int {
@@ -7589,13 +7575,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         displayNameField.setAccessibilityIdentifier("remote-hosts-display-name")
         let sshPortField = computeHostTextField(placeholder: "22", value: "")
         sshPortField.setAccessibilityIdentifier("remote-hosts-ssh-port")
-        let workspaceRootField = computeHostTextField(
-            placeholder: ComputeHostDraftBuilder.defaultWorkspaceRoot, value: ComputeHostDraftBuilder.defaultWorkspaceRoot)
-        workspaceRootField.setAccessibilityIdentifier("remote-hosts-workspace-folder")
 
         let refs = ComputeHostFormRefs(
-            hostField: hostField, sshUserField: sshUserField, displayNameField: displayNameField, sshPortField: sshPortField,
-            workspaceRootField: workspaceRootField)
+            hostField: hostField, sshUserField: sshUserField, displayNameField: displayNameField, sshPortField: sshPortField)
         let tag = UUID().uuidString.hashValue
         computeHostFormRefsByTag[tag] = refs
 
@@ -7607,8 +7589,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let disclosureSymbol = remoteHostAdvancedVisible ? "chevron.down" : "chevron.right"
         let advancedButton = actionButton(
-            title: "Advanced", symbol: disclosureSymbol, tooltip: "Show SSH port and workspace folder options",
-            action: #selector(toggleRemoteHostAdvanced), primary: false)
+            title: "Advanced", symbol: disclosureSymbol, tooltip: "Show SSH port option", action: #selector(toggleRemoteHostAdvanced), primary: false)
         advancedButton.setAccessibilityIdentifier("remote-hosts-advanced")
 
         let fields: [NSView] = [
@@ -7618,10 +7599,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ]
         var rows = fields
         rows.append(advancedButton)
-        if remoteHostAdvancedVisible {
-            rows.append(labeledInputRow(label: "SSH port", input: sshPortField, labelWidth: 112))
-            rows.append(labeledInputRow(label: "Workspace folder", input: workspaceRootField, labelWidth: 112))
-        }
+        if remoteHostAdvancedVisible { rows.append(labeledInputRow(label: "SSH port", input: sshPortField, labelWidth: 112)) }
         rows.append(mobilePanelButtonRow([connectButton]))
         return mobilePanelSection(icon: "externaldrive.connected.to.line.below", title: "Connect to a Mac or VM", rows: rows)
     }

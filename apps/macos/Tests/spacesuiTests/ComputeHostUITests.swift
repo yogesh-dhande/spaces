@@ -10,9 +10,4 @@ import Testing
     @Test func computeHostIDCandidateFallsBackToDaemonHost() {
         #expect(AppKitController.computeHostIDCandidate(name: "  ", sshHost: nil, daemonHost: "Remote Host.local") == "remote-host-local")
     }
-
-    @Test func normalizedRemoteWorkspaceRootAddsLeadingSlashAndTrimsTrailingSlash() {
-        #expect(AppKitController.normalizedRemoteWorkspaceRoot("tmp/spaces-remote/workspaces/") == "/tmp/spaces-remote/workspaces")
-        #expect(AppKitController.normalizedRemoteWorkspaceRoot("/") == "/")
-    }
 }

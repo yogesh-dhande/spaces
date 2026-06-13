@@ -30,6 +30,24 @@ final class ComputeHostDraftTests: XCTestCase {
         XCTAssertEqual(prepared.host.name, "builder")
     }
 
+    func testPrepareDraftPreservesExistingWorkspaceRoot() throws {
+        let existing = ComputeHostRecord(
+            id: "lab-mac", name: "Lab Mac", sshHost: "old-builder", sshUser: "runner", sshPort: 22, workspaceRoot: "/Users/runner/.spaces/workspaces",
+            daemonEndpoint: SpacesDaemonEndpoint(host: "old-builder.internal", port: 7443, certificateFingerprint: "SHA256:abc123"),
+            createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+
+        let prepared = try ComputeHostDraftBuilder.prepare(
+            draft: ComputeHostDraft(host: "builder", sshUser: "runner", displayName: "Lab Mac", sshPort: 2222, workspaceRoot: "/tmp/new-root"),
+            resolvedSSH: SSHResolvedConfiguration(hostname: "builder.internal"), existing: existing, authToken: "token-123",
+            now: Date(timeIntervalSince1970: 60))
+
+        XCTAssertEqual(prepared.host.workspaceRoot, existing.workspaceRoot)
+        XCTAssertEqual(prepared.host.id, existing.id)
+        XCTAssertEqual(prepared.host.createdAt, existing.createdAt)
+        XCTAssertEqual(prepared.host.sshHost, "builder")
+        XCTAssertEqual(prepared.host.sshPort, 2222)
+    }
+
     func testReachabilityErrorExplainsDirectNetworkRequirement() {
         let error = ComputeHostReachabilityError(host: "10.0.0.42", port: 7443, underlyingDescription: "connection refused")
         let message = error.errorDescription ?? ""
