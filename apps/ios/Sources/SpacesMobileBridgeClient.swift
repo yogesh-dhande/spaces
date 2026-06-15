@@ -587,6 +587,12 @@ struct SpacesMobileBridgeClient: Sendable {
 
 struct SpacesMobileTerminalDaemonClient: Sendable {
     let endpoint: SpacesMobileTerminalDaemonEndpoint
+    private let commandChannel: DirectTerminalServiceCommandChannel
+
+    init(endpoint: SpacesMobileTerminalDaemonEndpoint) {
+        self.endpoint = endpoint
+        commandChannel = DirectTerminalServiceCommandChannel(endpoint: endpoint)
+    }
 
     func subscribe(
         sessionID: String,
@@ -724,25 +730,21 @@ struct SpacesMobileTerminalDaemonClient: Sendable {
     }
 
     private func control(sessionID: String, request: TerminalControlRequest, timeout: Duration) async throws {
-        let response = try await controlResponse(sessionID: sessionID, request: request, timeout: timeout)
-        if let controlResponse = response.controlResponse, !controlResponse.ok {
-            throw SpacesMobileBridgeClientError.requestFailed(controlResponse.message)
-        }
+        _ = try await controlResponse(sessionID: sessionID, request: request, timeout: timeout)
     }
 
     private func controlResponse(sessionID: String, request: TerminalControlRequest, timeout: Duration) async throws -> TerminalServiceResponse {
         let response = try await send(.init(command: "control", sessionID: sessionID, controlRequest: request), timeout: timeout)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
+        guard let controlResponse = response.controlResponse else {
+            throw SpacesMobileBridgeClientError.requestFailed("Remote spacesd did not return terminal control response.")
+        }
+        guard controlResponse.ok else { throw SpacesMobileBridgeClientError.requestFailed(controlResponse.message) }
         return response
     }
 
     private func send(_ request: TerminalServiceRequest, timeout: Duration) async throws -> TerminalServiceResponse {
-        let endpoint = endpoint
-        return try await Task.detached(priority: .userInitiated) {
-            try TerminalServiceClient.sendPinnedTLS(
-                request: request, host: endpoint.host, port: endpoint.port, authToken: endpoint.authToken,
-                certificateFingerprint: endpoint.certificateFingerprint, timeout: Self.timeInterval(timeout))
-        }.value
+        try await commandChannel.send(request: request, timeout: timeout)
     }
 
     private static func mobileLinkMetadata(_ metadata: TerminalServiceTerminalLinkMetadata) throws -> SpacesMobileTerminalLinkMetadata {
@@ -768,7 +770,7 @@ struct SpacesMobileTerminalDaemonClient: Sendable {
         return TimeInterval(components.seconds) + TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000
     }
 
-    private static func makePinnedTLSConnection(endpoint: SpacesMobileTerminalDaemonEndpoint) throws -> NWConnection {
+    fileprivate static func makePinnedTLSConnection(endpoint: SpacesMobileTerminalDaemonEndpoint) throws -> NWConnection {
         let expectedFingerprint = endpoint.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !expectedFingerprint.isEmpty else { throw TerminalServiceTLSError.missingCertificateFingerprint }
         guard let port = NWEndpoint.Port(rawValue: UInt16(endpoint.port)) else { throw TerminalServiceTLSError.invalidPort(endpoint.port) }
@@ -792,6 +794,158 @@ struct SpacesMobileTerminalDaemonClient: Sendable {
             }, DispatchQueue.global(qos: .userInitiated))
 
         return NWConnection(host: NWEndpoint.Host(endpoint.host), port: port, using: NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options()))
+    }
+}
+
+private actor DirectTerminalServiceCommandChannel {
+    private let endpoint: SpacesMobileTerminalDaemonEndpoint
+    private let queue = DispatchQueue(label: "spaces.mobile.direct.command")
+    private var connection: NWConnection?
+    private var readBuffer = Data()
+
+    init(endpoint: SpacesMobileTerminalDaemonEndpoint) {
+        self.endpoint = endpoint
+    }
+
+    func send(request: TerminalServiceRequest, timeout: Duration) async throws -> TerminalServiceResponse {
+        var request = request
+        if request.authToken == nil {
+            request = request.withAuthToken(endpoint.authToken)
+        }
+        let command = request.command
+        let controlCommand = request.controlRequest?.command
+        let sessionID = request.sessionID ?? "-"
+        let connectionWasOpen = connection != nil
+        let startedAt = Date()
+        let connection = try await connectIfNeeded(timeout: timeout, sessionID: sessionID, command: command)
+        do {
+            var data = try JSONEncoder().encode(request)
+            data.append(0x0A)
+            try await Self.send(data: data, on: connection, timeout: timeout)
+            let responseData = try await readLine(from: connection, timeout: timeout)
+            let response = try JSONDecoder().decode(TerminalServiceResponse.self, from: responseData)
+            logEvent(
+                sessionID: sessionID,
+                name: "direct_command_request",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                count: data.count,
+                attributes: [
+                    "command": command,
+                    "control_command": controlCommand ?? "",
+                    "connection_reused": connectionWasOpen ? "1" : "0",
+                    "ok": response.ok ? "1" : "0",
+                ])
+            if !response.ok, response.message.localizedStandardContains("unauthorized") {
+                close()
+            }
+            return response
+        } catch {
+            close()
+            logEvent(
+                sessionID: sessionID,
+                name: "direct_command_request",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                attributes: [
+                    "command": command,
+                    "control_command": controlCommand ?? "",
+                    "connection_reused": connectionWasOpen ? "1" : "0",
+                    "error": String(describing: error),
+                ])
+            throw error
+        }
+    }
+
+    func close() {
+        connection?.cancel()
+        connection = nil
+        readBuffer.removeAll(keepingCapacity: true)
+    }
+
+    private func connectIfNeeded(timeout: Duration, sessionID: String, command: String) async throws -> NWConnection {
+        if let connection { return connection }
+        let startedAt = Date()
+        let createdConnection = try SpacesMobileTerminalDaemonClient.makePinnedTLSConnection(endpoint: endpoint)
+        do {
+            try await SpacesMobileBridgeConnectionSupport.waitUntilReady(createdConnection, queue: queue, timeout: timeout)
+        } catch {
+            createdConnection.cancel()
+            logEvent(
+                sessionID: sessionID,
+                name: "direct_command_connect",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                attributes: ["command": command, "error": String(describing: error)])
+            throw error
+        }
+        connection = createdConnection
+        logEvent(
+            sessionID: sessionID,
+            name: "direct_command_connect",
+            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            attributes: ["command": command, "connection_reused": "0"])
+        return createdConnection
+    }
+
+    private static func send(data: Data, on connection: NWConnection, timeout: Duration) async throws {
+        try await SpacesMobileBridgeConnectionSupport.withTimeout(timeout) {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                let resume = OneShotContinuation(continuation)
+                connection.send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed { error in
+                    if let error {
+                        resume.resume(throwing: error)
+                    } else {
+                        resume.resume(returning: ())
+                    }
+                })
+            }
+        }
+    }
+
+    private func readLine(from connection: NWConnection, timeout: Duration) async throws -> Data {
+        try await SpacesMobileBridgeConnectionSupport.withTimeout(timeout) {
+            try await self.readLineAccumulating(from: connection)
+        }
+    }
+
+    private func readLineAccumulating(from connection: NWConnection) async throws -> Data {
+        if let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
+            let line = Data(readBuffer.prefix(upTo: newlineIndex))
+            readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
+            return line
+        }
+        let (content, isComplete) = try await Self.receiveChunk(from: connection)
+        if let content, !content.isEmpty { readBuffer.append(content) }
+        if let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
+            let line = Data(readBuffer.prefix(upTo: newlineIndex))
+            readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
+            return line
+        }
+        if isComplete {
+            if readBuffer.isEmpty {
+                throw SpacesMobileBridgeClientError.requestFailed("The direct remote connection was cancelled.")
+            }
+            defer { readBuffer.removeAll(keepingCapacity: true) }
+            return readBuffer
+        }
+        return try await readLineAccumulating(from: connection)
+    }
+
+    private static func receiveChunk(from connection: NWConnection) async throws -> (Data?, Bool) {
+        try await withCheckedThrowingContinuation { continuation in
+            let resume = OneShotContinuation(continuation)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
+                if let error {
+                    resume.resume(throwing: error)
+                    return
+                }
+                resume.resume(returning: (content, isComplete))
+            }
+        }
+    }
+
+    private nonisolated func logEvent(sessionID: String, name: String, elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String]) {
+        SpacesMobileTerminalPerformanceLogger.emit(
+            SpacesMobileTerminalPerformanceEvent(
+                sessionID: sessionID, source: "ios-direct-daemon", name: name, elapsedMS: elapsedMS, count: count, attributes: attributes))
     }
 }
 

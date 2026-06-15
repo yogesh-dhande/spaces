@@ -480,11 +480,13 @@ SPACES_CLI="$SPACES_CLI" \
 SPACES_E2E="$SPACES_E2E" \
 python3 - "${SELECTED_SCENARIOS[@]}" <<'PY'
 import base64
+import atexit
 import json
 import math
 import os
 import queue
 import re
+import select
 import sqlite3
 import statistics
 import subprocess
@@ -695,28 +697,6 @@ def bridge_request(payload: dict) -> tuple[dict, float]:
     return json.loads(completed.stdout), (time.perf_counter() - started) * 1000
 
 
-def bridge_request_no_check(payload: dict, timeout: float = 20) -> tuple[dict | None, float]:
-    started = time.perf_counter()
-    try:
-        completed = run(
-            [
-                spacese2e,
-                "mobile-request",
-                "--host",
-                host,
-                "--port",
-                str(port),
-                "--transport-key=" + transport_key,
-                "--request-json",
-                json.dumps(payload),
-            ],
-            timeout=timeout,
-        )
-    except subprocess.CalledProcessError:
-        return None, (time.perf_counter() - started) * 1000
-    return json.loads(completed.stdout), (time.perf_counter() - started) * 1000
-
-
 def bridge_connect_stream(payload: dict) -> subprocess.Popen:
     return subprocess.Popen(
         [
@@ -771,25 +751,103 @@ def terminal_service_payload(payload: dict, endpoint: dict) -> dict:
 
 def direct_request(endpoint: dict, payload: dict, timeout: float = 20) -> tuple[dict, float]:
     started = time.perf_counter()
-    completed = run(
-        [
-            spacese2e,
-            "terminal-service-tls-request",
-            "--host",
-            endpoint["host"],
-            "--port",
-            str(endpoint["port"]),
-            "--auth-token",
-            endpoint["authToken"],
-            "--certificate-fingerprint",
-            endpoint["certificateFingerprint"],
-            "--request-json",
-            json.dumps(terminal_service_payload(payload, endpoint)),
-        ],
-        timeout=timeout,
-    )
-    response = json.loads(completed.stdout)
+    response = direct_tls_session(endpoint).request(terminal_service_payload(payload, endpoint), timeout=timeout)
+    assert_direct_response_shape(payload, response)
     return response, (time.perf_counter() - started) * 1000
+
+
+def assert_direct_response_shape(payload: dict, response: dict) -> None:
+    command = payload["command"]
+    if command in ("attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "resize", "scroll"):
+        assert "controlResponse" in response, {"command": command, "response": response}
+    if command == "state":
+        assert "sessionState" in response, {"command": command, "response": response}
+    if command == "resolveTerminalLink":
+        assert "terminalLinkMetadata" in response, {"command": command, "response": response}
+    if command == "readTerminalLinkChunk":
+        assert "terminalLinkChunk" in response, {"command": command, "response": response}
+
+
+class DirectTLSSession:
+    def __init__(self, endpoint: dict):
+        self.process = subprocess.Popen(
+            [
+                spacese2e,
+                "terminal-service-tls-session",
+                "--host",
+                endpoint["host"],
+                "--port",
+                str(endpoint["port"]),
+                "--auth-token",
+                endpoint["authToken"],
+                "--certificate-fingerprint",
+                endpoint["certificateFingerprint"],
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=base_env,
+            bufsize=1,
+        )
+
+    def request(self, payload: dict, timeout: float = 20) -> dict:
+        if self.process.poll() is not None:
+            raise RuntimeError(f"direct TLS session exited with status {self.process.returncode}")
+        assert self.process.stdin is not None
+        assert self.process.stdout is not None
+        self.process.stdin.write(json.dumps(payload) + "\n")
+        self.process.stdin.flush()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            remaining = max(deadline - time.monotonic(), 0)
+            readable, _, _ = select.select([self.process.stdout], [], [], min(remaining, 0.25))
+            if not readable:
+                if self.process.poll() is not None:
+                    raise RuntimeError(f"direct TLS session exited with status {self.process.returncode}")
+                continue
+            line = self.process.stdout.readline()
+            if line:
+                return json.loads(line)
+            if self.process.poll() is not None:
+                raise RuntimeError(f"direct TLS session exited with status {self.process.returncode}")
+            time.sleep(0.01)
+        raise TimeoutError("timed out waiting for direct TLS session response")
+
+    def close(self):
+        if self.process.poll() is not None:
+            return
+        try:
+            if self.process.stdin:
+                self.process.stdin.close()
+        except BrokenPipeError:
+            pass
+        try:
+            self.process.terminate()
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=2)
+
+
+direct_tls_sessions: dict[tuple[str, int, str, str], DirectTLSSession] = {}
+
+
+def direct_tls_session(endpoint: dict) -> DirectTLSSession:
+    key = (endpoint["host"], int(endpoint["port"]), endpoint["certificateFingerprint"], endpoint["authToken"])
+    session = direct_tls_sessions.get(key)
+    if session is None or session.process.poll() is not None:
+        session = DirectTLSSession(endpoint)
+        direct_tls_sessions[key] = session
+    return session
+
+
+def close_direct_tls_sessions():
+    for session in list(direct_tls_sessions.values()):
+        session.close()
+
+
+atexit.register(close_direct_tls_sessions)
 
 
 def direct_connect_stream(endpoint: dict, payload: dict) -> subprocess.Popen:
@@ -866,15 +924,6 @@ def request(payload: dict, terminal_target: str = "local") -> tuple[dict, float]
     if terminal_target == "remote":
         return direct_request(remote_daemon_endpoint(payload["sessionID"]), payload)
     return bridge_request(payload)
-
-
-def request_no_check(payload: dict, terminal_target: str = "local", timeout: float = 20) -> tuple[dict | None, float]:
-    if terminal_target == "remote":
-        try:
-            return direct_request(remote_daemon_endpoint(payload["sessionID"], timeout=timeout), payload, timeout=timeout)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, TimeoutError):
-            return None, 0
-    return bridge_request_no_check(payload, timeout=timeout)
 
 
 def connect_stream(payload: dict, terminal_target: str) -> subprocess.Popen:
@@ -1325,24 +1374,7 @@ auth_token = pair_response["issuedAuthToken"]
 def wait_for_bridge_session_available(session_id: str, terminal_target: str, timeout: float = 60) -> None:
     if terminal_target != "remote":
         return
-    deadline = time.monotonic() + timeout
-    last_response = None
-    while time.monotonic() < deadline:
-        response, _ = request_no_check(
-            {
-                "command": "state",
-                "authToken": auth_token,
-                "clientApp": client_app,
-                "sessionID": session_id,
-            },
-            terminal_target,
-            timeout=5,
-        )
-        last_response = response
-        if response and response.get("ok"):
-            return
-        time.sleep(0.25)
-    raise TimeoutError(f"timed out waiting for bridge to resolve remote terminal {session_id}: {last_response}")
+    remote_daemon_endpoint(session_id, timeout=timeout)
 
 
 def attach_pair(session_id: str, terminal_target: str) -> tuple[str, str, subprocess.Popen | None]:
@@ -1440,6 +1472,7 @@ def fetch_state(session_id: str, terminal_target: str = "local") -> dict:
         terminal_target,
     )
     assert response["ok"], response
+    assert "sessionState" in response, response
     return materialize_render_update(response["sessionState"])
 
 
@@ -1532,6 +1565,7 @@ def summarize_phases(measurements: list[dict]) -> dict:
     return {
         "enqueue_to_rpc_begin": summarize_latencies(measurements, "enqueue_to_rpc_begin_ms"),
         "rpc_duration": summarize_latencies(measurements, "rpc_ms"),
+        "direct_command_request": summarize_latencies(measurements, "direct_command_request_ms"),
         "event_to_frame_publish": summarize_latencies(measurements, "event_to_frame_publish_ms"),
         "event_to_host_publish": summarize_latencies(measurements, "event_to_host_publish_ms"),
         "host_publish_to_relay_read": summarize_latencies(measurements, "host_publish_to_relay_read_ms"),
@@ -1671,6 +1705,14 @@ def run_ios_input_latency(terminal_target: str) -> dict:
             rpc_end_ns = now_ns()
             rpc_duration_ms = ms_between(rpc_begin_ns, rpc_end_ns)
             event("ios_input_rpc_end", scenario, probe_id, rpc_end_ns, rpc_ms=rpc_duration_ms)
+            direct_command = last_performance_event(
+                session_id,
+                "ios-direct-daemon",
+                "direct_command_request",
+                rpc_begin_ns,
+                before_ns=rpc_end_ns,
+                require_render_payload=False,
+            )
             visible_payload, visible_ns = wait_for_line(stream, lambda payload, token=token: token in plain_text(payload), timeout=10)
             visible_meta = visible_render_metadata(visible_payload)
             frame_publish = last_performance_event(session_id, "mac-host", "render_frame_payload_publish", begin_ns, before_ns=visible_ns)
@@ -1709,6 +1751,8 @@ def run_ios_input_latency(terminal_target: str) -> dict:
                 "enqueue_to_rpc_begin_ms": ms_between(enqueue_ns, rpc_begin_ns),
                 "flush_to_rpc_begin_ms": ms_between(flush_ns, rpc_begin_ns),
                 "rpc_ms": round(rpc_ms, 3),
+                "direct_command_request_ms": (direct_command[0].get("elapsedMS") if direct_command else (round(rpc_ms, 3) if terminal_target == "remote" else None)),
+                "direct_command_connection_reused": ((direct_command[0].get("attributes") or {}).get("connection_reused") if direct_command else None),
                 "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
                 "event_to_frame_publish_ms": event_to_frame_publish_ms,
                 "event_to_host_publish_ms": event_to_frame_publish_ms,
@@ -1775,6 +1819,14 @@ def run_ios_scrollback_latency(terminal_target: str) -> dict:
             assert response["ok"], response
             rpc_end_ns = now_ns()
             event("ios_scroll_rpc_end", scenario, probe_id, rpc_end_ns, rpc_ms=ms_between(rpc_begin_ns, rpc_end_ns))
+            direct_command = last_performance_event(
+                session_id,
+                "ios-direct-daemon",
+                "direct_command_request",
+                rpc_begin_ns,
+                before_ns=rpc_end_ns,
+                require_render_payload=False,
+            )
             try:
                 remote_frame = wait_for_line(stream, lambda payload, before_text=before_text: plain_text(payload) not in ("", before_text), timeout=remote_frame_timeout)
             except TimeoutError:
@@ -1853,6 +1905,8 @@ def run_ios_scrollback_latency(terminal_target: str) -> dict:
                 "host_publish_to_client_visible_ms": frame_publish_to_visible_ms,
                 "rendered_change_latency_ms": rendered_change_latency_ms,
                 "rpc_ms": round(rpc_ms, 3),
+                "direct_command_request_ms": (direct_command[0].get("elapsedMS") if direct_command else (round(rpc_ms, 3) if terminal_target == "remote" else None)),
+                "direct_command_connection_reused": ((direct_command[0].get("attributes") or {}).get("connection_reused") if direct_command else None),
                 "scroll_vertical": scroll_delta,
                 "no_op": no_op,
             }
@@ -2017,6 +2071,7 @@ for result_key, result in scenario_results.items():
             "  phases: "
             f"enqueue_to_rpc_begin p95={format_ms(phases['enqueue_to_rpc_begin']['p95_ms'])}, "
             f"rpc p95={format_ms(phases['rpc_duration']['p95_ms'])}, "
+            f"direct_command p95={format_ms(phases['direct_command_request']['p95_ms'])}, "
             f"event_to_frame_publish p95={format_ms(phases['event_to_frame_publish']['p95_ms'])}, "
             f"event_to_host_publish p95={format_ms(phases['event_to_host_publish']['p95_ms'])}, "
             f"host_publish_to_relay_read p95={format_ms(phases['host_publish_to_relay_read']['p95_ms'])}, "

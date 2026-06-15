@@ -402,6 +402,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                     }
                     if let newlineIndex = self.buffer.firstIndex(of: 0x0A) {
                         let requestData = Data(self.buffer.prefix(upTo: newlineIndex))
+                        self.buffer.removeSubrange(self.buffer.startIndex...newlineIndex)
                         self.processRequest(requestData)
                         return
                     }
@@ -413,25 +414,53 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                 }
             }
 
+            private func processBufferedRequestIfAvailable() {
+                if let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                    let requestData = Data(buffer.prefix(upTo: newlineIndex))
+                    buffer.removeSubrange(buffer.startIndex...newlineIndex)
+                    processRequest(requestData)
+                    return
+                }
+                receiveNext()
+            }
+
             private func processRequest(_ requestData: Data) {
                 let response: TerminalServiceResponse
                 do {
                     let request = try TerminalServiceCodec.decodeRequest(requestData)
                     response = try server.validateAndHandle(request: request)
-                } catch { response = TerminalServiceResponse(ok: false, message: String(describing: error)) }
+                } catch {
+                    sendResponseAndClose(TerminalServiceResponse(ok: false, message: String(describing: error)))
+                    return
+                }
                 if response.ok, let streamSocketPath = response.streamSocketPath {
                     startStreamRelay(socketPath: streamSocketPath)
                     return
                 }
+                sendResponse(response, closeAfterSend: Self.shouldCloseAfterResponse(response))
+            }
+
+            private func sendResponse(_ response: TerminalServiceResponse, closeAfterSend: Bool) {
                 var responseData = (try? TerminalServiceCodec.encodeResponse(response)) ?? Data()
                 responseData.append(0x0A)
                 connection.send(
-                    content: responseData, contentContext: .defaultMessage, isComplete: true,
+                    content: responseData, contentContext: .defaultMessage, isComplete: closeAfterSend,
                     completion: .contentProcessed { [weak self] _ in
                         guard let self else { return }
-                        self.connection.cancel()
-                        self.server.removeConnection(self.connection)
+                        if closeAfterSend {
+                            self.connection.cancel()
+                            self.server.removeConnection(self.connection)
+                        } else {
+                            self.processBufferedRequestIfAvailable()
+                        }
                     })
+            }
+
+            private func sendResponseAndClose(_ response: TerminalServiceResponse) { sendResponse(response, closeAfterSend: true) }
+
+            private static func shouldCloseAfterResponse(_ response: TerminalServiceResponse) -> Bool {
+                guard !response.ok else { return false }
+                return response.message.localizedStandardContains("unauthorized")
             }
 
             private func startStreamRelay(socketPath: String) {
@@ -714,7 +743,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                 do {
                     try Self.setCloseOnExec(clientFD)
                     try Self.setBlocking(clientFD)
-                    Self.setSocketTimeout(clientFD, seconds: 15)
+                    Self.setSocketTimeout(clientFD, seconds: 120)
                     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                         guard let self else {
                             close(clientFD)
@@ -746,19 +775,29 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
 
             SSL_set_fd(ssl, fileDescriptor)
             guard SSL_accept(ssl) == 1 else { throw TerminalServiceTLSError.connectionFailed(Self.openSSLErrorMessage("TLS handshake failed")) }
-            let requestData = try Self.readTLSRequest(ssl: ssl)
-            let response: TerminalServiceResponse
-            do {
-                let request = try TerminalServiceCodec.decodeRequest(requestData)
-                response = try validateAndHandle(request: request)
-            } catch { response = TerminalServiceResponse(ok: false, message: String(describing: error)) }
-            if response.ok, let streamSocketPath = response.streamSocketPath {
-                try Self.relayUnixSocket(path: streamSocketPath, ssl: ssl)
-                return
+            var requestBuffer = Data()
+            while true {
+                guard let requestData = try Self.readTLSRequestLine(ssl: ssl, buffer: &requestBuffer) else { return }
+                let response: TerminalServiceResponse
+                do {
+                    let request = try TerminalServiceCodec.decodeRequest(requestData)
+                    response = try validateAndHandle(request: request)
+                } catch {
+                    var responseData =
+                        (try? TerminalServiceCodec.encodeResponse(TerminalServiceResponse(ok: false, message: String(describing: error)))) ?? Data()
+                    responseData.append(0x0A)
+                    try Self.writeTLSResponse(responseData, ssl: ssl)
+                    return
+                }
+                if response.ok, let streamSocketPath = response.streamSocketPath {
+                    try Self.relayUnixSocket(path: streamSocketPath, ssl: ssl)
+                    return
+                }
+                var responseData = (try? TerminalServiceCodec.encodeResponse(response)) ?? Data()
+                responseData.append(0x0A)
+                try Self.writeTLSResponse(responseData, ssl: ssl)
+                if Self.shouldCloseAfterResponse(response) { return }
             }
-            var responseData = (try? TerminalServiceCodec.encodeResponse(response)) ?? Data()
-            responseData.append(0x0A)
-            try Self.writeTLSResponse(responseData, ssl: ssl)
         }
 
         private func validateAndHandle(request: TerminalServiceRequest) throws -> TerminalServiceResponse {
@@ -907,20 +946,32 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             return socketFD
         }
 
-        private static func readTLSRequest(ssl: OpaquePointer) throws -> Data {
-            var data = Data()
+        private static func readTLSRequestLine(ssl: OpaquePointer, buffer data: inout Data) throws -> Data? {
             var buffer = [UInt8](repeating: 0, count: 4096)
             while true {
+                if let newlineIndex = data.firstIndex(of: 0x0A) {
+                    let requestData = Data(data.prefix(upTo: newlineIndex))
+                    data.removeSubrange(data.startIndex...newlineIndex)
+                    return requestData
+                }
                 let count = SSL_read(ssl, &buffer, Int32(buffer.count))
                 if count > 0 {
                     data.append(buffer, count: Int(count))
-                    if let newlineIndex = data.firstIndex(of: 0x0A) { return Data(data.prefix(upTo: newlineIndex)) }
                     continue
                 }
                 let error = SSL_get_error(ssl, count)
-                if error == SSL_ERROR_ZERO_RETURN { return data }
+                if error == SSL_ERROR_ZERO_RETURN {
+                    guard !data.isEmpty else { return nil }
+                    defer { data.removeAll(keepingCapacity: true) }
+                    return data
+                }
                 throw TerminalServiceTLSError.connectionFailed(openSSLErrorMessage("failed to read TLS request"))
             }
+        }
+
+        private static func shouldCloseAfterResponse(_ response: TerminalServiceResponse) -> Bool {
+            guard !response.ok else { return false }
+            return response.message.localizedStandardContains("unauthorized")
         }
 
         private static func writeTLSResponse(_ data: Data, ssl: OpaquePointer) throws {

@@ -4,6 +4,10 @@ import XCTest
 
 @testable import spacesterminalcore
 
+#if canImport(Network)
+    import Network
+#endif
+
 final class TerminalServiceProtocolTests: XCTestCase {
     func testRequestAndResponseRoundTripThroughCodec() throws {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
@@ -148,6 +152,36 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertEqual(response, TerminalServiceResponse(ok: true, message: "pong"))
     }
 
+    #if canImport(Network) && canImport(Security)
+        func testPinnedTLSServerKeepsConnectionOpenForMultipleRequests() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
+            let queue = DispatchQueue(label: "terminal-service-tls-persistent-test")
+            let requestCount = LockedCounter()
+            let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
+                let count = requestCount.increment()
+                return TerminalServiceResponse(ok: true, message: "\(request.command)-\(count)")
+            }
+            try server.start()
+            defer { server.stop() }
+
+            let connection = try Self.makeUnpinnedTLSConnection(port: server.listeningPort)
+            try Self.waitUntilReady(connection, queue: DispatchQueue(label: "terminal-service-tls-persistent-client"))
+            defer { connection.cancel() }
+
+            let first = try Self.sendRequestLineAndReadResponse(TerminalServiceRequest(command: "first", authToken: "SECRET"), connection: connection)
+            let second = try Self.sendRequestLineAndReadResponse(
+                TerminalServiceRequest(command: "second", authToken: "SECRET"), connection: connection)
+
+            XCTAssertEqual(first, TerminalServiceResponse(ok: true, message: "first-1"))
+            XCTAssertEqual(second, TerminalServiceResponse(ok: true, message: "second-2"))
+            XCTAssertEqual(requestCount.value, 2)
+        }
+    #endif
+
     func testTLSIdentityStoreReloadsExistingIdentity() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -185,3 +219,138 @@ final class TerminalServiceProtocolTests: XCTestCase {
         }
     }
 }
+
+#if canImport(Network) && canImport(Security)
+    extension TerminalServiceProtocolTests {
+        fileprivate static func makeUnpinnedTLSConnection(port: Int) throws -> NWConnection {
+            guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw TerminalServiceTLSError.invalidPort(port) }
+            let tlsOptions = NWProtocolTLS.Options()
+            let securityOptions = tlsOptions.securityProtocolOptions
+            sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
+            sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
+            sec_protocol_options_set_peer_authentication_required(securityOptions, true)
+            sec_protocol_options_set_verify_block(securityOptions, { _, _, complete in complete(true) }, DispatchQueue.global(qos: .userInitiated))
+            return NWConnection(host: "127.0.0.1", port: nwPort, using: NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options()))
+        }
+
+        fileprivate static func waitUntilReady(_ connection: NWConnection, queue: DispatchQueue) throws {
+            let semaphore = DispatchSemaphore(value: 0)
+            let errorBox = LockedErrorBox()
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready: semaphore.signal()
+                case .failed(let error):
+                    errorBox.set(error)
+                    semaphore.signal()
+                default: break
+                }
+            }
+            connection.start(queue: queue)
+            guard semaphore.wait(timeout: .now() + 5) == .success else { throw TerminalServiceTLSError.requestTimedOut }
+            if let error = errorBox.value { throw error }
+        }
+
+        fileprivate static func sendRequestLineAndReadResponse(_ request: TerminalServiceRequest, connection: NWConnection) throws
+            -> TerminalServiceResponse
+        {
+            var data = try TerminalServiceCodec.encodeRequest(request)
+            data.append(0x0A)
+            try send(data, connection: connection)
+            return try TerminalServiceCodec.decodeResponse(readLine(connection: connection))
+        }
+
+        fileprivate static func send(_ data: Data, connection: NWConnection) throws {
+            let semaphore = DispatchSemaphore(value: 0)
+            let errorBox = LockedErrorBox()
+            connection.send(
+                content: data, contentContext: .defaultMessage, isComplete: false,
+                completion: .contentProcessed { error in
+                    if let error { errorBox.set(error) }
+                    semaphore.signal()
+                })
+            guard semaphore.wait(timeout: .now() + 5) == .success else { throw TerminalServiceTLSError.requestTimedOut }
+            if let error = errorBox.value { throw error }
+        }
+
+        fileprivate static func readLine(connection: NWConnection, data: Data = Data()) throws -> Data {
+            if let newlineIndex = data.firstIndex(of: 0x0A) { return Data(data.prefix(upTo: newlineIndex)) }
+            let semaphore = DispatchSemaphore(value: 0)
+            let result = LockedResultBox<Data>()
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
+                if let error {
+                    result.set(.failure(error))
+                    semaphore.signal()
+                    return
+                }
+                var nextData = data
+                if let content, !content.isEmpty { nextData.append(content) }
+                if let newlineIndex = nextData.firstIndex(of: 0x0A) {
+                    result.set(.success(Data(nextData.prefix(upTo: newlineIndex))))
+                    semaphore.signal()
+                    return
+                }
+                if isComplete {
+                    result.set(.success(nextData))
+                    semaphore.signal()
+                    return
+                }
+                do { result.set(.success(try readLine(connection: connection, data: nextData))) } catch { result.set(.failure(error)) }
+                semaphore.signal()
+            }
+            guard semaphore.wait(timeout: .now() + 5) == .success else { throw TerminalServiceTLSError.requestTimedOut }
+            return try result.value.get()
+        }
+    }
+
+    private final class LockedCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+
+        var value: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return count
+        }
+
+        func increment() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            count += 1
+            return count
+        }
+    }
+
+    private final class LockedErrorBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var error: (any Error)?
+
+        var value: (any Error)? {
+            lock.lock()
+            defer { lock.unlock() }
+            return error
+        }
+
+        func set(_ error: any Error) {
+            lock.lock()
+            self.error = error
+            lock.unlock()
+        }
+    }
+
+    private final class LockedResultBox<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<T, any Error> = .failure(TerminalServiceTLSError.requestTimedOut)
+
+        var value: Result<T, any Error> {
+            lock.lock()
+            defer { lock.unlock() }
+            return result
+        }
+
+        func set(_ result: Result<T, any Error>) {
+            lock.lock()
+            self.result = result
+            lock.unlock()
+        }
+    }
+#endif

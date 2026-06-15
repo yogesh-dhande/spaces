@@ -612,7 +612,7 @@ import workspacecore
         }
         if let liveCore = sessionCores[sessionID] {
             let response = liveCore.handleControlRequest(controlRequest)
-            return terminalControlResponse(sessionID: sessionID, controlResponse: response)
+            return terminalControlResponse(sessionID: sessionID, controlResponse: response, includeSessionState: controlRequest.command == "takeover")
         }
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -623,12 +623,14 @@ import workspacecore
                 return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.")
             }
             let response = try TerminalControlClient.send(request: controlRequest, socketPath: paths.controlSocketPath)
-            return terminalControlResponse(sessionID: sessionID, controlResponse: response)
+            return terminalControlResponse(sessionID: sessionID, controlResponse: response, includeSessionState: controlRequest.command == "takeover")
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 
-    private func terminalControlResponse(sessionID: String, controlResponse response: TerminalControlResponse) -> TerminalServiceResponse {
-        let sessionState = response.ok ? try? loadCurrentState(sessionID: sessionID) : nil
+    private func terminalControlResponse(sessionID: String, controlResponse response: TerminalControlResponse, includeSessionState: Bool)
+        -> TerminalServiceResponse
+    {
+        let sessionState = response.ok && includeSessionState ? try? loadCurrentState(sessionID: sessionID) : nil
         return TerminalServiceResponse(ok: response.ok, message: response.message, sessionState: sessionState, controlResponse: response)
     }
 
