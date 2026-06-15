@@ -6,6 +6,10 @@ import spacesterminalcore
 import spacesterminalghostty
 import workspacecore
 
+#if canImport(CryptoKit)
+    import CryptoKit
+#endif
+
 #if canImport(AppKit)
     import AppKit
 #endif
@@ -22,6 +26,12 @@ import workspacecore
 
 @MainActor private final class SpacesDaemonController {
     private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll"]
+    private static let mobileTerminalServiceCommands: Set<String> = [
+        "list", "state", "subscribe", "control", "resolveTerminalLink", "readTerminalLinkChunk",
+    ]
+    private static let mobileTerminalControlCommands: Set<String> = [
+        "attach", "detach", "heartbeat", "takeover", "send", "key", "clearScreen", "resize", "scroll",
+    ]
     private static let terminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
 
     private struct TerminalLinkTransferAuthorization {
@@ -47,14 +57,26 @@ import workspacecore
         let host: String
         if let configuredHost, !configuredHost.isEmpty { host = configuredHost } else { host = "0.0.0.0" }
         let configuredAuthToken = environment["SPACESD_AUTH_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let authToken = configuredAuthToken?.isEmpty == false ? configuredAuthToken : nil
+        guard let authToken = configuredAuthToken, !authToken.isEmpty else {
+            remoteServerLoadError = SpacesRuntimeError.invalidArgument(message: "SPACESD_AUTH_TOKEN is required when SPACESD_LISTEN_PORT is set.")
+            return nil
+        }
+        remoteAdminAuthToken = authToken
         let identity: TerminalServiceTLSIdentity
         do { identity = try TerminalServiceTLSIdentityStore.loadOrCreate() } catch {
             remoteServerLoadError = error
             return nil
         }
         writeStandardError("spacesd: remote listener fingerprint=\(identity.certificateFingerprint)\n")
-        return TerminalServiceTLSServer(host: host, port: port, authToken: authToken, identity: identity, queue: serverQueue) { [weak self] request in
+        return TerminalServiceTLSServer(
+            host: host, port: port, authToken: nil, identity: identity, queue: serverQueue,
+            authorizeRequest: { [weak self] request in
+                Self.runOnMainActorSynchronously {
+                    guard let self else { return TerminalServiceResponse(ok: false, message: "spacesd is shutting down.") }
+                    return self.authorizeRemoteRequest(request)
+                }
+            }
+        ) { [weak self] request in
             Self.runOnMainActorSynchronously {
                 guard let self else { return TerminalServiceResponse(ok: false, message: "spacesd is shutting down.") }
                 return self.handle(request)
@@ -62,6 +84,7 @@ import workspacecore
         }
     }()
     private var remoteServerLoadError: (any Error)?
+    private var remoteAdminAuthToken: String?
     private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
@@ -112,6 +135,9 @@ import workspacecore
             guard let workspaceCommand = request.workspaceCommand else {
                 return TerminalServiceResponse(ok: false, message: "Missing workspace command request.")
             }
+            guard request.runtimeManifest != nil else {
+                return TerminalServiceResponse(ok: false, message: "Workspace runtime manifest is required.")
+            }
             return runWorkspaceCommand(workspaceCommand, request: request)
         case "terminate":
             guard let sessionID = request.sessionID, !sessionID.isEmpty else {
@@ -120,14 +146,63 @@ import workspacecore
             return terminateSession(id: sessionID)
         case "list": return listSessions()
         case "state": return loadTerminalState(request)
+        case "subscribe": return subscribeTerminalState(request)
         case "control": return handleTerminalControl(request)
         case "agentSignal": return recordAgentSignal(request)
         case "ackAgentSignals": return acknowledgeAgentSignals(request)
         case "profileCommand": return handleProfileCommand(request)
+        case "mobileCredential": return handleMobileCredential(request)
         case "resolveTerminalLink": return resolveTerminalLink(request)
         case "readTerminalLinkChunk": return readTerminalLinkChunk(request)
         default: return TerminalServiceResponse(ok: false, message: "Unsupported spacesd command '\(request.command)'.")
         }
+    }
+
+    private func authorizeRemoteRequest(_ request: TerminalServiceRequest) -> TerminalServiceResponse? {
+        if let remoteAdminAuthToken, request.authToken == remoteAdminAuthToken { return nil }
+        guard let token = request.authToken?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
+            return TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.")
+        }
+        guard Self.mobileTerminalServiceCommands.contains(request.command) else {
+            return TerminalServiceResponse(ok: false, message: "Mobile terminal credential cannot call '\(request.command)'.")
+        }
+        if request.command == "control", !Self.mobileTerminalControlCommands.contains(request.controlRequest?.command ?? "") {
+            return TerminalServiceResponse(ok: false, message: "Mobile terminal credential cannot call this terminal control command.")
+        }
+        do {
+            guard try SpacesDaemonMobileCredentialStore.authorize(token: token) else {
+                return TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.")
+            }
+            return nil
+        } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
+    }
+
+    private func handleMobileCredential(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
+        guard let credentialRequest = request.mobileCredentialRequest else {
+            return TerminalServiceResponse(ok: false, message: "Missing mobile credential request.")
+        }
+        do {
+            switch credentialRequest.operation {
+            case .issue:
+                guard let installationID = normalizedString(credentialRequest.installationID) else {
+                    return TerminalServiceResponse(ok: false, message: "Missing mobile installation ID.")
+                }
+                let issued = try SpacesDaemonMobileCredentialStore.issue(
+                    installationID: installationID, deviceName: credentialRequest.deviceName, platform: credentialRequest.platform)
+                return TerminalServiceResponse(
+                    ok: true, message: "Issued mobile terminal credential.", mobileCredentialToken: issued.token, mobileCredentials: [issued.record])
+            case .revoke:
+                guard let installationID = normalizedString(credentialRequest.installationID) else {
+                    return TerminalServiceResponse(ok: false, message: "Missing mobile installation ID.")
+                }
+                try SpacesDaemonMobileCredentialStore.revoke(installationID: installationID)
+                return TerminalServiceResponse(
+                    ok: true, message: "Revoked mobile terminal credential.", mobileCredentials: try SpacesDaemonMobileCredentialStore.list())
+            case .list:
+                return TerminalServiceResponse(
+                    ok: true, message: "Listed mobile terminal credentials.", mobileCredentials: try SpacesDaemonMobileCredentialStore.list())
+            }
+        } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 
     private func createSession(_ launchConfiguration: TerminalSessionLaunchConfiguration, request: TerminalServiceRequest) -> TerminalServiceResponse
@@ -155,6 +230,9 @@ import workspacecore
     }
 
     private func prepareWorkspace(request: TerminalServiceRequest, workingDirectory: String?) throws {
+        if request.worktreeRefresh != nil, request.runtimeManifest == nil {
+            throw SpacesRuntimeError.invalidArgument(message: "Workspace runtime manifest is required for worktree refresh.")
+        }
         if let manifest = request.runtimeManifest {
             if let workingDirectory { try validateWorkspacePath(workingDirectory, manifest: manifest) }
             if manifest.location == .remote { try prepareRemoteWorktree(manifest: manifest, refreshRequest: request.worktreeRefresh) }
@@ -214,9 +292,16 @@ import workspacecore
     }
 
     private func workspaceCommandLogPath(_ requestedPath: String?) throws -> String {
-        if let requestedPath = requestedPath?.trimmingCharacters(in: .whitespacesAndNewlines), !requestedPath.isEmpty { return requestedPath }
         let root = try TerminalServicePaths.terminalRootDirectory().appendingPathComponent("workspace-commands", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        if let requestedPath = requestedPath?.trimmingCharacters(in: .whitespacesAndNewlines), !requestedPath.isEmpty {
+            let normalizedRoot = root.standardizedFileURL.path
+            let normalizedPath = URL(fileURLWithPath: requestedPath).standardizedFileURL.path
+            guard normalizedPath == normalizedRoot || normalizedPath.hasPrefix(normalizedRoot + "/") else {
+                throw SpacesRuntimeError.invalidArgument(message: "Workspace command log path must be under the daemon command log directory.")
+            }
+            return normalizedPath
+        }
         return root.appendingPathComponent("\(UUID().uuidString).log", isDirectory: false).path
     }
 
@@ -231,9 +316,10 @@ import workspacecore
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = ["-lc", workspaceCommand.command]
         process.currentDirectoryURL = URL(fileURLWithPath: workspaceCommand.workingDirectory, isDirectory: true)
-        var environment = ProcessInfo.processInfo.environment
+        var environment = Self.scrubbedChildEnvironment(ProcessInfo.processInfo.environment)
         if let manifest { environment.merge(manifest.processEnvironment) { _, new in new } }
         environment.merge(workspaceCommand.environment) { _, new in new }
+        environment = Self.scrubbedChildEnvironment(environment)
         process.environment = environment
         process.standardOutput = logHandle
         process.standardError = logHandle
@@ -249,6 +335,12 @@ import workspacecore
             let sessions = try configurations.compactMap { configuration in try summaryIfLive(for: configuration) }
             return TerminalServiceResponse(ok: true, message: "Listed terminal sessions.", sessions: sessions)
         } catch { return TerminalServiceResponse(ok: false, message: String(describing: error)) }
+    }
+
+    private static func scrubbedChildEnvironment(_ environment: [String: String]) -> [String: String] {
+        environment.filter { key, _ in
+            key != "SPACESD_AUTH_TOKEN" && key != "SPACESD_LISTEN_PORT" && key != "SPACESD_LISTEN_HOST" && !key.hasPrefix("SPACESD_AUTH_TOKEN_")
+        }
     }
 
     private func loadTerminalState(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
@@ -720,6 +812,22 @@ import workspacecore
         return try GhosttyRemoteSessionStateCodec.decodeLine(data)
     }
 
+    private func subscribeTerminalState(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
+        guard let sessionID = request.sessionID, !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return TerminalServiceResponse(ok: false, message: "Missing session ID.")
+        }
+        do {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
+                return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' is not live.")
+            }
+            guard FileManager.default.fileExists(atPath: paths.subscriptionSocketPath) else {
+                return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' has no live state stream.")
+            }
+            return TerminalServiceResponse(ok: true, message: "Subscribed to terminal state.", streamSocketPath: paths.subscriptionSocketPath)
+        } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
+    }
+
     private func endedStatePayload(sessionID: String, paths: TerminalSessionPaths, runtimeState: TerminalSessionRuntimeState) throws
         -> GhosttyRemoteSessionStatePayload
     {
@@ -909,6 +1017,107 @@ import workspacecore
 }
 
 private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
+
+private enum SpacesDaemonMobileCredentialStore {
+    struct IssuedCredential {
+        let token: String
+        let record: TerminalServiceMobileCredential
+    }
+
+    private struct StoredCredential: Codable {
+        var id: String
+        var installationID: String
+        var tokenHash: String
+        var deviceName: String?
+        var platform: String?
+        var scopes: [String]
+        var createdAt: String
+        var lastUsedAt: String?
+        var revokedAt: String?
+    }
+
+    private struct StoreFile: Codable { var credentials: [StoredCredential] }
+
+    static func issue(installationID: String, deviceName: String?, platform: String?) throws -> IssuedCredential {
+        var file = try load()
+        let now = GhosttyRemoteSessionStateTimestamp.string(from: Date())
+        for index in file.credentials.indices
+        where file.credentials[index].installationID == installationID && file.credentials[index].revokedAt == nil {
+            file.credentials[index].revokedAt = now
+        }
+        let token = "smt_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        let stored = StoredCredential(
+            id: UUID().uuidString, installationID: installationID, tokenHash: hash(token), deviceName: normalized(deviceName),
+            platform: normalized(platform), scopes: ["terminal"], createdAt: now, lastUsedAt: nil, revokedAt: nil)
+        file.credentials.append(stored)
+        try save(file)
+        return IssuedCredential(token: token, record: publicRecord(stored))
+    }
+
+    static func revoke(installationID: String) throws {
+        var file = try load()
+        let now = GhosttyRemoteSessionStateTimestamp.string(from: Date())
+        for index in file.credentials.indices
+        where file.credentials[index].installationID == installationID && file.credentials[index].revokedAt == nil {
+            file.credentials[index].revokedAt = now
+        }
+        try save(file)
+    }
+
+    static func list() throws -> [TerminalServiceMobileCredential] { try load().credentials.map(publicRecord) }
+
+    static func authorize(token: String) throws -> Bool {
+        var file = try load()
+        let tokenHash = hash(token)
+        guard let index = file.credentials.firstIndex(where: { $0.tokenHash == tokenHash && $0.revokedAt == nil }) else { return false }
+        file.credentials[index].lastUsedAt = GhosttyRemoteSessionStateTimestamp.string(from: Date())
+        try save(file)
+        return true
+    }
+
+    private static func load() throws -> StoreFile {
+        let url = try storeURL()
+        guard FileManager.default.fileExists(atPath: url.path) else { return StoreFile(credentials: []) }
+        return try JSONDecoder().decode(StoreFile.self, from: Data(contentsOf: url))
+    }
+
+    private static func save(_ file: StoreFile) throws {
+        let url = try storeURL()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(file)
+        try data.write(to: url, options: [.atomic])
+        chmod(url.path, S_IRUSR | S_IWUSR)
+    }
+
+    private static func storeURL() throws -> URL {
+        try TerminalServicePaths.terminalRootDirectory().appendingPathComponent("mobile-terminal-credentials.json", isDirectory: false)
+    }
+
+    private static func publicRecord(_ stored: StoredCredential) -> TerminalServiceMobileCredential {
+        TerminalServiceMobileCredential(
+            id: stored.id, installationID: stored.installationID, deviceName: stored.deviceName, platform: stored.platform, scopes: stored.scopes,
+            createdAt: stored.createdAt, lastUsedAt: stored.lastUsedAt, revokedAt: stored.revokedAt)
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    private static func hash(_ token: String) -> String {
+        #if canImport(CryptoKit)
+            let digest = SHA256.hash(data: Data(token.utf8))
+            return digest.map { String(format: "%02x", $0) }.joined()
+        #else
+            var hash: UInt64 = 14_695_981_039_346_656_037
+            for byte in token.utf8 {
+                hash ^= UInt64(byte)
+                hash &*= 1_099_511_628_211
+            }
+            return String(format: "%016llx", hash)
+        #endif
+    }
+}
 
 @MainActor private final class SpacesDaemonMobileBridgeSupervisor {
     #if canImport(spacesmobilebridge)

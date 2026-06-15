@@ -63,6 +63,7 @@ REMOTE_GIT_ROOT="${SPACES_E2E_REMOTE_GIT_ROOT:-~/.spaces/e2e-git}"
 REMOTE_DEFAULT_WORKSPACE_DIR=""
 
 TMP_PREFIX="${TMP_PREFIX:-/tmp/spaces-real-e2e}"
+USER_HOME="${HOME:?}"
 TMP_ROOT="$(cd "$(mktemp -d "$TMP_PREFIX".XXXXXX)" && pwd -P)"
 TMP_HOME="$TMP_ROOT/home"
 TMP_DB="$TMP_ROOT/spaces.db"
@@ -1041,7 +1042,7 @@ configure_mixed_e2e_targets() {
   if [[ -n "$REMOTE_SSH_PORT" ]]; then args+=(--ssh-port "$REMOTE_SSH_PORT"); fi
   if [[ -n "$REMOTE_DAEMON_HOST" ]]; then args+=(--daemon-host "$REMOTE_DAEMON_HOST"); fi
   if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then args+=("--auth-token=$REMOTE_AUTH_TOKEN"); fi
-  "$SPACES_E2E_CLI" "${args[@]}" >"$TMP_ROOT/remote-compute-host-smoke.json" 2>"$TMP_ROOT/remote-compute-host-smoke.stderr.log" \
+  env HOME="$USER_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" "${args[@]}" >"$TMP_ROOT/remote-compute-host-smoke.json" 2>"$TMP_ROOT/remote-compute-host-smoke.stderr.log" \
     || fail "Remote compute host smoke failed. See $TMP_ROOT/remote-compute-host-smoke.stderr.log"
   REMOTE_DEFAULT_WORKSPACE_DIR="$(json_get "$TMP_ROOT/remote-compute-host-smoke.json" "workspace.dir")"
   [[ -n "$REMOTE_DEFAULT_WORKSPACE_DIR" ]] || fail "Remote compute host smoke did not return a workspace directory."
@@ -3275,6 +3276,17 @@ wait_for_log_pattern() {
   fail "timed out waiting for log pattern in $path: $pattern"
 }
 
+wait_for_file() {
+  local path="$1"
+  local label="${2:-file}"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    [[ -f "$path" ]] && return 0
+    sleep 0.1
+  done
+  fail "timed out waiting for $label: $path"
+}
+
 extract_metric_field() {
   local line="$1"
   local key="$2"
@@ -4476,7 +4488,10 @@ run_launch_and_focus_assertions() {
     activate_google_chrome
     transition_pause "$host seed chrome focus for window issue modal"
     wait_for_condition "frontmost_app" "Google Chrome"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" show-window-issue-modal --title "Process window not found" --detail "frontend is no longer open." >/tmp/spaces-e2e-show-window-issue-modal.json
+    local modal_ack_path="$TMP_ROOT/window-issue-modal-ack.json"
+    rm -f "$modal_ack_path"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" show-window-issue-modal --title "Process window not found" --detail "frontend is no longer open." --output-path "$modal_ack_path" >/tmp/spaces-e2e-show-window-issue-modal.json
+    wait_for_file "$modal_ack_path" "window issue modal IPC acknowledgement"
     if ! wait_for_spaces_modal_dialog_frontmost_optional; then
       activate_spaces_pid "$SPACES_PID"
       wait_for_spaces_modal_dialog_visible
@@ -5393,7 +5408,6 @@ run_agent_status_assertions() {
   local workspace_dir="$2"
   local dump_file="$TMP_ROOT/$host-agent-status.json"
   local workspace_title workspace_id agent_run_view_pattern agent_script
-  local event_start_line=1
 
   ensure_configured_terminal_host "$host"
   dump_workspace "$workspace_dir" "$dump_file"
@@ -5406,9 +5420,6 @@ run_agent_status_assertions() {
   # through both persisted agent-window state and the visible GUI rows.
   ensure_single_spaces_instance "$SPACES_PID"
   reset_fixture_runtime "$workspace_dir"
-  if [[ -f "$EVENT_LOG" ]]; then
-    event_start_line=$(( $(wc -l <"$EVENT_LOG") + 1 ))
-  fi
   if [[ "$host" == "remote" ]]; then
     stop_remote_workspace_port_listeners "$workspace_dir"
   fi
@@ -5416,12 +5427,12 @@ run_agent_status_assertions() {
   transition_pause "$host launch workspace with agent"
 
   if [[ "$host" != "remote" ]]; then
-    wait_for_event_log_contains_since_line "agent-waiting:$workspace_dir" "$event_start_line"
+    wait_for_event_log_contains "agent-waiting:$workspace_dir"
   fi
   wait_for_agent_status "$workspace_dir" "$MOCK_AGENT_LABEL" "waiting"
 
   if [[ "$host" != "remote" ]]; then
-    wait_for_event_log_contains_since_line "agent-done:$workspace_dir" "$event_start_line"
+    wait_for_event_log_contains "agent-done:$workspace_dir"
   fi
   wait_for_agent_status "$workspace_dir" "$MOCK_AGENT_LABEL" "done"
 

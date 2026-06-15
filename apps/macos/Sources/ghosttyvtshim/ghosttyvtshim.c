@@ -15,6 +15,8 @@
 typedef GhosttyResult (*GhosttyTerminalNewFn)(const GhosttyAllocator *, GhosttyTerminal *, GhosttyTerminalOptions);
 typedef void (*GhosttyTerminalFreeFn)(GhosttyTerminal);
 typedef void (*GhosttyTerminalVtWriteFn)(GhosttyTerminal, const uint8_t *, size_t);
+typedef void (*GhosttyTerminalScrollViewportFn)(GhosttyTerminal, GhosttyTerminalScrollViewport);
+typedef GhosttyResult (*GhosttyTerminalGetFn)(GhosttyTerminal, GhosttyTerminalData, void *);
 typedef GhosttyResult (*GhosttyFormatterTerminalNewFn)(
     const GhosttyAllocator *,
     GhosttyFormatter *,
@@ -44,6 +46,8 @@ typedef struct {
     GhosttyTerminalNewFn terminal_new;
     GhosttyTerminalFreeFn terminal_free;
     GhosttyTerminalVtWriteFn terminal_vt_write;
+    GhosttyTerminalScrollViewportFn terminal_scroll_viewport;
+    GhosttyTerminalGetFn terminal_get;
     GhosttyFormatterTerminalNewFn formatter_terminal_new;
     GhosttyFormatterFormatAllocFn formatter_format_alloc;
     GhosttyFormatterFreeFn formatter_free;
@@ -266,6 +270,8 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     symbols->terminal_new = (GhosttyTerminalNewFn)dlsym(handle, "ghostty_terminal_new");
     symbols->terminal_free = (GhosttyTerminalFreeFn)dlsym(handle, "ghostty_terminal_free");
     symbols->terminal_vt_write = (GhosttyTerminalVtWriteFn)dlsym(handle, "ghostty_terminal_vt_write");
+    symbols->terminal_scroll_viewport = (GhosttyTerminalScrollViewportFn)dlsym(handle, "ghostty_terminal_scroll_viewport");
+    symbols->terminal_get = (GhosttyTerminalGetFn)dlsym(handle, "ghostty_terminal_get");
     symbols->formatter_terminal_new = (GhosttyFormatterTerminalNewFn)dlsym(handle, "ghostty_formatter_terminal_new");
     symbols->formatter_format_alloc = (GhosttyFormatterFormatAllocFn)dlsym(handle, "ghostty_formatter_format_alloc");
     symbols->formatter_free = (GhosttyFormatterFreeFn)dlsym(handle, "ghostty_formatter_free");
@@ -289,6 +295,8 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->terminal_new == NULL ||
         symbols->terminal_free == NULL ||
         symbols->terminal_vt_write == NULL ||
+        symbols->terminal_scroll_viewport == NULL ||
+        symbols->terminal_get == NULL ||
         symbols->formatter_terminal_new == NULL ||
         symbols->formatter_format_alloc == NULL ||
         symbols->formatter_free == NULL ||
@@ -615,6 +623,26 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
     out_snapshot->cell_count = cell_count;
     out_snapshot->cells = cells;
     return true;
+}
+
+bool spaces_ghostty_vt_session_scroll_viewport(SpacesGhosttyVtSession *session, intptr_t delta_rows) {
+    if (session == NULL || session->terminal == NULL || delta_rows == 0) return false;
+
+    GhosttyTerminalScrollbar before = {0};
+    GhosttyTerminalScrollbar after = {0};
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &before) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+
+    GhosttyTerminalScrollViewport behavior = {0};
+    behavior.tag = GHOSTTY_SCROLL_VIEWPORT_DELTA;
+    behavior.value.delta = delta_rows;
+    session->symbols.terminal_scroll_viewport(session->terminal, behavior);
+
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &after) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+    return before.offset != after.offset;
 }
 
 bool spaces_ghostty_vt_session_format_plain(SpacesGhosttyVtSession *session, char **out_ptr, size_t *out_len) {

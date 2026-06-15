@@ -6,6 +6,10 @@ import spacesmobilecore
 import spacesterminalcore
 import workspacecore
 
+#if canImport(Security)
+    @preconcurrency import Security
+#endif
+
 protocol SpacesMobilePairingStoreProtocol: Sendable {
     func issueToken(for clientApp: SpacesMobileClientApp) throws -> String
     func listDevices() throws -> [SpacesMobilePairedDevice]
@@ -518,7 +522,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             onPairingSucceeded?(clientApp)
             return SpacesMobileBridgeResponse(ok: true, message: "Paired iOS client.", issuedAuthToken: issuedToken)
         case "ping": return SpacesMobileBridgeResponse(ok: true, message: "pong")
-        case "overview": return SpacesMobileBridgeResponse(ok: true, message: "Loaded mobile overview.", overview: try loadOverview())
+        case "overview":
+            return SpacesMobileBridgeResponse(ok: true, message: "Loaded mobile overview.", overview: try loadOverview(clientApp: request.clientApp))
         case "launchSpacesApp": return try handleLaunchSpacesAppRequest()
         case "workspaceCreateOptions": return try handleWorkspaceCreateOptionsRequest(request)
         case "createWorkspace": return try handleCreateWorkspaceRequest(request)
@@ -582,7 +587,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         TerminalPerformance.logMetric(
             "mobile_bridge_\(command)", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: response.ok)
-        return SpacesMobileBridgeResponse(ok: response.ok, message: response.message)
+        let sessionState = response.ok && command == "takeover" ? try? loadCurrentState(sessionID: sessionID) : nil
+        return SpacesMobileBridgeResponse(ok: response.ok, message: response.message, sessionState: sessionState)
     }
 
     private static func normalizedClientID(from request: SpacesMobileBridgeRequest) -> String? {
@@ -598,7 +604,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         return SpacesMobileBridgeResponse(ok: true, message: outcome.message)
     }
 
-    private func loadOverview() throws -> SpacesMobileOverviewPayload {
+    private func loadOverview(clientApp: SpacesMobileClientApp? = nil) throws -> SpacesMobileOverviewPayload {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = mobileOrchestrator(store: store)
         let projects = try store.projects()
@@ -609,7 +615,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                     project: project, workspace: workspace, settings: try? orchestrator.workspaceSettings(workspaceID: workspace.id),
                     runningProcesses: try store.runningProcesses(workspaceID: workspace.id),
                     agentWindows: try store.agentWindows(workspaceID: workspace.id), windows: try store.windows(workspaceID: workspace.id),
-                    terminalDaemonEndpoint: terminalDaemonEndpoint(project: project, workspace: workspace, hostsByID: hostsByID))
+                    terminalDaemonEndpoint: terminalDaemonEndpoint(project: project, workspace: workspace, hostsByID: hostsByID, clientApp: clientApp)
+                )
             }
         }
         let localSessions = try TerminalSessionCatalog.listLiveSessions()
@@ -624,17 +631,65 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         return SpacesMobileOverviewBuilder.build(projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions)
     }
 
-    private func terminalDaemonEndpoint(project: ProjectRecord, workspace: WorkspaceRecord, hostsByID: [String: ComputeHostRecord])
-        -> SpacesMobileTerminalDaemonEndpoint?
-    {
+    private func terminalDaemonEndpoint(
+        project: ProjectRecord, workspace: WorkspaceRecord, hostsByID: [String: ComputeHostRecord], clientApp: SpacesMobileClientApp? = nil
+    ) -> SpacesMobileTerminalDaemonEndpoint? {
         switch ComputeHostPlanner.selectHost(project: project, workspace: workspace, hostsByID: hostsByID) {
         case .local: return nil
         case .remote(let host):
+            let adminToken = try? ComputeHostCredentialStore.resolvedAuthToken(hostID: host.id)
+            let mobileToken = issueMobileTerminalCredential(host: host, adminToken: adminToken, clientApp: clientApp)
             return SpacesMobileTerminalDaemonEndpoint(
-                host: host.daemonEndpoint.host, port: host.daemonEndpoint.port,
-                authToken: try? ComputeHostCredentialStore.resolvedAuthToken(hostID: host.id),
+                host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: mobileToken,
                 certificateFingerprint: host.daemonEndpoint.certificateFingerprint)
         }
+    }
+
+    private func issueMobileTerminalCredential(host: ComputeHostRecord, adminToken: String?, clientApp: SpacesMobileClientApp?) -> String? {
+        guard let clientApp else {
+            trace("mobile_credential_issue_skipped host_id=\(host.id) reason=missing_client_app")
+            return nil
+        }
+        if let cached = try? SpacesMobileRemoteTerminalCredentialStore.token(
+            hostID: host.id, installationID: clientApp.installationID, certificateFingerprint: host.daemonEndpoint.certificateFingerprint)
+        {
+            trace("mobile_credential_issue_cached host_id=\(host.id)")
+            return cached
+        }
+        guard let adminToken, !adminToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            trace("mobile_credential_issue_skipped host_id=\(host.id) reason=missing_admin_token")
+            return nil
+        }
+        do {
+            let response = try TerminalServiceClient.sendPinnedTLS(
+                request: TerminalServiceRequest(
+                    command: "mobileCredential",
+                    mobileCredentialRequest: TerminalServiceMobileCredentialRequest(
+                        operation: .issue, installationID: clientApp.installationID, deviceName: clientApp.deviceName, platform: clientApp.platform)),
+                host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: adminToken,
+                certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: 5)
+            guard response.ok else {
+                trace("mobile_credential_issue_failed host_id=\(host.id) message=\(Self.sanitizedTraceDetail(response.message))")
+                return nil
+            }
+            if response.mobileCredentialToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                trace("mobile_credential_issue_failed host_id=\(host.id) message=missing_token")
+            }
+            if let token = response.mobileCredentialToken, !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try? SpacesMobileRemoteTerminalCredentialStore.saveToken(
+                    token, hostID: host.id, installationID: clientApp.installationID,
+                    certificateFingerprint: host.daemonEndpoint.certificateFingerprint)
+                return token
+            }
+            return nil
+        } catch {
+            trace("mobile_credential_issue_error host_id=\(host.id) error=\(Self.sanitizedTraceDetail(error.localizedDescription))")
+            return nil
+        }
+    }
+
+    private static func sanitizedTraceDetail(_ value: String) -> String {
+        value.replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\r", with: "\\r")
     }
 
     private func loadDatabaseRemoteTerminalSessions(workspaces: [SpacesMobileOverviewBuilder.WorkspaceDescriptor]) -> RemoteTerminalSessionList {
@@ -665,7 +720,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         var entries: [TerminalSessionCatalogEntry] = []
         var hasFinalRenderBySessionID: [String: Bool] = [:]
         var endpointsByKey: [RemoteTerminalEndpointKey: SpacesMobileTerminalDaemonEndpoint] = [:]
-        for endpoint in workspaces.compactMap(\.terminalDaemonEndpoint) {
+        for endpoint in adminTerminalDaemonEndpoints(workspaces: workspaces) {
             let key = RemoteTerminalEndpointKey(
                 host: endpoint.host, port: endpoint.port, authToken: endpoint.authToken, certificateFingerprint: endpoint.certificateFingerprint)
             endpointsByKey[key] = endpoint
@@ -682,6 +737,21 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             }
         }
         return RemoteTerminalSessionList(entries: entries, hasFinalRenderBySessionID: hasFinalRenderBySessionID)
+    }
+
+    private func adminTerminalDaemonEndpoints(workspaces: [SpacesMobileOverviewBuilder.WorkspaceDescriptor]) -> [SpacesMobileTerminalDaemonEndpoint] {
+        guard let store = try? SQLiteStore(path: DatabaseLocator.defaultPath()) else { return [] }
+        var endpointsByHostID: [String: SpacesMobileTerminalDaemonEndpoint] = [:]
+        for descriptor in workspaces {
+            let hostID = descriptor.workspace.hostID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !hostID.isEmpty, let host = try? store.computeHost(id: hostID),
+                let token = try? ComputeHostCredentialStore.resolvedAuthToken(hostID: host.id)
+            else { continue }
+            endpointsByHostID[host.id] = SpacesMobileTerminalDaemonEndpoint(
+                host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: token,
+                certificateFingerprint: host.daemonEndpoint.certificateFingerprint)
+        }
+        return Array(endpointsByHostID.values)
     }
 
     private func mergedTerminalSessions(_ sessions: [TerminalSessionCatalogEntry]) -> [TerminalSessionCatalogEntry] {
@@ -1512,4 +1582,49 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         running = value
         stateLock.unlock()
     }
+}
+
+private enum SpacesMobileRemoteTerminalCredentialStore {
+    private static let service = "app.asmvik.Spaces.mobile-terminal-credential"
+
+    static func token(hostID: String, installationID: String, certificateFingerprint: String) throws -> String? {
+        #if canImport(Security)
+            let query = try baseQuery(hostID: hostID, installationID: installationID, certificateFingerprint: certificateFingerprint).merging([
+                kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne,
+            ]) { _, new in new }
+            var result: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            if status == errSecItemNotFound { return nil }
+            guard status == errSecSuccess, let data = result as? Data, let token = String(data: data, encoding: .utf8) else { return nil }
+            let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        #else
+            nil
+        #endif
+    }
+
+    static func saveToken(_ token: String, hostID: String, installationID: String, certificateFingerprint: String) throws {
+        #if canImport(Security)
+            let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            let query = try baseQuery(hostID: hostID, installationID: installationID, certificateFingerprint: certificateFingerprint)
+            let tokenData = Data(trimmed.utf8)
+            let updateStatus = SecItemUpdate(query as CFDictionary, [kSecValueData as String: tokenData] as CFDictionary)
+            if updateStatus == errSecSuccess { return }
+            guard updateStatus == errSecItemNotFound else { return }
+            var addQuery = query
+            addQuery[kSecValueData as String] = tokenData
+            SecItemAdd(addQuery as CFDictionary, nil)
+        #endif
+    }
+
+    #if canImport(Security)
+        private static func baseQuery(hostID: String, installationID: String, certificateFingerprint: String) throws -> [String: Any] {
+            let profile = try SpacesProfile.current()
+            return [
+                kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                kSecAttrAccount as String: "\(profile.rootDirectory)#\(hostID)#\(certificateFingerprint)#\(installationID)",
+            ]
+        }
+    #endif
 }

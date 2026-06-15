@@ -1,5 +1,10 @@
-import Darwin
 import Foundation
+
+#if os(Linux)
+    import Glibc
+#else
+    import Darwin
+#endif
 
 public final class PortReserver: Sendable {
     public static let shared = PortReserver()
@@ -13,7 +18,7 @@ public final class PortReserver: Sendable {
         lock.lock()
         let all = _reservedSockets.pointee
         lock.unlock()
-        for (_, fds) in all { for fd in fds { Darwin.close(fd) } }
+        for (_, fds) in all { for fd in fds { close(fd) } }
         _reservedSockets.deinitialize(count: 1)
         _reservedSockets.deallocate()
     }
@@ -22,7 +27,7 @@ public final class PortReserver: Sendable {
         var fds: [Int32] = []
         for port in ports { if let fd = bindSocket(port: port) { fds.append(fd) } }
         lock.lock()
-        if let existing = _reservedSockets.pointee[workspaceID] { for fd in existing { Darwin.close(fd) } }
+        if let existing = _reservedSockets.pointee[workspaceID] { for fd in existing { close(fd) } }
         _reservedSockets.pointee[workspaceID] = fds
         lock.unlock()
     }
@@ -31,7 +36,7 @@ public final class PortReserver: Sendable {
         lock.lock()
         if let fds = _reservedSockets.pointee.removeValue(forKey: workspaceID) {
             lock.unlock()
-            for fd in fds { Darwin.close(fd) }
+            for fd in fds { close(fd) }
         } else {
             lock.unlock()
         }
@@ -45,7 +50,11 @@ public final class PortReserver: Sendable {
     }
 
     private func bindSocket(port: Int) -> Int32? {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        #if os(Linux)
+            let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #else
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+        #endif
         guard fd >= 0 else { return nil }
         var opt: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, socklen_t(MemoryLayout<Int32>.size))
@@ -59,7 +68,7 @@ public final class PortReserver: Sendable {
             }
         }
         if result != 0 {
-            Darwin.close(fd)
+            close(fd)
             return nil
         }
         return fd

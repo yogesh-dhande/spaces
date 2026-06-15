@@ -1,9 +1,18 @@
-import CryptoKit
-import Darwin
 import Foundation
-@preconcurrency import UserNotifications
 import spacesterminalcore
 import systembridge
+
+#if canImport(CryptoKit)
+    import CryptoKit
+#endif
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
+#if canImport(UserNotifications)
+    @preconcurrency import UserNotifications
+#endif
 
 public final class WorkspaceOrchestrator {
     public typealias BuiltInTerminalWindowOpener = @Sendable (String, TerminalAttachmentMode) -> Void
@@ -13,22 +22,26 @@ public final class WorkspaceOrchestrator {
     public typealias BuiltInTerminalSessionLauncher = @Sendable (TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary
     public typealias RemoteTerminalServiceClient = @Sendable (SpacesDaemonConnectionTarget, TerminalServiceRequest) throws -> TerminalServiceResponse
 
-    private final class NotificationAuthorizationCache: @unchecked Sendable {
-        private let lock = NSLock()
-        private var status: UNAuthorizationStatus?
+    #if canImport(UserNotifications)
+        private final class NotificationAuthorizationCache: @unchecked Sendable {
+            private let lock = NSLock()
+            private var status: UNAuthorizationStatus?
 
-        func set(_ status: UNAuthorizationStatus) {
-            lock.lock()
-            self.status = status
-            lock.unlock()
-        }
+            func set(_ status: UNAuthorizationStatus) {
+                lock.lock()
+                self.status = status
+                lock.unlock()
+            }
 
-        func get() -> UNAuthorizationStatus? {
-            lock.lock()
-            defer { lock.unlock() }
-            return status
+            func get() -> UNAuthorizationStatus? {
+                lock.lock()
+                defer { lock.unlock() }
+                return status
+            }
         }
-    }
+    #else
+        private final class NotificationAuthorizationCache: @unchecked Sendable {}
+    #endif
 
     private final class BuiltInTerminalSessionLauncherOverrideStore: @unchecked Sendable {
         private let lock = NSLock()
@@ -127,12 +140,16 @@ public final class WorkspaceOrchestrator {
             guard let socketPath = target.socketPath else { throw WorkspaceError.invalidArgument(message: "Local spacesd socket path is missing.") }
             return try TerminalServiceClient.send(request: request, socketPath: socketPath, timeout: 15)
         case .pinnedTLS:
-            guard let endpoint = target.endpoint else {
-                throw WorkspaceError.invalidArgument(message: "Remote spacesd endpoint is missing for \(target.displayName).")
-            }
-            return try TerminalServiceClient.sendPinnedTLS(
-                request: request, host: endpoint.host, port: endpoint.port, authToken: try remoteDaemonAuthToken(target: target),
-                certificateFingerprint: endpoint.certificateFingerprint, timeout: 30)
+            #if canImport(Network) && canImport(Security)
+                guard let endpoint = target.endpoint else {
+                    throw WorkspaceError.invalidArgument(message: "Remote spacesd endpoint is missing for \(target.displayName).")
+                }
+                return try TerminalServiceClient.sendPinnedTLS(
+                    request: request, host: endpoint.host, port: endpoint.port, authToken: try remoteDaemonAuthToken(target: target),
+                    certificateFingerprint: endpoint.certificateFingerprint, timeout: 30)
+            #else
+                throw WorkspaceError.invalidArgument(message: "Pinned-TLS remote daemon forwarding is unavailable in this spacesd build.")
+            #endif
         }
     }
 
@@ -142,8 +159,7 @@ public final class WorkspaceOrchestrator {
 
     private static func remoteDaemonAuthToken(target: SpacesDaemonConnectionTarget) throws -> String? {
         if let computeHostID = target.computeHostID { return try ComputeHostCredentialStore.resolvedAuthToken(hostID: computeHostID) }
-        let sharedToken = ProcessInfo.processInfo.environment["SPACESD_AUTH_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return sharedToken?.isEmpty == false ? sharedToken : nil
+        return nil
     }
 
     private enum ExtractedBrowserFocusOutcome {
@@ -327,46 +343,60 @@ public final class WorkspaceOrchestrator {
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
         self.terminalFocusPulseController = terminalFocusPulseController
         self.notificationDeliverer = notificationDeliverer ?? Self.deliverUserNotification
-        self.builtInTerminalWindowOpener =
-            builtInTerminalWindowOpener ?? { sessionID, mode in
-                guard let object = try? IPCNotification.currentObject() else { return }
-                DistributedNotificationCenter.default().postNotificationName(
-                    IPCNotification.openTerminalSessionWindow, object: object,
-                    userInfo: [
-                        IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalAttachmentModeUserInfoKey: mode.rawValue,
-                    ], options: [.deliverImmediately])
-            }
-        self.builtInTerminalWindowFocuser =
-            builtInTerminalWindowFocuser ?? { sessionID, requestID in
-                var userInfo: [String: String] = [
-                    IPCNotification.terminalSessionIDUserInfoKey: sessionID,
-                    IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
-                ]
-                if let requestID, !requestID.isEmpty { userInfo[IPCNotification.focusRequestIDUserInfoKey] = requestID }
-                guard let object = try? IPCNotification.currentObject() else { return }
-                DistributedNotificationCenter.default().postNotificationName(
-                    IPCNotification.openTerminalSessionWindow, object: object, userInfo: userInfo, options: [.deliverImmediately])
-            }
-        self.builtInTerminalWindowCloser =
-            builtInTerminalWindowCloser ?? { sessionID in
-                guard let object = try? IPCNotification.currentObject() else { return }
-                DistributedNotificationCenter.default().postNotificationName(
-                    IPCNotification.closeTerminalSessionWindow, object: object,
-                    userInfo: [
-                        IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalSessionIsTerminatingUserInfoKey: "true",
-                    ], options: [.deliverImmediately])
-            }
-        self.builtInTerminalSessionTerminator =
-            builtInTerminalSessionTerminator ?? Self.builtInTerminalSessionTerminatorOverrideStore.get() ?? { sessionID in
-                try? TerminalService.terminateSession(id: sessionID)
-            }
-        self.builtInTerminalSessionLauncher =
-            builtInTerminalSessionLauncher ?? Self.builtInTerminalSessionLauncherOverrideStore.get() ?? { launchConfiguration in
-                try TerminalService.createSession(launchConfiguration)
-            }
+        #if canImport(Darwin)
+            self.builtInTerminalWindowOpener =
+                builtInTerminalWindowOpener ?? { sessionID, mode in
+                    guard let object = try? IPCNotification.currentObject() else { return }
+                    DistributedNotificationCenter.default().postNotificationName(
+                        IPCNotification.openTerminalSessionWindow, object: object,
+                        userInfo: [
+                            IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalAttachmentModeUserInfoKey: mode.rawValue,
+                        ], options: [.deliverImmediately])
+                }
+            self.builtInTerminalWindowFocuser =
+                builtInTerminalWindowFocuser ?? { sessionID, requestID in
+                    var userInfo: [String: String] = [
+                        IPCNotification.terminalSessionIDUserInfoKey: sessionID,
+                        IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+                    ]
+                    if let requestID, !requestID.isEmpty { userInfo[IPCNotification.focusRequestIDUserInfoKey] = requestID }
+                    guard let object = try? IPCNotification.currentObject() else { return }
+                    DistributedNotificationCenter.default().postNotificationName(
+                        IPCNotification.openTerminalSessionWindow, object: object, userInfo: userInfo, options: [.deliverImmediately])
+                }
+            self.builtInTerminalWindowCloser =
+                builtInTerminalWindowCloser ?? { sessionID in
+                    guard let object = try? IPCNotification.currentObject() else { return }
+                    DistributedNotificationCenter.default().postNotificationName(
+                        IPCNotification.closeTerminalSessionWindow, object: object,
+                        userInfo: [
+                            IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalSessionIsTerminatingUserInfoKey: "true",
+                        ], options: [.deliverImmediately])
+                }
+            self.builtInTerminalSessionTerminator =
+                builtInTerminalSessionTerminator ?? Self.builtInTerminalSessionTerminatorOverrideStore.get() ?? { sessionID in
+                    try? TerminalService.terminateSession(id: sessionID)
+                }
+            self.builtInTerminalSessionLauncher =
+                builtInTerminalSessionLauncher ?? Self.builtInTerminalSessionLauncherOverrideStore.get() ?? { launchConfiguration in
+                    try TerminalService.createSession(launchConfiguration)
+                }
+        #else
+            self.builtInTerminalWindowOpener = builtInTerminalWindowOpener ?? { _, _ in }
+            self.builtInTerminalWindowFocuser = builtInTerminalWindowFocuser ?? { _, _ in }
+            self.builtInTerminalWindowCloser = builtInTerminalWindowCloser ?? { _ in }
+            self.builtInTerminalSessionTerminator =
+                builtInTerminalSessionTerminator ?? Self.builtInTerminalSessionTerminatorOverrideStore.get() ?? { _ in }
+            self.builtInTerminalSessionLauncher =
+                builtInTerminalSessionLauncher ?? Self.builtInTerminalSessionLauncherOverrideStore.get() ?? { _ in
+                    throw WorkspaceError.invalidArgument(message: "Local TerminalService launch is unavailable in this spacesd build.")
+                }
+        #endif
         self.remoteTerminalServiceClient = remoteTerminalServiceClient ?? Self.defaultRemoteTerminalServiceClient
         self.currentDate = currentDate
-        if ProcessInfo.processInfo.environment["DEBUG"] == "1" { fputs("spaces: DEBUG=1 enabled (browser/cycle profiling active)\n", stderr) }
+        if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
+            Self.writeStandardError("spaces: DEBUG=1 enabled (browser/cycle profiling active)\n")
+        }
     }
 
     @discardableResult public func syncConfig() throws -> AppConfig { try store.appConfig() }
@@ -522,7 +552,7 @@ public final class WorkspaceOrchestrator {
     /// actual values. The `url` field of each returned session is the fully-expanded prefix used for
     /// matching. Sessions whose URL is empty after expansion are omitted; duplicate resolved URLs are
     /// deduplicated (first occurrence wins, preserving order).
-    public func resolvedWorkspaceBrowserSessions(workspaceID: String) throws -> [BrowserSession] {
+    public func resolvedWorkspaceBrowserSessions(workspaceID: String, openRemoteForwards: Bool = false) throws -> [BrowserSession] {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         guard !sessions.isEmpty else { return [] }
@@ -531,7 +561,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        return try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan).map { resolved in
+        return try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan, openRemoteForwards: openRemoteForwards).map { resolved in
             BrowserSession(name: resolved.session.name, url: resolved.prefix, extractedWindow: resolved.session.extractedWindow)
         }
     }
@@ -1560,6 +1590,7 @@ public final class WorkspaceOrchestrator {
     }
 
     public func workspaceRuntimeStatus(workspaceID: String) throws -> WorkspaceRuntimeStatus {
+        _ = try synchronizeRemoteAgentSignals(workspaceID: workspaceID)
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let lifecycleState = WorkspaceLifecycleState(isRunning: workspace.isRunning)
         let runningProcesses = try store.runningProcesses(workspaceID: workspaceID)
@@ -1816,97 +1847,103 @@ public final class WorkspaceOrchestrator {
         }
         return didUpdate
     }
-    private static func deliverUserNotification(title: String, body: String, subtitle: String? = nil) {
-        guard NSClassFromString("XCTest") == nil else { return }
-        let center = UNUserNotificationCenter.current()
-        guard let authorizationStatus = currentNotificationAuthorizationStatus(center: center) else {
-            fputs("spaces: Timed out waiting for notification settings\n", stderr)
-            return
-        }
-        guard authorizationStatus == .authorized || authorizationStatus == .provisional else {
-            switch authorizationStatus {
-            case .denied: fputs("spaces: Notification authorization denied; skipping delivery\n", stderr)
-            case .notDetermined: fputs("spaces: Notification authorization not determined; skipping delivery\n", stderr)
-            default: fputs("spaces: Notification authorization unavailable (\(authorizationStatus.rawValue)); skipping delivery\n", stderr)
-            }
-            return
-        }
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        if let subtitle { content.subtitle = subtitle }
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        let timeout = DispatchTime.now() + .seconds(5)
-        let addSemaphore = DispatchSemaphore(value: 0)
-        center.add(request) { error in
-            if let error { fputs("spaces: Failed to deliver notification: \(error.localizedDescription)\n", stderr) }
-            addSemaphore.signal()
-        }
-        guard addSemaphore.wait(timeout: timeout) == .success else {
-            fputs("spaces: Timed out waiting for notification delivery\n", stderr)
-            return
-        }
-    }
-
-    public static func prepareUserNotificationAuthorization() {
-        guard NSClassFromString("XCTest") == nil else { return }
-        Task { @MainActor in
+    #if canImport(UserNotifications)
+        private static func deliverUserNotification(title: String, body: String, subtitle: String? = nil) {
+            guard NSClassFromString("XCTest") == nil else { return }
             let center = UNUserNotificationCenter.current()
-            let settings = await notificationSettings(center: center)
-            notificationAuthorizationCache.set(settings.authorizationStatus)
-            guard settings.authorizationStatus == .notDetermined else { return }
-            do {
-                let granted = try await requestNotificationAuthorization(center: center)
-                let updatedSettings = await notificationSettings(center: center)
-                let resolvedStatus =
-                    updatedSettings.authorizationStatus == .notDetermined
-                    ? (granted ? UNAuthorizationStatus.authorized : .denied) : updatedSettings.authorizationStatus
-                notificationAuthorizationCache.set(resolvedStatus)
-            } catch { fputs("spaces: Failed to request notification authorization: \(error.localizedDescription)\n", stderr) }
-        }
-    }
-
-    private static func currentNotificationAuthorizationStatus(center: UNUserNotificationCenter) -> UNAuthorizationStatus? {
-        if let cached = notificationAuthorizationCache.get(), cached != .notDetermined { return cached }
-        let statusBox = LockedNotificationAuthorizationStatus()
-        let semaphore = DispatchSemaphore(value: 0)
-        center.getNotificationSettings { settings in
-            notificationAuthorizationCache.set(settings.authorizationStatus)
-            statusBox.set(settings.authorizationStatus)
-            semaphore.signal()
-        }
-        guard semaphore.wait(timeout: .now() + .seconds(5)) == .success else { return nil }
-        return statusBox.get()
-    }
-
-    private static func notificationSettings(center: UNUserNotificationCenter) async -> UNNotificationSettings {
-        await withCheckedContinuation { continuation in center.getNotificationSettings { settings in continuation.resume(returning: settings) } }
-    }
-
-    private static func requestNotificationAuthorization(center: UNUserNotificationCenter) async throws -> Bool {
-        try await withCheckedThrowingContinuation { continuation in
-            center.requestAuthorization(options: [.alert, .sound]) { granted, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: granted) }
+            guard let authorizationStatus = currentNotificationAuthorizationStatus(center: center) else {
+                fputs("spaces: Timed out waiting for notification settings\n", stderr)
+                return
+            }
+            guard authorizationStatus == .authorized || authorizationStatus == .provisional else {
+                switch authorizationStatus {
+                case .denied: fputs("spaces: Notification authorization denied; skipping delivery\n", stderr)
+                case .notDetermined: fputs("spaces: Notification authorization not determined; skipping delivery\n", stderr)
+                default: fputs("spaces: Notification authorization unavailable (\(authorizationStatus.rawValue)); skipping delivery\n", stderr)
+                }
+                return
+            }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            if let subtitle { content.subtitle = subtitle }
+            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            let timeout = DispatchTime.now() + .seconds(5)
+            let addSemaphore = DispatchSemaphore(value: 0)
+            center.add(request) { error in
+                if let error { fputs("spaces: Failed to deliver notification: \(error.localizedDescription)\n", stderr) }
+                addSemaphore.signal()
+            }
+            guard addSemaphore.wait(timeout: timeout) == .success else {
+                fputs("spaces: Timed out waiting for notification delivery\n", stderr)
+                return
             }
         }
-    }
 
-    private final class LockedNotificationAuthorizationStatus: @unchecked Sendable {
-        private let lock = NSLock()
-        private var status: UNAuthorizationStatus?
-
-        func set(_ status: UNAuthorizationStatus) {
-            lock.lock()
-            self.status = status
-            lock.unlock()
+        public static func prepareUserNotificationAuthorization() {
+            guard NSClassFromString("XCTest") == nil else { return }
+            Task { @MainActor in
+                let center = UNUserNotificationCenter.current()
+                let settings = await notificationSettings(center: center)
+                notificationAuthorizationCache.set(settings.authorizationStatus)
+                guard settings.authorizationStatus == .notDetermined else { return }
+                do {
+                    let granted = try await requestNotificationAuthorization(center: center)
+                    let updatedSettings = await notificationSettings(center: center)
+                    let resolvedStatus =
+                        updatedSettings.authorizationStatus == .notDetermined
+                        ? (granted ? UNAuthorizationStatus.authorized : .denied) : updatedSettings.authorizationStatus
+                    notificationAuthorizationCache.set(resolvedStatus)
+                } catch { fputs("spaces: Failed to request notification authorization: \(error.localizedDescription)\n", stderr) }
+            }
         }
 
-        func get() -> UNAuthorizationStatus? {
-            lock.lock()
-            defer { lock.unlock() }
-            return status
+        private static func currentNotificationAuthorizationStatus(center: UNUserNotificationCenter) -> UNAuthorizationStatus? {
+            if let cached = notificationAuthorizationCache.get(), cached != .notDetermined { return cached }
+            let statusBox = LockedNotificationAuthorizationStatus()
+            let semaphore = DispatchSemaphore(value: 0)
+            center.getNotificationSettings { settings in
+                notificationAuthorizationCache.set(settings.authorizationStatus)
+                statusBox.set(settings.authorizationStatus)
+                semaphore.signal()
+            }
+            guard semaphore.wait(timeout: .now() + .seconds(5)) == .success else { return nil }
+            return statusBox.get()
         }
-    }
+
+        private static func notificationSettings(center: UNUserNotificationCenter) async -> UNNotificationSettings {
+            await withCheckedContinuation { continuation in center.getNotificationSettings { settings in continuation.resume(returning: settings) } }
+        }
+
+        private static func requestNotificationAuthorization(center: UNUserNotificationCenter) async throws -> Bool {
+            try await withCheckedThrowingContinuation { continuation in
+                center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+                    if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: granted) }
+                }
+            }
+        }
+
+        private final class LockedNotificationAuthorizationStatus: @unchecked Sendable {
+            private let lock = NSLock()
+            private var status: UNAuthorizationStatus?
+
+            func set(_ status: UNAuthorizationStatus) {
+                lock.lock()
+                self.status = status
+                lock.unlock()
+            }
+
+            func get() -> UNAuthorizationStatus? {
+                lock.lock()
+                defer { lock.unlock() }
+                return status
+            }
+        }
+    #else
+        private static func deliverUserNotification(title _: String, body _: String, subtitle _: String? = nil) {}
+
+        public static func prepareUserNotificationAuthorization() {}
+    #endif
     private func handleProcessExit(workspaceID: String, process: RunningProcessRecord, project: ProjectRecord, workspace: WorkspaceRecord) throws {
         // Find the process template to get the on-exit behavior
         guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else { return }
@@ -1925,7 +1962,7 @@ public final class WorkspaceOrchestrator {
         case .notify: notificationDeliverer("Process Exited", "Process '\(process.templateName)' has exited", nil)
         case .restart:
             // Restart the process
-            fputs("spaces: Restarting process '\(process.templateName)' due to exit\n", stderr)
+            Self.writeStandardError("spaces: Restarting process '\(process.templateName)' due to exit\n")
             notificationDeliverer("Process Restarting", "Process '\(process.templateName)' is being restarted", nil)
             try restartProcessInTerminal(workspaceID: workspaceID, process: process)
         }
@@ -1944,9 +1981,8 @@ public final class WorkspaceOrchestrator {
         _ = background
         let previousSessionID = process.terminalNativeID ?? process.terminalTrackingID
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
-            fputs(
-                "spaces: restart_process begin workspace=\(workspaceID) name=\(process.templateName) previous_session=\(previousSessionID ?? "-")\n",
-                stderr)
+            Self.writeStandardError(
+                "spaces: restart_process begin workspace=\(workspaceID) name=\(process.templateName) previous_session=\(previousSessionID ?? "-")\n")
         }
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let template = try templateOverride ?? configuredProcessTemplate(for: process, workspace: workspace, project: project)
@@ -1960,7 +1996,7 @@ public final class WorkspaceOrchestrator {
             terminateRemoteTerminalSession(for: process, plan: runtimePlan)
             let command = try spacesTerminalCommand(
                 template: template, env: env, shellPath: remoteShellPath(for: runtimePlan), includeInheritedPath: false,
-                includeProfileEnvironment: false)
+                includeProfileEnvironment: false, commandPrelude: remoteComputeHostProfilePathPrelude(plan: runtimePlan))
             session = try launchRemoteTerminalSession(
                 title: process.templateName, command: command, plan: runtimePlan, kind: .process, showMode: .owner)
         } else {
@@ -1972,9 +2008,9 @@ public final class WorkspaceOrchestrator {
                 readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
         }
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
-            fputs(
-                "spaces: restart_process launched workspace=\(workspaceID) name=\(process.templateName) previous_session=\(previousSessionID ?? "-") new_session=\(session.sessionID)\n",
-                stderr)
+            Self.writeStandardError(
+                "spaces: restart_process launched workspace=\(workspaceID) name=\(process.templateName) previous_session=\(previousSessionID ?? "-") new_session=\(session.sessionID)\n"
+            )
         }
         let now = nowISO8601()
         let restartedProcess = RunningProcessRecord(
@@ -1999,9 +2035,8 @@ public final class WorkspaceOrchestrator {
         terminateProcessGroup(pid: pid)
         waitForProcessExit(pid: pid, timeout: 10.0)
         guard isProcessAlive(pid: pid) else { return true }
-        fputs(
-            "spaces: Process '\(process.templateName)' with pid \(pid) did not exit in time; restart will open a fresh Spaces terminal session\n",
-            stderr)
+        Self.writeStandardError(
+            "spaces: Process '\(process.templateName)' with pid \(pid) did not exit in time; restart will open a fresh Spaces terminal session\n")
         return false
     }
 
@@ -3458,6 +3493,32 @@ public final class WorkspaceOrchestrator {
         FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
     }
 
+    private func remoteComputeHostProfilePathPrelude(plan: WorkspaceRuntimePlan) -> String? {
+        guard let computeHostID = plan.selection.computeHostID?.trimmingCharacters(in: .whitespacesAndNewlines), !computeHostID.isEmpty else {
+            return nil
+        }
+        let profileName = Self.safeComputeHostProfileName(computeHostID)
+        let helperPath = "~/.spaces/compute-hosts/\(profileName)/bin/spaces"
+        return "export PATH=~/.spaces/compute-hosts/\(profileName)/bin:$PATH; spaces() { \(helperPath) \"$@\"; }; export -f spaces"
+    }
+
+    private static func safeComputeHostProfileName(_ value: String) -> String {
+        let lowercased = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var scalars: [UnicodeScalar] = []
+        var lastWasSeparator = false
+        for scalar in lowercased.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) {
+                scalars.append(scalar)
+                lastWasSeparator = false
+            } else if !lastWasSeparator {
+                scalars.append("-")
+                lastWasSeparator = true
+            }
+        }
+        let result = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return result.isEmpty ? "host" : result
+    }
+
     private func runRemoteWorkspaceCommand(_ command: String, plan: WorkspaceRuntimePlan, env: [String: String], logPath: String? = nil) throws
         -> WorkspaceSetupRunResult
     {
@@ -3529,13 +3590,18 @@ public final class WorkspaceOrchestrator {
 
     private func spacesTerminalCommand(
         template: ProcessTemplate, env: [String: String], shellPath: String? = nil, includeInheritedPath: Bool = true,
-        includeProfileEnvironment: Bool = true
+        includeProfileEnvironment: Bool = true, commandPrelude: String? = nil
     ) throws -> String {
-        let command = try processLaunchCommand(template: template)
+        let command = commandWithPrelude(try processLaunchCommand(template: template), prelude: commandPrelude)
         let runtimeEnv = terminalLaunchEnvironment(
             base: env, includeInheritedPath: includeInheritedPath, includeProfileEnvironment: includeProfileEnvironment)
         let resolvedShellPath = shellPath ?? terminalLoginShellPath()
         return commandPrefixedWithShellEnvironment("exec \(shellQuoted(resolvedShellPath)) -l -c \(shellQuoted(command))", env: runtimeEnv)
+    }
+
+    private func commandWithPrelude(_ command: String, prelude: String?) -> String {
+        guard let prelude = prelude?.trimmingCharacters(in: .whitespacesAndNewlines), !prelude.isEmpty else { return command }
+        return "\(prelude); \(command)"
     }
 
     public func validateProcessTemplate(_ template: ProcessTemplate) throws { _ = try processLaunchCommand(template: template) }
@@ -3602,9 +3668,9 @@ public final class WorkspaceOrchestrator {
         return resolved
     }
 
-    private func resolveBrowserSessions(_ sessions: [BrowserSession], env: [String: String], runtimePlan: WorkspaceRuntimePlan) throws
-        -> [ResolvedBrowserSession]
-    {
+    private func resolveBrowserSessions(
+        _ sessions: [BrowserSession], env: [String: String], runtimePlan: WorkspaceRuntimePlan, openRemoteForwards: Bool = true
+    ) throws -> [ResolvedBrowserSession] {
         let resolved = resolveBrowserSessions(sessions, env: env)
         guard runtimePlan.selection.isRemote else { return resolved }
         var forwarded: [ResolvedBrowserSession] = []
@@ -3615,6 +3681,8 @@ public final class WorkspaceOrchestrator {
                 session.session.extractedWindow?.targetURL, for: session.prefix, runtimePlan: runtimePlan)
             {
                 prefix = reusable
+            } else if !openRemoteForwards {
+                prefix = session.prefix
             } else {
                 prefix = try BrowserSSHForwardResolver.resolvedURL(session.prefix, runtimePlan: runtimePlan)
             }
@@ -3866,12 +3934,12 @@ public final class WorkspaceOrchestrator {
 
     private func logCycleProfile(_ message: String) {
         guard debugLoggingEnabled() else { return }
-        fputs("spaces: cycle \(message)\n", stderr)
+        Self.writeStandardError("spaces: cycle \(message)\n")
     }
 
     private func logBrowserFocus(_ message: String) {
         guard debugLoggingEnabled() else { return }
-        fputs("spaces: browser focus \(message)\n", stderr)
+        Self.writeStandardError("spaces: browser focus \(message)\n")
     }
 
     private func logPerfMetric(_ metric: String, workspaceID: String, target: String, detail: String = "", elapsedMS: Int, success: Bool) {
@@ -3887,6 +3955,8 @@ public final class WorkspaceOrchestrator {
     }
 
     private func debugLoggingEnabled() -> Bool { ProcessInfo.processInfo.environment["DEBUG"] == "1" }
+
+    private static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
 
     private func navigationTargetDebugName(_ target: WorkspaceNavigationTarget) -> String {
         switch target {
@@ -3942,8 +4012,8 @@ public final class WorkspaceOrchestrator {
         }
         if debugLoggingEnabled() {
             let elapsedMS = Int(Date().timeIntervalSince(scanStartedAt) * 1000)
-            fputs(
-                "spaces: browser scan workspace=\(workspaceID) tabs=\(tabs.count) matches=\(browserWindows.count) elapsed_ms=\(elapsedMS)\n", stderr)
+            Self.writeStandardError(
+                "spaces: browser scan workspace=\(workspaceID) tabs=\(tabs.count) matches=\(browserWindows.count) elapsed_ms=\(elapsedMS)\n")
         }
         return BrowserWindowScanResult(windows: browserWindows, tabIndexByWindowAndURL: tabIndexByWindowAndURL)
     }
@@ -5166,7 +5236,7 @@ public final class WorkspaceOrchestrator {
             if let runtimePlan, runtimePlan.selection.isRemote {
                 let sessionCommand = try spacesTerminalCommand(
                     template: template, env: env, shellPath: remoteShellPath(for: runtimePlan), includeInheritedPath: false,
-                    includeProfileEnvironment: false)
+                    includeProfileEnvironment: false, commandPrelude: remoteComputeHostProfilePathPrelude(plan: runtimePlan))
                 session = try launchRemoteTerminalSession(title: name, command: sessionCommand, plan: runtimePlan, kind: .process, showMode: .owner)
             } else {
                 let sessionCommand = try spacesTerminalCommand(template: template, env: env)
@@ -5413,7 +5483,7 @@ public final class WorkspaceOrchestrator {
 
     private func processState(pid: Int) -> String? {
         guard pid > 0 else { return nil }
-        if Darwin.kill(pid_t(pid), 0) != 0, errno != EPERM { return nil }
+        if kill(pid_t(pid), 0) != 0, errno != EPERM { return nil }
         return try? Shell.runAndCapture(["ps", "-p", "\(pid)", "-o", "state="])
     }
 
@@ -5732,7 +5802,16 @@ public final class WorkspaceOrchestrator {
 
     private func projectID(namespace: String, source: String) -> String {
         let data = Data("\(namespace)\u{0}\(source)".utf8)
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        #if canImport(CryptoKit)
+            return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        #else
+            var hash: UInt64 = 14_695_981_039_346_656_037
+            for byte in data {
+                hash ^= UInt64(byte)
+                hash &*= 1_099_511_628_211
+            }
+            return String(format: "%016llx", hash)
+        #endif
     }
 
     private func repositoriesRootDirectory() -> URL {
@@ -5907,8 +5986,8 @@ public final class WorkspaceOrchestrator {
     }
 
     @discardableResult public func recordRemoteAgentSignal(_ event: TerminalServiceAgentSignalEvent) throws -> Bool {
-        guard let type = RemoteAgentSignalType(rawValue: event.type), let provider = AgentProvider(rawValue: event.provider) else { return true }
-        guard let workspaceID = try remoteAgentSignalWorkspaceID(event) else { return true }
+        guard let type = RemoteAgentSignalType(rawValue: event.type), let provider = AgentProvider(rawValue: event.provider) else { return false }
+        guard let workspaceID = try remoteAgentSignalWorkspaceID(event) else { return false }
         let terminalTrackingID = sanitizedFocusName(event.terminalTrackingID) ?? sanitizedFocusName(event.sessionID)
         let terminalNativeID = sanitizedFocusName(event.terminalNativeID) ?? terminalTrackingID
         let codexThreadID = sanitizedFocusName(event.codexThreadID)
@@ -5938,10 +6017,50 @@ public final class WorkspaceOrchestrator {
         return true
     }
 
+    @discardableResult public func synchronizeRemoteAgentSignals(workspaceID: String) throws -> Bool {
+        let plan = try workspaceRuntimePlan(workspaceID: workspaceID)
+        guard plan.selection.isRemote else { return false }
+        var didApply = false
+        for agent in try store.agentWindows(workspaceID: workspaceID) where agent.provider == .spaces {
+            guard let sessionID = builtInTerminalSessionID(for: agent) else { continue }
+            let response: TerminalServiceResponse
+            do {
+                response = try Self.sendTerminalServiceRequest(
+                    to: plan.daemonTarget, request: TerminalServiceRequest(command: "state", sessionID: sessionID))
+            } catch { continue }
+            guard response.ok else { continue }
+            var acknowledgedIDs: [String] = []
+            for event in response.agentSignals ?? [] {
+                if try recordRemoteAgentSignal(event) {
+                    acknowledgedIDs.append(event.id)
+                    didApply = true
+                }
+            }
+            guard !acknowledgedIDs.isEmpty else { continue }
+            _ = try? Self.sendTerminalServiceRequest(
+                to: plan.daemonTarget,
+                request: TerminalServiceRequest(command: "ackAgentSignals", sessionID: sessionID, agentSignalEventIDs: acknowledgedIDs))
+        }
+        return didApply
+    }
+
     private func remoteAgentSignalWorkspaceID(_ event: TerminalServiceAgentSignalEvent) throws -> String? {
         if let workspaceID = sanitizedFocusName(event.workspaceID), try store.workspace(id: workspaceID) != nil { return workspaceID }
         if let workspacePath = sanitizedFocusName(event.workspacePath), let workspace = try store.workspace(dir: workspacePath) {
             return workspace.id
+        }
+        let candidateSessionIDs = Set(
+            [event.terminalNativeID, event.terminalTrackingID, event.sessionID].compactMap { normalizedTerminalSessionID($0) })
+        guard !candidateSessionIDs.isEmpty else { return nil }
+        for project in try store.projects() {
+            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
+                if try store.agentWindows(workspaceID: workspace.id).contains(where: { agent in
+                    guard let sessionID = builtInTerminalSessionID(for: agent) else { return false }
+                    return candidateSessionIDs.contains(sessionID)
+                }) {
+                    return workspace.id
+                }
+            }
         }
         return nil
     }
@@ -6622,8 +6741,11 @@ public final class WorkspaceOrchestrator {
         let agentSessionID = UUID().uuidString
         launchEnv[Self.terminalTrackingIDEnvVar] = agentSessionID
         let shellPath = runtimePlan.selection.isRemote ? remoteShellPath(for: runtimePlan) : terminalShellPathOverride()
+        let commandPrelude = runtimePlan.selection.isRemote ? remoteComputeHostProfilePathPrelude(plan: runtimePlan) : nil
         let sessionCommand = commandPrefixedWithShellEnvironment(
-            wrappedAgentLauncherCommand(name: launcher.name, command: applyEnvVars(launcher.command, env: env), shellPath: shellPath), env: launchEnv)
+            wrappedAgentLauncherCommand(
+                name: launcher.name, command: applyEnvVars(launcher.command, env: env), shellPath: shellPath, commandPrelude: commandPrelude),
+            env: launchEnv)
         let session: SpacesTerminalSessionHandle
         if runtimePlan.selection.isRemote {
             session = try launchRemoteTerminalSession(
@@ -6661,9 +6783,9 @@ public final class WorkspaceOrchestrator {
         return !fallbackKey.isEmpty && runningProcessMatchKey(name: process.templateName) == fallbackKey
     }
 
-    private func wrappedAgentLauncherCommand(name: String, command: String, shellPath: String?) -> String {
+    private func wrappedAgentLauncherCommand(name: String, command: String, shellPath: String?, commandPrelude: String? = nil) -> String {
         let escapedName = name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "'\\''")
-        let wrappedCommand = "printf '\\033]0;\(escapedName)\\007'; \(command)"
+        let wrappedCommand = commandWithPrelude("printf '\\033]0;\(escapedName)\\007'; \(command)", prelude: commandPrelude)
         let resolvedShell: String
         if let trimmedShell = shellPath?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedShell.isEmpty {
             resolvedShell = trimmedShell
@@ -6830,7 +6952,7 @@ public final class WorkspaceOrchestrator {
         if let runtimePlan, runtimePlan.selection.isRemote {
             let sessionCommand = try spacesTerminalCommand(
                 template: template, env: env, shellPath: remoteShellPath(for: runtimePlan), includeInheritedPath: false,
-                includeProfileEnvironment: false)
+                includeProfileEnvironment: false, commandPrelude: remoteComputeHostProfilePathPrelude(plan: runtimePlan))
             session = try launchRemoteTerminalSession(title: name, command: sessionCommand, plan: runtimePlan, kind: .process, showMode: .owner)
         } else {
             let sessionCommand = try spacesTerminalCommand(template: template, env: env)

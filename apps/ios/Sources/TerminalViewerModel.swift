@@ -84,7 +84,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var streamHandle: SpacesMobileBridgeStreamHandle?
     private var reconnectTask: Task<Void, Never>?
-    private var directStatePollingTask: Task<Void, Never>?
+    private var directHeartbeatTask: Task<Void, Never>?
     private var bufferedInputText = ""
     private var bufferedInputFlushTask: Task<Void, Never>?
     private let inputSendQueue = TerminalInputSerialQueue()
@@ -131,7 +131,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private static let postResizeStateSettleIterations = 6
     private static let dismissalDetachTimeout: Duration = .seconds(3)
     private static let linkPreviewChunkLimit = 256 * 1024
-    private static let directStatePollingInterval: Duration = .milliseconds(750)
+    private static let directHeartbeatInterval: Duration = .seconds(20)
 
     init(
         session: SpacesMobileTerminalSessionSummary,
@@ -147,7 +147,9 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         self.onAuthenticationRequired = onAuthenticationRequired
         let resolvedBridgeClient = bridgeClient ?? SpacesMobileBridgeClient(settings: settings)
         self.bridgeClient = resolvedBridgeClient
-        directDaemonClient = session.daemonEndpoint.map { SpacesMobileTerminalDaemonClient(endpoint: $0) }
+        directDaemonClient = SpacesMobileDirectCredentialStore.endpoint(from: session.daemonEndpoint).map {
+            SpacesMobileTerminalDaemonClient(endpoint: $0)
+        }
         commandChannel = resolvedBridgeClient.makeCommandChannel()
         self.openExternalURL = openExternalURL
         self.remoteMediaDownloader = remoteMediaDownloader
@@ -297,8 +299,8 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         isInputSurfaceReady = false
         reconnectTask?.cancel()
         reconnectTask = nil
-        directStatePollingTask?.cancel()
-        directStatePollingTask = nil
+        directHeartbeatTask?.cancel()
+        directHeartbeatTask = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         scrollCoalescer.cancel()
@@ -381,8 +383,13 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             if !isOwner {
                 await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "takeover_confirmation")
             }
-            isAwaitingTakeoverConfirmation = !isOwner
             errorMessage = nil
+            if !isOwner {
+                isAwaitingTakeoverConfirmation = false
+                trace("takeover_unconfirmed")
+                return
+            }
+            isAwaitingTakeoverConfirmation = false
             trace("takeover_success state=\(takeoverState == nil ? 0 : 1) owner=\(isOwner ? 1 : 0)")
         } catch {
             isAwaitingTakeoverConfirmation = false
@@ -400,6 +407,9 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private func takeOverTerminal(timeout: Duration) async throws -> GhosttyRemoteSessionStatePayload? {
         if let directDaemonClient {
             return try await directDaemonClient.takeOver(sessionID: session.id, clientID: remoteClient.id, timeout: timeout)
+        }
+        if session.daemonEndpoint != nil {
+            throw SpacesMobileBridgeClientError.requestFailed("Remote terminal credential is missing. Refresh the mobile overview from the paired Mac.")
         }
         let takeoverState = try await bridgeClient.takeOver(sessionID: session.id, clientID: remoteClient.id, timeout: timeout)
         replaceCommandChannel()
@@ -719,6 +729,12 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private func handleInputSendError(_ error: Error) {
         guard !Self.isTransientInputTransportError(error) else { return }
         if handleAuthenticationFailure(error) { return }
+        if Self.isTerminalNoLongerLiveError(error) {
+            Task { [weak self] in
+                await self?.recoverEndedStateAfterTerminalStopped(error, reason: "input_terminal_stopped")
+            }
+            return
+        }
         errorMessage = error.localizedDescription
     }
 
@@ -948,6 +964,13 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             await connectDirectDaemon(reconnectSilently: reconnectSilently)
             return
         }
+        if session.daemonEndpoint != nil {
+            reconnectTask = nil
+            isConnecting = false
+            errorMessage = "Remote terminal credential is missing. Refresh the mobile overview from the paired Mac."
+            trace("direct_connect_missing_credential")
+            return
+        }
         do {
             if shouldAttachBeforeSubscribing {
                 try await bridgeClient.attach(
@@ -996,17 +1019,19 @@ struct TerminalLinkPreview: Identifiable, Equatable {
                 hasAttachedToSession = true
                 trace("direct_connect_attach_success")
             }
-            let refreshedState = await refreshLatestState(
-                timeout: Self.stateRequestTimeout,
-                ignoreTransientTimeout: true,
-                reason: "direct_connect_bootstrap")
-            startDirectStatePolling()
+            let handle = try directDaemonClient.subscribe(sessionID: session.id, clientID: remoteClient.id) { [weak self] payload in
+                guard let self else { return }
+                applyLatestState(payload)
+            } onDisconnect: { [weak self] error in
+                Task { @MainActor [weak self] in
+                    await self?.handleDisconnect(error)
+                }
+            }
+            streamHandle = handle
+            startDirectHeartbeat()
             errorMessage = nil
             reconnectTask = nil
-            trace("direct_connect_success state=\(refreshedState == nil ? 0 : 1)")
-            if refreshedState == nil, !isOwner, !isStopping {
-                isConnecting = false
-            }
+            trace("direct_connect_subscribe_success")
         } catch {
             reconnectTask = nil
             isConnecting = false
@@ -1015,17 +1040,20 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
     }
 
-    private func startDirectStatePolling() {
-        guard directDaemonClient != nil, !isStopping, !isEndedState else { return }
-        directStatePollingTask?.cancel()
-        directStatePollingTask = Task { [weak self] in
+    private func startDirectHeartbeat() {
+        guard let directDaemonClient, hasAttachedToSession, !isStopping, !isEndedState else { return }
+        directHeartbeatTask?.cancel()
+        directHeartbeatTask = Task { [weak self, directDaemonClient, sessionID = session.id, clientID = remoteClient.id] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: Self.directStatePollingInterval)
+                try? await Task.sleep(for: Self.directHeartbeatInterval)
                 guard !Task.isCancelled else { break }
-                await self?.refreshLatestState(
-                    timeout: Self.inputRequestTimeout,
-                    ignoreTransientTimeout: true,
-                    reason: "direct_poll")
+                do {
+                    try await directDaemonClient.heartbeat(sessionID: sessionID, clientID: clientID, timeout: Self.inputRequestTimeout)
+                } catch {
+                    await MainActor.run { [weak self] in
+                        self?.trace("direct_heartbeat_failure error=\(self?.sanitizedTraceDetail(error.localizedDescription) ?? "unknown")")
+                    }
+                }
             }
         }
     }
@@ -1161,6 +1189,27 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private func recoverEndedStateIfLiveStreamIsMissing(_ error: Error, reason: String) async -> Bool {
         guard Self.isMissingLiveStateStreamError(error), !isStopping else { return false }
         trace("missing_live_stream_state_refresh reason=\(reason)")
+        isBusy = false
+        isConnecting = true
+        let refreshedState = await refreshLatestState(
+            timeout: Self.stateRequestTimeout,
+            ignoreTransientTimeout: true,
+            reason: reason
+        )
+        isConnecting = false
+        guard let refreshedState else { return false }
+        if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
+            isSessionUnavailable = false
+            isAwaitingTakeoverConfirmation = false
+            errorMessage = nil
+            return true
+        }
+        return false
+    }
+
+    private func recoverEndedStateAfterTerminalStopped(_ error: Error, reason: String) async -> Bool {
+        guard Self.isTerminalNoLongerLiveError(error), !isStopping else { return false }
+        trace("terminal_stopped_state_refresh reason=\(reason)")
         isBusy = false
         isConnecting = true
         let refreshedState = await refreshLatestState(
@@ -1348,6 +1397,9 @@ struct TerminalLinkPreview: Identifiable, Equatable {
                     trace("ownership_resize_success columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
                 } catch {
                     trace("ownership_resize_failure columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows) error=\(sanitizedTraceDetail(error.localizedDescription))")
+                    if await recoverEndedStateAfterTerminalStopped(error, reason: "ownership_resize_terminal_stopped") {
+                        return
+                    }
                     if !Self.isTransientReconnectError(error) {
                         if handleAuthenticationFailure(error) { return }
                         errorMessage = error.localizedDescription
@@ -1473,12 +1525,16 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private func handleAuthenticationFailure(_ error: Error) -> Bool {
         guard let recoveryMessage = SpacesMobileBridgeAuthentication.recoveryMessage(for: error) else { return false }
+        if session.daemonEndpoint != nil {
+            errorMessage = "Remote terminal credential was rejected. Refresh terminals from the paired Mac to reprovision direct access."
+            return true
+        }
         isStopping = true
         isAwaitingTakeoverConfirmation = false
         reconnectTask?.cancel()
         reconnectTask = nil
-        directStatePollingTask?.cancel()
-        directStatePollingTask = nil
+        directHeartbeatTask?.cancel()
+        directHeartbeatTask = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         inputSendQueue.cancelAll()
@@ -1557,6 +1613,17 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
     }
 
+    private static func isTerminalNoLongerLiveError(_ error: Error) -> Bool {
+        switch error {
+        case SpacesMobileBridgeClientError.requestFailed(let message),
+             SpacesMobileBridgeClientError.streamFailed(let message):
+            return message.localizedStandardContains("terminal session")
+                && (message.localizedStandardContains("not running") || message.localizedStandardContains("not live"))
+        default:
+            return false
+        }
+    }
+
     private static func transientPOSIXErrorCode(_ error: Error) -> Int? {
         let nsError = error as NSError
         guard nsError.domain == NSPOSIXErrorDomain else { return nil }
@@ -1620,8 +1687,8 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             streamHandle = nil
             reconnectTask?.cancel()
             reconnectTask = nil
-            directStatePollingTask?.cancel()
-            directStatePollingTask = nil
+            directHeartbeatTask?.cancel()
+            directHeartbeatTask = nil
             bufferedInputFlushTask?.cancel()
             bufferedInputFlushTask = nil
             scrollCoalescer.cancel()

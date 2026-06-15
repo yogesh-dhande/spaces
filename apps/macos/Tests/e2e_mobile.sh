@@ -157,6 +157,19 @@ remote_auth_token_env_key() {
   printf 'SPACESD_AUTH_TOKEN_%s\n' "$(printf '%s' "$REMOTE_HOST_ID" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]/_/g')"
 }
 
+ensure_remote_auth_token() {
+  if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then
+    return 0
+  fi
+  REMOTE_AUTH_TOKEN="$(python3 - <<'PY'
+import base64
+import os
+print(base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("="))
+PY
+)"
+  export SPACES_E2E_REMOTE_AUTH_TOKEN="$REMOTE_AUTH_TOKEN"
+}
+
 export_remote_auth_token() {
   [[ -n "$REMOTE_AUTH_TOKEN" ]] || return 0
   local key
@@ -478,6 +491,7 @@ start_demo() {
     SPACES_MOBILE_DEMO_IPHONE_NAME="$demo_iphone_name" \
     SPACES_MOBILE_DEMO_IPAD_NAME="$demo_ipad_name" \
     SPACES_MOBILE_DEMO_PORT="$DEMO_PORT" \
+    SPACES_E2E_REMOTE_AUTH_TOKEN="$REMOTE_AUTH_TOKEN" \
     SPACESD_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
     CODEX_HOME="$E2E_CODEX_HOME" \
     XDG_CONFIG_HOME="$E2E_GHOSTTY_XDG_CONFIG_HOME" \
@@ -656,8 +670,7 @@ completed = subprocess.run(
         bridge_host,
         "--port",
         str(bridge_port),
-        "--transport-key",
-        pairing["transportKey"],
+        "--transport-key=" + pairing["transportKey"],
         "--request-json",
         json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
     ],
@@ -714,11 +727,30 @@ command = [
     bridge_host,
     "--port",
     str(bridge_port),
-    "--transport-key",
-    pairing["transportKey"],
+    "--transport-key=" + pairing["transportKey"],
     "--request-json",
     json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, "command": "overview"}),
 ]
+
+def session_id_for_row(row):
+    if not isinstance(row, dict):
+        return None
+    for key in ("sessionID", "id"):
+        value = row.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+def collect_terminal_rows(value, rows):
+    if isinstance(value, dict):
+        row_session_id = session_id_for_row(value)
+        if row_session_id in required_session_ids:
+            rows.append(value)
+        for child in value.values():
+            collect_terminal_rows(child, rows)
+    elif isinstance(value, list):
+        for child in value:
+            collect_terminal_rows(child, rows)
 
 deadline = time.time() + 30
 last_detail = ""
@@ -732,21 +764,28 @@ while time.time() < deadline:
         except json.JSONDecodeError as error:
             last_detail = f"attempt {attempt}: invalid JSON: {error}\nstdout={completed.stdout}\nstderr={completed.stderr}"
         else:
-            sessions = payload.get("overview", {}).get("sessions", [])
-            visible_ids = {session.get("id") for session in sessions if isinstance(session, dict)}
+            terminal_rows = []
+            collect_terminal_rows(payload.get("overview", {}), terminal_rows)
+            visible_ids = {session_id_for_row(row) for row in terminal_rows}
             missing = [session_id for session_id in required_session_ids if session_id not in visible_ids]
+            missing_direct_credentials = []
+            for row in terminal_rows:
+                endpoint = row.get("daemonEndpoint")
+                if isinstance(endpoint, dict) and not str(endpoint.get("authToken") or "").strip():
+                    missing_direct_credentials.append(session_id_for_row(row))
             last_detail = json.dumps(
                 {
                     "attempt": attempt,
                     "requiredSessionIDs": required_session_ids,
                     "visibleSessionIDs": sorted(session_id for session_id in visible_ids if session_id),
                     "missingSessionIDs": missing,
+                    "missingDirectCredentialSessionIDs": missing_direct_credentials,
                     "ok": payload.get("ok"),
                 },
                 indent=2,
                 sort_keys=True,
             )
-            if payload.get("ok") and not missing:
+            if payload.get("ok") and not missing and not missing_direct_credentials:
                 log_path.write_text(last_detail + "\n")
                 raise SystemExit(0)
     else:
@@ -1284,11 +1323,11 @@ def wait_for_owner_control_ready(owner_client_id: str) -> None:
     last_response = None
     while time.time() < deadline:
         response = send_request(
-            {"command": "key", "key": "__spaces_e2e_owner_probe__", "clientID": owner_client_id}
+            {"command": "send", "text": "", "clientID": owner_client_id}
         )
         last_response = response
         message = response.get("message", "")
-        if message == "Unsupported terminal key.":
+        if response.get("ok"):
             return
         if "Only the active owner" in message:
             time.sleep(0.1)
@@ -1713,6 +1752,7 @@ run_roundtrip_scenario() {
   session_id="$(new_terminal_session)"
   track_current_scenario_session "$session_id"
   write_ui_test_config "roundtrip" "$session_id"
+  wait_for_mobile_overview_sessions
   reset_mobile_app
   python3 - "$ROOT_DIR" "$DEMO_ROOT" "$session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$MOBILE_UDID" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$UI_TEST_CONFIG" "$UI_TEST_LOG" "$IOS_DERIVED_DATA" "$SCENARIO_DIR" "$MOBILE_DEVICE_LABEL" "$MOBILE_ARTIFACT_NAME" <<'PY'
 import json
@@ -2418,11 +2458,11 @@ def wait_for_owner_control_ready(owner_client_id: str) -> None:
     last_response = None
     while time.time() < deadline:
         response = send_request(
-            {"command": "key", "key": "__spaces_e2e_owner_probe__", "clientID": owner_client_id}
+            {"command": "send", "text": "", "clientID": owner_client_id}
         )
         last_response = response
         message = response.get("message", "")
-        if message == "Unsupported terminal key.":
+        if response.get("ok"):
             return
         if "Only the active owner" in message:
             time.sleep(0.1)
@@ -2852,8 +2892,7 @@ def send_mobile_request(request: dict, attempts: int = 3) -> dict:
         bridge_host,
         "--port",
         str(bridge_port),
-        "--transport-key",
-        pairing["transportKey"],
+        "--transport-key=" + pairing["transportKey"],
         "--request-json",
         json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
     ]
@@ -3147,8 +3186,7 @@ def send_mobile_request(request: dict) -> dict:
             bridge_host,
             "--port",
             str(bridge_port),
-            "--transport-key",
-            pairing["transportKey"],
+            "--transport-key=" + pairing["transportKey"],
             "--request-json",
             json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
         ],
@@ -3442,8 +3480,7 @@ def send_mobile_request(request: dict) -> dict:
             bridge_host,
             "--port",
             str(bridge_port),
-            "--transport-key",
-            pairing["transportKey"],
+            "--transport-key=" + pairing["transportKey"],
             "--request-json",
             json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
         ],
@@ -3636,6 +3673,7 @@ run_selected_scenarios() {
 
 parse_args "$@"
 require_remote_configuration
+ensure_remote_auth_token
 export_remote_auth_token
 case "$MOBILE_DEVICE_KEY" in
   iphone|ipad)

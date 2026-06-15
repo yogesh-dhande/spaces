@@ -51,7 +51,7 @@ public enum ComputeHostBootstrapError: LocalizedError, Equatable {
 }
 
 public struct ComputeHostBootstrapper {
-    public typealias CommandRunner = @Sendable ([String], TimeInterval) throws -> String
+    public typealias CommandRunner = @Sendable ([String], String, TimeInterval) throws -> String
 
     private let runCommand: CommandRunner
 
@@ -66,7 +66,8 @@ public struct ComputeHostBootstrapper {
         guard !token.isEmpty else { throw ComputeHostBootstrapError.missingAuthToken }
 
         let output = try runCommand(
-            Self.sshCommand(host: host, authToken: token, selectsAvailablePort: false, cleanExistingProfile: cleanExistingProfile), timeout)
+            Self.sshCommand(host: host),
+            Self.remoteStartInput(host: host, authToken: token, selectsAvailablePort: false, cleanExistingProfile: cleanExistingProfile), timeout)
         let parsed = try Self.parseBootstrapOutput(output)
         return ComputeHostBootstrapOutcome(
             certificateFingerprint: parsed.certificateFingerprint,
@@ -84,7 +85,8 @@ public struct ComputeHostBootstrapper {
         guard !token.isEmpty else { throw ComputeHostBootstrapError.missingAuthToken }
 
         let output = try runCommand(
-            Self.sshCommand(host: prepared.host, authToken: token, selectsAvailablePort: true, cleanExistingProfile: false), timeout)
+            Self.sshCommand(host: prepared.host),
+            Self.remoteStartInput(host: prepared.host, authToken: token, selectsAvailablePort: true, cleanExistingProfile: false), timeout)
         let outcome = try Self.parseBootstrapOutput(output)
         var host = prepared.host
         host.workspaceRoot = outcome.workspaceRoot.isEmpty ? host.workspaceRoot : outcome.workspaceRoot
@@ -97,23 +99,22 @@ public struct ComputeHostBootstrapper {
         return ComputeHostBootstrapResult(host: host, authToken: token, outcome: normalizedOutcome)
     }
 
-    static func sshCommand(host: ComputeHostRecord, authToken: String, selectsAvailablePort: Bool, cleanExistingProfile: Bool = false) -> [String] {
-        var command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new"]
+    static func sshCommand(host: ComputeHostRecord) -> [String] {
+        var command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes"]
         if let port = host.sshPort { command.append(contentsOf: ["-p", String(port)]) }
         command.append(sshDestination(host: host))
-        command.append(
-            remoteStartScript(
-                host: host, authToken: authToken, selectsAvailablePort: selectsAvailablePort, cleanExistingProfile: cleanExistingProfile))
+        command.append("sh -c 'IFS= read -r spacesd_auth_token; export spacesd_auth_token; exec bash -s'")
         return command
     }
 
-    static func remoteStartScript(host: ComputeHostRecord, authToken: String, selectsAvailablePort: Bool = false, cleanExistingProfile: Bool = false)
+    static func remoteStartInput(host: ComputeHostRecord, authToken: String, selectsAvailablePort: Bool = false, cleanExistingProfile: Bool = false)
         -> String
-    {
+    { "\(authToken)\n\(remoteStartScript(host: host, selectsAvailablePort: selectsAvailablePort, cleanExistingProfile: cleanExistingProfile))" }
+
+    static func remoteStartScript(host: ComputeHostRecord, selectsAvailablePort: Bool = false, cleanExistingProfile: Bool = false) -> String {
         let hostID = safePathComponent(host.id)
         let workspaceRoot = shellSingleQuoted(host.workspaceRoot)
         let port = host.daemonEndpoint.port
-        let token = shellSingleQuoted(authToken)
         let cleanProfileScript: String
         if cleanExistingProfile {
             cleanProfileScript = """
@@ -188,6 +189,10 @@ public struct ComputeHostBootstrapper {
         }
 
         return """
+            if [ -z "${spacesd_auth_token}" ]; then
+              echo "spacesd auth token is required." >&2
+              exit 1
+            fi
             set -eu
             PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
             profile_root="${HOME}/.spaces/compute-hosts/\(hostID)"
@@ -331,7 +336,12 @@ public struct ComputeHostBootstrapper {
             PY
             SPACES_REMOTE_HELPER
             chmod +x "${profile_root}/bin/spaces"
-            spacesd_path="$(command -v spacesd || true)"
+            spacesd_path=""
+            if [ -x "${HOME}/bin/spacesd" ]; then
+              spacesd_path="${HOME}/bin/spacesd"
+            else
+              spacesd_path="$(command -v spacesd || true)"
+            fi
             if [ -z "${spacesd_path}" ]; then
               echo "spacesd executable not found on remote host PATH." >&2
               exit 127
@@ -350,7 +360,7 @@ public struct ComputeHostBootstrapper {
               lsof_path="$(command -v lsof || true)"
             fi
             if ! { [ -n "${lsof_path}" ] && "${lsof_path}" -nPiTCP:${selected_port} -sTCP:LISTEN >/dev/null 2>&1; }; then
-              nohup env PATH="${PATH}" SPACES_DB_PATH="${db_path}" SPACES_RUNTIME_DIR="${runtime_root}" SPACESD_LISTEN_PORT="${selected_port}" SPACESD_AUTH_TOKEN=\(token) "${spacesd_path}" >>"${log_path}" 2>&1 &
+              nohup env PATH="${PATH}" SPACES_DB_PATH="${db_path}" SPACES_RUNTIME_DIR="${runtime_root}" SPACESD_LISTEN_PORT="${selected_port}" SPACESD_AUTH_TOKEN="${spacesd_auth_token}" "${spacesd_path}" >>"${log_path}" 2>&1 &
               daemon_pid="$!"
             fi
             if [ -n "${lsof_path}" ]; then
@@ -423,15 +433,19 @@ public struct ComputeHostBootstrapper {
 
     private static func shellSingleQuoted(_ value: String) -> String { "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'" }
 
-    private static func defaultRunCommand(_ command: [String], timeout: TimeInterval) throws -> String {
+    private static func defaultRunCommand(_ command: [String], standardInput: String, timeout: TimeInterval) throws -> String {
         let process = Process()
+        let input = Pipe()
         let output = Pipe()
         let error = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = command
+        process.standardInput = input
         process.standardOutput = output
         process.standardError = error
         try process.run()
+        if let data = standardInput.data(using: .utf8) { input.fileHandleForWriting.write(data) }
+        try? input.fileHandleForWriting.close()
 
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }

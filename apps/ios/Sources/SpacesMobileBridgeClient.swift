@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Network
+import Security
 import spacesmobilecore
 import spacesterminalcore
 
@@ -36,6 +37,47 @@ final class SpacesMobileBridgeStreamHandle: @unchecked Sendable {
     init(cancelHandler: @escaping @Sendable () -> Void) { self.cancelHandler = cancelHandler }
 
     func cancel() { cancelHandler() }
+}
+
+enum SpacesMobileDirectCredentialStore {
+    private static let service = "dev.usespaces.spacesmobile.remote-terminal"
+
+    static func endpoint(from endpoint: SpacesMobileTerminalDaemonEndpoint?) -> SpacesMobileTerminalDaemonEndpoint? {
+        guard let endpoint else { return nil }
+        if let token = endpoint.authToken?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
+            save(token: token, endpoint: endpoint)
+            return endpoint
+        }
+        guard let token = token(for: endpoint) else { return nil }
+        return SpacesMobileTerminalDaemonEndpoint(
+            host: endpoint.host, port: endpoint.port, authToken: token, certificateFingerprint: endpoint.certificateFingerprint)
+    }
+
+    private static func save(token: String, endpoint: SpacesMobileTerminalDaemonEndpoint) {
+        let query = baseQuery(endpoint: endpoint)
+        SecItemDelete(query as CFDictionary)
+        var attributes = query
+        attributes[kSecValueData as String] = Data(token.utf8)
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        SecItemAdd(attributes as CFDictionary, nil)
+    }
+
+    private static func token(for endpoint: SpacesMobileTerminalDaemonEndpoint) -> String? {
+        var query = baseQuery(endpoint: endpoint)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func baseQuery(endpoint: SpacesMobileTerminalDaemonEndpoint) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: "\(endpoint.host):\(endpoint.port):\(endpoint.certificateFingerprint)",
+        ]
+    }
 }
 
 struct SpacesMobileBridgeClient: Sendable {
@@ -546,6 +588,22 @@ struct SpacesMobileBridgeClient: Sendable {
 struct SpacesMobileTerminalDaemonClient: Sendable {
     let endpoint: SpacesMobileTerminalDaemonEndpoint
 
+    func subscribe(
+        sessionID: String,
+        clientID: String,
+        onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+        onDisconnect: @escaping @MainActor (Error?) -> Void
+    ) throws -> SpacesMobileBridgeStreamHandle {
+        let connection = try Self.makePinnedTLSConnection(endpoint: endpoint)
+        let request = TerminalServiceRequest(command: "subscribe", sessionID: sessionID).withAuthToken(endpoint.authToken)
+        let queue = DispatchQueue(label: "spaces.mobile.direct.stream.\(sessionID).\(clientID)")
+        DirectTerminalServiceStreamSubscription(
+            connection: connection, request: request, onEvent: onEvent, onDisconnect: onDisconnect
+        )
+        .start(on: queue)
+        return SpacesMobileBridgeStreamHandle { connection.cancel() }
+    }
+
     func fetchState(sessionID: String, timeout: Duration = .seconds(3)) async throws -> GhosttyRemoteSessionStatePayload {
         let response = try await send(.init(command: "state", sessionID: sessionID), timeout: timeout)
         guard response.ok else { throw SpacesMobileBridgeClientError.requestFailed(response.message) }
@@ -564,6 +622,10 @@ struct SpacesMobileTerminalDaemonClient: Sendable {
 
     func detach(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws {
         try await control(sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), timeout: timeout)
+    }
+
+    func heartbeat(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws {
+        try await control(sessionID: sessionID, request: TerminalControlRequest(command: "heartbeat", clientID: clientID), timeout: timeout)
     }
 
     func takeOver(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws -> GhosttyRemoteSessionStatePayload? {
@@ -704,6 +766,143 @@ struct SpacesMobileTerminalDaemonClient: Sendable {
     private static func timeInterval(_ duration: Duration) -> TimeInterval {
         let components = duration.components
         return TimeInterval(components.seconds) + TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000
+    }
+
+    private static func makePinnedTLSConnection(endpoint: SpacesMobileTerminalDaemonEndpoint) throws -> NWConnection {
+        let expectedFingerprint = endpoint.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !expectedFingerprint.isEmpty else { throw TerminalServiceTLSError.missingCertificateFingerprint }
+        guard let port = NWEndpoint.Port(rawValue: UInt16(endpoint.port)) else { throw TerminalServiceTLSError.invalidPort(endpoint.port) }
+
+        let tlsOptions = NWProtocolTLS.Options()
+        let securityOptions = tlsOptions.securityProtocolOptions
+        sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
+        sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
+        sec_protocol_options_set_peer_authentication_required(securityOptions, true)
+        sec_protocol_options_set_verify_block(
+            securityOptions,
+            { _, trust, complete in
+                let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+                let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
+                guard let certificate = chain?.first else {
+                    complete(false)
+                    return
+                }
+                let actualFingerprint = TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)
+                complete(TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint))
+            }, DispatchQueue.global(qos: .userInitiated))
+
+        return NWConnection(host: NWEndpoint.Host(endpoint.host), port: port, using: NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options()))
+    }
+}
+
+private final class DirectTerminalServiceStreamSubscription: @unchecked Sendable {
+    private static let initialEventTimeout: Duration = .seconds(12)
+
+    private let connection: NWConnection
+    private let request: TerminalServiceRequest
+    private let lifecycle: StreamLifecycle
+    private let onEvent: @MainActor (GhosttyRemoteSessionStatePayload) -> Void
+    private var buffer = Data()
+    private var decodedState = false
+
+    init(
+        connection: NWConnection,
+        request: TerminalServiceRequest,
+        onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+        onDisconnect: @escaping @MainActor (Error?) -> Void
+    ) {
+        self.connection = connection
+        self.request = request
+        self.onEvent = onEvent
+        lifecycle = StreamLifecycle(onDisconnect: onDisconnect)
+    }
+
+    func start(on queue: DispatchQueue) {
+        queue.asyncAfter(deadline: .now() + Self.initialEventTimeout.timeInterval) { [weak self] in
+            guard let self, !decodedState else { return }
+            lifecycle.finish(error: SpacesMobileBridgeClientError.streamFailed("Timed out waiting for remote terminal state."))
+            connection.cancel()
+        }
+        connection.stateUpdateHandler = { [self] state in
+            switch state {
+            case .ready:
+                sendInitialRequest()
+            case .failed(let error):
+                lifecycle.finish(error: error)
+            case .cancelled:
+                lifecycle.finish(error: nil)
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+    }
+
+    private func sendInitialRequest() {
+        do {
+            var data = try JSONEncoder().encode(request)
+            data.append(0x0A)
+            connection.send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed { [self] error in
+                if let error {
+                    lifecycle.finish(error: error)
+                    connection.cancel()
+                    return
+                }
+                receiveNext()
+            })
+        } catch {
+            lifecycle.finish(error: error)
+            connection.cancel()
+        }
+    }
+
+    private func receiveNext() {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [self] content, _, isComplete, error in
+            if let content, !content.isEmpty {
+                buffer.append(content)
+                while let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                    let line = Data(buffer.prefix(upTo: newlineIndex))
+                    buffer.removeSubrange(...newlineIndex)
+                    guard !line.isEmpty else { continue }
+                    do {
+                        let payload = try GhosttyRemoteSessionStateCodec.decodeLine(line)
+                        decodedState = true
+                        Task { @MainActor in onEvent(payload) }
+                    } catch {
+                        if let response = try? JSONDecoder().decode(TerminalServiceResponse.self, from: line), !response.ok {
+                            lifecycle.finish(error: SpacesMobileBridgeClientError.streamFailed(response.message))
+                            connection.cancel()
+                            return
+                        }
+                        lifecycle.finish(error: error)
+                        connection.cancel()
+                        return
+                    }
+                }
+            }
+
+            if let error {
+                lifecycle.finish(error: error)
+                connection.cancel()
+                return
+            }
+
+            if isComplete {
+                if !decodedState,
+                    !buffer.isEmpty,
+                    let response = try? JSONDecoder().decode(TerminalServiceResponse.self, from: buffer),
+                    !response.ok
+                {
+                    lifecycle.finish(error: SpacesMobileBridgeClientError.streamFailed(response.message))
+                } else {
+                    lifecycle.finish(error: nil)
+                }
+                connection.cancel()
+                return
+            }
+
+            receiveNext()
+        }
     }
 }
 

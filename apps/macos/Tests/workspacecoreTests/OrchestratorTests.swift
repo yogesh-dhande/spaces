@@ -9167,6 +9167,25 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(resolved[1].url, "http://localhost:4000/v1")
     }
 
+    // Tests passive resolvedWorkspaceBrowserSessions does not open SSH forwards for remote browser display.
+    func testResolvedWorkspaceBrowserSessionsPassiveRemoteDoesNotOpenForward() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
+        let project = makeProjectRecord(dir: "/projects/app")
+        let workspace = WorkspaceRecord(
+            id: "workspace-a", projectID: project.id, hostID: host.id, title: "dev", dir: "/projects/app", runtimePath: "/srv/app", dirname: nil,
+            branch: "main", targetBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        try orchestrator.upsertComputeHost(host)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "App", url: "http://localhost:$PORT")])
+
+        let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
+        XCTAssertEqual(resolved.map(\.url), ["http://localhost:3000"])
+    }
+
     // Tests resolvedWorkspaceBrowserSessions deduplicates sessions that resolve to the same URL.
     func testResolvedWorkspaceBrowserSessionsDeduplicatesSameResolvedURL() throws {
         let store = try makeTemporaryStore()

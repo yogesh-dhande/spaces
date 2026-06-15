@@ -19,6 +19,29 @@ public struct SpacesMobileTerminalDaemonEndpoint: Codable, Sendable, Equatable {
         self.authToken = authToken
         self.certificateFingerprint = certificateFingerprint
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case host
+        case port
+        case authToken
+        case certificateFingerprint
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        host = try container.decode(String.self, forKey: .host)
+        port = try container.decode(Int.self, forKey: .port)
+        authToken = try container.decodeIfPresent(String.self, forKey: .authToken)
+        certificateFingerprint = try container.decode(String.self, forKey: .certificateFingerprint)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(host, forKey: .host)
+        try container.encode(port, forKey: .port)
+        try container.encodeIfPresent(authToken, forKey: .authToken)
+        try container.encode(certificateFingerprint, forKey: .certificateFingerprint)
+    }
 }
 
 public struct SpacesMobileClientApp: Codable, Sendable, Equatable {

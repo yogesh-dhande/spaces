@@ -5,6 +5,7 @@ import Carbon
 import Dispatch
 import Foundation
 import Network
+import Security
 import spacesmobilebridge
 import spacesmobilecore
 import spacesterminalcore
@@ -27,12 +28,13 @@ struct SpacesE2ECommand: ParsableCommand {
             CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
             CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self,
             FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self, StartTerminalSessionCommand.self,
-            StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self,
-            TerminalServiceControlCommand.self, UpsertComputeHostCommand.self, ListComputeHostsCommand.self, DeleteComputeHostCommand.self,
-            PlanWorkspaceRuntimeCommand.self, RemoteComputeHostSmokeCommand.self, OpenMobilePairingWindowCommand.self, RecordScreenCommand.self,
-            ProfileShowCommand.self, ProfileAppOwnerCommand.self, ProfileDesktopControlOwnerCommand.self, ProfileWaitForDesktopControlCommand.self,
-            MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self, ScrollApplicationWindowCommand.self,
-            TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self,
+            TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, UpsertComputeHostCommand.self, ListComputeHostsCommand.self,
+            DeleteComputeHostCommand.self, PlanWorkspaceRuntimeCommand.self, RemoteComputeHostSmokeCommand.self, OpenMobilePairingWindowCommand.self,
+            RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self, ProfileDesktopControlOwnerCommand.self,
+            ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
+            TerminalServiceTLSRequestCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
+            DragApplicationWindowCommand.self,
         ])
 }
 
@@ -163,11 +165,13 @@ private struct ShowWindowIssueModalCommand: ParsableCommand {
 
     @Option(name: .long) var title: String
     @Option(name: .long) var detail: String
+    @Option(name: .long) var outputPath: String?
 
     func run() throws {
+        var userInfo = [IPCNotification.titleUserInfoKey: title, IPCNotification.detailUserInfoKey: detail]
+        if let outputPath { userInfo[IPCNotification.outputPathUserInfoKey] = outputPath }
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.showWindowIssueModal, object: try IPCNotification.currentObject(),
-            userInfo: [IPCNotification.titleUserInfoKey: title, IPCNotification.detailUserInfoKey: detail], options: [.deliverImmediately])
+            IPCNotification.showWindowIssueModal, object: try IPCNotification.currentObject(), userInfo: userInfo, options: [.deliverImmediately])
         try emitJSON(["success": true])
     }
 }
@@ -569,6 +573,178 @@ private struct MobileRequestCommand: ParsableCommand {
     }
 }
 
+private struct TerminalServiceTLSRequestCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "terminal-service-tls-request", abstract: "Send a pinned-TLS terminal service JSON request.")
+
+    @Option(help: "Remote spacesd host.") var host: String
+    @Option(help: "Remote spacesd port.") var port: Int
+    @Option(help: "Terminal service auth token.") var authToken: String
+    @Option(help: "Expected daemon certificate fingerprint.") var certificateFingerprint: String
+    @Option(help: "JSON terminal service request. Reads stdin when omitted.") var requestJSON: String?
+    @Flag(help: "Keep the connection open and print newline-delimited terminal state messages.") var stream = false
+
+    func run() throws {
+        let request = try readRequest().withAuthToken(authToken)
+        if stream {
+            try TerminalServiceTLSStreamClient.stream(request: request, host: host, port: port, certificateFingerprint: certificateFingerprint)
+            return
+        }
+        let response = try TerminalServiceClient.sendPinnedTLS(
+            request: request, host: host, port: port, authToken: authToken, certificateFingerprint: certificateFingerprint, timeout: 20)
+        try emitJSON(response)
+    }
+
+    private func readRequest() throws -> TerminalServiceRequest {
+        let data: Data
+        if let requestJSON { data = Data(requestJSON.utf8) } else { data = FileHandle.standardInput.readDataToEndOfFile() }
+        guard !data.isEmpty else { throw ValidationError("Provide --request-json or request JSON on stdin.") }
+        return try JSONDecoder().decode(TerminalServiceRequest.self, from: data)
+    }
+}
+
+private enum TerminalServiceTLSStreamClient {
+    static func stream(request: TerminalServiceRequest, host: String, port: Int, certificateFingerprint: String) throws {
+        let expectedFingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !expectedFingerprint.isEmpty else { throw TerminalServiceTLSError.missingCertificateFingerprint }
+        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw TerminalServiceTLSError.invalidPort(port) }
+
+        let tlsOptions = NWProtocolTLS.Options()
+        let securityOptions = tlsOptions.securityProtocolOptions
+        sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
+        sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
+        sec_protocol_options_set_peer_authentication_required(securityOptions, true)
+        let ready = DispatchSemaphore(value: 0)
+        let completed = DispatchSemaphore(value: 0)
+        let errorBox = TerminalServiceTLSStreamErrorBox()
+
+        sec_protocol_options_set_verify_block(
+            securityOptions,
+            { _, trust, complete in
+                let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+                let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
+                guard let certificate = chain?.first else {
+                    errorBox.set(TerminalServiceTLSError.peerCertificateUnavailable)
+                    ready.signal()
+                    complete(false)
+                    return
+                }
+                let actualFingerprint = TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)
+                guard TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint) else {
+                    errorBox.set(TerminalServiceTLSError.certificatePinMismatch(expected: expectedFingerprint, actual: actualFingerprint))
+                    ready.signal()
+                    complete(false)
+                    return
+                }
+                complete(true)
+            }, DispatchQueue.global(qos: .userInitiated))
+
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options()))
+        let queue = DispatchQueue(label: "spaces.e2e.terminal-service-tls-stream")
+        let streamSession = TerminalServiceTLSStreamSession(connection: connection, completed: completed, errorBox: errorBox)
+
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                ready.signal()
+                do {
+                    var payload = try JSONEncoder().encode(request)
+                    payload.append(0x0A)
+                    connection.send(
+                        content: payload, contentContext: .defaultMessage, isComplete: false,
+                        completion: .contentProcessed { error in
+                            if let error {
+                                errorBox.set(TerminalServiceTLSError.connectionFailed(String(describing: error)))
+                                completed.signal()
+                            } else {
+                                streamSession.receiveNext()
+                            }
+                        })
+                } catch {
+                    errorBox.set(error)
+                    completed.signal()
+                }
+            case .failed(let error):
+                errorBox.set(TerminalServiceTLSError.connectionFailed(String(describing: error)))
+                ready.signal()
+                completed.signal()
+            case .cancelled: completed.signal()
+            default: break
+            }
+        }
+
+        connection.start(queue: queue)
+        guard ready.wait(timeout: .now() + 20) == .success else {
+            connection.cancel()
+            throw TerminalServiceTLSError.requestTimedOut
+        }
+        if let error = errorBox.error {
+            connection.cancel()
+            throw error
+        }
+        completed.wait()
+        connection.cancel()
+        if let error = errorBox.error { throw error }
+    }
+}
+
+private final class TerminalServiceTLSStreamSession: @unchecked Sendable {
+    private let connection: NWConnection
+    private let completed: DispatchSemaphore
+    private let errorBox: TerminalServiceTLSStreamErrorBox
+    private var buffer = Data()
+
+    init(connection: NWConnection, completed: DispatchSemaphore, errorBox: TerminalServiceTLSStreamErrorBox) {
+        self.connection = connection
+        self.completed = completed
+        self.errorBox = errorBox
+    }
+
+    func receiveNext() {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [self] content, _, isComplete, error in
+            if let error {
+                errorBox.set(TerminalServiceTLSError.connectionFailed(String(describing: error)))
+                completed.signal()
+                return
+            }
+            if let content, !content.isEmpty {
+                buffer.append(content)
+                while let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                    let line = Data(buffer.prefix(through: newlineIndex))
+                    FileHandle.standardOutput.write(line)
+                    buffer.removeSubrange(buffer.startIndex...newlineIndex)
+                }
+            }
+            if isComplete {
+                if !buffer.isEmpty {
+                    FileHandle.standardOutput.write(buffer)
+                    FileHandle.standardOutput.write(Data([0x0A]))
+                }
+                completed.signal()
+                return
+            }
+            receiveNext()
+        }
+    }
+}
+
+private final class TerminalServiceTLSStreamErrorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedError: Error?
+
+    var error: Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedError
+    }
+
+    func set(_ error: Error) {
+        lock.lock()
+        if storedError == nil { storedError = error }
+        lock.unlock()
+    }
+}
+
 private struct RunWorkspaceProcessCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "run-workspace-process")
 
@@ -586,7 +762,7 @@ private struct RunWorkspaceProcessCommand: ParsableCommand {
         let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.runWorkspaceProcess, object: nil,
+            IPCNotification.runWorkspaceProcess, object: try IPCNotification.currentObject(),
             userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName],
             options: [.deliverImmediately])
         try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
@@ -608,7 +784,7 @@ private struct StopWorkspaceProcessCommand: ParsableCommand {
         let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.stopWorkspaceProcess, object: nil,
+            IPCNotification.stopWorkspaceProcess, object: try IPCNotification.currentObject(),
             userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName],
             options: [.deliverImmediately])
         try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
@@ -630,7 +806,7 @@ private struct RestartWorkspaceProcessCommand: ParsableCommand {
         let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.restartWorkspaceProcess, object: nil,
+            IPCNotification.restartWorkspaceProcess, object: try IPCNotification.currentObject(),
             userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName],
             options: [.deliverImmediately])
         try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
@@ -654,7 +830,7 @@ private struct LaunchWorkspaceAgentCommand: ParsableCommand {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw ValidationError("Missing coding agent name.") }
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.launchWorkspaceAgent, object: nil,
+            IPCNotification.launchWorkspaceAgent, object: try IPCNotification.currentObject(),
             userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedName],
             options: [.deliverImmediately])
         try emitJSON(["workspaceID": workspace.id, "name": trimmedName])
@@ -838,11 +1014,7 @@ private struct RemoteComputeHostSmokeCommand: ParsableCommand {
         let readyHost = host.updatedForBootstrap(outcome)
         let status = try ping(host: readyHost, authToken: token)
         try orchestrator.upsertComputeHost(readyHost)
-        if explicitToken == nil {
-            try ComputeHostCredentialStore.saveAuthToken(token, hostID: readyHost.id)
-        } else {
-            fputs("spacese2e: skipping Keychain token storage because --auth-token was supplied.\n", stderr)
-        }
+        try ComputeHostCredentialStore.saveAuthToken(token, hostID: readyHost.id)
         guard let remoteBranch = workspace.branch ?? project.defaultBranch else {
             throw ValidationError("Default workspace branch not found for project: \(project.dir)")
         }
@@ -1111,6 +1283,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
         guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
             throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
         }
+        _ = try orchestrator.synchronizeRemoteAgentSignals(workspaceID: workspace.id)
         let payload = WorkspaceDumpPayload(
             workspace: .init(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
@@ -1329,6 +1502,29 @@ private struct DumpTerminalSessionWindowStateCommand: ParsableCommand {
             IPCNotification.dumpTerminalSessionWindowState, object: try IPCNotification.currentObject(), userInfo: userInfo,
             options: [.deliverImmediately])
         try emitJSON(["sessionID": trimmedSessionID, "mode": attachmentMode?.rawValue ?? "any", "outputPath": trimmedOutputPath])
+    }
+}
+
+private struct TerminalSessionWindowShortcutCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "terminal-window-shortcut")
+
+    @Option(name: .long) var sessionID: String
+    @Option(name: .long) var action: String
+    @Option(name: .long) var text: String?
+
+    func run() throws {
+        let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session id.") }
+        let trimmedAction = action.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAction.isEmpty else { throw ValidationError("Missing terminal shortcut action.") }
+        var userInfo: [String: String] = [
+            IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID, IPCNotification.terminalShortcutActionUserInfoKey: trimmedAction,
+        ]
+        if let text { userInfo[IPCNotification.terminalShortcutTextUserInfoKey] = text }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.performTerminalSessionWindowShortcut, object: try IPCNotification.currentObject(), userInfo: userInfo,
+            options: [.deliverImmediately])
+        try emitJSON(["sessionID": trimmedSessionID, "action": trimmedAction, "text": text ?? ""])
     }
 }
 

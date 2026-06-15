@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import spacesmobilecore
+import spacesterminalcore
 
 private enum SpacesMobileSettingsStore {
     static let settingsKey = "spaces.mobile.connection-settings"
@@ -428,7 +429,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     var terminalGroups: [SpacesMobileTerminalWorkspaceGroup] {
         let workspaceByID = Dictionary(uniqueKeysWithValues: (overview?.workspaces ?? []).map { ($0.id, $0) })
-        let grouped = Dictionary(grouping: overview?.sessions ?? []) { session in
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessions = (overview?.sessions ?? []).filter { session in terminalSessionMatchesFilters(session, query: query) }
+        let grouped = Dictionary(grouping: sessions) { session in
             session.workspaceID ?? "unassigned::\(session.projectID ?? session.projectName ?? "none")::\(session.workingDirectory)"
         }
 
@@ -691,8 +694,27 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return [workspace.projectName, workspace.title, workspace.dir].contains { $0.localizedStandardContains(query) }
     }
 
+    private func terminalSessionMatchesFilters(_ session: SpacesMobileTerminalSessionSummary, query: String) -> Bool {
+        guard session.rowKind == .liveSession else { return false }
+        guard visibleRowTypes.contains(.workspaceTerminals), visibleRunStates.contains(runState(for: session.state)) else { return false }
+        guard !query.isEmpty else { return true }
+        return [session.projectName, session.workspaceTitle, session.workingDirectory, session.title].compactMap(\.self).contains {
+            $0.localizedStandardContains(query)
+        }
+    }
+
+    private func runState(for state: TerminalSessionState) -> SpacesMobileRunState {
+        switch state {
+        case .starting, .running: .running
+        case .exited, .failed: .exited
+        }
+    }
+
     func terminalSession(for row: SpacesMobileWorkspaceRuntimeRow) -> SpacesMobileTerminalSessionSummary? {
-        row.sessionID.flatMap { sessionID in overview?.sessions.first(where: { $0.id == sessionID }) }
+        guard let sessionID = row.sessionID else { return nil }
+        if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
+        guard case .terminal(let terminalRow) = row.source else { return nil }
+        return terminalSession(from: terminalRow)
     }
 
     func runtimeRow(forSessionID sessionID: String) -> SpacesMobileWorkspaceRuntimeRow? {
@@ -701,6 +723,43 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     func refreshedSession(forRowID rowID: String) -> SpacesMobileTerminalSessionSummary? {
         overview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first(where: { $0.id == rowID }).flatMap(terminalSession(for:))
+    }
+
+    private func terminalSession(from row: SpacesMobileWorkspaceTerminalRow) -> SpacesMobileTerminalSessionSummary? {
+        guard let sessionID = row.sessionID else { return nil }
+        let workspace = overview?.workspaces.first { $0.id == row.workspaceID }
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        return SpacesMobileTerminalSessionSummary(
+            id: sessionID,
+            title: row.title,
+            workingDirectory: row.workingDirectory,
+            state: terminalSessionState(for: row.runState),
+            backend: .ghosttyEmbedded,
+            lifetimePolicy: .persistent,
+            servicePID: 0,
+            childPID: nil,
+            workspaceID: row.workspaceID,
+            workspaceTitle: workspace?.title,
+            projectID: workspace?.projectID,
+            projectName: workspace?.projectName,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            isControlAvailable: row.runState == .running,
+            isSubscriptionAvailable: row.runState == .running,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            rowKind: .liveSession,
+            rowSourceID: row.id,
+            hasFinalRender: false,
+            daemonEndpoint: row.daemonEndpoint
+        )
+    }
+
+    private func terminalSessionState(for runState: SpacesMobileRunState) -> TerminalSessionState {
+        switch runState {
+        case .notStarted: .starting
+        case .running: .running
+        case .exited: .exited
+        }
     }
 
     private func performMutationReturningSession(

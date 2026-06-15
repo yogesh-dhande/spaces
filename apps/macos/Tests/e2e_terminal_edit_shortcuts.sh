@@ -75,57 +75,25 @@ else:
 PY
 }
 
-frontmost_app() {
-  osascript <<'APPLESCRIPT'
-tell application "System Events"
-  return name of first process whose frontmost is true
-end tell
-APPLESCRIPT
-}
-
-activate_spaces_pid() {
-  local pid="$1"
-  osascript - "$pid" <<'APPLESCRIPT' >/dev/null 2>&1 || true
-on run argv
-  set targetPID to (item 1 of argv) as integer
-  tell application "System Events"
-    repeat with proc in every process whose unix id is targetPID
-      set frontmost of proc to true
-      try
-        if (count of windows of proc) > 0 then
-          perform action "AXRaise" of window 1 of proc
-        end if
-      end try
-      return
-    end repeat
-  end tell
-end run
-APPLESCRIPT
-}
-
 wait_for_spaces_frontmost_ready() {
   local deadline=$((SECONDS + 30))
   while (( SECONDS < deadline )); do
-    activate_spaces_pid "$APP_PID"
-    if [[ "$(frontmost_app 2>/dev/null || true)" == "SpacesApp" ]] && osascript <<'APPLESCRIPT' 2>/dev/null | grep -Eiq '^(1|true)$'; then
-tell application "System Events"
-  if exists process "SpacesApp" then
-    tell process "SpacesApp"
-      return (count of windows) > 0
-    end tell
-  end if
-end tell
-return false
-APPLESCRIPT
-      return 0
+    if [[ -n "$session_id" ]]; then
+      env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+        dump-terminal-session-window-state --session-id "$session_id" --output-path "$DUMP_PATH" >/dev/null
+      if [[ -s "$DUMP_PATH" ]] && [[ "$(dump_value found)" == "true" ]] && [[ "$(dump_value showsTerminalSurface)" == "true" ]]; then
+        return 0
+      fi
     fi
     sleep 0.2
   done
-  fail "Timed out waiting for SpacesApp to become frontmost"
+  fail "Timed out waiting for terminal window to become key"
 }
 
 focus_terminal_window_for_input() {
   env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal show "$session_id" >/dev/null
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+    focus-terminal-session-window --session-id "$session_id" >/dev/null
   wait_for_spaces_frontmost_ready
   dump_terminal_state
 }
@@ -134,40 +102,30 @@ send_command_key_code() {
   local key_code="$1"
   local with_shift="${2:-0}"
   focus_terminal_window_for_input
-  osascript - "$key_code" "$with_shift" <<'APPLESCRIPT'
-on run argv
-  set keyCodeValue to (item 1 of argv) as integer
-  set withShift to (item 2 of argv) as integer
-  tell application "System Events"
-    if withShift is 1 then
-      key code keyCodeValue using {command down, shift down}
-    else
-      key code keyCodeValue using command down
-    end if
-  end tell
-end run
-APPLESCRIPT
+  local action=""
+  case "$key_code:$with_shift" in
+    "9:0") action="paste" ;;
+    "8:0") action="copy" ;;
+    "3:0") action="find" ;;
+    "5:0") action="find-next" ;;
+    "5:1") action="find-previous" ;;
+    *) fail "Unsupported terminal shortcut key code: $key_code shift=$with_shift" ;;
+  esac
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+    terminal-window-shortcut --session-id "$session_id" --action "$action" >/dev/null
 }
 
 send_escape_key() {
   focus_terminal_window_for_input
-  osascript <<'APPLESCRIPT'
-tell application "System Events"
-  key code 53
-end tell
-APPLESCRIPT
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+    terminal-window-shortcut --session-id "$session_id" --action escape >/dev/null
 }
 
 type_text() {
   local text="$1"
   focus_terminal_window_for_input
-  osascript - "$text" <<'APPLESCRIPT'
-on run argv
-  tell application "System Events"
-    keystroke (item 1 of argv)
-  end tell
-end run
-APPLESCRIPT
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+    terminal-window-shortcut --session-id "$session_id" --action search --text "$text" >/dev/null
 }
 
 wait_for_tail_contains() {
@@ -194,7 +152,6 @@ dump_terminal_state() {
   start="$(date +%s)"
   rm -f "$DUMP_PATH"
   while (( "$(date +%s)" - start < 10 )); do
-    activate_spaces_pid "$APP_PID"
     env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
       dump-terminal-session-window-state --session-id "$session_id" --output-path "$DUMP_PATH" >/dev/null
     local attempt_start
@@ -316,8 +273,7 @@ session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || fail "Failed to parse session ID from: $command_output"
 SERVICE_PID="$(terminal_service_pid "$session_id")"
 
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal show "$session_id" >/dev/null
-wait_for_spaces_frontmost_ready
+focus_terminal_window_for_input
 wait_for_terminal_window_ready
 
 paste_token="spaces-paste-token-$(uuidgen)"
@@ -328,9 +284,7 @@ wait_for_rendered_output_contains "$paste_token"
 
 : | pbcopy
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
-  drag-application-window --executable-name SpacesApp --window-title-contains "$SESSION_TITLE" \
-  --start-normalized-x 0.005 --start-normalized-y 0.09 --end-normalized-x 0.85 --end-normalized-y 0.13 \
-  --duration-ms 300 --steps 10 >/dev/null
+  terminal-window-shortcut --session-id "$session_id" --action select-all >/dev/null
 send_command_key_code 8
 wait_for_pbpaste_contains "$paste_token"
 

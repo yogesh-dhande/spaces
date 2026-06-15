@@ -1,5 +1,6 @@
 import SwiftUI
 import spacesmobilecore
+import spacesterminalcore
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -168,7 +169,7 @@ struct ContentView: View {
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         homeControls
-                        if model.workspaceGroups.isEmpty {
+                        if model.workspaceGroups.isEmpty && model.terminalGroups.isEmpty {
                             ContentUnavailableView(
                                 "No Workspaces",
                                 systemImage: "rectangle.stack",
@@ -178,6 +179,9 @@ struct ContentView: View {
                         } else {
                             ForEach(model.workspaceGroups) { group in
                                 workspaceCard(group)
+                            }
+                            ForEach(model.terminalGroups) { group in
+                                terminalGroupCard(group)
                             }
                         }
                     }
@@ -366,20 +370,106 @@ struct ContentView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
+                    Spacer(minLength: 0)
+                    if showsStateChip(for: row) {
+                        MetaChip(text: row.runState.mobileLabel)
+                    }
+                    runtimePrimaryIndicator(for: row)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(model.isMutating || (row.sessionID == nil && !row.canRun))
             .accessibilityIdentifier(rowIdentifier)
-            Spacer(minLength: 0)
-            if showsStateChip(for: row) {
-                MetaChip(text: row.runState.mobileLabel)
-            }
             runtimeActionButtons(for: row)
         }
         .padding(.init(top: 9, leading: 14, bottom: 9, trailing: 14))
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+    }
+
+    private func terminalGroupCard(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
+        SectionCard {
+            terminalGroupHeader(group)
+            ForEach(Array(group.sessions.enumerated()), id: \.element.id) { index, session in
+                if index == 0 {
+                    RowDivider(inset: 0)
+                } else {
+                    RowDivider()
+                }
+                terminalSessionRow(session)
+            }
+        }
+    }
+
+    private func terminalGroupHeader(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(group.projectName.uppercased())
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.mutedSecondary)
+                .tracking(0.4)
+            Text(group.workspaceTitle)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+            Text(group.workspaceDirectory)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Theme.mutedSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.init(top: 12, leading: 14, bottom: 12, trailing: 14))
+    }
+
+    private func terminalSessionRow(_ session: SpacesMobileTerminalSessionSummary) -> some View {
+        Button {
+            selectedSession = session
+        } label: {
+            HStack(spacing: 10) {
+                StatusDot(kind: statusKind(for: session.state))
+                TypeIconTile(systemName: "terminal.fill")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(session.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                    Text(session.workingDirectory)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+                if session.state != .running {
+                    MetaChip(text: session.state.rawValue.capitalized)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.mutedSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(model.isMutating || (!session.isControlAvailable && !session.hasFinalRender))
+        .accessibilityIdentifier("terminal.row.\(session.id)")
+        .padding(.init(top: 9, leading: 14, bottom: 9, trailing: 14))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder private func runtimePrimaryIndicator(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        if row.sessionID != nil {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.mutedSecondary)
+        } else if row.canRun {
+            Image(systemName: "play.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.mutedSecondary)
+        }
     }
 
     @ViewBuilder private func runtimeActionButtons(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
@@ -416,15 +506,6 @@ struct ContentView: View {
             .accessibilityLabel("Restart")
             .accessibilityIdentifier("runtime.action.restart.\(row.id)")
         }
-        if row.sessionID != nil {
-            Image(systemName: "chevron.right")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.mutedSecondary)
-        } else if row.canRun {
-            Image(systemName: "play.fill")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.mutedSecondary)
-        }
     }
 
     private func showsRunActionButton(for row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
@@ -446,6 +527,13 @@ struct ContentView: View {
         case .running: .running
         case .exited: .exited
         case .notStarted: .idle
+        }
+    }
+
+    private func statusKind(for state: TerminalSessionState) -> StatusDot.Kind {
+        switch state {
+        case .starting, .running: .running
+        case .exited, .failed: .exited
         }
     }
 

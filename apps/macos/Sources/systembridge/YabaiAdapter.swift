@@ -84,13 +84,15 @@ public final class YabaiAdapter {
 
     private func logFocusedWindowDebug(stage: String, elapsedMS: Int, detail: String) {
         guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
-        fputs("spaces: yabai_focused_window stage=\(stage) elapsed_ms=\(elapsedMS) \(detail)\n", stderr)
+        Self.writeStandardError("spaces: yabai_focused_window stage=\(stage) elapsed_ms=\(elapsedMS) \(detail)\n")
     }
 
     private func logFocusWindowDebug(stage: String, elapsedMS: Int, detail: String) {
         guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
-        fputs("spaces: yabai_focus_window stage=\(stage) elapsed_ms=\(elapsedMS) \(detail)\n", stderr)
+        Self.writeStandardError("spaces: yabai_focus_window stage=\(stage) elapsed_ms=\(elapsedMS) \(detail)\n")
     }
+
+    private static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
 
     private func elapsedMS(since start: Date) -> Int { max(Int(Date().timeIntervalSince(start) * 1000), 0) }
 

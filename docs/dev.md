@@ -209,7 +209,7 @@ export SPACESD_AUTH_TOKEN=<shared-token>
 <path-to-spacesd>
 ```
 
-Register that endpoint from the Mac-side profile. The host-specific token environment key is the uppercased compute host ID with non-alphanumeric characters replaced by `_`:
+The listener fails closed without a non-empty `SPACESD_AUTH_TOKEN`. Register that endpoint from the Mac-side profile. Mac-side clients do not use the global `SPACESD_AUTH_TOKEN` as a compute-host fallback; the host-specific token environment key is the uppercased compute host ID with non-alphanumeric characters replaced by `_`:
 
 ```bash
 eval "$(apps/macos/.build/debug/spacese2e profile-show --shell)"
@@ -224,7 +224,7 @@ apps/macos/.build/debug/spacese2e upsert-compute-host \
   --certificate-fingerprint 'SHA256:<fingerprint-hex>'
 ```
 
-The Mac-side host record can be created through the app. Open Remote Hosts from the sidebar, enter the SSH host and SSH user, optionally set a display name, and use Advanced only for SSH port. The remote Mac must accept non-interactive SSH from the Mac and have `spacesd` discoverable on the SSH PATH. Connect resolves the SSH host, creates a stable remote profile under `~/.spaces/compute-hosts/<host-id>`, creates the workspace root, starts the remote listener with an internally selected port, stores the auth token in Keychain, saves the returned certificate fingerprint, and verifies the direct pinned-TLS endpoint before saving the host. Workspaces choose a host at creation time, and that host assignment is immutable. Manual workspace root, daemon host, daemon port, and certificate fingerprint fields are available only through `spacese2e` setup commands.
+The Mac-side host record can be created through the app. Open Remote Hosts from the sidebar, enter the SSH host and SSH user, optionally set a display name, and use Advanced only for SSH port. The remote Mac must accept non-interactive SSH from the Mac with a pinned known-host entry and have `spacesd` discoverable on the SSH PATH. Connect resolves the SSH host, feeds bootstrap input over SSH stdin with strict host checking, has a remote shell wrapper read the token from the first stdin line, creates a stable remote profile under `~/.spaces/compute-hosts/<host-id>`, creates the workspace root, starts the remote listener with an internally selected port, stores the auth token in Keychain, saves the returned certificate fingerprint, and verifies the direct pinned-TLS endpoint before saving the host. Workspaces choose a host at creation time, and that host assignment is immutable. Manual workspace root, daemon host, daemon port, and certificate fingerprint fields are available only through `spacese2e` setup commands.
 
 For focused terminal latency probes:
 
@@ -310,7 +310,7 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-st
 xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
-On first launch, the iOS client opens its connection sheet. Open Mobile Connection in the Mac sidebar, open a pairing window, then scan the QR code or paste the full `spacesmobile://` link. The `run_mobile_terminal_demo.sh` harness opens one daemon pairing window per simulator and seeds both the iPad and iPhone simulator settings automatically. After pairing, the iOS client stores the issued credential and transport key and reconnects automatically on later launches. The client is terminal-only: it lists workspaces and live terminal sessions, auto-attempts takeover when a session detail is opened, renders service-published Ghostty render frames only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
+On first launch, the iOS client opens its connection sheet. Open Mobile Connection in the Mac sidebar, open a pairing window, then scan the QR code or paste the full `spacesmobile://` link. The `run_mobile_terminal_demo.sh` harness opens one daemon pairing window per simulator and seeds both the iPad and iPhone simulator settings automatically. After pairing, the iOS client stores the issued credential and transport key and reconnects automatically on later launches. The client is terminal-only: it lists workspaces and live terminal sessions through the Mac bridge, never stores remote daemon auth tokens, auto-attempts takeover when a session detail is opened, renders service-published Ghostty render frames only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
 For the iOS simulator, a pairing link with `127.0.0.1` still works because the daemon bridge binds all IPv4 interfaces by default. A real device can scan the Mac QR code or open the deep link from the Mobile Connection panel. The iOS terminal detail path renders the owner-bootstrap Ghostty render frame through the same terminal-grid compatibility data as macOS, so the simulator should show a terminal-like view after takeover rather than a plain-text fallback.
 
 For manual real-device verification of the iOS client:

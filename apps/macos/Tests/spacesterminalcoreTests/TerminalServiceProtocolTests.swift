@@ -51,9 +51,20 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 workspace: TerminalServiceProfileWorkspaceRecord(
                     id: "workspace-1", projectID: "project-1", hostID: "host-1", title: "Feature", dir: "/srv/work", runtimePath: "/srv/work",
                     dirname: "feature", branch: "feature", targetBranch: "main", isDefault: false, isArchived: false, isHidden: false,
-                    isRunning: false, lastLaunchedAt: nil, notes: nil), terminalOutput: "recent output"))
+                    isRunning: false, lastLaunchedAt: nil, notes: nil), terminalOutput: "recent output"), mobileCredentialToken: "MOBILE",
+            mobileCredentials: [
+                TerminalServiceMobileCredential(
+                    id: "credential-1", installationID: "installation-1", deviceName: "iPhone", platform: "ios", scopes: ["terminal"],
+                    createdAt: "2026-06-14T00:00:00Z", lastUsedAt: nil, revokedAt: nil)
+            ])
+
+        let credentialRequest = TerminalServiceRequest(
+            command: "mobileCredential",
+            mobileCredentialRequest: TerminalServiceMobileCredentialRequest(
+                operation: .issue, installationID: "installation-1", deviceName: "iPhone", platform: "ios"))
 
         XCTAssertEqual(try TerminalServiceCodec.decodeRequest(TerminalServiceCodec.encodeRequest(request)), request)
+        XCTAssertEqual(try TerminalServiceCodec.decodeRequest(TerminalServiceCodec.encodeRequest(credentialRequest)), credentialRequest)
         XCTAssertEqual(try TerminalServiceCodec.decodeResponse(TerminalServiceCodec.encodeResponse(response)), response)
     }
 

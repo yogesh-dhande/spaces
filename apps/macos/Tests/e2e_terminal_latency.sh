@@ -543,6 +543,8 @@ def summarize_phases(measurements: list[dict]) -> dict:
         "command_submit_to_render_visible": summarize_latencies(measurements, "command_submit_to_render_visible_ms"),
         "owner_input_activity_to_state_change": summarize_latencies(measurements, "owner_input_activity_to_state_change_ms"),
         "state_change_to_frame_export": summarize_latencies(measurements, "state_change_to_frame_export_ms"),
+        "event_to_host_publish": summarize_latencies(measurements, "event_to_host_publish_ms"),
+        "host_publish_to_client_visible": summarize_latencies(measurements, "host_publish_to_client_visible_ms"),
         "frame_export_to_frame_apply": summarize_latencies(measurements, "frame_export_to_frame_apply_ms"),
         "event_to_frame_apply": summarize_latencies(measurements, "event_to_frame_apply_ms"),
         "frame_apply_to_visible": summarize_latencies(measurements, "frame_apply_to_visible_ms"),
@@ -581,6 +583,8 @@ def mac_host_latency_split(session_id: str, begin_ns: int, frame_apply_ns: int |
         "state_change_to_frame_export_ms": (
             ms_between(state_change_ns, frame_export_ns) if state_change_ns is not None and frame_export_ns is not None else None
         ),
+        "event_to_host_publish_ms": ms_between(begin_ns, frame_export_ns) if frame_export_ns is not None else None,
+        "host_publish_to_client_visible_ms": ms_between(frame_export_ns, visible_ns) if frame_export_ns is not None else None,
         "frame_export_to_frame_apply_ms": (
             ms_between(frame_export_ns, frame_apply_ns) if frame_export_ns is not None and frame_apply_ns is not None else None
         ),
@@ -664,6 +668,8 @@ def run_mac_input_latency() -> dict:
                 "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
                 "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
                 "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "event_to_host_publish_ms": stage_split["event_to_host_publish_ms"],
+                "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
                 "event_to_frame_apply_ms": event_to_frame_apply_ms,
                 "frame_apply_to_visible_ms": frame_apply_to_visible_ms,
@@ -783,6 +789,8 @@ def run_mac_scrollback_latency(
                 "rpc_end_to_render_visible_ms": rpc_end_to_render_visible_ms,
                 "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
                 "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "event_to_host_publish_ms": stage_split["event_to_host_publish_ms"],
+                "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
                 "event_to_frame_apply_ms": event_to_frame_apply_ms,
                 "frame_apply_to_visible_ms": frame_apply_to_visible_ms,
@@ -892,6 +900,8 @@ def run_mac_command_output_catchup() -> dict:
                 "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
                 "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
                 "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "event_to_host_publish_ms": stage_split["event_to_host_publish_ms"],
+                "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
                 "event_to_frame_apply_ms": event_to_frame_apply_ms,
                 "command_submit_to_first_frame_apply_ms": command_submit_to_first_frame_apply_ms,
@@ -973,6 +983,8 @@ for name, result in scenario_results.items():
             f"submit_to_visible p95={format_ms(phases['command_submit_to_render_visible']['p95_ms'])}, "
             f"owner_input_to_state_change p95={format_ms(phases['owner_input_activity_to_state_change']['p95_ms'])}, "
             f"state_change_to_frame_export p95={format_ms(phases['state_change_to_frame_export']['p95_ms'])}, "
+            f"event_to_host_publish p95={format_ms(phases['event_to_host_publish']['p95_ms'])}, "
+            f"host_publish_to_client_visible p95={format_ms(phases['host_publish_to_client_visible']['p95_ms'])}, "
             f"frame_export_to_apply p95={format_ms(phases['frame_export_to_frame_apply']['p95_ms'])}, "
             f"event_to_frame_apply p95={format_ms(phases['event_to_frame_apply']['p95_ms'])}, "
             f"frame_apply_to_visible p95={format_ms(phases['frame_apply_to_visible']['p95_ms'])}, "

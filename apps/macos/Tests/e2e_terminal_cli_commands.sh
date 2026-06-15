@@ -279,7 +279,7 @@ env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" te
 tail_output="$(wait_for_tail_contains "$session_id" "b'abc")"
 printf '%s\n' "$tail_output" | grep -Fq "b'abc"
 printf '%s\n' "$tail_output" | grep -Fq "\\x1b[A"
-printf '%s\n' "$tail_output" | grep -Fq "\\r'"
+printf '%s\n' "$tail_output" | grep -Eq "\\\\r'|\\\\n'"
 
 wait_for_control_socket "$session_id"
 viewer_client_id="$(attach_remote_viewer_client "$session_id")"

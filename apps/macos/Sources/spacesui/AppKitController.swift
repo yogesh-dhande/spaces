@@ -284,6 +284,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var focusTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var closeTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var dumpTerminalSessionWindowStateIPCObserver: NSObjectProtocol?
+    private var performTerminalSessionWindowShortcutIPCObserver: NSObjectProtocol?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var workspaceDidTerminateApplicationObserver: NSObjectProtocol?
@@ -497,6 +498,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupFocusTerminalSessionWindowIPCObserver()
         setupCloseTerminalSessionWindowIPCObserver()
         setupDumpTerminalSessionWindowStateIPCObserver()
+        setupPerformTerminalSessionWindowShortcutIPCObserver()
         setupAppActivationObservers()
         setupWorkspaceApplicationObservers()
         setupTerminalAttachmentStateObserver()
@@ -647,6 +649,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             DistributedNotificationCenter.default().removeObserver(dumpTerminalSessionWindowStateIPCObserver)
             self.dumpTerminalSessionWindowStateIPCObserver = nil
         }
+        if let performTerminalSessionWindowShortcutIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(performTerminalSessionWindowShortcutIPCObserver)
+            self.performTerminalSessionWindowShortcutIPCObserver = nil
+        }
         if let appDidBecomeActiveObserver {
             NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
             self.appDidBecomeActiveObserver = nil
@@ -769,6 +775,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         dumpTerminalSessionWindowStateIPCObserver = self
     }
 
+    private func setupPerformTerminalSessionWindowShortcutIPCObserver() {
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handlePerformTerminalSessionWindowShortcutIPC(_:)), name: IPCNotification.performTerminalSessionWindowShortcut,
+            object: nil, suspensionBehavior: .deliverImmediately)
+        performTerminalSessionWindowShortcutIPCObserver = self
+    }
+
     private func setupFocusTerminalSessionWindowIPCObserver() {
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(handleFocusTerminalSessionWindowIPC(_:)), name: IPCNotification.focusTerminalSessionWindow, object: nil,
@@ -808,8 +821,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let object = notification.object as? String
         guard let title = notification.userInfo?[IPCNotification.titleUserInfoKey] as? String else { return }
         guard let detail = notification.userInfo?[IPCNotification.detailUserInfoKey] as? String else { return }
-        Task { @MainActor [weak self, object, title, detail] in
+        let outputPath = notification.userInfo?[IPCNotification.outputPathUserInfoKey] as? String
+        Task { @MainActor [weak self, object, title, detail, outputPath] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
+            if let outputPath { self.writeWindowIssueModalAck(to: outputPath) }
             self.showWindowIssueModal(title: title, detail: detail)
         }
     }
@@ -879,37 +894,41 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     @objc private nonisolated func handleRunWorkspaceProcessIPC(_ notification: Notification) {
+        let object = notification.object as? String
         guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
         guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
-        Task { @MainActor [weak self, workspaceID, processName] in
-            guard let self else { return }
+        Task { @MainActor [weak self, object, workspaceID, processName] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
             self.runWorkspaceProcess(workspaceID: workspaceID, processName: processName)
         }
     }
 
     @objc private nonisolated func handleStopWorkspaceProcessIPC(_ notification: Notification) {
+        let object = notification.object as? String
         guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
         guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
-        Task { @MainActor [weak self, workspaceID, processName] in
-            guard let self else { return }
+        Task { @MainActor [weak self, object, workspaceID, processName] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
             self.stopWorkspaceProcess(workspaceID: workspaceID, processName: processName)
         }
     }
 
     @objc private nonisolated func handleRestartWorkspaceProcessIPC(_ notification: Notification) {
+        let object = notification.object as? String
         guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
         guard let processName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
-        Task { @MainActor [weak self, workspaceID, processName] in
-            guard let self else { return }
+        Task { @MainActor [weak self, object, workspaceID, processName] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
             self.restartWorkspaceProcess(workspaceID: workspaceID, processName: processName)
         }
     }
 
     @objc private nonisolated func handleLaunchWorkspaceAgentIPC(_ notification: Notification) {
+        let object = notification.object as? String
         guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
         guard let launcherName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
-        Task { @MainActor [weak self, workspaceID, launcherName] in
-            guard let self else { return }
+        Task { @MainActor [weak self, object, workspaceID, launcherName] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
             self.launchWorkspaceAgent(workspaceID: workspaceID, launcherName: launcherName)
         }
     }
@@ -963,6 +982,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    @objc private nonisolated func handlePerformTerminalSessionWindowShortcutIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+        guard let action = notification.userInfo?[IPCNotification.terminalShortcutActionUserInfoKey] as? String else { return }
+        let text = notification.userInfo?[IPCNotification.terminalShortcutTextUserInfoKey] as? String
+        Task { @MainActor [weak self, object, sessionID, action, text] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            self.performTerminalSessionWindowShortcut(sessionID: sessionID, action: action, text: text)
+        }
+    }
+
     private func matchesProfileIPCObject(_ object: String?) -> Bool { object == ipcNotificationObject }
 
     private func dumpTerminalSessionWindowState(sessionID: String, mode: TerminalAttachmentMode?, outputPath: String) {
@@ -981,6 +1011,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             searchVisible: debugState?.searchVisible, searchQuery: debugState?.searchQuery, searchTotal: debugState?.searchTotal,
             searchSelected: debugState?.searchSelected)
         writeTerminalSessionWindowStateDump(payload, to: outputPath)
+    }
+
+    private func performTerminalSessionWindowShortcut(sessionID: String, action: String, text: String?) {
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+        guard let controller = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) else { return }
+        controller.performShortcutForTesting(action: action, text: text)
     }
 
     private func writeTerminalSessionWindowStateDump(_ payload: TerminalSessionWindowStateDump, to outputPath: String) {
@@ -1097,7 +1133,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     }
                     sendInputAction = nil
                     sendKeyAction = nil
-                    takeoverAction = nil
+                    takeoverAction = { clientID in
+                        try TerminalControlClient.send(
+                            request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
+                    }
                 }
                 let created = TerminalSessionWindowController(
                     sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false, sendInputAction: sendInputAction,
@@ -4270,6 +4309,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let response = alert.runModal()
             if actionTitle != nil, response == .alertFirstButtonReturn { action?() }
         }
+    }
+
+    private func writeWindowIssueModalAck(to outputPath: String) {
+        let url = URL(fileURLWithPath: outputPath)
+        let payload = #"{"received":true}"#
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? payload.write(to: url, atomically: true, encoding: .utf8)
     }
 
     private func showSettingsDetail() {

@@ -1,6 +1,11 @@
-import Darwin
 import Foundation
 import spacesterminalcore
+
+#if os(Linux)
+    import Glibc
+#else
+    import Darwin
+#endif
 
 public struct SpacesProcessLeaseOwner: Sendable, Codable, Equatable {
     public let pid: Int32
@@ -211,7 +216,7 @@ public enum SpacesLeaseCoordinator {
 
     private static func isProcessAlive(pid: Int32) -> Bool {
         guard pid > 0 else { return false }
-        if Darwin.kill(pid, 0) == 0 { return true }
+        if kill(pid, 0) == 0 { return true }
         return errno == EPERM
     }
 
@@ -223,12 +228,21 @@ public enum SpacesLeaseCoordinator {
 
     private static func executablePath(for pid: Int32) -> String? {
         guard pid > 0 else { return nil }
-        var buffer = [CChar](repeating: 0, count: 4096)
-        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
-        guard length > 0 else { return nil }
-        let terminatorIndex = buffer.firstIndex(of: 0) ?? Int(length)
-        let utf8Bytes = buffer[..<terminatorIndex].map { UInt8(bitPattern: $0) }
-        return SpacesProfile.canonicalPath(String(decoding: utf8Bytes, as: UTF8.self))
+        #if os(Linux)
+            let path = "/proc/\(pid)/exe"
+            var buffer = [CChar](repeating: 0, count: 4096)
+            let length = readlink(path, &buffer, buffer.count - 1)
+            guard length > 0 else { return nil }
+            buffer[Int(length)] = 0
+            return SpacesProfile.canonicalPath(String(cString: buffer))
+        #else
+            var buffer = [CChar](repeating: 0, count: 4096)
+            let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+            guard length > 0 else { return nil }
+            let terminatorIndex = buffer.firstIndex(of: 0) ?? Int(length)
+            let utf8Bytes = buffer[..<terminatorIndex].map { UInt8(bitPattern: $0) }
+            return SpacesProfile.canonicalPath(String(decoding: utf8Bytes, as: UTF8.self))
+        #endif
     }
 
     private static func isFileExistsError(_ error: Error) -> Bool {
@@ -249,7 +263,7 @@ public enum SpacesLeaseCoordinator {
 
     private static func currentUserAccountHomePath() -> String? {
         let uid = getuid()
-        let rawSize = sysconf(_SC_GETPW_R_SIZE_MAX)
+        let rawSize = sysconf(Int32(_SC_GETPW_R_SIZE_MAX))
         let bufferSize = rawSize > 0 ? Int(rawSize) : 16_384
         var buffer = [CChar](repeating: 0, count: bufferSize)
         var record = passwd()

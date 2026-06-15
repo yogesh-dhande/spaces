@@ -361,13 +361,19 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             private let connection: NWConnection
             private let server: TerminalServiceTLSServer
             private var buffer = Data()
+            private var relaySource: DispatchSourceRead?
+            private var relaySocketFD: Int32 = -1
 
             init(connection: NWConnection, server: TerminalServiceTLSServer) {
                 self.connection = connection
                 self.server = server
             }
 
-            func cancel() { connection.cancel() }
+            func cancel() {
+                relaySource?.cancel()
+                relaySource = nil
+                connection.cancel()
+            }
 
             func start(on queue: DispatchQueue) {
                 connection.stateUpdateHandler = { [weak self] state in
@@ -375,7 +381,10 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                     terminalServiceTLSTrace("server_connection_state \(state)")
                     switch state {
                     case .ready: self.receiveNext()
-                    case .failed, .cancelled: self.server.removeConnection(self.connection)
+                    case .failed, .cancelled:
+                        self.relaySource?.cancel()
+                        self.relaySource = nil
+                        self.server.removeConnection(self.connection)
                     default: break
                     }
                 }
@@ -410,6 +419,10 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                     let request = try TerminalServiceCodec.decodeRequest(requestData)
                     response = try server.validateAndHandle(request: request)
                 } catch { response = TerminalServiceResponse(ok: false, message: String(describing: error)) }
+                if response.ok, let streamSocketPath = response.streamSocketPath {
+                    startStreamRelay(socketPath: streamSocketPath)
+                    return
+                }
                 var responseData = (try? TerminalServiceCodec.encodeResponse(response)) ?? Data()
                 responseData.append(0x0A)
                 connection.send(
@@ -419,6 +432,64 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                         self.connection.cancel()
                         self.server.removeConnection(self.connection)
                     })
+            }
+
+            private func startStreamRelay(socketPath: String) {
+                do {
+                    let socketFD = try server.connectUnixSocket(path: socketPath)
+                    try server.setNonBlocking(socketFD)
+                    relaySocketFD = socketFD
+                    let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: server.queue)
+                    source.setEventHandler { [weak self] in self?.relayReadableData() }
+                    source.setCancelHandler { [weak self] in
+                        guard let self else { return }
+                        if self.relaySocketFD >= 0 {
+                            shutdown(self.relaySocketFD, SHUT_RDWR)
+                            close(self.relaySocketFD)
+                            self.relaySocketFD = -1
+                        }
+                    }
+                    relaySource = source
+                    source.resume()
+                } catch {
+                    let response = TerminalServiceResponse(ok: false, message: String(describing: error))
+                    var responseData = (try? TerminalServiceCodec.encodeResponse(response)) ?? Data()
+                    responseData.append(0x0A)
+                    connection.send(
+                        content: responseData, contentContext: .defaultMessage, isComplete: true,
+                        completion: .contentProcessed { [weak self] _ in
+                            guard let self else { return }
+                            self.connection.cancel()
+                            self.server.removeConnection(self.connection)
+                        })
+                }
+            }
+
+            private func relayReadableData() {
+                guard relaySocketFD >= 0 else { return }
+                var readBuffer = [UInt8](repeating: 0, count: 65_536)
+                while true {
+                    let count = read(relaySocketFD, &readBuffer, readBuffer.count)
+                    if count > 0 {
+                        connection.send(
+                            content: Data(readBuffer.prefix(count)), contentContext: .defaultMessage, isComplete: false, completion: .idempotent)
+                        continue
+                    }
+                    if count == 0 {
+                        finishStreamRelay()
+                        return
+                    }
+                    if errno == EWOULDBLOCK || errno == EAGAIN { return }
+                    finishStreamRelay()
+                    return
+                }
+            }
+
+            private func finishStreamRelay() {
+                relaySource?.cancel()
+                relaySource = nil
+                connection.cancel()
+                server.removeConnection(connection)
             }
         }
 
@@ -447,6 +518,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         private let host: String
         private let port: Int
         private let authToken: String?
+        private let authorizeRequest: (@Sendable (TerminalServiceRequest) -> TerminalServiceResponse?)?
         private let identity: TerminalServiceTLSIdentity
         private let queue: DispatchQueue
         private let handleRequest: @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
@@ -458,11 +530,13 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
 
         public init(
             host: String, port: Int, authToken: String? = nil, identity: TerminalServiceTLSIdentity, queue: DispatchQueue,
+            authorizeRequest: (@Sendable (TerminalServiceRequest) -> TerminalServiceResponse?)? = nil,
             handleRequest: @escaping @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
         ) {
             self.host = host
             self.port = port
             self.authToken = authToken
+            self.authorizeRequest = authorizeRequest
             self.identity = identity
             self.queue = queue
             self.handleRequest = handleRequest
@@ -529,8 +603,42 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         private func removeConnection(_ connection: NWConnection) { connections.removeValue(forKey: ObjectIdentifier(connection)) }
 
         private func validateAndHandle(request: TerminalServiceRequest) throws -> TerminalServiceResponse {
+            if let authorizationFailure = authorizeRequest?(request) { return authorizationFailure }
             if let authToken, authToken != request.authToken { return TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.") }
             return try handleRequest(request)
+        }
+
+        private func connectUnixSocket(path: String) throws -> Int32 {
+            let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            var address = sockaddr_un()
+            address.sun_family = sa_family_t(AF_UNIX)
+            let maxLength = MemoryLayout.size(ofValue: address.sun_path)
+            let utf8Path = path.utf8CString
+            guard utf8Path.count <= maxLength else {
+                close(socketFD)
+                throw POSIXError(.ENAMETOOLONG)
+            }
+            withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
+                utf8Path.withUnsafeBufferPointer { buffer in if let baseAddress = buffer.baseAddress { memcpy(pointer, baseAddress, buffer.count) } }
+            }
+            let connectResult = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                    connect(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            guard connectResult == 0 else {
+                let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+                close(socketFD)
+                throw POSIXError(code)
+            }
+            return socketFD
+        }
+
+        private func setNonBlocking(_ fileDescriptor: Int32) throws {
+            let currentFlags = fcntl(fileDescriptor, F_GETFL)
+            guard currentFlags >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            guard fcntl(fileDescriptor, F_SETFL, currentFlags | O_NONBLOCK) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         }
     }
 #endif
@@ -540,6 +648,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         private let host: String
         private let port: Int
         private let authToken: String?
+        private let authorizeRequest: (@Sendable (TerminalServiceRequest) -> TerminalServiceResponse?)?
         private let identity: TerminalServiceTLSIdentity
         private let queue: DispatchQueue
         private let handleRequest: @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
@@ -552,11 +661,13 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
 
         public init(
             host: String, port: Int, authToken: String? = nil, identity: TerminalServiceTLSIdentity, queue: DispatchQueue,
+            authorizeRequest: (@Sendable (TerminalServiceRequest) -> TerminalServiceResponse?)? = nil,
             handleRequest: @escaping @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
         ) {
             self.host = host
             self.port = port
             self.authToken = authToken
+            self.authorizeRequest = authorizeRequest
             self.identity = identity
             self.queue = queue
             self.handleRequest = handleRequest
@@ -604,7 +715,13 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                     try Self.setCloseOnExec(clientFD)
                     try Self.setBlocking(clientFD)
                     Self.setSocketTimeout(clientFD, seconds: 15)
-                    try handleClient(fileDescriptor: clientFD)
+                    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                        guard let self else {
+                            close(clientFD)
+                            return
+                        }
+                        do { try self.handleClient(fileDescriptor: clientFD) } catch { terminalServiceTLSTrace("linux_server_client_error \(error)") }
+                    }
                 } catch {
                     terminalServiceTLSTrace("linux_server_client_error \(error)")
                     close(clientFD)
@@ -635,12 +752,17 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                 let request = try TerminalServiceCodec.decodeRequest(requestData)
                 response = try validateAndHandle(request: request)
             } catch { response = TerminalServiceResponse(ok: false, message: String(describing: error)) }
+            if response.ok, let streamSocketPath = response.streamSocketPath {
+                try Self.relayUnixSocket(path: streamSocketPath, ssl: ssl)
+                return
+            }
             var responseData = (try? TerminalServiceCodec.encodeResponse(response)) ?? Data()
             responseData.append(0x0A)
             try Self.writeTLSResponse(responseData, ssl: ssl)
         }
 
         private func validateAndHandle(request: TerminalServiceRequest) throws -> TerminalServiceResponse {
+            if let authorizationFailure = authorizeRequest?(request) { return authorizationFailure }
             if let authToken, authToken != request.authToken { return TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.") }
             return try handleRequest(request)
         }
@@ -738,6 +860,51 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             var value = timeval(tv_sec: Int(seconds.rounded(.down)), tv_usec: 0)
             setsockopt(fileDescriptor, SOL_SOCKET, SO_RCVTIMEO, &value, socklen_t(MemoryLayout<timeval>.size))
             setsockopt(fileDescriptor, SOL_SOCKET, SO_SNDTIMEO, &value, socklen_t(MemoryLayout<timeval>.size))
+        }
+
+        private static func relayUnixSocket(path: String, ssl: OpaquePointer) throws {
+            let socketFD = try connectUnixSocket(path: path)
+            defer {
+                shutdown(socketFD, Int32(SHUT_RDWR))
+                close(socketFD)
+            }
+            var buffer = [UInt8](repeating: 0, count: 65_536)
+            while true {
+                let count = read(socketFD, &buffer, buffer.count)
+                if count == 0 { return }
+                if count < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                try buffer.withUnsafeBytes { rawBuffer in
+                    guard let baseAddress = rawBuffer.baseAddress else { return }
+                    try writeTLSResponse(Data(bytes: baseAddress, count: count), ssl: ssl)
+                }
+            }
+        }
+
+        private static func connectUnixSocket(path: String) throws -> Int32 {
+            let socketFD = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+            guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            var address = sockaddr_un()
+            address.sun_family = sa_family_t(AF_UNIX)
+            let maxLength = MemoryLayout.size(ofValue: address.sun_path)
+            let utf8Path = path.utf8CString
+            guard utf8Path.count <= maxLength else {
+                close(socketFD)
+                throw POSIXError(.ENAMETOOLONG)
+            }
+            withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
+                utf8Path.withUnsafeBufferPointer { buffer in if let baseAddress = buffer.baseAddress { memcpy(pointer, baseAddress, buffer.count) } }
+            }
+            let connectResult = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                    connect(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            guard connectResult == 0 else {
+                let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+                close(socketFD)
+                throw POSIXError(code)
+            }
+            return socketFD
         }
 
         private static func readTLSRequest(ssl: OpaquePointer) throws -> Data {

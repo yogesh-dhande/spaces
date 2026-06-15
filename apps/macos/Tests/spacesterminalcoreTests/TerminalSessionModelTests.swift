@@ -283,6 +283,13 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertLessThan(paths.controlSocketPath.utf8.count, 104)
     }
 
+    func testSessionPathsRejectUnsafeSessionIDs() throws {
+        XCTAssertThrowsError(try TerminalSessionPaths.forSession(id: "../outside"))
+        XCTAssertThrowsError(try TerminalSessionPaths.forSession(id: "nested/session"))
+        XCTAssertThrowsError(try TerminalSessionPaths.forSession(id: " session "))
+        XCTAssertThrowsError(try TerminalSessionPaths.forSession(id: "."))
+    }
+
     func testWindowFramePersistsPerAttachmentMode() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

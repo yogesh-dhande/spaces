@@ -59,7 +59,7 @@ final class SpacesMobileBridgeProtocolTests: XCTestCase {
 
     func testTerminalDaemonEndpointRoundTripsOnRuntimeRowsAndSessionSummary() throws {
         let endpoint = SpacesMobileTerminalDaemonEndpoint(
-            host: "builder.example.com", port: 7443, authToken: "SECRET", certificateFingerprint: "SHA256:abcdef")
+            host: "builder.example.com", port: 7443, authToken: nil, certificateFingerprint: "SHA256:abcdef")
         let processRow = SpacesMobileWorkspaceProcessRow(
             id: "process-1", workspaceID: "workspace-1", name: "API", command: "npm run dev", processID: "runtime-1", sessionID: "session-1",
             runState: .running, canRun: false, canStop: true, canRestart: true, daemonEndpoint: endpoint)
@@ -85,11 +85,27 @@ final class SpacesMobileBridgeProtocolTests: XCTestCase {
 
         let decoded = try SpacesMobileBridgeCodec.decodeResponse(
             SpacesMobileBridgeCodec.encodeResponse(SpacesMobileBridgeResponse(ok: true, message: "ok", overview: overview)))
-
         XCTAssertEqual(decoded.overview?.workspaces.first?.processRows.first?.daemonEndpoint, endpoint)
         XCTAssertEqual(decoded.overview?.workspaces.first?.codingAgentRows.first?.daemonEndpoint, endpoint)
         XCTAssertEqual(decoded.overview?.workspaces.first?.terminalRows.first?.daemonEndpoint, endpoint)
         XCTAssertEqual(decoded.overview?.sessions.first?.daemonEndpoint, endpoint)
+        let encodedResponse = try SpacesMobileBridgeCodec.encodeResponse(SpacesMobileBridgeResponse(ok: true, message: "ok", overview: overview))
+        XCTAssertFalse(String(data: encodedResponse, encoding: .utf8)?.contains("authToken") == true)
+    }
+
+    func testTerminalDaemonEndpointEncodesOnlyTokensPresentInPayload() throws {
+        let metadataOnlyEndpoint = SpacesMobileTerminalDaemonEndpoint(
+            host: "builder.example.com", port: 7443, authToken: nil, certificateFingerprint: "SHA256:abcdef")
+        let mobileEndpoint = SpacesMobileTerminalDaemonEndpoint(
+            host: "builder.example.com", port: 7443, authToken: "MOBILE", certificateFingerprint: "SHA256:abcdef")
+
+        let encodedMetadataOnly = try JSONEncoder().encode(metadataOnlyEndpoint)
+        let encodedMobile = try JSONEncoder().encode(mobileEndpoint)
+
+        XCTAssertFalse(String(data: encodedMetadataOnly, encoding: .utf8)?.contains("authToken") == true)
+        XCTAssertTrue(String(data: encodedMobile, encoding: .utf8)?.contains("MOBILE") == true)
+        XCTAssertNil(try JSONDecoder().decode(SpacesMobileTerminalDaemonEndpoint.self, from: encodedMetadataOnly).authToken)
+        XCTAssertEqual(try JSONDecoder().decode(SpacesMobileTerminalDaemonEndpoint.self, from: encodedMobile).authToken, "MOBILE")
     }
 
     func testLegacyTerminalRowDecodesWithoutDaemonEndpoint() throws {

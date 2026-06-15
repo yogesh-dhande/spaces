@@ -479,7 +479,7 @@
                     Self.runOnMainActorSynchronously {
                         self?.currentRemoteSessionState(
                             reason: TerminalRemoteSessionStateReason.initial, outputByteCount: nil, exportMode: .selfContained,
-                            markNextBroadcastFull: hasExistingClients, markNextBroadcastFullWhenMissingRenderUpdate: true)
+                            markNextBroadcastFullWhenMissingRenderUpdate: !hasExistingClients)
                     }
                 })
             try stateStreamServer.start()
@@ -1273,7 +1273,8 @@
             for frame: GhosttyRenderFrame, reason: String, nativeScrollRects: [GhosttyRenderScrollRectOperation] = [],
             exportMode: RenderStateExportMode = .selfContained
         ) -> GhosttyRenderUpdate {
-            let forceFullForSubscriberBaseline = exportMode == .streamDeltaAllowed && forceNextBroadcastFullRenderUpdate
+            let hasPendingSubscriberBaselineReset = exportMode == .streamDeltaAllowed && forceNextBroadcastFullRenderUpdate
+            let forceFullForSubscriberBaseline = hasPendingSubscriberBaselineReset && reason != TerminalRemoteSessionStateReason.scroll
             let forceFullForSelfContainedExport = exportMode == .selfContained
             let forceFullForExplicitResync =
                 reason == TerminalRemoteSessionStateReason.initial || reason == TerminalRemoteSessionStateReason.inputOutput
@@ -1292,19 +1293,23 @@
             let update = GhosttyRenderUpdateFactory.makeUpdate(
                 target: frame, baseline: lastRenderUpdateBaseline, forceFull: forceFull, forceFullReason: forceFullReason,
                 nativeScrollRects: nativeScrollRects)
+            let shouldUpdateStreamBaseline = exportMode == .streamDeltaAllowed
             switch update.kind {
-            case .full: if let fullFrame = update.fullFrame { lastRenderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: fullFrame) }
+            case .full:
+                if shouldUpdateStreamBaseline, let fullFrame = update.fullFrame {
+                    lastRenderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: fullFrame)
+                }
             case .delta:
                 if let appliedBaseline = try? GhosttyRenderUpdateApplier.apply(update, to: lastRenderUpdateBaseline) {
                     lastRenderUpdateBaseline = appliedBaseline
                 } else {
                     let fullUpdate = GhosttyRenderUpdate.full(frame, fallbackReason: "local_delta_apply_failed")
-                    lastRenderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: frame)
+                    if shouldUpdateStreamBaseline { lastRenderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: frame) }
                     return fullUpdate
                 }
-            case .resyncRequired: lastRenderUpdateBaseline = nil
+            case .resyncRequired: if shouldUpdateStreamBaseline { lastRenderUpdateBaseline = nil }
             }
-            if forceFullForSubscriberBaseline { forceNextBroadcastFullRenderUpdate = false }
+            if hasPendingSubscriberBaselineReset { forceNextBroadcastFullRenderUpdate = false }
             return update
         }
 

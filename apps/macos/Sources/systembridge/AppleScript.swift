@@ -1,40 +1,51 @@
-import Darwin
 import Foundation
+
+#if os(Linux)
+    import Glibc
+#else
+    import Darwin
+#endif
 
 public enum AppleScript {
     @discardableResult public static func run(_ script: String, timeoutSeconds: Int? = nil) throws -> String {
-        let isRunningTests = NSClassFromString("XCTest") != nil
-        if isRunningTests, ProcessInfo.processInfo.environment["SPACES_ALLOW_TEST_APPLESCRIPT"] != "1" {
-            throw NSError(
-                domain: "spaces.applescript", code: 1,
-                userInfo: [
-                    NSLocalizedDescriptionKey: "Unmocked AppleScript call during tests. Install an `osascript` mock before invoking AppleScript.run."
-                ])
-        }
-        let usesProcessTimeout = (timeoutSeconds ?? 0) > 0
-        let script = usesProcessTimeout ? timeoutWrappedScript(script, timeoutSeconds: timeoutSeconds ?? 0) : script
-        do {
-            if usesProcessTimeout, let timeoutSeconds { return try runWithProcessTimeout(script, timeoutSeconds: timeoutSeconds) }
-            if isRunningTests {
-                let output = try Shell.runAndCapture(["osascript", "-e", script])
-                return output.trimmingCharacters(in: .whitespacesAndNewlines)
+        #if os(Linux)
+            throw NSError(domain: "spaces.applescript", code: 5, userInfo: [NSLocalizedDescriptionKey: "AppleScript is unavailable on Linux."])
+        #else
+            let isRunningTests = NSClassFromString("XCTest") != nil
+            if isRunningTests, ProcessInfo.processInfo.environment["SPACES_ALLOW_TEST_APPLESCRIPT"] != "1" {
+                throw NSError(
+                    domain: "spaces.applescript", code: 1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Unmocked AppleScript call during tests. Install an `osascript` mock before invoking AppleScript.run."
+                    ])
             }
-            guard let appleScript = NSAppleScript(source: script) else {
-                throw NSError(domain: "spaces.applescript", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to compile AppleScript source."])
+            let usesProcessTimeout = (timeoutSeconds ?? 0) > 0
+            let script = usesProcessTimeout ? timeoutWrappedScript(script, timeoutSeconds: timeoutSeconds ?? 0) : script
+            do {
+                if usesProcessTimeout, let timeoutSeconds { return try runWithProcessTimeout(script, timeoutSeconds: timeoutSeconds) }
+                if isRunningTests {
+                    let output = try Shell.runAndCapture(["osascript", "-e", script])
+                    return output.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                guard let appleScript = NSAppleScript(source: script) else {
+                    throw NSError(
+                        domain: "spaces.applescript", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to compile AppleScript source."])
+                }
+                var executionError: NSDictionary?
+                let result = appleScript.executeAndReturnError(&executionError)
+                if let executionError {
+                    throw NSError(domain: "spaces.applescript", code: 3, userInfo: [NSLocalizedDescriptionKey: executionError.description])
+                }
+                return (result.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            } catch {
+                fputs("spaces: AppleScript failed.\n", stderr)
+                fputs("spaces: script begin\n", stderr)
+                fputs(script, stderr)
+                fputs("\nspaces: script end\n", stderr)
+                throw error
             }
-            var executionError: NSDictionary?
-            let result = appleScript.executeAndReturnError(&executionError)
-            if let executionError {
-                throw NSError(domain: "spaces.applescript", code: 3, userInfo: [NSLocalizedDescriptionKey: executionError.description])
-            }
-            return (result.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch {
-            fputs("spaces: AppleScript failed.\n", stderr)
-            fputs("spaces: script begin\n", stderr)
-            fputs(script, stderr)
-            fputs("\nspaces: script end\n", stderr)
-            throw error
-        }
+        #endif
     }
 
     @discardableResult public static func run(lines: [String], timeoutSeconds: Int? = nil) throws -> String {

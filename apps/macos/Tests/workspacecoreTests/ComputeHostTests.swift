@@ -11,6 +11,10 @@ final class ComputeHostTests: XCTestCase {
             try ComputeHostCredentialStore.resolvedAuthToken(hostID: "Builder-A.1", environment: [key: "  remote-secret  "]), "remote-secret")
     }
 
+    func testResolvedAuthTokenDoesNotUseGlobalDaemonToken() throws {
+        XCTAssertNil(try ComputeHostCredentialStore.resolvedAuthToken(hostID: "Builder-A.1", environment: ["SPACESD_AUTH_TOKEN": "global-secret"]))
+    }
+
     func testFreshStoreIncludesLocalHost() throws {
         let store = try makeTemporaryStore()
 

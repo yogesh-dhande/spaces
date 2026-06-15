@@ -23,13 +23,15 @@ public struct TerminalServiceRequest: Codable, Sendable, Equatable {
     public let agentSignal: TerminalServiceAgentSignalEvent?
     public let agentSignalEventIDs: [String]?
     public let profileCommand: TerminalServiceProfileCommandRequest?
+    public let mobileCredentialRequest: TerminalServiceMobileCredentialRequest?
 
     public init(
         command: String, authToken: String? = nil, launchConfiguration: TerminalSessionLaunchConfiguration? = nil, sessionID: String? = nil,
         runtimeManifest: TerminalServiceWorkspaceRuntimeManifest? = nil, worktreeRefresh: TerminalServiceWorktreeRefreshRequest? = nil,
         workspaceCommand: TerminalServiceWorkspaceCommandRequest? = nil, controlRequest: TerminalControlRequest? = nil, terminalLink: String? = nil,
         terminalLinkID: String? = nil, chunkOffset: Int64? = nil, chunkLimit: Int? = nil, agentSignal: TerminalServiceAgentSignalEvent? = nil,
-        agentSignalEventIDs: [String]? = nil, profileCommand: TerminalServiceProfileCommandRequest? = nil
+        agentSignalEventIDs: [String]? = nil, profileCommand: TerminalServiceProfileCommandRequest? = nil,
+        mobileCredentialRequest: TerminalServiceMobileCredentialRequest? = nil
     ) {
         self.command = command
         self.authToken = authToken
@@ -46,6 +48,7 @@ public struct TerminalServiceRequest: Codable, Sendable, Equatable {
         self.agentSignal = agentSignal
         self.agentSignalEventIDs = agentSignalEventIDs
         self.profileCommand = profileCommand
+        self.mobileCredentialRequest = mobileCredentialRequest
     }
 
     public init(
@@ -59,7 +62,7 @@ public struct TerminalServiceRequest: Codable, Sendable, Equatable {
             command: command, authToken: authToken, launchConfiguration: launchConfiguration, sessionID: sessionID, runtimeManifest: runtimeManifest,
             worktreeRefresh: worktreeRefresh, workspaceCommand: workspaceCommand, controlRequest: controlRequest, terminalLink: terminalLink,
             terminalLinkID: terminalLinkID, chunkOffset: chunkOffset, chunkLimit: chunkLimit, agentSignal: agentSignal,
-            agentSignalEventIDs: agentSignalEventIDs, profileCommand: nil)
+            agentSignalEventIDs: agentSignalEventIDs, profileCommand: nil, mobileCredentialRequest: nil)
     }
 
     public func withAuthToken(_ authToken: String?) -> TerminalServiceRequest {
@@ -67,7 +70,54 @@ public struct TerminalServiceRequest: Codable, Sendable, Equatable {
             command: command, authToken: authToken, launchConfiguration: launchConfiguration, sessionID: sessionID, runtimeManifest: runtimeManifest,
             worktreeRefresh: worktreeRefresh, workspaceCommand: workspaceCommand, controlRequest: controlRequest, terminalLink: terminalLink,
             terminalLinkID: terminalLinkID, chunkOffset: chunkOffset, chunkLimit: chunkLimit, agentSignal: agentSignal,
-            agentSignalEventIDs: agentSignalEventIDs, profileCommand: profileCommand)
+            agentSignalEventIDs: agentSignalEventIDs, profileCommand: profileCommand, mobileCredentialRequest: mobileCredentialRequest)
+    }
+}
+
+public enum TerminalServiceMobileCredentialOperation: String, Codable, Sendable, Equatable {
+    case issue
+    case revoke
+    case list
+}
+
+public struct TerminalServiceMobileCredentialRequest: Codable, Sendable, Equatable {
+    public let operation: TerminalServiceMobileCredentialOperation
+    public let installationID: String?
+    public let deviceName: String?
+    public let platform: String?
+
+    public init(
+        operation: TerminalServiceMobileCredentialOperation, installationID: String? = nil, deviceName: String? = nil, platform: String? = nil
+    ) {
+        self.operation = operation
+        self.installationID = installationID
+        self.deviceName = deviceName
+        self.platform = platform
+    }
+}
+
+public struct TerminalServiceMobileCredential: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let installationID: String
+    public let deviceName: String?
+    public let platform: String?
+    public let scopes: [String]
+    public let createdAt: String
+    public let lastUsedAt: String?
+    public let revokedAt: String?
+
+    public init(
+        id: String, installationID: String, deviceName: String?, platform: String?, scopes: [String], createdAt: String, lastUsedAt: String?,
+        revokedAt: String?
+    ) {
+        self.id = id
+        self.installationID = installationID
+        self.deviceName = deviceName
+        self.platform = platform
+        self.scopes = scopes
+        self.createdAt = createdAt
+        self.lastUsedAt = lastUsedAt
+        self.revokedAt = revokedAt
     }
 }
 
@@ -405,6 +455,23 @@ public struct TerminalServiceSessionSummary: Codable, Sendable, Equatable, Ident
 }
 
 public struct TerminalServiceResponse: Codable, Sendable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case message
+        case session
+        case sessions
+        case servicePID
+        case commandResult
+        case sessionState
+        case controlResponse
+        case terminalLinkMetadata
+        case terminalLinkChunk
+        case agentSignals
+        case profile
+        case mobileCredentialToken
+        case mobileCredentials
+    }
+
     public let ok: Bool
     public let message: String
     public let session: TerminalServiceSessionSummary?
@@ -417,13 +484,17 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
     public let terminalLinkChunk: TerminalServiceTerminalLinkChunk?
     public let agentSignals: [TerminalServiceAgentSignalEvent]?
     public let profile: TerminalServiceProfileCommandResponse?
+    public let mobileCredentialToken: String?
+    public let mobileCredentials: [TerminalServiceMobileCredential]?
+    let streamSocketPath: String?
 
     public init(
         ok: Bool, message: String, session: TerminalServiceSessionSummary? = nil, sessions: [TerminalServiceSessionSummary]? = nil,
         servicePID: Int32? = nil, commandResult: TerminalServiceCommandResult? = nil, sessionState: GhosttyRemoteSessionStatePayload? = nil,
         controlResponse: TerminalControlResponse? = nil, terminalLinkMetadata: TerminalServiceTerminalLinkMetadata? = nil,
         terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil, agentSignals: [TerminalServiceAgentSignalEvent]? = nil,
-        profile: TerminalServiceProfileCommandResponse? = nil
+        profile: TerminalServiceProfileCommandResponse? = nil, mobileCredentialToken: String? = nil,
+        mobileCredentials: [TerminalServiceMobileCredential]? = nil, streamSocketPath: String? = nil
     ) {
         self.ok = ok
         self.message = message
@@ -437,6 +508,9 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
         self.terminalLinkChunk = terminalLinkChunk
         self.agentSignals = agentSignals
         self.profile = profile
+        self.mobileCredentialToken = mobileCredentialToken
+        self.mobileCredentials = mobileCredentials
+        self.streamSocketPath = streamSocketPath
     }
 
     public init(
@@ -449,6 +523,24 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
             ok: ok, message: message, session: session, sessions: sessions, servicePID: servicePID, commandResult: commandResult,
             sessionState: sessionState, controlResponse: controlResponse, terminalLinkMetadata: terminalLinkMetadata,
             terminalLinkChunk: terminalLinkChunk, agentSignals: agentSignals, profile: nil)
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            ok: try container.decode(Bool.self, forKey: .ok), message: try container.decode(String.self, forKey: .message),
+            session: try container.decodeIfPresent(TerminalServiceSessionSummary.self, forKey: .session),
+            sessions: try container.decodeIfPresent([TerminalServiceSessionSummary].self, forKey: .sessions),
+            servicePID: try container.decodeIfPresent(Int32.self, forKey: .servicePID),
+            commandResult: try container.decodeIfPresent(TerminalServiceCommandResult.self, forKey: .commandResult),
+            sessionState: try container.decodeIfPresent(GhosttyRemoteSessionStatePayload.self, forKey: .sessionState),
+            controlResponse: try container.decodeIfPresent(TerminalControlResponse.self, forKey: .controlResponse),
+            terminalLinkMetadata: try container.decodeIfPresent(TerminalServiceTerminalLinkMetadata.self, forKey: .terminalLinkMetadata),
+            terminalLinkChunk: try container.decodeIfPresent(TerminalServiceTerminalLinkChunk.self, forKey: .terminalLinkChunk),
+            agentSignals: try container.decodeIfPresent([TerminalServiceAgentSignalEvent].self, forKey: .agentSignals),
+            profile: try container.decodeIfPresent(TerminalServiceProfileCommandResponse.self, forKey: .profile),
+            mobileCredentialToken: try container.decodeIfPresent(String.self, forKey: .mobileCredentialToken),
+            mobileCredentials: try container.decodeIfPresent([TerminalServiceMobileCredential].self, forKey: .mobileCredentials))
     }
 }
 

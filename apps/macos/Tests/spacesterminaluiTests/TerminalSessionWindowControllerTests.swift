@@ -990,6 +990,55 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.attachmentMode, .owner)
     }
 
+    @MainActor func testOwnerWindowDoesNotReclaimOwnershipAfterRemoteTakeoverDuringPassiveRefresh() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-remote-retakeover"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "retakeover", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let capture = ClientCapture()
+        let fakeHost = FakeGhosttySessionHost()
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost,
+            attachClientAction: { client, mode in
+                capture.attachedClientID = client.id
+                capture.attachedMode = mode
+                capture.attachedModes.append(mode)
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:\(capture.attachedModes.count)Z")
+            }, detachClientAction: { _ in })
+
+        controller.show()
+        XCTAssertEqual(capture.attachedModes, [.owner])
+
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", hostName: "iphone", deviceName: "iPhone"),
+            connectedAt: "2026-05-20T00:00:02Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: remoteOwner, mode: .viewer, paths: paths, attachedAt: "2026-05-20T00:00:02Z")
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: sessionID, newOwnerClientID: remoteOwner.id, paths: paths, transferredAt: "2026-05-20T00:00:03Z")
+
+        controller.debugAttachLocalClientIfNeeded()
+        controller.debugForceRefresh()
+        controller.debugForceRefresh()
+
+        XCTAssertEqual(capture.attachedModes, [.owner, .viewer])
+        XCTAssertEqual(controller.attachmentMode, .viewer)
+        let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+        XCTAssertEqual(activeAttachments.first { $0.clientID == remoteOwner.id }?.mode, .owner)
+        XCTAssertEqual(activeAttachments.first { $0.clientID == controller.clientID }?.mode, .viewer)
+    }
+
     @MainActor func testOwnerSeekingWindowRequestsTakeoverAfterShowWhenAnotherClientOwnsSession() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

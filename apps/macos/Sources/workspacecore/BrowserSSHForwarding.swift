@@ -1,5 +1,10 @@
-import Darwin
 import Foundation
+
+#if os(Linux)
+    import Glibc
+#else
+    import Darwin
+#endif
 
 struct BrowserSSHForwardRequest: Sendable, Hashable {
     let computeHostID: String
@@ -150,13 +155,19 @@ final class BrowserSSHForwardManager: @unchecked Sendable {
     }
 
     private static func allocateEphemeralPort() throws -> Int {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        #if os(Linux)
+            let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #else
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+        #endif
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(fd) }
         var yes: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
         var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #if !os(Linux)
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #endif
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = 0
         address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
@@ -176,11 +187,17 @@ final class BrowserSSHForwardManager: @unchecked Sendable {
     }
 
     private static func canConnectToLocalhost(port: Int) -> Bool {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        #if os(Linux)
+            let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #else
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+        #endif
         guard fd >= 0 else { return false }
         defer { close(fd) }
         var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #if !os(Linux)
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #endif
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = in_port_t(port).bigEndian
         address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))

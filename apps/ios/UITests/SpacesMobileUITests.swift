@@ -67,23 +67,17 @@ final class SpacesMobileUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(1))
 
-        let sessionRow = app.buttons["terminal.row.\(configuration.sessionID)"]
-        XCTAssertTrue(sessionRow.waitForExistence(timeout: 20), "Timed out waiting for session row \(configuration.sessionID)")
+        try returnToTerminalList(in: app)
         if configuration.proceedTakeOverPath != nil {
             waitForMarkerIfNeeded(configuration.proceedTakeOverPath, timeout: 60)
         }
-        sessionRow.tap()
-
-        if !waitForOwnerState(in: app, configuration: configuration, timeout: 8),
-           let takeOverButton = waitForButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 8)
-        {
-            takeOverButton.tap()
-        }
-
-        guard waitForOwnerState(in: app, configuration: configuration, timeout: 45) else {
-            XCTFail("Timed out waiting for owner state")
-            return
-        }
+        try takeOverSessionFromList(
+            in: app,
+            configuration: configuration,
+            sessionID: configuration.sessionID,
+            timeout: 20,
+            context: "initial takeover"
+        )
 
         captureScreenshot(app, name: "post-takeover-immediate", filePath: configuration.immediateScreenshotPath)
         RunLoop.current.run(until: Date().addingTimeInterval(2))
@@ -149,7 +143,7 @@ final class SpacesMobileUITests: XCTestCase {
         if let proceedFinishPath = configuration.proceedFinishPath {
             waitForMarkerIfNeeded(proceedFinishPath, timeout: 30)
             for attemptIndex in 0..<configuration.manualRetakeoverAttempts {
-                guard let takeOverButton = waitForButton(
+                guard tapButton(
                     in: app,
                     identifier: "terminal.takeover",
                     fallbackLabel: "Take Over",
@@ -158,7 +152,6 @@ final class SpacesMobileUITests: XCTestCase {
                     XCTFail("Timed out waiting for Take Over button after Mac retakeover")
                     return
                 }
-                takeOverButton.tap()
                 guard waitForOwnerState(in: app, configuration: configuration, timeout: 45) else {
                     XCTFail("Timed out waiting for owner state after mobile retakeover attempt \(attemptIndex + 1)")
                     return
@@ -214,6 +207,7 @@ final class SpacesMobileUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(1))
 
+        try returnToTerminalList(in: app)
         try takeOverSessionFromList(
             in: app,
             configuration: configuration,
@@ -350,6 +344,31 @@ final class SpacesMobileUITests: XCTestCase {
 
     private func waitForButton(in app: XCUIApplication, identifier: String, fallbackLabel: String, timeout: TimeInterval) -> XCUIElement? {
         waitForElement(primary: app.buttons[identifier], fallback: app.buttons[fallbackLabel], timeout: timeout)
+    }
+
+    private func tapButton(in app: XCUIApplication, identifier: String, fallbackLabel: String, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let candidates = [
+                app.buttons[identifier],
+                app.descendants(matching: .any)[identifier],
+                app.buttons[fallbackLabel],
+                app.descendants(matching: .any)[fallbackLabel],
+            ]
+            for candidate in candidates where candidate.exists {
+                let frame = candidate.frame
+                if !frame.isEmpty {
+                    app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                        .withOffset(CGVector(dx: frame.midX, dy: frame.midY))
+                        .tap()
+                    return true
+                }
+                candidate.tap()
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return false
     }
 
     private func focusTerminalSurface(in app: XCUIApplication) {
@@ -675,6 +694,23 @@ final class SpacesMobileUITests: XCTestCase {
         return app.buttons.matching(rowPredicate).firstMatch.exists
     }
 
+    private func revealTerminalRow(_ row: XCUIElement, in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        let scrollView = app.scrollViews.firstMatch
+        while Date() < deadline {
+            if row.exists, row.isEnabled, row.isHittable {
+                return true
+            }
+            if scrollView.exists {
+                scrollView.swipeUp()
+            } else {
+                app.swipeUp()
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        }
+        return row.exists && row.isEnabled && row.isHittable
+    }
+
     private func takeOverSessionFromList(
         in app: XCUIApplication,
         configuration: UITestConfiguration,
@@ -684,14 +720,27 @@ final class SpacesMobileUITests: XCTestCase {
     ) throws {
         let sessionRow = app.buttons["terminal.row.\(sessionID)"]
         XCTAssertTrue(sessionRow.waitForExistence(timeout: timeout), "Terminal row \(sessionID) did not reappear during \(context)")
+        XCTAssertTrue(
+            revealTerminalRow(sessionRow, in: app, timeout: 8),
+            "Terminal row \(sessionID) was not ready for interaction during \(context)"
+        )
         sessionRow.tap()
 
         let sessionDetail = app.descendants(matching: .any)["terminal.detail.\(sessionID)"]
-        XCTAssertTrue(sessionDetail.waitForExistence(timeout: 8), "Terminal detail \(sessionID) did not appear during \(context)")
-        if !waitForOwnerState(in: app, configuration: configuration, sessionID: sessionID, timeout: 4),
-           let takeOverButton = waitForButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 8)
-        {
-            takeOverButton.tap()
+        if !sessionDetail.waitForExistence(timeout: 8) {
+            captureScreenshot(
+                app,
+                name: "terminal-detail-missing-\(context)",
+                filePath: configuration.renderDumpPath.map { "\(($0 as NSString).deletingLastPathComponent)/terminal-detail-missing.png" }
+            )
+            XCTFail("Terminal detail \(sessionID) did not appear during \(context)")
+            return
+        }
+        if !waitForOwnerState(in: app, configuration: configuration, sessionID: sessionID, timeout: 4) {
+            XCTAssertTrue(
+                tapButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 8),
+                "Timed out waiting for Take Over button during \(context)"
+            )
         }
 
         guard waitForOwnerState(in: app, configuration: configuration, sessionID: sessionID, timeout: 45) else {

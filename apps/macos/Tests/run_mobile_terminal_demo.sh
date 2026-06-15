@@ -97,6 +97,9 @@ run_demo_env() {
   if [[ -n "$ghostty_demo_xdg_config_home" ]]; then
     env_args+=(XDG_CONFIG_HOME="$ghostty_demo_xdg_config_home")
   fi
+  if [[ -n "$remote_auth_token" ]]; then
+    env_args+=("$(remote_auth_token_env_key)=$remote_auth_token" "SPACES_E2E_REMOTE_AUTH_TOKEN=$remote_auth_token")
+  fi
   env "${env_args[@]}" "$@"
 }
 
@@ -743,6 +746,11 @@ PY
 }
 
 start_mobile_bridge() {
+  local -a bridge_remote_auth_env=()
+  if [[ -n "$remote_auth_token" ]]; then
+    bridge_remote_auth_env=("$(remote_auth_token_env_key)=$remote_auth_token" "SPACES_E2E_REMOTE_AUTH_TOKEN=$remote_auth_token")
+  fi
+
   if ! run_demo_env \
     HOME="$demo_home" \
     SPACES_DB_PATH="$spaces_db_path" \
@@ -750,6 +758,8 @@ start_mobile_bridge() {
     SPACESD_EXECUTABLE="$terminal_service" \
     SPACES_MOBILE_BRIDGE_HOST="$bridge_bind_host" \
     SPACES_MOBILE_BRIDGE_PORT="$bridge_port" \
+    SPACES_MOBILE_BRIDGE_TRACE="${SPACES_MOBILE_BRIDGE_TRACE:-1}" \
+    "${bridge_remote_auth_env[@]}" \
     "$spacese2e" mobile-status >"$bridge_log" 2>&1; then
     echo "Timed out waiting for daemon mobile bridge readiness." >&2
     cat "$bridge_log" >&2 || true
@@ -1305,6 +1315,11 @@ open_simulator_app
 boot_device "$ipad_udid"
 boot_device "$iphone_udid"
 
+remote_auth_env=()
+if [[ -n "$remote_auth_token" ]]; then
+  remote_auth_env=("$(remote_auth_token_env_key)=$remote_auth_token" "SPACES_E2E_REMOTE_AUTH_TOKEN=$remote_auth_token")
+fi
+
 env \
   -u NO_COLOR \
   -u CLICOLOR \
@@ -1325,6 +1340,7 @@ env \
   SPACES_GHOSTTY_RESOURCES_DIR="$ghostty_resources" \
   SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
   SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$performance_log_path" \
+  "${remote_auth_env[@]}" \
   "$spaces_app" >"$app_log" 2>&1 &
 app_pid=$!
 wait_for_pid "$app_pid" "SpacesApp"

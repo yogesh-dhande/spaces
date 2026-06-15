@@ -45,6 +45,11 @@ bool spaces_ghostty_vt_session_copy_snapshot(
     SpacesGhosttyVtSnapshot *out_snapshot
 );
 
+bool spaces_ghostty_vt_session_scroll_viewport(
+    SpacesGhosttyVtSession *session,
+    intptr_t delta_rows
+);
+
 bool spaces_ghostty_vt_session_format_plain(
     SpacesGhosttyVtSession *session,
     char **out_ptr,
