@@ -2146,12 +2146,14 @@
             window.isHidden = true
         }
 
-        func testRemoteTerminalHostViewTinyScrollDeltasAccumulate() throws {
+        func testRemoteTerminalHostViewTinyScrollDeltasForwardWithoutLocalViewportMutation() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
             window.rootViewController = viewController
 
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            var sentScrollCount = 0
+            hostView.onSendScroll = { _, _, _ in sentScrollCount += 1 }
             viewController.view.addSubview(hostView)
             window.isHidden = false
             viewController.view.frame = window.bounds
@@ -2177,18 +2179,22 @@
 
             let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
             let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
-            XCTAssertNotEqual(scrolledText, bottomText)
-            XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
+            XCTAssertEqual(scrolledText, bottomText)
+            XCTAssertEqual(sentScrollCount, 20)
 
             window.isHidden = true
         }
 
-        func testRemoteTerminalHostViewCanScrollBackThroughSnapshotScrollback() throws {
+        func testRemoteTerminalHostViewForwardsScrollbackWithoutLocalViewportMutation() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
             window.rootViewController = viewController
 
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            var sentScrolls: [(horizontal: Double, vertical: Double, scrollMods: Int32)] = []
+            hostView.onSendScroll = { horizontal, vertical, scrollMods in
+                sentScrolls.append((horizontal, vertical, scrollMods))
+            }
             viewController.view.addSubview(hostView)
             window.isHidden = false
             viewController.view.frame = window.bounds
@@ -2226,19 +2232,23 @@
 
             let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
             let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
-            XCTAssertNotEqual(scrolledText, bottomText)
-            XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
-            XCTAssertTrue(scrolledText.localizedStandardContains("SEQ 000001"), scrolledText)
+            XCTAssertEqual(scrolledText, bottomText)
+            XCTAssertEqual(sentScrolls.last?.horizontal, 0)
+            XCTAssertEqual(sentScrolls.last?.vertical, 10_000)
 
             window.isHidden = true
         }
 
-        func testRemoteTerminalHostViewPreservesSnapshotScrollbackAfterResizeChurn() throws {
+        func testRemoteTerminalHostViewDoesNotLocallyScrollAfterResizeChurn() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
             window.rootViewController = viewController
 
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            var sentScrolls: [(horizontal: Double, vertical: Double, scrollMods: Int32)] = []
+            hostView.onSendScroll = { horizontal, vertical, scrollMods in
+                sentScrolls.append((horizontal, vertical, scrollMods))
+            }
             viewController.view.addSubview(hostView)
             window.isHidden = false
             viewController.view.frame = window.bounds
@@ -2271,6 +2281,9 @@
             viewController.view.layoutIfNeeded()
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
+            let preScrollSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let preScrollText = GhosttyTerminalSnapshotLayout.plainText(for: preScrollSnapshot)
+
             let didScroll = hostView.debugSendScrollForTesting(
                 horizontal: 0,
                 vertical: 10_000,
@@ -2282,8 +2295,9 @@
 
             let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
             let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
-            XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
-            XCTAssertTrue(scrolledText.localizedStandardContains("SEQ 000001"), scrolledText)
+            XCTAssertEqual(scrolledText, preScrollText)
+            XCTAssertEqual(sentScrolls.last?.horizontal, 0)
+            XCTAssertEqual(sentScrolls.last?.vertical, 10_000)
 
             window.isHidden = true
         }

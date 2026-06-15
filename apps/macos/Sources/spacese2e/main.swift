@@ -22,19 +22,19 @@ struct SpacesE2ECommand: ParsableCommand {
             ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, SelectWorkspaceDetailCommand.self,
             OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self, RestartWorkspaceProcessCommand.self,
             LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
-            StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
-            ClearWorkspaceAgentWindowsCommand.self, SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self,
-            RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self, FocusWorkspaceWindowIndexCommand.self,
-            CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
-            CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self,
-            FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self, StartTerminalSessionCommand.self,
-            TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self,
-            TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, UpsertComputeHostCommand.self, ListComputeHostsCommand.self,
-            DeleteComputeHostCommand.self, PlanWorkspaceRuntimeCommand.self, RemoteComputeHostSmokeCommand.self, OpenMobilePairingWindowCommand.self,
-            RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self, ProfileDesktopControlOwnerCommand.self,
-            ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
-            TerminalServiceTLSRequestCommand.self, TerminalServiceTLSSessionCommand.self, ScrollApplicationWindowCommand.self,
-            TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            HideWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self,
+            SetWorkspaceAgentLaunchersCommand.self, ClearWorkspaceAgentWindowsCommand.self, SetWorkspaceStopScriptCommand.self,
+            AddWorkspaceProcessCommand.self, RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self,
+            FocusWorkspaceWindowIndexCommand.self, CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self,
+            RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self,
+            CloseTerminalSessionWindowCommand.self, FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
+            StartTerminalSessionCommand.self, TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self,
+            TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, UpsertComputeHostCommand.self,
+            ListComputeHostsCommand.self, DeleteComputeHostCommand.self, PlanWorkspaceRuntimeCommand.self, RemoteComputeHostSmokeCommand.self,
+            OpenMobilePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
+            ProfileDesktopControlOwnerCommand.self, ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self,
+            MobileRequestCommand.self, TerminalServiceTLSRequestCommand.self, TerminalServiceTLSSessionCommand.self,
+            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
         ])
 }
 
@@ -614,7 +614,7 @@ private struct TerminalServiceTLSSessionCommand: ParsableCommand {
     @Option(help: "Expected daemon certificate fingerprint.") var certificateFingerprint: String
 
     func run() throws {
-        let client = try TerminalServiceTLSPersistentClient(
+        let client = try TerminalServicePinnedTLSRequestSessionClient(
             host: host, port: port, authToken: authToken, certificateFingerprint: certificateFingerprint)
         defer { client.cancel() }
 
@@ -622,8 +622,8 @@ private struct TerminalServiceTLSSessionCommand: ParsableCommand {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
             do {
-                let request = try JSONDecoder().decode(TerminalServiceRequest.self, from: Data(trimmed.utf8)).withAuthToken(authToken)
-                let response = try client.send(request)
+                let request = try JSONDecoder().decode(TerminalServiceRequest.self, from: Data(trimmed.utf8))
+                let response = try client.send(request: request, timeout: 20)
                 var data = try JSONEncoder().encode(response)
                 data.append(0x0A)
                 FileHandle.standardOutput.write(data)
@@ -633,125 +633,6 @@ private struct TerminalServiceTLSSessionCommand: ParsableCommand {
                 FileHandle.standardOutput.write(data)
                 throw error
             }
-        }
-    }
-}
-
-private final class TerminalServiceTLSPersistentClient: @unchecked Sendable {
-    private let connection: NWConnection
-    private let queue = DispatchQueue(label: "spaces.e2e.terminal-service-tls-session")
-    private let errorBox = TerminalServiceTLSStreamErrorBox()
-    private var readBuffer = Data()
-
-    init(host: String, port: Int, authToken _: String, certificateFingerprint: String) throws {
-        let expectedFingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !expectedFingerprint.isEmpty else { throw TerminalServiceTLSError.missingCertificateFingerprint }
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw TerminalServiceTLSError.invalidPort(port) }
-
-        let ready = DispatchSemaphore(value: 0)
-        let tlsOptions = NWProtocolTLS.Options()
-        let securityOptions = tlsOptions.securityProtocolOptions
-        sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
-        sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
-        sec_protocol_options_set_peer_authentication_required(securityOptions, true)
-        sec_protocol_options_set_verify_block(
-            securityOptions,
-            { [errorBox] _, trust, complete in
-                let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-                let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
-                guard let certificate = chain?.first else {
-                    errorBox.set(TerminalServiceTLSError.peerCertificateUnavailable)
-                    ready.signal()
-                    complete(false)
-                    return
-                }
-                let actualFingerprint = TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)
-                guard TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint) else {
-                    errorBox.set(TerminalServiceTLSError.certificatePinMismatch(expected: expectedFingerprint, actual: actualFingerprint))
-                    ready.signal()
-                    complete(false)
-                    return
-                }
-                complete(true)
-            }, DispatchQueue.global(qos: .userInitiated))
-
-        connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options()))
-        connection.stateUpdateHandler = { [errorBox] state in
-            switch state {
-            case .ready: ready.signal()
-            case .failed(let error):
-                errorBox.set(TerminalServiceTLSError.connectionFailed(String(describing: error)))
-                ready.signal()
-            default: break
-            }
-        }
-        connection.start(queue: queue)
-        guard ready.wait(timeout: .now() + 20) == .success else {
-            connection.cancel()
-            throw TerminalServiceTLSError.requestTimedOut
-        }
-        if let error = errorBox.error {
-            connection.cancel()
-            throw error
-        }
-    }
-
-    func cancel() { connection.cancel() }
-
-    func send(_ request: TerminalServiceRequest) throws -> TerminalServiceResponse {
-        var data = try JSONEncoder().encode(request)
-        data.append(0x0A)
-        try send(data)
-        return try JSONDecoder().decode(TerminalServiceResponse.self, from: readResponseLine())
-    }
-
-    private func send(_ data: Data) throws {
-        let sent = DispatchSemaphore(value: 0)
-        connection.send(
-            content: data, contentContext: .defaultMessage, isComplete: false,
-            completion: .contentProcessed { [errorBox] error in
-                if let error { errorBox.set(TerminalServiceTLSError.connectionFailed(String(describing: error))) }
-                sent.signal()
-            })
-        guard sent.wait(timeout: .now() + 20) == .success else { throw TerminalServiceTLSError.requestTimedOut }
-        if let error = errorBox.error { throw error }
-    }
-
-    private func readResponseLine() throws -> Data {
-        if let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
-            let line = Data(readBuffer.prefix(upTo: newlineIndex))
-            readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
-            return line
-        }
-        let received = DispatchSemaphore(value: 0)
-        let resultBox = TerminalServiceTLSLineResultBox()
-        receiveLine(resultBox: resultBox, completion: received)
-        guard received.wait(timeout: .now() + 20) == .success else { throw TerminalServiceTLSError.requestTimedOut }
-        return try resultBox.value.get()
-    }
-
-    private func receiveLine(resultBox: TerminalServiceTLSLineResultBox, completion: DispatchSemaphore) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [self] content, _, isComplete, error in
-            if let error {
-                resultBox.set(.failure(TerminalServiceTLSError.connectionFailed(String(describing: error))))
-                completion.signal()
-                return
-            }
-            if let content, !content.isEmpty { readBuffer.append(content) }
-            if let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
-                let line = Data(readBuffer.prefix(upTo: newlineIndex))
-                readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
-                resultBox.set(.success(line))
-                completion.signal()
-                return
-            }
-            if isComplete {
-                resultBox.set(.success(readBuffer))
-                readBuffer.removeAll(keepingCapacity: true)
-                completion.signal()
-                return
-            }
-            receiveLine(resultBox: resultBox, completion: completion)
         }
     }
 }
@@ -1189,8 +1070,8 @@ private struct RemoteComputeHostSmokeCommand: ParsableCommand {
             throw ValidationError("Default workspace branch not found for project: \(project.dir)")
         }
         let remoteWorkspace = try orchestrator.createWorkspaceOnHost(
-            projectID: project.id, name: "\(workspace.title) on \(readyHost.name)", branch: remoteBranch, hostID: readyHost.id,
-            targetBranch: workspace.targetBranch ?? project.defaultBranch, notes: workspace.notes, runSetupScript: false,
+            projectID: project.id, name: workspace.title, branch: remoteBranch, hostID: readyHost.id,
+            targetBranch: workspace.targetBranch ?? project.defaultBranch, notes: workspace.notes, runSetupScript: true,
             allowRemoteBranchLookup: false, allowExistingBranchReuse: true)
         let runtimePlan = try orchestrator.workspaceRuntimePlan(workspaceID: remoteWorkspace.id)
         guard runtimePlan.selection.computeHostID == readyHost.id else {
@@ -1788,6 +1669,28 @@ private struct ArchiveWorkspaceCommand: ParsableCommand {
             throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
         }
         _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
+        guard let updated = try orchestrator.store.workspace(id: workspace.id) else {
+            throw ValidationError("Workspace disappeared: \(workspace.id)")
+        }
+        try emitJSON(
+            WorkspaceSummaryPayload(
+                id: updated.id, title: updated.title, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
+                notes: updated.notes))
+    }
+}
+
+private struct HideWorkspaceCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "hide-workspace")
+
+    @Option(name: .long) var workspaceDir: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        try orchestrator.updateWorkspaceHidden(workspaceID: workspace.id, isHidden: true)
         guard let updated = try orchestrator.store.workspace(id: workspace.id) else {
             throw ValidationError("Workspace disappeared: \(workspace.id)")
         }

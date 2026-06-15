@@ -28,8 +28,8 @@ pairing_code=""
 pairing_nonce=""
 transport_key=""
 certificate_fingerprint=""
-workspace_title="${SPACES_MOBILE_DEMO_WORKSPACE_TITLE:-Spaces Demo}"
-remote_workspace_title="${SPACES_MOBILE_DEMO_REMOTE_WORKSPACE_TITLE:-Scout Remote Demo}"
+workspace_title="${SPACES_MOBILE_DEMO_WORKSPACE_TITLE:-Local Demo}"
+remote_workspace_title="${SPACES_MOBILE_DEMO_REMOTE_WORKSPACE_TITLE:-Remote Demo}"
 ipad_name="${SPACES_MOBILE_DEMO_IPAD_NAME:-iPad Pro 13-inch (M5)}"
 iphone_name="${SPACES_MOBILE_DEMO_IPHONE_NAME:-iPhone 17 Pro}"
 bundle_id="dev.usespaces.spacesmobile"
@@ -1308,6 +1308,13 @@ run_demo_env \
     --workspace-title "$remote_workspace_title" >/dev/null
 
 configure_demo_compute_hosts
+
+run_demo_env \
+  HOME="$demo_home" \
+  SPACES_DB_PATH="$spaces_db_path" \
+  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+  SPACESD_EXECUTABLE="$terminal_service" \
+  "$spacese2e" hide-workspace --workspace-dir "$temp_root/scout-errors" >/dev/null
 
 ipad_udid="$(resolve_device_udid "$ipad_name")"
 iphone_udid="$(resolve_device_udid "$iphone_name")"

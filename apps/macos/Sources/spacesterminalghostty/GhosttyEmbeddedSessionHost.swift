@@ -690,8 +690,9 @@
             let vertical = CGFloat(request.scrollVertical ?? 0)
             let scrollMods = request.scrollMods ?? 0
             guard horizontal != 0 || vertical != 0 || scrollMods != 0 else {
-                return TerminalControlResponse(ok: false, message: "Missing scroll delta.")
+                return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.")
             }
+            guard horizontal != 0 || vertical != 0 else { return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.") }
             if let ownerClient = activeOwnerClient() {
                 logMobileTakeoverPerformance(
                     name: "owner_input_activity", attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": "1", "input_kind": "scroll"])

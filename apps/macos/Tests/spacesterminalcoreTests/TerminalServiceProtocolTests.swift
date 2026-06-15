@@ -180,6 +180,33 @@ final class TerminalServiceProtocolTests: XCTestCase {
             XCTAssertEqual(second, TerminalServiceResponse(ok: true, message: "second-2"))
             XCTAssertEqual(requestCount.value, 2)
         }
+
+        func testPinnedTLSRequestSessionClientSendsMultipleRequestsOverOneConnection() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
+            let queue = DispatchQueue(label: "terminal-service-tls-session-client-test")
+            let requestCount = LockedCounter()
+            let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
+                let count = requestCount.increment()
+                return TerminalServiceResponse(ok: true, message: "\(request.command)-\(request.authToken ?? "")-\(count)")
+            }
+            try server.start()
+            defer { server.stop() }
+
+            let client = try TerminalServicePinnedTLSRequestSessionClient(
+                host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET", certificateFingerprint: identity.certificateFingerprint)
+            defer { client.cancel() }
+
+            let first = try client.send(request: TerminalServiceRequest(command: "first"))
+            let second = try client.send(request: TerminalServiceRequest(command: "second"))
+
+            XCTAssertEqual(first, TerminalServiceResponse(ok: true, message: "first-SECRET-1"))
+            XCTAssertEqual(second, TerminalServiceResponse(ok: true, message: "second-SECRET-2"))
+            XCTAssertEqual(requestCount.value, 2)
+        }
     #endif
 
     func testTLSIdentityStoreReloadsExistingIdentity() throws {

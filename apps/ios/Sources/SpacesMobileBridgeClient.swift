@@ -817,22 +817,26 @@ private actor DirectTerminalServiceCommandChannel {
         let sessionID = request.sessionID ?? "-"
         let connectionWasOpen = connection != nil
         let startedAt = Date()
-        let connection = try await connectIfNeeded(timeout: timeout, sessionID: sessionID, command: command)
+        var didReconnectAfterClosedConnection = false
         do {
-            var data = try JSONEncoder().encode(request)
-            data.append(0x0A)
-            try await Self.send(data: data, on: connection, timeout: timeout)
-            let responseData = try await readLine(from: connection, timeout: timeout)
-            let response = try JSONDecoder().decode(TerminalServiceResponse.self, from: responseData)
+            let response: TerminalServiceResponse
+            do {
+                response = try await sendOnce(request: request, timeout: timeout, sessionID: sessionID, command: command)
+            } catch {
+                guard connectionWasOpen, Self.isClosedConnectionError(error) else { throw error }
+                close()
+                didReconnectAfterClosedConnection = true
+                response = try await sendOnce(request: request, timeout: timeout, sessionID: sessionID, command: command)
+            }
             logEvent(
                 sessionID: sessionID,
                 name: "direct_command_request",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                count: data.count,
                 attributes: [
                     "command": command,
                     "control_command": controlCommand ?? "",
                     "connection_reused": connectionWasOpen ? "1" : "0",
+                    "reconnected_after_closed": didReconnectAfterClosedConnection ? "1" : "0",
                     "ok": response.ok ? "1" : "0",
                 ])
             if !response.ok, response.message.localizedStandardContains("unauthorized") {
@@ -853,6 +857,29 @@ private actor DirectTerminalServiceCommandChannel {
                 ])
             throw error
         }
+    }
+
+    private func sendOnce(request: TerminalServiceRequest, timeout: Duration, sessionID: String, command: String) async throws
+        -> TerminalServiceResponse
+    {
+        let connection = try await connectIfNeeded(timeout: timeout, sessionID: sessionID, command: command)
+        var data = try JSONEncoder().encode(request)
+        data.append(0x0A)
+        try await Self.send(data: data, on: connection, timeout: timeout)
+        let responseData = try await readLine(from: connection, timeout: timeout)
+        return try JSONDecoder().decode(TerminalServiceResponse.self, from: responseData)
+    }
+
+    private static func isClosedConnectionError(_ error: any Error) -> Bool {
+        if case SpacesMobileBridgeClientError.requestFailed(let message) = error {
+            return message.localizedStandardContains("direct remote connection was cancelled")
+                || message.localizedStandardContains("connection was cancelled")
+        }
+        let description = String(describing: error)
+        return description.localizedStandardContains("posixerrorcode: 54")
+            || description.localizedStandardContains("connection reset")
+            || description.localizedStandardContains("connection was cancelled")
+            || description.localizedStandardContains("connection was aborted")
     }
 
     func close() {

@@ -280,7 +280,7 @@
             guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
             let vertical = request.scrollVertical ?? 0
             let deltaRows = -Int(vertical.rounded(.toNearestOrAwayFromZero))
-            guard deltaRows != 0 else { return TerminalControlResponse(ok: false, message: "Missing scroll delta.") }
+            guard deltaRows != 0 else { return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.") }
             guard spaces_ghostty_vt_session_scroll_viewport(vtSession, deltaRows) else {
                 return TerminalControlResponse(ok: false, message: "Unable to scroll terminal.")
             }

@@ -1030,7 +1030,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } catch {}
     }
 
-    private struct RemoteTerminalSessionRoute: Sendable { let requestSender: RemoteGhosttyTerminalServiceRequestSender }
+    private struct RemoteTerminalSessionRoute: Sendable {
+        let requestSender: RemoteGhosttyTerminalServiceRequestSender
+        let stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber
+        let launchConfiguration: TerminalSessionLaunchConfiguration
+    }
 
     private final class RemoteTerminalWindowClientStore: @unchecked Sendable {
         private let lock = NSLock()
@@ -1063,9 +1067,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             } else {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
                 let remoteRoute = try remoteTerminalSessionRoute(sessionID: sessionID)
-                if let remoteRoute {
-                    try refreshRemoteTerminalSessionMirror(sessionID: sessionID, paths: paths, requestSender: remoteRoute.requestSender)
-                }
+                if let remoteRoute { try ensureRemoteTerminalLaunchConfiguration(remoteRoute.launchConfiguration, paths: paths) }
                 let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
                 if remoteRoute == nil {
                     agentSignalHandler = nil
@@ -1151,7 +1153,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     sessionHostProvider: { launchConfiguration, paths in
                         Self.terminalSessionHost(
                             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: remoteRoute?.requestSender,
-                            agentSignalHandler: agentSignalHandler)
+                            stateStreamSubscriber: remoteRoute?.stateStreamSubscriber, agentSignalHandler: agentSignalHandler)
                     })
                 terminalSessionWindowControllers[sessionID] = created
                 controller = created
@@ -1183,9 +1185,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let plan = try orchestrator.workspaceRuntimePlan(workspaceID: workspaceID)
         guard plan.selection.isRemote else { return nil }
         let target = plan.daemonTarget
-        return RemoteTerminalSessionRoute(requestSender: { request in
-            try WorkspaceOrchestrator.sendTerminalServiceRequest(to: target, request: request)
-        })
+        let kind = try remoteTerminalSessionKind(sessionID: sessionID, workspaceID: workspaceID)
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "shell-1", workingDirectory: plan.manifest.remotePath ?? plan.manifest.localPath,
+            shell: "/bin/bash", command: nil, createdAt: ISO8601DateFormatter().string(from: Date()), workspaceID: workspaceID, kind: kind)
+        guard let endpoint = target.endpoint, let hostID = target.computeHostID else {
+            throw WorkspaceError.invalidArgument(message: "Remote terminal session is missing its pinned TLS endpoint.")
+        }
+        let authToken = try ComputeHostCredentialStore.resolvedAuthToken(hostID: hostID)
+        let requestClient = try TerminalServicePinnedTLSRequestSessionClient(
+            host: endpoint.host, port: endpoint.port, authToken: authToken, certificateFingerprint: endpoint.certificateFingerprint, timeout: 30)
+        return RemoteTerminalSessionRoute(
+            requestSender: { request in try requestClient.send(request: request, timeout: 30) },
+            stateStreamSubscriber: { sessionID, onEvent, onDisconnect in
+                let client = TerminalServicePinnedTLSStateStreamClient(
+                    request: TerminalServiceRequest(command: "subscribe", sessionID: sessionID), host: endpoint.host, port: endpoint.port,
+                    authToken: authToken, certificateFingerprint: endpoint.certificateFingerprint, onEvent: onEvent, onDisconnect: onDisconnect)
+                try client.start()
+                return client
+            }, launchConfiguration: launchConfiguration)
+    }
+
+    private func ensureRemoteTerminalLaunchConfiguration(_ launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths)
+        throws
+    {
+        if (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) == nil {
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        }
     }
 
     private func applyRemoteAgentSignals(_ events: [TerminalServiceAgentSignalEvent]) throws -> [String] {
@@ -1847,11 +1873,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @MainActor static func terminalSessionHost(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
-        terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil
+        terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
+        stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil
     ) -> any TerminalGhosttySessionHosting {
         RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: terminalServiceRequestSender,
-            agentSignalHandler: agentSignalHandler)
+            stateStreamSubscriber: stateStreamSubscriber, agentSignalHandler: agentSignalHandler)
     }
 
     nonisolated static func launchServiceBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws

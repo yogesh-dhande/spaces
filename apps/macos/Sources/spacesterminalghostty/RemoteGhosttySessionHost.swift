@@ -5,11 +5,17 @@
 
     public typealias RemoteGhosttyTerminalServiceRequestSender = @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
     public typealias RemoteGhosttyAgentSignalHandler = @MainActor @Sendable ([TerminalServiceAgentSignalEvent]) throws -> [String]
+    public typealias RemoteGhosttyStateStreamSubscriber =
+        @Sendable (
+            _ sessionID: String, _ onEvent: @escaping @Sendable (GhosttyRemoteSessionStatePayload) -> Void,
+            _ onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        ) throws -> TerminalServicePinnedTLSStateStreamClient
 
     @MainActor public final class RemoteGhosttySessionHost: TerminalGhosttySessionHosting {
         private let launchConfiguration: TerminalSessionLaunchConfiguration
         private let paths: TerminalSessionPaths
         private let terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender?
+        private let stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber?
         private let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
         private let terminalView: GhosttyMirrorTerminalView
         private var latestState: GhosttyRemoteSessionStatePayload?
@@ -17,8 +23,8 @@
         private var persistedFinalStateLoadInProgress = false
         private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
         private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
+        private var directStateStreamClient: TerminalServicePinnedTLSStateStreamClient?
         private var lastSubscriptionAttemptAt: Date?
-        private var directStatePollingTask: Task<Void, Never>?
         private var directStateFetchInFlight = false
         private var attachedClient: TerminalClient?
         private var attachedMode: TerminalAttachmentMode = .viewer
@@ -36,15 +42,15 @@
         }
 
         private static let scrollCoalescingInterval: Duration = .milliseconds(16)
-        private static let directStatePollingInterval: Duration = .milliseconds(750)
-
         public init(
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
-            terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil
+            terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
+            stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil
         ) {
             self.launchConfiguration = launchConfiguration
             self.paths = paths
             self.terminalServiceRequestSender = terminalServiceRequestSender
+            self.stateStreamSubscriber = stateStreamSubscriber
             self.agentSignalHandler = agentSignalHandler
             terminalView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
             ensureStateStreamStartedIfNeeded()
@@ -54,7 +60,7 @@
             guard Thread.isMainThread else { return }
             MainActor.assumeIsolated {
                 stateStreamClient?.stop()
-                directStatePollingTask?.cancel()
+                directStateStreamClient?.stop()
                 pendingViewportResizeTask?.cancel()
                 scrollCoalescer.cancel()
                 inputQueue.cancelAll()
@@ -204,8 +210,11 @@
         }
 
         private func ensureStateStreamStartedIfNeeded(now: Date = Date()) {
+            if let stateStreamSubscriber {
+                startDirectStateStreamIfNeeded(stateStreamSubscriber: stateStreamSubscriber, now: now)
+                return
+            }
             if terminalServiceRequestSender != nil {
-                startDirectStatePollingIfNeeded()
                 requestDirectStateRefresh(reason: TerminalRemoteSessionStateReason.initial)
                 return
             }
@@ -225,23 +234,29 @@
             } catch { stateStreamClient = nil }
         }
 
-        private func startDirectStatePollingIfNeeded() {
-            guard directStatePollingTask == nil else { return }
-            directStatePollingTask = Task { @MainActor [weak self] in
-                while !Task.isCancelled {
-                    guard let self else { return }
-                    self.requestDirectStateRefresh(reason: "poll")
-                    try? await Task.sleep(for: Self.directStatePollingInterval)
-                }
+        private func startDirectStateStreamIfNeeded(stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber, now: Date) {
+            guard isInteractiveRuntimeStateForControl() else {
+                loadPersistedFinalStateIfAvailable()
+                return
             }
-        }
-
-        private func stopDirectStatePolling() {
-            directStatePollingTask?.cancel()
-            directStatePollingTask = nil
+            if directStateStreamClient != nil { return }
+            if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
+            lastSubscriptionAttemptAt = now
+            do {
+                let client = try stateStreamSubscriber(
+                    launchConfiguration.sessionID, { [weak self] payload in Task { @MainActor [weak self] in self?.applyRemoteState(payload) } },
+                    { [weak self] _ in
+                        Task { @MainActor [weak self] in
+                            self?.directStateStreamClient = nil
+                            self?.handleStreamDisconnect()
+                        }
+                    })
+                directStateStreamClient = client
+            } catch { directStateStreamClient = nil }
         }
 
         private func requestDirectStateRefresh(reason _: String) {
+            guard stateStreamSubscriber == nil else { return }
             guard let terminalServiceRequestSender else { return }
             guard !directStateFetchInFlight else { return }
             directStateFetchInFlight = true
@@ -256,7 +271,6 @@
                 case .success(let fetchResult):
                     self.applyRemoteState(fetchResult.payload)
                     self.applyAndAcknowledgeAgentSignals(fetchResult.agentSignals)
-                    if fetchResult.payload.runtimeState?.state.isInteractive == false { self.stopDirectStatePolling() }
                 case .failure(let error):
                     TerminalPerformance.logMetric(
                         "terminal_remote_state_fetch", target: "session=\(sessionID)", elapsedMS: 0, success: false,
@@ -491,11 +505,12 @@
             let ownerEpoch = latestState?.renderOwnerEpoch
             let sessionID = launchConfiguration.sessionID
             let requestSender = terminalServiceRequestSender
+            let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
             inputQueue.enqueue(priority: .userInitiated) {
                 _ = try Self.sendControlRequest(
                     TerminalControlRequest(command: "send", text: text, clientID: clientID, ownerEpoch: ownerEpoch), sessionID: sessionID,
                     socketPath: socketPath, requestSender: requestSender)
-                if requestSender != nil { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
+                if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
             }
         }
 
@@ -512,11 +527,12 @@
             let ownerEpoch = latestState?.renderOwnerEpoch
             let sessionID = launchConfiguration.sessionID
             let requestSender = terminalServiceRequestSender
+            let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
             inputQueue.enqueue(priority: .userInitiated) {
                 _ = try Self.sendControlRequest(
                     TerminalControlRequest(command: "key", key: key, clientID: clientID, ownerEpoch: ownerEpoch), sessionID: sessionID,
                     socketPath: socketPath, requestSender: requestSender)
-                if requestSender != nil { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
+                if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
             }
         }
 
@@ -529,11 +545,12 @@
             let ownerEpoch = latestState?.renderOwnerEpoch
             let sessionID = launchConfiguration.sessionID
             let requestSender = terminalServiceRequestSender
+            let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
             inputQueue.enqueue(priority: .userInitiated) {
                 _ = try Self.sendControlRequest(
                     TerminalControlRequest(command: "clearScreen", clientID: clientID, ownerEpoch: ownerEpoch), sessionID: sessionID,
                     socketPath: socketPath, requestSender: requestSender)
-                if requestSender != nil { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "clear_screen") } }
+                if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "clear_screen") } }
             }
         }
 
@@ -552,6 +569,7 @@
             let ownerEpoch = latestState?.renderOwnerEpoch
             let sessionID = launchConfiguration.sessionID
             let requestSender = terminalServiceRequestSender
+            let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
             inputQueue.enqueue(priority: .userInitiated) {
                 defer { Task { @MainActor in onFinished() } }
                 _ = try Self.sendControlRequest(
@@ -559,7 +577,7 @@
                         command: "scroll", clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: batch.horizontal,
                         scrollVertical: batch.vertical, scrollMods: batch.scrollMods == 0 ? nil : batch.scrollMods), sessionID: sessionID,
                     socketPath: socketPath, requestSender: requestSender)
-                if requestSender != nil { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "scroll") } }
+                if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "scroll") } }
             }
         }
 
@@ -586,6 +604,7 @@
             resizeSerial &+= 1
             let currentResizeSerial = resizeSerial
             let ownerEpoch = latestState?.renderOwnerEpoch
+            let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
             let finishResizeRequest: @MainActor @Sendable (Bool) -> Void = { [weak self, requestedSize] success in
                 guard let self else { return }
                 if let pendingViewportResizeSize = self.pendingViewportResizeSize, pendingViewportResizeSize == requestedSize {
@@ -599,7 +618,7 @@
                     TerminalControlRequest(
                         command: "resize", clientID: clientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch, resizeSerial: currentResizeSerial
                     ), sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
-                if requestSender != nil { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "resize") } }
+                if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "resize") } }
                 await finishResizeRequest(response?.ok == true)
             }
         }

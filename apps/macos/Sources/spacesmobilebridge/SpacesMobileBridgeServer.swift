@@ -611,7 +611,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
         let projects = try store.projects()
         let hostsByID = Dictionary(uniqueKeysWithValues: try store.computeHosts().map { ($0.id, $0) })
         let workspaces = try projects.flatMap { project in
-            try store.workspaces(projectID: project.id, includeArchived: false).map { workspace in
+            try store.workspaces(projectID: project.id, includeArchived: false).filter { !$0.isHidden }.map { workspace in
                 SpacesMobileOverviewBuilder.WorkspaceDescriptor(
                     project: project, workspace: workspace, settings: try? orchestrator.workspaceSettings(workspaceID: workspace.id),
                     runningProcesses: try store.runningProcesses(workspaceID: workspace.id),

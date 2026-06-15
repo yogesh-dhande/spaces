@@ -1761,6 +1761,29 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(response.message, "Ignoring stale owner epoch 1; current owner epoch is 0.")
     }
 
+    @MainActor func testControlScrollAcceptsZeroDeltaLifecyclePackets() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-zero-scroll-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-06-15T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        defer { host.terminate() }
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let owner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-06-15T00:00:00Z")
+        XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .viewer)).ok)
+        XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: owner.id)).ok)
+
+        let response = host.handleControlRequest(.init(command: "scroll", clientID: owner.id, scrollHorizontal: 0, scrollVertical: 0, scrollMods: 7))
+
+        XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "Ignored zero scroll delta."))
+    }
+
     @MainActor func testControlKeyCommandKClearsScreenThroughHostAction() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
