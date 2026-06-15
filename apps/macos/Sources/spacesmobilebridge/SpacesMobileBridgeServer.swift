@@ -97,7 +97,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
 
         func send(
             content data: Data, to connection: NWConnection, on queue: DispatchQueue, onSendBegin: @escaping @Sendable () -> Void = {},
-            isComplete: Bool = false, completion: @escaping @Sendable (Error?) -> Void
+            isComplete: Bool = false, applyInitialDelay: Bool = true, applyBandwidthDelay: Bool = true,
+            completion: @escaping @Sendable (Error?) -> Void
         ) {
             guard isEnabled, !data.isEmpty else {
                 onSendBegin()
@@ -106,8 +107,8 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
             }
 
             let chunks = chunked(data)
-            let initialDelay = DispatchTimeInterval.milliseconds(max(rttMS / 2, 0))
-            let bandwidthBPS = bandwidthBPS
+            let initialDelay = DispatchTimeInterval.milliseconds(applyInitialDelay ? max(rttMS / 2, 0) : 0)
+            let bandwidthBPS = applyBandwidthDelay ? bandwidthBPS : 0
             let chain = SendChain(
                 chunks: chunks, connection: connection, queue: queue, isComplete: isComplete,
                 interChunkDelayMicroseconds: { byteCount in Self.interChunkDelayMicroseconds(forByteCount: byteCount, bandwidthBPS: bandwidthBPS) },
@@ -1339,7 +1340,7 @@ public final class SpacesMobileBridgeServer: @unchecked Sendable {
                     var sendAttributes = attributes
                     sendAttributes["network_send_bytes"] = String(count)
                     self?.logBridgePerformance(sessionID: sessionID, name: "stream_network_send_begin", count: count, attributes: sendAttributes)
-                }, isComplete: closeAfterSend
+                }, isComplete: closeAfterSend, applyInitialDelay: closeAfterSend, applyBandwidthDelay: closeAfterSend
             ) { [weak self, weak connection] error in
                 self?.queue.async { [weak self, weak connection] in
                     if let error {

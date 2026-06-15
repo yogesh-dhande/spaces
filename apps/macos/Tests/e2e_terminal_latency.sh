@@ -687,7 +687,8 @@ def run_mac_input_latency() -> dict:
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        "summary": summarize_latencies(measurements),
+        "summary": summarize_latencies(measurements, "event_to_frame_apply_ms"),
+        "summary_metric": "event_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),
         "budget_enforced": True,
     }
@@ -807,7 +808,8 @@ def run_mac_scrollback_latency(
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        "summary": summarize_latencies(measurements),
+        "summary": summarize_latencies(measurements, "event_to_frame_apply_ms"),
+        "summary_metric": "event_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),
         "no_op_gestures": sum(1 for item in measurements if item.get("no_op")),
         "rendered_change_count": sum(1 for item in measurements if not item.get("no_op")),
@@ -922,8 +924,8 @@ def run_mac_command_output_catchup() -> dict:
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        "summary": summarize_latencies(measurements, "command_submit_to_render_visible_ms"),
-        "summary_metric": "command_submit_to_render_visible_ms",
+        "summary": summarize_latencies(measurements, "command_submit_to_frame_apply_ms"),
+        "summary_metric": "command_submit_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),
         "budget_enforced": True,
     }
@@ -967,9 +969,10 @@ for name, result in scenario_results.items():
     summary = result["summary"]
     target = budgets[name]["target_p95_ms"]
     enforcement_text = "gross" if result.get("budget_enforced", True) else "report-only"
+    summary_metric = result.get("summary_metric", "event_to_visible_ms")
     print(
         f"{name}: p50={summary['p50_ms']}ms p95={summary['p95_ms']}ms max={summary['max_ms']}ms "
-        f"(target p95 {target}ms, {enforcement_text} {budgets[name]['gross_p95_ms']}ms)"
+        f"(metric {summary_metric}, target p95 {target}ms, {enforcement_text} {budgets[name]['gross_p95_ms']}ms)"
     )
     phases = result.get("phase_summaries") or {}
     if phases:

@@ -137,6 +137,7 @@ export SPACES_E2E_EVENTS_LOG="$EVENT_LOG"
 cleanup() {
   local exit_code="$?"
   if (( PRESERVE_FIXTURES_ON_EXIT == 1 && exit_code == 0 )); then
+    cleanup_remote_e2e_host
     print_run_summary "$exit_code"
     return 0
   fi
@@ -151,6 +152,7 @@ cleanup() {
     wait "${SPACES_PID}" >/dev/null 2>&1 || true
   fi
   HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI" "$ACTION_TIMEOUT_SECONDS" || true
+  cleanup_remote_e2e_host
   print_run_summary "$exit_code"
   open_final_recording
 }
@@ -991,6 +993,16 @@ export_remote_auth_token() {
   export "$key=$REMOTE_AUTH_TOKEN"
 }
 
+deploy_remote_spacesd() {
+  require_remote_configuration
+  "$ROOT_DIR/apps/macos/scripts/deploy_linux_spacesd_e2e.sh"
+}
+
+cleanup_remote_e2e_host() {
+  [[ -n "$REMOTE_SSH_HOST" ]] || return 0
+  "$ROOT_DIR/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null 2>&1 || true
+}
+
 prepare_remote_git_origin() {
   local project_dir="$1"
   local slug="$2"
@@ -1027,6 +1039,7 @@ configure_mixed_e2e_targets() {
   log_step "configuring mixed local/remote compute targets"
   require_remote_configuration
   export_remote_auth_token
+  deploy_remote_spacesd
   prepare_remote_scout_git_origin \
     || fail "Remote git fixture setup failed. See $TMP_ROOT/remote-git-origin.log"
   local -a args=(

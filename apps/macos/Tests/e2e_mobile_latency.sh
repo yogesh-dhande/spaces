@@ -41,6 +41,7 @@ REMOTE_GIT_ROOT="${SPACES_E2E_REMOTE_GIT_ROOT:-~/.spaces/e2e-git}"
 LOCAL_PROJECT_DIR="$WORK_ROOT/local-project"
 REMOTE_PROJECT_DIR="$WORK_ROOT/remote-project"
 REMOTE_WORKSPACE_DIR=""
+REMOTE_RTT_MS=""
 
 SCENARIOS=(ios-input-latency ios-scrollback-latency)
 SELECTED_SCENARIOS=()
@@ -300,9 +301,30 @@ resolve_terminal_targets() {
   fi
 }
 
+measure_remote_rtt_ms() {
+  [[ "$TERMINAL_TARGETS" == *remote* ]] || return 0
+  local host="${REMOTE_DAEMON_HOST:-$REMOTE_SSH_HOST}"
+  [[ -n "$host" ]] || return 0
+  local ping_output
+  ping_output="$(ping -c 5 -q "$host" 2>/dev/null || true)"
+  REMOTE_RTT_MS="$(
+    python3 - "$ping_output" <<'PY'
+import re
+import sys
+
+text = sys.argv[1]
+match = re.search(r"(?:round-trip|rtt) min/avg/max/(?:stddev|mdev) = [^/]+/([^/]+)/", text)
+if match:
+    print(match.group(1))
+PY
+  )"
+}
+
 prepare_remote_workspace() {
   [[ "$TERMINAL_TARGETS" == *remote* ]] || return 0
   export_remote_auth_token
+  "$APP_ROOT/scripts/deploy_linux_spacesd_e2e.sh" \
+    || fail "Remote Linux spacesd deploy failed."
   spaces_e2e_create_scout_fixture_repo "$FIXTURE_TEMPLATE_DIR" "$REMOTE_PROJECT_DIR"
   local slug
   slug="$(basename "$WORK_ROOT" | tr -cd 'A-Za-z0-9_.-')"
@@ -329,6 +351,11 @@ prepare_remote_workspace() {
   [[ -n "$REMOTE_WORKSPACE_DIR" ]] || fail "Remote compute host smoke did not return a workspace directory."
 }
 
+cleanup_remote_e2e_host() {
+  [[ "$TERMINAL_TARGETS" == *remote* && -n "$REMOTE_SSH_HOST" ]] || return 0
+  "$APP_ROOT/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null 2>&1 || true
+}
+
 cleanup() {
   local exit_code=$?
   if [[ -n "$BRIDGE_PID" ]]; then
@@ -340,6 +367,7 @@ cleanup() {
     wait "$SERVICE_PID" >/dev/null 2>&1 || true
   fi
   stop_terminal_service_for_runtime_dir "$RUNTIME_DIR" 5
+  cleanup_remote_e2e_host
   if [[ "$KEEP_ROOT" == "1" || $exit_code -ne 0 ]]; then
     printf 'Preserved mobile latency root: %s\n' "$WORK_ROOT" >&2
   else
@@ -366,6 +394,7 @@ export SPACES_DB_PATH="$DB_PATH"
 export SPACES_RUNTIME_DIR="$RUNTIME_DIR"
 export SPACESD_EXECUTABLE="$TERMINAL_SERVICE"
 export SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERF_JSONL"
+measure_remote_rtt_ms
 prepare_remote_workspace
 
 "$TERMINAL_SERVICE" >"$SERVICE_LOG" 2>&1 &
@@ -437,6 +466,7 @@ PAIRING_CODE="$PAIRING_CODE" \
 PAIRING_NONCE="$PAIRING_NONCE" \
 NETWORK_PROFILE="$NETWORK_PROFILE" \
 NETWORK_RTT_MS="${NETWORK_RTT_MS:-$([[ "$NETWORK_PROFILE" == "ios-constrained" ]] && printf 80 || printf 0)}" \
+REMOTE_RTT_MS="$REMOTE_RTT_MS" \
 NETWORK_BANDWIDTH_BPS="${NETWORK_BANDWIDTH_BPS:-$([[ "$NETWORK_PROFILE" == "ios-constrained" ]] && printf 8000000 || printf 0)}" \
 NETWORK_CHUNK_BYTES="${NETWORK_CHUNK_BYTES:-$([[ "$NETWORK_PROFILE" == "ios-constrained" ]] && printf 16384 || printf 0)}" \
 TERMINAL_TARGETS="$TERMINAL_TARGETS" \
@@ -472,6 +502,8 @@ pairing_code = os.environ["PAIRING_CODE"]
 pairing_nonce = os.environ["PAIRING_NONCE"]
 network_profile = os.environ["NETWORK_PROFILE"]
 network_rtt_ms = int(os.environ.get("NETWORK_RTT_MS") or "0")
+remote_rtt_ms_text = os.environ.get("REMOTE_RTT_MS") or ""
+remote_rtt_ms = float(remote_rtt_ms_text) if remote_rtt_ms_text else None
 network_bandwidth_bps = int(os.environ.get("NETWORK_BANDWIDTH_BPS") or "0")
 network_chunk_bytes = int(os.environ.get("NETWORK_CHUNK_BYTES") or "0")
 terminal_targets = [item.strip() for item in os.environ["TERMINAL_TARGETS"].split(",") if item.strip()]
@@ -1716,7 +1748,8 @@ def run_ios_scrollback_latency(terminal_target: str) -> dict:
     session_id = start_terminal(title, command, terminal_target)
     _, mobile_client_id, stream = attach_pair(session_id, terminal_target)
     latest_payload = latest_stream_payload(stream)
-    if latest_payload is None or "SCROLL_READY" not in plain_text(latest_payload[0]):
+    ready_state = fetch_state(session_id, terminal_target)
+    if "SCROLL_READY" not in plain_text(ready_state) and (latest_payload is None or "SCROLL_READY" not in plain_text(latest_payload[0])):
         wait_for_line(stream, lambda payload: "SCROLL_READY" in plain_text(payload), timeout=30)
     base_scroll_delta = float(os.environ.get("IOS_SCROLL_DELTA", "720"))
     remote_frame_timeout = float(os.environ.get("IOS_SCROLL_REMOTE_FRAME_TIMEOUT", "2"))
@@ -1948,7 +1981,8 @@ payload = {
     "network_profile": network_profile,
     "network": {
         "profile": network_profile,
-        "rtt_ms": network_rtt_ms,
+        "bridge_rtt_ms": network_rtt_ms,
+        "remote_rtt_ms": remote_rtt_ms,
         "bandwidth_bps": network_bandwidth_bps,
         "chunk_bytes": network_chunk_bytes,
     },
@@ -1971,8 +2005,9 @@ for result_key, result in scenario_results.items():
     target = budget["target_p95_ms"]
     target_text = f", target p95 {target}ms" if target is not None else ""
     enforcement_text = "gross" if result.get("budget_enforced", True) else "report-only"
+    rtt_label = f"remote_rtt={remote_rtt_ms:.3f}ms" if terminal_target == "remote" and remote_rtt_ms is not None else f"bridge_rtt={network_rtt_ms}ms"
     print(
-        f"{name} [{network_profile}, terminal={terminal_target}, rtt={network_rtt_ms}ms]: "
+        f"{name} [{network_profile}, terminal={terminal_target}, {rtt_label}]: "
         f"p50={summary['p50_ms']}ms p95={summary['p95_ms']}ms "
         f"max={summary['max_ms']}ms ({enforcement_text} {budget['gross_p95_ms']}ms{target_text})"
     )

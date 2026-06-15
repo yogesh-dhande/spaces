@@ -195,6 +195,7 @@ cleanup() {
   stop_demo_workspace
   stop_mobile_bridge
   stop_terminal_service
+  cleanup_remote_e2e_host
   if [[ -n "$ipad_launch_pid" ]]; then
     kill "$ipad_launch_pid" >/dev/null 2>&1 || true
     wait "$ipad_launch_pid" >/dev/null 2>&1 || true
@@ -312,6 +313,16 @@ export_remote_auth_token() {
   export "$key=$remote_auth_token"
 }
 
+deploy_remote_spacesd() {
+  require_remote_configuration
+  "$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh"
+}
+
+cleanup_remote_e2e_host() {
+  [[ -n "$remote_ssh_host" ]] || return 0
+  "$repo_root/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null 2>&1 || true
+}
+
 prepare_remote_git_origin() {
   local project_dir_for_origin="$1"
   local slug="$2"
@@ -337,6 +348,7 @@ prepare_remote_git_origin() {
 configure_demo_compute_hosts() {
   require_remote_configuration
   export_remote_auth_token
+  deploy_remote_spacesd
 
   local slug
   slug="$(basename "$temp_root" | tr -cd 'A-Za-z0-9_.-')"
