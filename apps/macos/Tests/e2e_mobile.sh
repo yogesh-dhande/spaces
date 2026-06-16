@@ -1807,9 +1807,11 @@ env = os.environ | {
 }
 
 mac_prepare_commands = [
+    "export PS1='READY PROMPT > '",
     "printf '__roundtrip_mac_before_takeover_one__\\n'",
-    "printf '__roundtrip_mac_before_takeover_two__\\n'",
+    "printf '__roundtrip_mac_before_takeover_two__\\nMAC BEFORE TAKEOVER TWO\\n'",
 ]
+mac_ready_prompt_text = "READY PROMPT"
 ios_first_command = config["firstCommandText"]
 ios_first_output = config.get("firstCommandOutputText") or f"__roundtrip_{mobile_artifact_name}_one__"
 ios_second_command = config["secondCommandText"]
@@ -1912,6 +1914,17 @@ def send_owner_command(command_text: str) -> None:
     if not response.get("ok"):
         raise RuntimeError(f"Owner control request failed: {response}")
 
+def focus_mac_terminal_window() -> None:
+    show_result = subprocess.run(
+        [str(spaces_cli), "terminal", "show", session_id],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    if "Requested owner terminal window" not in show_result.stdout:
+        raise RuntimeError(f"Mac terminal focus request did not report success:\n{show_result.stdout}\n{show_result.stderr}")
+
 def wait_for_render_dump(predicate, timeout: float, process: subprocess.Popen[str]) -> dict:
     deadline = time.time() + timeout
     last_payload = None
@@ -1967,12 +1980,20 @@ def contains_command_output(text: str, command_text: str, output_text: str) -> b
     lines = text.splitlines()
     compact_text = re.sub(r"\s+", "", text)
     compact_command = re.sub(r"\s+", "", command_text)
+    compact_prompts = tuple(re.sub(r"\s+", "", prompt) for prompt in ("%", "$", "#", mac_ready_prompt_text, f"{mac_ready_prompt_text} >"))
     return (
-        any(f"{prompt}{compact_command}" in compact_text for prompt in ("%", "$", "#"))
+        any(f"{prompt}{compact_command}" in compact_text for prompt in compact_prompts)
         and any(line.strip() == output_text for line in lines)
     )
 
 def assert_prompt_rendered_after_output(label: str, text: str, output_text: str) -> None:
+    if prompt_rendered_after_output(text, output_text):
+        return
+    if output_text in text:
+        raise RuntimeError(f"{label} did not render the next shell prompt after {output_text!r}:\n{text}")
+    raise RuntimeError(f"{label} did not render output marker {output_text!r}:\n{text}")
+
+def prompt_rendered_after_output(text: str, output_text: str) -> bool:
     lines = [line.rstrip() for line in text.splitlines()]
     for index, line in enumerate(lines):
         if line.strip() != output_text:
@@ -1983,10 +2004,92 @@ def assert_prompt_rendered_after_output(label: str, text: str, output_text: str)
                 continue
             if output_text in stripped or "printf " in stripped or "echo " in stripped:
                 continue
+            if mac_ready_prompt_text in stripped:
+                return True
             if re.search(r"[%#$]\s*$", next_line):
-                return
-        raise RuntimeError(f"{label} did not render the next shell prompt after {output_text!r}:\n{text}")
-    raise RuntimeError(f"{label} did not render output marker {output_text!r}:\n{text}")
+                return True
+        return False
+    return False
+
+def normalized_ocr_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+def assert_mac_screen_prompt_rendered_after_output(label: str, payload: dict, output_text: str, prompt_text: str) -> None:
+    screenshot_path = scenario_dir / "roundtrip-mac-before-takeover-screen.png"
+    ocr_path = scenario_dir / "roundtrip-mac-before-takeover-screen-ocr.txt"
+    window_number = payload.get("windowNumber")
+    if not isinstance(window_number, int) or window_number <= 0:
+        raise RuntimeError(f"{label} did not report a captureable terminal window number:\n{json.dumps(payload, indent=2)}")
+
+    swift_script = r'''
+import AppKit
+import Foundation
+import Vision
+
+let screenshotPath = CommandLine.arguments[1]
+let screenshotURL = URL(fileURLWithPath: screenshotPath)
+guard let image = NSImage(contentsOf: screenshotURL) else {
+    fputs("Unable to load screenshot at \(screenshotPath)\n", stderr)
+    exit(1)
+}
+var proposedRect = NSRect(origin: .zero, size: image.size)
+guard let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
+    fputs("Unable to decode screenshot at \(screenshotPath)\n", stderr)
+    exit(1)
+}
+let request = VNRecognizeTextRequest()
+request.recognitionLevel = .accurate
+request.usesLanguageCorrection = false
+let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+try handler.perform([request])
+let recognizedText = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+print(recognizedText)
+'''
+    output_needle = normalized_ocr_text(output_text)
+    prompt_needle = normalized_ocr_text(prompt_text)
+    deadline = time.time() + 2.0
+    recognized_text = ""
+    last_error = ""
+    while time.time() < deadline:
+        try:
+            subprocess.run(
+                ["screencapture", "-x", "-l", str(window_number), str(screenshot_path)],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError(f"{label} could not capture a desktop screenshot for UI assertion: {error}") from error
+
+        result = subprocess.run(
+            ["swift", "-", str(screenshot_path)],
+            input=swift_script,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        recognized_text = result.stdout
+        ocr_path.write_text(recognized_text)
+        if result.returncode != 0:
+            last_error = f"OCR failed for {screenshot_path}:\n{result.stderr}\nOCR output:\n{recognized_text}"
+            time.sleep(0.2)
+            continue
+
+        normalized = normalized_ocr_text(recognized_text)
+        output_index = normalized.find(output_needle)
+        prompt_index = normalized.find(prompt_needle, output_index + len(output_needle)) if output_index >= 0 else -1
+        if output_index >= 0 and prompt_index >= 0:
+            return
+        time.sleep(0.2)
+
+    raise RuntimeError(
+        f"{label} did not visibly render command output followed by the next prompt.\n"
+        f"Screenshot: {screenshot_path}\nOCR: {ocr_path}\n"
+        f"Expected output {output_text!r} before prompt {prompt_text!r}.\n"
+        f"{last_error}\n"
+        f"OCR output:\n{recognized_text}"
+    )
 
 def mobile_rendered_text(payload: dict) -> str:
     return payload.get("renderedText") or ""
@@ -2128,46 +2231,63 @@ ui_test_command = [
 ]
 
 mac_owner_dump_path = scenario_dir / "roundtrip-mac-owner-dump.json"
+mac_before_takeover_dump_path = scenario_dir / "roundtrip-mac-before-takeover-dump.json"
 mac_status_dump_path = scenario_dir / "roundtrip-mac-status-dump.json"
 
 with ui_test_log.open("w") as ui_test_output:
-    ui_test_process = subprocess.Popen(
-        ui_test_command,
-        cwd=repo_root,
-        stdout=ui_test_output,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=os.environ | {"SPACES_MOBILE_UI_TEST_CONFIG_PATH": str(ui_test_config)},
-    )
+    ui_test_process = None
 
     try:
+        focus_mac_terminal_window()
         for command_text in mac_prepare_commands:
             send_owner_command(command_text)
             time.sleep(0.5)
 
+        focus_mac_terminal_window()
         mac_owner_payload = wait_for_terminal_window_dump(
+            mac_owner_dump_path,
+            lambda payload: (
+                payload.get("found") is True
+                and payload.get("showsTerminalSurface") is True
+                and isinstance(payload.get("windowNumber"), int)
+            ),
+            timeout=45,
+            any_mode=False,
+        )
+        mac_before_takeover_dump_path.write_text(json.dumps(mac_owner_payload, indent=2, sort_keys=True))
+        assert_mac_screen_prompt_rendered_after_output(
+            "Mac owner before takeover",
+            mac_owner_payload,
+            "MAC BEFORE TAKEOVER TWO",
+            mac_ready_prompt_text,
+        )
+        refreshed_mac_owner_payload = wait_for_terminal_window_dump(
             mac_owner_dump_path,
             lambda payload: (
                 mac_owner_render_contains(
                     payload, "__roundtrip_mac_before_takeover_one__", "__roundtrip_mac_before_takeover_two__"
                 )
+                and prompt_rendered_after_output(
+                    payload.get("visibleSurfaceOutput") or "",
+                    "__roundtrip_mac_before_takeover_two__",
+                )
             ),
-            timeout=45,
+            timeout=5,
             any_mode=False,
         )
-        expected_render_text = mac_owner_payload.get("renderedOutput") or ""
+        expected_render_text = refreshed_mac_owner_payload.get("renderedOutput") or ""
         if not expected_render_text:
-            raise RuntimeError(f"Unable to derive canonical Mac owner render text:\n{json.dumps(mac_owner_payload, indent=2)}")
+            raise RuntimeError(f"Unable to derive canonical Mac owner render text:\n{json.dumps(refreshed_mac_owner_payload, indent=2)}")
         assert_render_output_sane("Mac owner before takeover", expected_render_text)
-        mac_visible_text = mac_owner_payload.get("visibleSurfaceOutput") or ""
-        if not mac_visible_text:
-            raise RuntimeError(f"Mac owner before takeover did not report visible surface text:\n{json.dumps(mac_owner_payload, indent=2)}")
-        assert_prompt_rendered_after_output(
-            "Mac owner before takeover",
-            mac_visible_text,
-            "__roundtrip_mac_before_takeover_two__",
-        )
 
+        ui_test_process = subprocess.Popen(
+            ui_test_command,
+            cwd=repo_root,
+            stdout=ui_test_output,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=os.environ | {"SPACES_MOBILE_UI_TEST_CONFIG_PATH": str(ui_test_config)},
+        )
         write_marker(proceed_takeover_path, "go\n")
 
         mobile_owner_payload = wait_for_mobile_owner_render(
@@ -2350,7 +2470,7 @@ with ui_test_log.open("w") as ui_test_output:
         if not event_log_path.exists():
             raise RuntimeError(f"Expected {mobile_device_label} event log at {event_log_path}")
     finally:
-        if ui_test_process.poll() is None:
+        if ui_test_process is not None and ui_test_process.poll() is None:
             ui_test_process.terminate()
             try:
                 ui_test_process.wait(timeout=10)
@@ -2801,9 +2921,9 @@ run_two_session_scenario() {
   begin_scenario "two-session"
   local session_id
   local secondary_session_id
-  session_id="$(new_terminal_session)"
+  session_id="$(new_terminal_session "e2e-two-session-primary")"
   track_current_scenario_session "$session_id"
-  secondary_session_id="$(new_terminal_session)"
+  secondary_session_id="$(new_terminal_session "e2e-two-session-secondary")"
   track_current_scenario_session "$secondary_session_id"
   write_ui_test_config "two-session" "$session_id" "$secondary_session_id"
   run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverAcrossTwoSessionsFromList"

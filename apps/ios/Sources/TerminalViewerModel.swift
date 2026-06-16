@@ -106,7 +106,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private var hasConfirmedOwnerInputReadiness = false
     private var ownerRecoveryGraceDeadline: Date?
     private var ownerRenderEpochState: GhosttyRemoteTerminalOwnerEpoch?
-    private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
+    private var stateReducer = TerminalRemoteStateReducer()
     private var reportedOwnerReadyEpochID: String?
     private var reportedOwnerNonblankEpochID: String?
     private var hasRetriedEndedStateAfterStreamClose = false
@@ -313,7 +313,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         resizeSerial = 0
         needsOwnershipSynchronizationAfterCurrentRun = false
         ownerRenderEpochState = nil
-        renderUpdateBaseline = nil
+        stateReducer.resetRenderUpdateBaseline()
         invalidateLinkPreviewRequests()
         isPreparingLinkPreview = false
         linkPreviewErrorMessage = nil
@@ -1670,14 +1670,16 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private func applyLatestState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
         let applyStartedAt = Date()
         let decodeStartedAt = Date()
-        let resolvedRenderState = payloadByResolvingRenderUpdate(incomingPayload)
-        let payload = resolvedRenderState.payload
-        let decodedFrame = payload.decodedRenderUpdate?.fullFrame
-        let decodedUpdate = resolvedRenderState.decodedUpdate
+        let reduction = stateReducer.reduce(
+            incomingPayload: incomingPayload, previousPayload: latestState, requestResyncOnApplyFailure: true)
+        let payload = reduction.payload
+        let decodedFrame = reduction.frameToApply
+        let decodedUpdate = reduction.decodedUpdate
         let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
         let wasOwner = isOwner
         let wasTakingOver = isBusy || isAwaitingTakeoverConfirmation
-        latestState = latestState?.merged(with: payload) ?? payload
+        requestRenderUpdateResyncIfNeeded(reduction)
+        latestState = reduction.storedPayload
         if payload.attachmentSnapshot != nil {
             isAwaitingTakeoverConfirmation = false
             hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
@@ -1729,7 +1731,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             if wasOwner, !isEndedState, let latestState {
                 self.latestState = payloadByClearingScreenState(latestState)
             }
-            if wasOwner { renderUpdateBaseline = nil }
+            if wasOwner { stateReducer.resetRenderUpdateBaseline() }
             hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
             lastSentResizeSize = nil
@@ -1753,9 +1755,9 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             outputByteCount: payload.outputByteCount,
             screenStateRevision: payload.screenStateRevision,
             dropped: incomingPayload.renderUpdate == nil ? nil : decodedFrame == nil,
-            dropReason: resolvedRenderState.dropReason ?? (incomingPayload.renderUpdate != nil && decodedFrame == nil ? "decode_failed" : nil),
+            dropReason: reduction.dropReason ?? (incomingPayload.renderUpdate != nil && decodedFrame == nil ? "decode_failed" : nil),
             renderMode: renderMode,
-            frameKind: decodedUpdate?.frameKindMetricValue ?? "full",
+            frameKind: decodedUpdate?.frameKindMetricValue,
             baseRevision: decodedUpdate?.baseRevision,
             targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
             appliedRevision: decodedFrame == nil && incomingPayload.renderUpdate != nil ? nil : payload.screenStateRevision,
@@ -1764,8 +1766,8 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             changedCellCount: decodedUpdate?.changedCellCount,
             scrollOperationCount: decodedUpdate?.scrollOperationCount,
             fullFrameFallbackReason: decodedUpdate?.fallbackReason,
-            droppedDeltaCount: resolvedRenderState.dropReason == nil ? nil : 1,
-            resyncCount: resolvedRenderState.didRequestResync ? 1 : nil)
+            droppedDeltaCount: reduction.dropReason == nil ? nil : 1,
+            resyncCount: reduction.didRequestResync ? 1 : nil)
         renderUpdateAttributes["owner_before"] = wasOwner ? "1" : "0"
         renderUpdateAttributes["owner_after"] = isOwnerAfterMerge ? "1" : "0"
         renderUpdateAttributes["materialized_render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
@@ -1785,40 +1787,10 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         attemptAutomaticTakeoverIfNeeded()
     }
 
-    private func payloadByResolvingRenderUpdate(
-        _ payload: GhosttyRemoteSessionStatePayload
-    ) -> (payload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?, dropReason: String?, didRequestResync: Bool) {
-        guard payload.renderUpdate != nil else { return (payload, nil, nil, false) }
-        guard let decodedUpdate = payload.decodedRenderUpdate else {
-            return (payload.replacingRenderUpdate(nil), nil, "render_update_decode_failed", false)
-        }
-        do {
-            let baseline = try GhosttyRenderUpdateApplier.apply(decodedUpdate, to: renderUpdateBaseline)
-            renderUpdateBaseline = baseline
-            let frame = GhosttyRenderFrame(sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
-            let materializedUpdate = try? GhosttyRenderUpdateBinaryCodec.encode(.full(frame))
-            return (payload.replacingRenderUpdate(materializedUpdate), decodedUpdate, nil, false)
-        } catch {
-            renderUpdateBaseline = nil
-            Task { [weak self] in
-                await self?.refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "render_update_resync")
-            }
-            return (payload.replacingRenderUpdate(nil), decodedUpdate, Self.renderUpdateDropReason(for: error), true)
-        }
-    }
-
-    private static func renderUpdateDropReason(for error: Error) -> String {
-        switch error as? GhosttyRenderUpdateApplyError {
-        case .missingBaseline: "missing_baseline"
-        case .versionMismatch: "version_mismatch"
-        case .missingFullFrame: "missing_full_frame"
-        case .missingDelta: "missing_delta"
-        case .resyncRequired: "resync_required"
-        case .baseRevisionMismatch: "base_revision_mismatch"
-        case .ownerEpochMismatch: "owner_epoch_mismatch"
-        case .dimensionMismatch: "dimension_mismatch"
-        case .invalidOperation: "invalid_operation"
-        case nil: "render_update_apply_failed"
+    private func requestRenderUpdateResyncIfNeeded(_ reduction: TerminalRemoteStateReductionResult) {
+        guard reduction.didRequestResync else { return }
+        Task { [weak self] in
+            await self?.refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "render_update_resync")
         }
     }
 

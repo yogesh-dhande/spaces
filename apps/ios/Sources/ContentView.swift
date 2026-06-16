@@ -4,7 +4,7 @@ import spacesterminalcore
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @State private var selectedSession: SpacesMobileTerminalSessionSummary?
+    @State private var selectedSession: SelectedTerminalSessionRoute?
     @State private var pendingTerminalLaunch: PendingTerminalLaunch?
     @State private var pendingAuthenticationMessage: String?
     @State private var terminalListRefreshGeneration = 0
@@ -19,32 +19,31 @@ struct ContentView: View {
                 .toolbar {
                     toolbarContent
                 }
-                .navigationDestination(isPresented: terminalRoutePresentationBinding) {
-                    if let selectedSession {
-                        TerminalDetailView(
-                            session: selectedSession,
-                            settings: model.settings,
-                            appModel: model,
-                            onAuthenticationRequired: { message in
-                                pendingAuthenticationMessage = message
-                                self.selectedSession = nil
-                            },
-                            onSessionChanged: { session in
-                                self.selectedSession = session
-                            }
-                        ) {
+                .navigationDestination(item: $selectedSession) { selectedSession in
+                    TerminalDetailView(
+                        session: selectedSession.session,
+                        settings: model.settings,
+                        appModel: model,
+                        onAuthenticationRequired: { message in
+                            pendingAuthenticationMessage = message
                             self.selectedSession = nil
+                        },
+                        onSessionChanged: { session in
+                            self.selectedSession = SelectedTerminalSessionRoute(session: session)
                         }
-                        .id(selectedSession.id)
-                    } else if let pendingTerminalLaunch {
-                        TerminalLaunchPendingView(launch: pendingTerminalLaunch, model: model) { session in
-                            if let session {
-                                selectedSession = session
-                            }
-                            self.pendingTerminalLaunch = nil
-                        } onBack: {
-                            self.pendingTerminalLaunch = nil
+                    ) {
+                        self.selectedSession = nil
+                    }
+                    .id(selectedSession.id)
+                }
+                .navigationDestination(item: $pendingTerminalLaunch) { pendingTerminalLaunch in
+                    TerminalLaunchPendingView(launch: pendingTerminalLaunch, model: model) { session in
+                        self.pendingTerminalLaunch = nil
+                        if let session {
+                            selectedSession = SelectedTerminalSessionRoute(session: session)
                         }
+                    } onBack: {
+                        self.pendingTerminalLaunch = nil
                     }
                 }
         }
@@ -121,18 +120,6 @@ struct ContentView: View {
         Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.dismissError() } }
-        )
-    }
-
-    private var terminalRoutePresentationBinding: Binding<Bool> {
-        Binding(
-            get: { activeTerminalRouteID != nil },
-            set: { isPresented in
-                if !isPresented {
-                    selectedSession = nil
-                    pendingTerminalLaunch = nil
-                }
-            }
         )
     }
 
@@ -425,7 +412,7 @@ struct ContentView: View {
 
     private func terminalSessionRow(_ session: SpacesMobileTerminalSessionSummary) -> some View {
         Button {
-            selectedSession = session
+            selectedSession = SelectedTerminalSessionRoute(session: session)
         } label: {
             HStack(spacing: 10) {
                 StatusDot(kind: statusKind(for: session.state))
@@ -516,7 +503,7 @@ struct ContentView: View {
 
     private func activateRuntimeRow(_ row: SpacesMobileWorkspaceRuntimeRow) {
         if let session = model.terminalSession(for: row) {
-            selectedSession = session
+            selectedSession = SelectedTerminalSessionRoute(session: session)
         } else if row.canRun {
             pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .primary)
         }
@@ -544,7 +531,21 @@ struct ContentView: View {
     }
 }
 
-private struct PendingTerminalLaunch: Identifiable, Sendable {
+private struct SelectedTerminalSessionRoute: Identifiable, Hashable {
+    let session: SpacesMobileTerminalSessionSummary
+
+    var id: String { session.id }
+
+    static func == (lhs: SelectedTerminalSessionRoute, rhs: SelectedTerminalSessionRoute) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
+private struct PendingTerminalLaunch: Identifiable, Sendable, Hashable {
     enum Action: Sendable {
         case primary
         case run
@@ -578,6 +579,14 @@ private struct PendingTerminalLaunch: Identifiable, Sendable {
         action = .workspaceTerminal
         row = nil
         workspaceID = workspace.id
+    }
+
+    static func == (lhs: PendingTerminalLaunch, rhs: PendingTerminalLaunch) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
     }
 }
 

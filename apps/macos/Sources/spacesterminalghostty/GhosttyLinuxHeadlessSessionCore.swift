@@ -45,6 +45,8 @@
         private var screenStateRevision: UInt64 = 0
         private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
         private var forceNextBroadcastFullRenderUpdate = false
+        private var localOwnerCommandInputOutputResyncPending = false
+        private var inputOutputResyncTask: Task<Void, Never>?
         private let onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)?
 
         public init(
@@ -93,12 +95,16 @@
             terminating = true
             let finalPayload = makeStatePayload(reason: TerminalRemoteSessionStateReason.terminated, state: .exited)
             if let finalPayload { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths) }
+            if let finalPayload { stateStreamServer?.broadcast(finalPayload) }
             controlServer?.stop()
             controlServer = nil
             TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
             stateStreamServer?.stop()
             stateStreamServer = nil
             GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
+            inputOutputResyncTask?.cancel()
+            inputOutputResyncTask = nil
+            localOwnerCommandInputOutputResyncPending = false
             ptyDriver.setOutputHandler(nil)
             ptyDriver.setSessionClosedHandler(nil)
             ptyDriver.terminate()
@@ -134,6 +140,7 @@
             writeVTRenderer(data)
             writeRuntimeState(state: .running)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.output)
+            scheduleInputOutputResyncIfNeeded()
         }
 
         private func ensureOutputHandle() throws {
@@ -234,6 +241,7 @@
             guard ownerRequestIsCurrent(request) else { return TerminalControlResponse(ok: false, message: "Only the active owner can send input.") }
             guard var payload = request.inputPayload else { return TerminalControlResponse(ok: false, message: "Missing input payload.") }
             if request.appendNewline { payload.append(0x0A) }
+            markLocalOwnerCommandInputOutputResyncPending()
             ptyDriver.sendRawBytes(payload)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.input)
             return TerminalControlResponse(ok: true, message: "Sent input.")
@@ -244,6 +252,7 @@
             guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
                 return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
             }
+            if bytes.contains(0x0D) { markLocalOwnerCommandInputOutputResyncPending() }
             ptyDriver.sendRawBytes(Data(bytes))
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.input)
             return TerminalControlResponse(ok: true, message: "Sent key.")
@@ -299,7 +308,31 @@
             ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).first { $0.mode == .owner }?.clientID
         }
 
+        private func activeOwnerClient() -> TerminalClient? {
+            guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths),
+                let ownerID = TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: snapshot)
+            else { return nil }
+            return snapshot.clients.first { $0.id == ownerID }
+        }
+
         private func advanceOwnerEpoch() { ownerEpoch &+= 1 }
+
+        private func markLocalOwnerCommandInputOutputResyncPending() {
+            guard activeOwnerClient()?.kind == .localWindow else { return }
+            localOwnerCommandInputOutputResyncPending = true
+        }
+
+        private func scheduleInputOutputResyncIfNeeded() {
+            guard localOwnerCommandInputOutputResyncPending else { return }
+            localOwnerCommandInputOutputResyncPending = false
+            inputOutputResyncTask?.cancel()
+            inputOutputResyncTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .milliseconds(20)) } catch { return }
+                guard let self else { return }
+                self.inputOutputResyncTask = nil
+                self.broadcastCurrentState(reason: TerminalRemoteSessionStateReason.inputOutput)
+            }
+        }
 
         private func writeVTRenderer(_ data: Data) {
             guard let vtSession, !data.isEmpty else { return }
@@ -344,6 +377,9 @@
             reason: String, state: TerminalSessionState? = nil, exportMode: RenderStateExportMode = .selfContained,
             markNextBroadcastFull: Bool = false
         ) -> GhosttyRemoteSessionStatePayload? {
+            let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot()
+            let ownerKind = TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: attachmentSnapshot)
+            let includeScreenState = TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: reason, ownerKind: ownerKind)
             let runtimeState: TerminalSessionRuntimeState
             if let state {
                 writeRuntimeState(state: state)
@@ -351,15 +387,14 @@
             } else {
                 runtimeState = lastRuntimeState ?? fallbackRuntimeState(state: started ? .running : .exited)
             }
-            let frame = try? renderFrame()
+            let frame = includeScreenState ? try? renderFrame() : nil
             let renderUpdate = frame.flatMap {
                 try? GhosttyRenderUpdateBinaryCodec.encode(makeRenderUpdate(for: $0, reason: reason, exportMode: exportMode))
             }
             if renderUpdate != nil, markNextBroadcastFull { forceNextBroadcastFullRenderUpdate = true }
             return GhosttyRemoteSessionStatePayload(
                 sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: nowISO8601(), sessionStateRevision: nil, sessionStateFlags: nil,
-                screenStateRevision: screenStateRevision, runtimeState: runtimeState,
-                attachmentSnapshot: (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot(),
+                screenStateRevision: screenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                 title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory, outputByteCount: outputByteCount,
                 outputEndByteOffset: outputByteCount, renderUpdate: renderUpdate)
         }

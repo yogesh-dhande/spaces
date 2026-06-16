@@ -69,6 +69,7 @@
         private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
         private var lastReportedViewportSize: (columns: Int, rows: Int)?
         private var renderedText = ""
+        private var pendingSurfacePresentationTask: Task<Void, Never>?
         private var pendingFirstResponderRestoreTask: Task<Void, Never>?
         private var pendingSearchQueryTask: Task<Void, Never>?
         private var mouseTrackingArea: NSTrackingArea?
@@ -112,6 +113,7 @@
             MainActor.assumeIsolated {
                 pendingFirstResponderRestoreTask?.cancel()
                 pendingSearchQueryTask?.cancel()
+                pendingSurfacePresentationTask?.cancel()
                 if let surface = mirrorSurface() { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
                 if let mirror { ghostty_mirror_free(mirror) }
             }
@@ -370,6 +372,8 @@
 
         func releaseSurface() {
             resetSearchOverlay(restoreFocus: false)
+            pendingSurfacePresentationTask?.cancel()
+            pendingSurfacePresentationTask = nil
             if let surface = mirrorSurface() { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
             if let mirror {
                 ghostty_mirror_free(mirror)
@@ -661,7 +665,35 @@
                 return
             }
             lastAppliedRenderFrameIdentity = identity
-            if let surface = mirrorSurface() { ghostty_surface_refresh(surface) }
+            GhosttyEmbeddedAppService.shared.tick()
+            presentSurfaceNow()
+            GhosttyEmbeddedAppService.shared.tick()
+            surfaceHostView.needsDisplay = true
+            surfaceHostView.displayIfNeeded()
+            window?.displayIfNeeded()
+            scheduleSurfacePresentationRefresh()
+        }
+
+        private func scheduleSurfacePresentationRefresh() {
+            pendingSurfacePresentationTask?.cancel()
+            pendingSurfacePresentationTask = Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self, !Task.isCancelled else { return }
+                self.pendingSurfacePresentationTask = nil
+                guard let surface = self.mirrorSurface() else { return }
+                ghostty_surface_refresh(surface)
+                ghostty_surface_draw(surface)
+                GhosttyEmbeddedAppService.shared.tick()
+                self.surfaceHostView.needsDisplay = true
+                self.surfaceHostView.displayIfNeeded()
+                self.window?.displayIfNeeded()
+            }
+        }
+
+        private func presentSurfaceNow() {
+            guard let surface = mirrorSurface() else { return }
+            ghostty_surface_refresh(surface)
+            ghostty_surface_draw(surface)
         }
 
         private func appliedRenderFrameIdentity(for frame: GhosttyRenderFrame) -> AppliedRenderFrameIdentity {

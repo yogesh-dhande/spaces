@@ -1169,11 +1169,10 @@
             let decodedUpdate = payload.decodedRenderUpdate
             let renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
                 reason: payload.reason, frame: decodedUpdate?.fullFrame, payloadByteCount: payloadBytes, payloadEncodeMS: payloadEncodeMS,
-                outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision,
-                frameKind: decodedUpdate?.frameKindMetricValue ?? "full", baseRevision: decodedUpdate?.baseRevision,
-                targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision, operationCount: decodedUpdate?.operationCount,
-                changedCellCount: decodedUpdate?.changedCellCount, scrollOperationCount: decodedUpdate?.scrollOperationCount,
-                fullFrameFallbackReason: decodedUpdate?.fallbackReason)
+                outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
+                baseRevision: decodedUpdate?.baseRevision, targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
+                operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
+                scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)
             logMobileTakeoverPerformance(
                 name: "remote_state_publish", count: payloadBytes,
                 attributes: [
@@ -1239,7 +1238,7 @@
                 )
                 var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
                     reason: reason, frame: frame, outputByteCount: outputByteCount, screenStateRevision: lastScreenStateRevision,
-                    frameKind: renderUpdateValue?.frameKindMetricValue ?? "full", baseRevision: renderUpdateValue?.baseRevision,
+                    frameKind: renderUpdateValue?.frameKindMetricValue, baseRevision: renderUpdateValue?.baseRevision,
                     targetRevision: renderUpdateValue?.targetRevision ?? lastScreenStateRevision, operationCount: renderUpdateValue?.operationCount,
                     changedCellCount: renderUpdateValue?.changedCellCount, scrollOperationCount: renderUpdateValue?.scrollOperationCount,
                     fullFrameFallbackReason: renderUpdateValue?.fallbackReason)

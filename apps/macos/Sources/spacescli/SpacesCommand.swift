@@ -303,11 +303,13 @@ struct TerminalShowCommand: ParsableCommand {
         guard (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) != nil else {
             throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' does not exist.")
         }
+        let requestID = UUID().uuidString
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.openTerminalSessionWindow, object: try IPCNotification.currentObject(),
             userInfo: [
                 IPCNotification.terminalSessionIDUserInfoKey: sessionID,
                 IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+                IPCNotification.focusRequestIDUserInfoKey: requestID,
             ], options: [.deliverImmediately])
         print("Requested owner terminal window for session \(sessionID)")
     }

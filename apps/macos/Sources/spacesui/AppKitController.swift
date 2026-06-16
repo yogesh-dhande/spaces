@@ -362,6 +362,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let showsTerminalSurface: Bool?
         let showsTextRenderer: Bool?
         let didClose: Bool?
+        let windowNumber: Int?
         let surfaceColumns: Int?
         let surfaceRows: Int?
         let windowIsKey: Bool?
@@ -370,6 +371,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let searchQuery: String?
         let searchTotal: Int?
         let searchSelected: Int?
+        let attachmentMode: String?
+        let takeoverPending: Bool?
+        let takeoverButtonVisible: Bool?
+        let takeoverButtonEnabled: Bool?
+        let takeoverMessage: String?
     }
 
     struct TerminalRuntimeControlDescriptor: Equatable {
@@ -1006,10 +1012,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput,
             visibleSurfaceOutput: debugState?.visibleSurfaceOutput, summary: debugState?.summary, state: debugState?.state,
             showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
-            didClose: debugState?.didCloseWindow, surfaceColumns: debugState?.surfaceColumns, surfaceRows: debugState?.surfaceRows,
-            windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
+            didClose: debugState?.didCloseWindow, windowNumber: controller?.window?.windowNumber, surfaceColumns: debugState?.surfaceColumns,
+            surfaceRows: debugState?.surfaceRows, windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
             searchVisible: debugState?.searchVisible, searchQuery: debugState?.searchQuery, searchTotal: debugState?.searchTotal,
-            searchSelected: debugState?.searchSelected)
+            searchSelected: debugState?.searchSelected, attachmentMode: debugState?.attachmentMode, takeoverPending: debugState?.takeoverPending,
+            takeoverButtonVisible: debugState?.takeoverButtonVisible, takeoverButtonEnabled: debugState?.takeoverButtonEnabled,
+            takeoverMessage: debugState?.takeoverMessage)
         writeTerminalSessionWindowStateDump(payload, to: outputPath)
     }
 
@@ -1193,10 +1201,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             throw WorkspaceError.invalidArgument(message: "Remote terminal session is missing its pinned TLS endpoint.")
         }
         let authToken = try ComputeHostCredentialStore.resolvedAuthToken(hostID: hostID)
+        let requestTimeout: TimeInterval = 5
         let requestClient = try TerminalServicePinnedTLSRequestSessionClient(
             host: endpoint.host, port: endpoint.port, authToken: authToken, certificateFingerprint: endpoint.certificateFingerprint, timeout: 30)
         return RemoteTerminalSessionRoute(
-            requestSender: { request in try requestClient.send(request: request, timeout: 30) },
+            requestSender: { request in try requestClient.send(request: request, timeout: requestTimeout) },
             stateStreamSubscriber: { sessionID, onEvent, onDisconnect in
                 let client = TerminalServicePinnedTLSStateStreamClient(
                     request: TerminalServiceRequest(command: "subscribe", sessionID: sessionID), host: endpoint.host, port: endpoint.port,

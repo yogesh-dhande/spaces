@@ -21,7 +21,7 @@
         private var latestState: GhosttyRemoteSessionStatePayload?
         private var persistedFinalStateLoaded = false
         private var persistedFinalStateLoadInProgress = false
-        private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
+        private var stateReducer = TerminalRemoteStateReducer()
         private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
         private var directStateStreamClient: TerminalServicePinnedTLSStateStreamClient?
         private var lastSubscriptionAttemptAt: Date?
@@ -257,6 +257,12 @@
 
         private func requestDirectStateRefresh(reason _: String) {
             guard stateStreamSubscriber == nil else { return }
+            requestDirectStateFetch()
+        }
+
+        private func requestRenderUpdateStateResync() { requestDirectStateFetch() }
+
+        private func requestDirectStateFetch() {
             guard let terminalServiceRequestSender else { return }
             guard !directStateFetchInFlight else { return }
             directStateFetchInFlight = true
@@ -347,16 +353,21 @@
             if incomingPayload.runtimeState?.state.isInteractive == true { persistedFinalStateLoaded = false }
             let decodeStartedAt = Date()
             let incomingPayloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(incomingPayload).count) ?? 0
-            let resolvedRenderState = payloadByResolvingRenderUpdate(incomingPayload)
-            let payload = resolvedRenderState.payload
-            let decodedFrame = payload.decodedRenderUpdate?.fullFrame
-            let decodedUpdate = resolvedRenderState.decodedUpdate
+            let reduction = stateReducer.reduce(
+                incomingPayload: incomingPayload, previousPayload: latestState,
+                shouldUseFrame: { frame, payload in
+                    Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: payload.runtimeState, reason: payload.reason)
+                }, requestResyncOnApplyFailure: true)
+            let payload = reduction.payload
+            let decodedFrame = reduction.frameToApply
+            let decodedUpdate = reduction.decodedUpdate
             let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
-            let dropReason = renderUpdateDropReason(for: payload, decodedFrame: decodedFrame) ?? resolvedRenderState.dropReason
-            latestState = latestState?.merged(with: payload) ?? payload
+            let dropReason = reduction.dropReason
+            latestState = reduction.storedPayload
+            if reduction.didRequestResync { requestRenderUpdateStateResync() }
             try? TerminalSessionPersistence.writeRemoteStateMirror(latestState ?? payload, paths: paths)
             lastSubscriptionAttemptAt = nil
-            let frameForUpdate = currentRenderFrameForRenderUpdate()
+            let frameForUpdate = reduction.frameToApply
             let applyStartedAt = Date()
             if frameForUpdate != nil || !terminalView.hasRenderedSurfaceContent {
                 terminalView.update(frame: frameForUpdate, renderStateKey: currentRenderStateKey())
@@ -368,11 +379,12 @@
                 reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count,
                 payloadByteCount: incomingPayloadBytes, decodeMS: decodeMS, outputByteCount: payload.outputByteCount,
                 screenStateRevision: payload.screenStateRevision, dropped: incomingPayload.renderUpdate == nil ? nil : dropReason != nil,
-                dropReason: dropReason, renderMode: "ghostty-mirror", frameKind: decodedUpdate?.frameKindMetricValue ?? "full",
+                dropReason: dropReason, renderMode: "ghostty-mirror", frameKind: decodedUpdate?.frameKindMetricValue,
                 baseRevision: decodedUpdate?.baseRevision, targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
                 appliedRevision: frameForUpdate == nil ? nil : (payload.screenStateRevision ?? frameForUpdate?.sessionRevision), applyMS: applyMS,
                 operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
-                scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)
+                scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason,
+                resyncCount: reduction.didRequestResync ? 1 : nil)
             renderUpdateAttributes["materialized_render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
             renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
             renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
@@ -392,50 +404,6 @@
                 elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
                 detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
             if postNotifications { postLocalNotifications(for: payload) }
-        }
-
-        private func renderUpdateDropReason(for payload: GhosttyRemoteSessionStatePayload, decodedFrame: GhosttyRenderFrame?) -> String? {
-            guard payload.renderUpdate != nil else { return nil }
-            guard let decodedFrame else { return "decode_failed" }
-            guard Self.shouldUseRenderFrameSnapshot(decodedFrame.snapshot, runtimeState: payload.runtimeState, reason: payload.reason) else {
-                return "stale_resize_grid"
-            }
-            return nil
-        }
-
-        private func payloadByResolvingRenderUpdate(_ payload: GhosttyRemoteSessionStatePayload) -> (
-            payload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?, dropReason: String?
-        ) {
-            guard payload.renderUpdate != nil else { return (payload, nil, nil) }
-            guard let decodedUpdate = payload.decodedRenderUpdate else {
-                return (payload.replacingRenderUpdate(nil), nil, "render_update_decode_failed")
-            }
-            do {
-                let baseline = try GhosttyRenderUpdateApplier.apply(decodedUpdate, to: renderUpdateBaseline)
-                renderUpdateBaseline = baseline
-                let frame = GhosttyRenderFrame(
-                    sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
-                let materializedUpdate = try? GhosttyRenderUpdateBinaryCodec.encode(.full(frame))
-                return (payload.replacingRenderUpdate(materializedUpdate), decodedUpdate, nil)
-            } catch {
-                renderUpdateBaseline = nil
-                return (payload.replacingRenderUpdate(nil), decodedUpdate, Self.renderUpdateDropReason(for: error))
-            }
-        }
-
-        private static func renderUpdateDropReason(for error: Error) -> String {
-            switch error as? GhosttyRenderUpdateApplyError {
-            case .missingBaseline: "missing_baseline"
-            case .versionMismatch: "version_mismatch"
-            case .missingFullFrame: "missing_full_frame"
-            case .missingDelta: "missing_delta"
-            case .resyncRequired: "resync_required"
-            case .baseRevisionMismatch: "base_revision_mismatch"
-            case .ownerEpochMismatch: "owner_epoch_mismatch"
-            case .dimensionMismatch: "dimension_mismatch"
-            case .invalidOperation: "invalid_operation"
-            case nil: "render_update_apply_failed"
-            }
         }
 
         private func postLocalNotifications(for payload: GhosttyRemoteSessionStatePayload) {

@@ -69,6 +69,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public let searchQuery: String
     public let searchTotal: Int?
     public let searchSelected: Int?
+    public let attachmentMode: String
+    public let takeoverPending: Bool
+    public let takeoverButtonVisible: Bool
+    public let takeoverButtonEnabled: Bool
+    public let takeoverMessage: String
 }
 
 @MainActor public struct TerminalSessionRuntimeControls {
@@ -99,6 +104,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
     private static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
     private static let fallbackRefreshInterval: Duration = .milliseconds(500)
+    private static let takeoverAttemptTimeout: TimeInterval = 10
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     private enum VisibleRenderer {
@@ -198,6 +204,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var activeGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var refreshTask: Task<Void, Never>?
     private var takeoverTask: Task<Void, Never>?
+    private var takeoverTaskStartedAt: Date?
+    private var takeoverAttemptID: UUID?
     private var pendingWindowFramePersistTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
     private var isClientAttached = false
@@ -802,25 +810,31 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         outputView.performTextFinderAction(sender)
     }
 
-    public func takeOverOwnership() {
+    public func takeOverOwnership(now: Date = Date()) {
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else {
             updateInputStatus(message: "Session is not running.", isError: true)
             return
         }
-        guard takeoverTask == nil else { return }
-        let startedAt = Date()
+        if let takeoverTask {
+            guard let takeoverTaskStartedAt, now.timeIntervalSince(takeoverTaskStartedAt) >= Self.takeoverAttemptTimeout else { return }
+            takeoverTask.cancel()
+            self.takeoverTask = nil
+            self.takeoverTaskStartedAt = nil
+            takeoverAttemptID = nil
+        }
+        let startedAt = now
+        let attemptID = UUID()
         let clientID = client.id
         takeoverButton.isEnabled = false
+        takeoverTaskStartedAt = startedAt
+        takeoverAttemptID = attemptID
         takeoverTask = Task.detached(priority: .userInitiated) { [takeoverAction] in
             let controlStartedAt = Date()
             do {
                 let response = try takeoverAction(clientID)
                 await MainActor.run {
-                    defer {
-                        self.takeoverTask = nil
-                        self.takeoverButton.isEnabled =
-                            self.preferredAttachmentMode != .owner && self.isInteractiveRuntimeState(self.lastObservedRuntimeState)
-                    }
+                    guard self.takeoverAttemptID == attemptID else { return }
+                    defer { self.clearTakeoverAttempt(id: attemptID) }
                     guard response.ok else {
                         TerminalPerformance.logMetric(
                             "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
@@ -845,9 +859,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 }
             } catch {
                 await MainActor.run {
-                    self.takeoverTask = nil
-                    self.takeoverButton.isEnabled =
-                        self.preferredAttachmentMode != .owner && self.isInteractiveRuntimeState(self.lastObservedRuntimeState)
+                    guard self.takeoverAttemptID == attemptID else { return }
+                    self.clearTakeoverAttempt(id: attemptID)
                     TerminalPerformance.logMetric(
                         "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
                         elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=exception")
@@ -855,6 +868,15 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 }
             }
         }
+    }
+
+    private func clearTakeoverAttempt(id: UUID) {
+        guard takeoverAttemptID == id else { return }
+        takeoverTask = nil
+        takeoverTaskStartedAt = nil
+        takeoverAttemptID = nil
+        let isCurrentOwner = lastObservedOwnerClientID == client.id
+        takeoverButton.isEnabled = !isCurrentOwner && isInteractiveRuntimeState(lastObservedRuntimeState)
     }
 
     private func buildUI() {
@@ -1207,6 +1229,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         Task { @MainActor [weak window] in
             await Task.yield()
             guard let window, window.isVisible, !window.isMiniaturized else { return }
+            NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
         }
     }
@@ -1639,7 +1662,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         interruptButton.isEnabled = usesInlineControls && isInteractive
         newlineButton.isEnabled = usesInlineControls && isInteractive
         takeoverButton.isHidden = isOwner || !isInteractive
-        takeoverButton.isEnabled = !isOwner && isInteractive
+        takeoverButton.isEnabled = !isOwner && isInteractive && takeoverTask == nil
         if !isInteractive {
             inputField.placeholderString = "Session is not running"
         } else {
@@ -2135,8 +2158,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             showsTextRenderer: !outputScrollView.isHidden, rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue,
             state: stateLabel.stringValue, windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
             surfaceRows: surfaceSnapshot?.rows, windowIsKey: window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName,
-            searchVisible: searchState.isVisible, searchQuery: searchState.query, searchTotal: searchState.total, searchSelected: searchState.selected
-        )
+            searchVisible: searchState.isVisible, searchQuery: searchState.query, searchTotal: searchState.total,
+            searchSelected: searchState.selected, attachmentMode: preferredAttachmentMode.rawValue, takeoverPending: takeoverTask != nil,
+            takeoverButtonVisible: !takeoverButton.isHidden, takeoverButtonEnabled: takeoverButton.isEnabled,
+            takeoverMessage: takeoverMessageLabel.stringValue)
     }
 
     var debugRenderedOutput: String { outputView.string }
@@ -2157,6 +2182,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     func debugAttachLocalClientIfNeeded() { attachLocalClientIfNeeded() }
     func debugFlushPendingWindowFramePersistence() async { await pendingWindowFramePersistTask?.value }
     public var clientID: String { client.id }
+    var debugTakeoverPending: Bool { takeoverTask != nil }
+    func debugSetTakeoverTaskStartedAt(_ date: Date?) { takeoverTaskStartedAt = date }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
     var debugShowsTakeoverButton: Bool { !takeoverButton.isHidden }
     var debugInlineInputEnabled: Bool { inputField.isEnabled }

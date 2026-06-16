@@ -4,16 +4,17 @@ public enum GhosttyRenderFrameMetrics {
     public static func attributes(
         reason: String? = nil, frame: GhosttyRenderFrame?, frameByteCount: Int? = nil, frameEncodeMS: Int? = nil, payloadByteCount: Int? = nil,
         payloadEncodeMS: Int? = nil, decodeMS: Int? = nil, outputByteCount: Int? = nil, screenStateRevision: UInt64? = nil, dropped: Bool? = nil,
-        dropReason: String? = nil, renderMode: String? = nil, frameKind: String = "full", baseRevision: UInt64? = nil, targetRevision: UInt64? = nil,
+        dropReason: String? = nil, renderMode: String? = nil, frameKind: String? = nil, baseRevision: UInt64? = nil, targetRevision: UInt64? = nil,
         appliedRevision: UInt64? = nil, applyMS: Int? = nil, operationCount: Int? = nil, changedCellCount: Int? = nil,
         scrollOperationCount: Int? = nil, fullFrameFallbackReason: String? = nil, coalescedFrameCount: Int? = nil, droppedDeltaCount: Int? = nil,
         resyncCount: Int? = nil, networkSendBytes: Int? = nil
     ) -> [String: String] {
         let resolvedTargetRevision = targetRevision ?? screenStateRevision ?? frame?.sessionRevision
+        let resolvedFrameKind = frameKind ?? (frame == nil ? "none" : "full")
         var attributes: [String: String] = [
             "render_frame": frame == nil ? "0" : "1", "frame_columns": String(frame?.snapshot.columns ?? 0),
             "frame_rows": String(frame?.snapshot.rows ?? 0), "owner_epoch": String(frame?.ownerEpoch ?? 0),
-            "session_revision": frame?.sessionRevision.map(String.init) ?? "nil", "frame_kind": frameKind,
+            "session_revision": frame?.sessionRevision.map(String.init) ?? "nil", "frame_kind": resolvedFrameKind,
             "base_revision": baseRevision.map(String.init) ?? "nil", "target_revision": resolvedTargetRevision.map(String.init) ?? "nil",
             "applied_revision": appliedRevision.map(String.init) ?? "nil",
         ]

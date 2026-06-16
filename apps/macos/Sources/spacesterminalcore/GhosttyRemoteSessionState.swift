@@ -37,8 +37,8 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
 
     public func merged(with update: Self) -> Self {
         precondition(sessionID == update.sessionID, "Cannot merge terminal state from a different session.")
-        let previousOwnerClientID = Self.activeOwnerClientID(in: attachmentSnapshot)
-        let nextOwnerClientID = Self.activeOwnerClientID(in: update.attachmentSnapshot ?? attachmentSnapshot)
+        let previousOwnerClientID = TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: attachmentSnapshot)
+        let nextOwnerClientID = TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: update.attachmentSnapshot ?? attachmentSnapshot)
         let ownerChanged = update.attachmentSnapshot != nil && previousOwnerClientID != nextOwnerClientID
         let mergedRenderUpdate = update.renderUpdate ?? (ownerChanged ? nil : renderUpdate)
         return .init(
@@ -48,10 +48,6 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
             runtimeState: update.runtimeState ?? runtimeState, attachmentSnapshot: update.attachmentSnapshot ?? attachmentSnapshot,
             title: update.title, workingDirectory: update.workingDirectory, outputByteCount: update.outputByteCount,
             outputEndByteOffset: update.outputEndByteOffset, renderUpdate: mergedRenderUpdate)
-    }
-
-    private static func activeOwnerClientID(in snapshot: TerminalSessionAttachmentSnapshot?) -> String? {
-        snapshot?.attachments.first { $0.mode == .owner && $0.detachedAt == nil }?.clientID
     }
 }
 

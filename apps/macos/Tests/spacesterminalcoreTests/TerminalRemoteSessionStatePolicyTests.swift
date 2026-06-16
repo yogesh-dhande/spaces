@@ -35,6 +35,42 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.resize, ownerKind: .remoteViewer))
         XCTAssertTrue(
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.resize, ownerKind: .localWindow))
+        XCTAssertTrue(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.clearScreen))
+        XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.runtimeState))
+        XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: "unknown", ownerKind: .localWindow))
+    }
+
+    func testActiveOwnerHelpersUseLiveOwnerAttachment() {
+        let owner = TerminalClient(
+            id: "owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-15T00:00:00Z")
+        let localViewer = TerminalClient(
+            id: "viewer", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-15T00:00:01Z")
+        let snapshot = TerminalSessionAttachmentSnapshot(
+            clients: [localViewer, owner],
+            attachments: [
+                TerminalAttachment(
+                    id: "detached-owner", sessionID: "session", clientID: localViewer.id, mode: .owner, attachedAt: "2026-06-15T00:00:02Z",
+                    detachedAt: "2026-06-15T00:00:03Z"),
+                TerminalAttachment(id: "owner", sessionID: "session", clientID: owner.id, mode: .owner, attachedAt: "2026-06-15T00:00:04Z"),
+            ])
+
+        XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: snapshot), owner.id)
+        XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClient(in: snapshot), owner)
+        XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: snapshot), .remoteViewer)
+    }
+
+    func testActiveOwnerHelpersMatchMacOwnerAttachmentSemantics() {
+        let owner = TerminalClient(
+            id: "owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-15T00:00:00Z",
+            disconnectedAt: "2026-06-15T00:00:03Z")
+        let snapshot = TerminalSessionAttachmentSnapshot(
+            clients: [owner],
+            attachments: [TerminalAttachment(id: "owner", sessionID: "session", clientID: owner.id, mode: .owner, attachedAt: "2026-06-15T00:00:01Z")]
+        )
+
+        XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: snapshot), owner.id)
+        XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClient(in: snapshot), owner)
+        XCTAssertEqual(TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: snapshot), .remoteViewer)
     }
 
     func testOwnerBootstrapRequiresSnapshot() throws {

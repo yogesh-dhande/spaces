@@ -195,33 +195,6 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertFalse(HostManagedPTYTerminalSessionDriver.readLoopOwnsDescriptor(currentFD: 13, currentGeneration: 4, readFD: 12, readGeneration: 4))
     }
 
-    @MainActor func testRemoteStateScreenSnapshotPolicyPublishesOwnerBootstrapSnapshots() {
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial"))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial", ownerKind: .localWindow))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial", ownerKind: .remoteViewer))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "attachment_state", ownerKind: .localWindow))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "attachment_state", ownerKind: .remoteViewer))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input"))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input_output"))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "terminated"))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "output", ownerKind: .localWindow))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "output", ownerKind: .remoteViewer))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "state_change", ownerKind: .localWindow))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "state_change", ownerKind: .remoteViewer))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize"))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize", ownerKind: .remoteViewer))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize", ownerKind: .localWindow))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "clear_screen"))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "runtime_state"))
-    }
-
-    @MainActor func testInputOutputResyncPublishesScreenStateForLocalOwnerOnly() {
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input", ownerKind: .remoteViewer))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input_output", ownerKind: .remoteViewer))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input", ownerKind: .localWindow))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input_output", ownerKind: .localWindow))
-    }
-
     @MainActor func testScreenStateChangeRequestsLiveSurfaceRefresh() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -465,6 +438,35 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         XCTAssertEqual(update.kind, .full)
         XCTAssertEqual(update.fallbackReason, "explicit_resync")
+    }
+
+    @MainActor func testInputStateDoesNotExportStaleRenderUpdate() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-input-no-render-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-06-03T00:00:00Z")
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        let owner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-03T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-06-03T00:00:00Z")
+
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in self.snapshot(text: "before input") }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
+        let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial))
+        XCTAssertNotNil(initialPayload.renderUpdate)
+
+        let inputPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.input))
+        XCTAssertNil(inputPayload.renderUpdate)
+        XCTAssertNil(inputPayload.decodedRenderUpdate)
     }
 
     @MainActor func testScrollRenderUpdateAdvancesRevisionWithoutSessionStateChange() throws {

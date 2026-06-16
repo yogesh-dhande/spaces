@@ -117,6 +117,24 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         var detachedClientID: String?
     }
 
+    private final class TakeoverAttemptRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var attemptClientIDs: [String] = []
+
+        func record(clientID: String) -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            attemptClientIDs.append(clientID)
+            return attemptClientIDs.count
+        }
+
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return attemptClientIDs.count
+        }
+    }
+
     private final class ValidatedItem: NSObject, NSValidatedUserInterfaceItem {
         let action: Selector?
 
@@ -1098,6 +1116,76 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugShowsTextRenderer)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror")
         XCTAssertEqual(fakeHost.attachedModes.last, .owner)
+    }
+
+    @MainActor func testTakeoverRetrySupersedesStalePendingAttempt() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-stale-takeover"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "stale-takeover", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", hostName: "iphone", deviceName: "iPhone 17 Pro"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        let attempts = TakeoverAttemptRecorder()
+        let firstAttemptEntered = DispatchSemaphore(value: 0)
+        let releaseFirstAttempt = DispatchSemaphore(value: 0)
+        defer { releaseFirstAttempt.signal() }
+
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost,
+            takeoverAction: { clientID in
+                let attempt = attempts.record(clientID: clientID)
+                if attempt == 1 {
+                    firstAttemptEntered.signal()
+                    _ = releaseFirstAttempt.wait(timeout: .now() + 10)
+                    try TerminalSessionPersistence.transferOwnership(
+                        sessionID: sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: "2026-05-20T00:00:03Z")
+                    return TerminalControlResponse(ok: true, message: "Late stale takeover.")
+                }
+                try TerminalSessionPersistence.transferOwnership(
+                    sessionID: sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: "2026-05-20T00:00:02Z")
+                return TerminalControlResponse(ok: true, message: "Took over ownership.")
+            }, detachClientAction: { _ in })
+        controller.show()
+
+        controller.requestOwnershipIfNeeded()
+        XCTAssertEqual(firstAttemptEntered.wait(timeout: .now() + 1), .success)
+        XCTAssertTrue(controller.debugTakeoverPending)
+        XCTAssertFalse(controller.debugTakeoverEnabled)
+
+        fakeHost.hasSurface = true
+        fakeHost.snapshotValue = ghosttySnapshot(text: "owned")
+        fakeHost.snapshotTextValue = "owned"
+        controller.debugSetTakeoverTaskStartedAt(Date(timeIntervalSinceNow: -60))
+        controller.takeOverOwnership()
+
+        let deadline = Date().addingTimeInterval(1)
+        while Date() < deadline {
+            controller.debugForceRefresh()
+            if attempts.count >= 2 && controller.attachmentMode == .owner { break }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+
+        XCTAssertEqual(attempts.count, 2)
+        XCTAssertEqual(controller.attachmentMode, .owner)
+        XCTAssertFalse(controller.debugTakeoverPending)
+        XCTAssertTrue(controller.debugShowsTerminalSurface)
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror")
     }
 
     @MainActor func testGhosttyOwnerDemotionToViewerReleasesRendererSurfaceAndShowsTakeoverStatus() throws {

@@ -207,6 +207,34 @@ final class TerminalServiceProtocolTests: XCTestCase {
             XCTAssertEqual(second, TerminalServiceResponse(ok: true, message: "second-SECRET-2"))
             XCTAssertEqual(requestCount.value, 2)
         }
+
+        func testPinnedTLSRequestSessionClientReconnectsAfterServerClosesConnection() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
+            let queue = DispatchQueue(label: "terminal-service-tls-session-client-reconnect-test")
+            let requestCount = LockedCounter()
+            let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
+                let count = requestCount.increment()
+                if count == 1 { return TerminalServiceResponse(ok: false, message: "Unauthorized test connection close.") }
+                return TerminalServiceResponse(ok: true, message: "\(request.command)-\(request.authToken ?? "")-\(count)")
+            }
+            try server.start()
+            defer { server.stop() }
+
+            let client = try TerminalServicePinnedTLSRequestSessionClient(
+                host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET", certificateFingerprint: identity.certificateFingerprint)
+            defer { client.cancel() }
+
+            let first = try client.send(request: TerminalServiceRequest(command: "first"))
+            let second = try client.send(request: TerminalServiceRequest(command: "second"))
+
+            XCTAssertEqual(first, TerminalServiceResponse(ok: false, message: "Unauthorized test connection close."))
+            XCTAssertEqual(second, TerminalServiceResponse(ok: true, message: "second-SECRET-2"))
+            XCTAssertEqual(requestCount.value, 2)
+        }
     #endif
 
     func testTLSIdentityStoreReloadsExistingIdentity() throws {

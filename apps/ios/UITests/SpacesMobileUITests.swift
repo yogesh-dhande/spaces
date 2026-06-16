@@ -356,15 +356,10 @@ final class SpacesMobileUITests: XCTestCase {
                 app.descendants(matching: .any)[fallbackLabel],
             ]
             for candidate in candidates where candidate.exists {
-                let frame = candidate.frame
-                if !frame.isEmpty {
-                    app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-                        .withOffset(CGVector(dx: frame.midX, dy: frame.midY))
-                        .tap()
+                if candidate.isHittable {
+                    candidate.tap()
                     return true
                 }
-                candidate.tap()
-                return true
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }

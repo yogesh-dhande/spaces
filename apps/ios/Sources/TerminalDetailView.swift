@@ -315,10 +315,11 @@ struct TerminalDetailView: View {
                 .frame(height: Self.chromeControlHeight)
                 .background(Capsule().fill(Theme.primaryButtonFill))
         }
+        .buttonStyle(.plain)
         .disabled(model.isBusy)
-        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Take Over")
         .accessibilityIdentifier("terminal.takeover")
+        .accessibilityElement(children: .ignore)
     }
 
     /// Zero-visual-footprint accessibility marker that preserves the ownership
