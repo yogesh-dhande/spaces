@@ -9,11 +9,13 @@ struct ConnectionSettingsView: View {
     @State private var isConfirmingPairing = false
     @State private var isShowingScanner = false
     @State private var isPairing = false
+    @State private var isLaunchingSpaces = false
     @State private var errorMessage: String?
     @State private var discovery = SpacesMobileBridgeDiscovery()
     private let initialPairingLink: SpacesMobilePairingLink?
     let noticeMessage: String?
     let onPairingLinkConsumed: () -> Void
+    let onLaunchSpaces: (() async -> Void)?
     let onSave: (SpacesMobileConnectionSettings) -> Void
 
     init(
@@ -21,12 +23,14 @@ struct ConnectionSettingsView: View {
         initialPairingLink: SpacesMobilePairingLink? = nil,
         noticeMessage: String? = nil,
         onPairingLinkConsumed: @escaping () -> Void = {},
+        onLaunchSpaces: (() async -> Void)? = nil,
         onSave: @escaping (SpacesMobileConnectionSettings) -> Void
     ) {
         _settings = State(initialValue: initialSettings)
         self.initialPairingLink = initialPairingLink
         self.noticeMessage = noticeMessage
         self.onPairingLinkConsumed = onPairingLinkConsumed
+        self.onLaunchSpaces = onLaunchSpaces
         self.onSave = onSave
     }
 
@@ -45,6 +49,25 @@ struct ConnectionSettingsView: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
+                    }
+                    if settings.isPaired, let onLaunchSpaces {
+                        Button {
+                            Task {
+                                isLaunchingSpaces = true
+                                await onLaunchSpaces()
+                                isLaunchingSpaces = false
+                            }
+                        } label: {
+                            if isLaunchingSpaces {
+                                HStack(spacing: 10) {
+                                    ProgressView().controlSize(.small)
+                                    Text("Launching…")
+                                }
+                            } else {
+                                Label("Launch Spaces on Mac", systemImage: "macwindow")
+                            }
+                        }
+                        .disabled(isLaunchingSpaces)
                     }
                 }
 
