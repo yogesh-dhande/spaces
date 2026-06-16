@@ -272,7 +272,7 @@ func mobileStatusLines(status: SpacesMobileBridgeStatus) -> [String] {
     } else {
         lines.append("addresses=\(status.networkAddresses.map { "\($0):\(status.port)" }.joined(separator: ","))")
     }
-    lines.append("iphone=Open Mobile Connection in the Mac app to show a QR code or pairing link.")
+    lines.append("iphone=Open Mobile Connection in the Mac app to show a QR code to scan with the Spaces iOS app.")
     return lines
 }
 

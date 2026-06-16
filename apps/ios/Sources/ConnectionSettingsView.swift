@@ -5,9 +5,9 @@ struct ConnectionSettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var settings: SpacesMobileConnectionSettings
-    @State private var pairingLinkText = ""
     @State private var pendingPairingLink: SpacesMobilePairingLink?
     @State private var isConfirmingPairing = false
+    @State private var isShowingScanner = false
     @State private var isPairing = false
     @State private var errorMessage: String?
     @State private var discovery = SpacesMobileBridgeDiscovery()
@@ -32,23 +32,91 @@ struct ConnectionSettingsView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 14) {
-                    statusCard
-                    nearbyMacsCard
-                    endpointCard
-                    pairCard
-                    Text("Scan the QR code from the Mac app or paste the full pairing link. Nearby Macs can still be selected for the saved endpoint.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.mutedSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 4)
+            Form {
+                Section {
+                    HStack(spacing: 10) {
+                        StatusDot(kind: settings.isPaired ? .running : .idle)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(settings.isPaired ? "Paired" : "Not paired")
+                                .font(.system(size: 13, weight: .medium))
+                            Text("\(settings.trimmedHost):\(settings.port)")
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
+
+                Section("Nearby Macs") {
+                    if discovery.discoveredBridges.isEmpty {
+                        HStack(spacing: 10) {
+                            ProgressView().controlSize(.small)
+                            Text("Searching…")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        ForEach(Array(discovery.discoveredBridges.enumerated()), id: \.element.id) { _, bridge in
+                            Button {
+                                settings.host = bridge.host
+                                settings.port = bridge.port
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Label(String(bridge.serviceName.trimmingPrefix("Spaces ")), systemImage: "macbook")
+                                        .foregroundStyle(.primary)
+                                    Text("\(bridge.host):\(bridge.port)")
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .padding(.leading, 28)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section("Endpoint") {
+                    TextField("Host", text: $settings.host)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    TextField("Port", value: $settings.port, format: .number.grouping(.never))
+                        .keyboardType(.numberPad)
+                }
+
+                Section {
+                    Button {
+                        isShowingScanner = true
+                    } label: {
+                        if isPairing {
+                            HStack(spacing: 10) {
+                                ProgressView().controlSize(.small)
+                                Text("Pairing…")
+                            }
+                        } else {
+                            Label(
+                                settings.isPaired ? "Scan QR Code to Re-Pair" : "Scan QR Code",
+                                systemImage: "qrcode.viewfinder"
+                            )
+                        }
+                    }
+                    .disabled(isPairing)
+
+                    if let noticeMessage {
+                        Text(noticeMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                } header: {
+                    Text(settings.isPaired ? "Re-pair This Device" : "Pair This Device")
+                } footer: {
+                    Text("Scan the QR code from the Mac app to pair. Nearby Macs can still be selected for the saved endpoint.")
+                }
             }
-            .background(Theme.bg.ignoresSafeArea())
-            .scrollContentBackground(.hidden)
             .navigationTitle("Connection")
             .tint(Theme.accent)
             .toolbar {
@@ -63,10 +131,9 @@ struct ConnectionSettingsView: View {
                     .disabled(!settings.isValid)
                 }
             }
-            .confirmationDialog(
+            .alert(
                 pendingPairingLink.map { "Pair with \($0.name)?" } ?? "Pair Device?",
-                isPresented: $isConfirmingPairing,
-                titleVisibility: .visible
+                isPresented: $isConfirmingPairing
             ) {
                 Button("Pair") {
                     guard let pendingPairingLink else { return }
@@ -76,6 +143,11 @@ struct ConnectionSettingsView: View {
             } message: {
                 if let pendingPairingLink {
                     Text("\(pendingPairingLink.host):\(pendingPairingLink.port)")
+                }
+            }
+            .fullScreenCover(isPresented: $isShowingScanner) {
+                QRCodeScannerView { payload in
+                    handleScannedPayload(payload)
                 }
             }
             .task {
@@ -91,149 +163,17 @@ struct ConnectionSettingsView: View {
         }
     }
 
-    private var statusCard: some View {
-        SectionCard {
-            HStack(spacing: 10) {
-                StatusDot(kind: settings.isPaired ? .running : .idle)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(settings.isPaired ? "Paired" : "Not paired")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Theme.text)
-                    Text("\(settings.trimmedHost):\(settings.port)")
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(Theme.muted)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.init(top: 12, leading: 14, bottom: 12, trailing: 14))
-        }
-    }
-
-    private var nearbyMacsCard: some View {
-        SectionCard {
-            SectionHeader("Nearby Macs")
-            RowDivider(inset: 0)
-            if discovery.discoveredBridges.isEmpty {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text("Searching…")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Theme.muted)
-                    Spacer(minLength: 0)
-                }
-                .padding(.init(top: 9, leading: 14, bottom: 9, trailing: 14))
-            } else {
-                ForEach(Array(discovery.discoveredBridges.enumerated()), id: \.element.id) { index, bridge in
-                    if index > 0 { RowDivider() }
-                    Button {
-                        settings.host = bridge.host
-                        settings.port = bridge.port
-                    } label: {
-                        HStack(spacing: 10) {
-                            TypeIconTile(systemName: "macbook.and.iphone")
-                            Text(bridge.serviceName)
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(Theme.text)
-                                .lineLimit(1)
-                            Spacer(minLength: 8)
-                            Text("\(bridge.host):\(bridge.port)")
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundStyle(Theme.muted)
-                                .lineLimit(1)
-                        }
-                        .padding(.init(top: 9, leading: 14, bottom: 9, trailing: 14))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    private var endpointCard: some View {
-        SectionCard {
-            SectionHeader("Endpoint")
-            RowDivider(inset: 0)
-            VStack(spacing: 12) {
-                BrandTextField(label: "Host", text: $settings.host, placeholder: "127.0.0.1")
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Port")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.muted)
-                    TextField("Port", value: $settings.port, format: .number.grouping(.never))
-                        .font(.system(size: 14))
-                        .foregroundStyle(Theme.text)
-                        .keyboardType(.numberPad)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-            }
-            .padding(.init(top: 12, leading: 14, bottom: 12, trailing: 14))
-        }
-    }
-
-    private var pairCard: some View {
-        SectionCard {
-            SectionHeader(settings.isPaired ? "Re-pair this device" : "Pair this device")
-            RowDivider(inset: 0)
-            VStack(alignment: .leading, spacing: 10) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Pairing link")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.muted)
-                    TextField("Paste pairing link", text: $pairingLinkText, axis: .vertical)
-                        .font(.system(size: 14))
-                        .foregroundStyle(Theme.text)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .lineLimit(2...4)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-                Button {
-                    confirmPastedPairingLink()
-                } label: {
-                    if isPairing {
-                        ProgressView().tint(Theme.primaryButtonText)
-                    } else {
-                        Text(settings.isPaired ? "Re-Pair This Device" : "Pair This Device")
-                    }
-                }
-                .buttonStyle(BrandPrimaryButtonStyle())
-                .disabled(isPairing || pairingLinkText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                if let noticeMessage {
-                    Text(noticeMessage)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.orange)
-                }
-                if let errorMessage {
-                    Text(errorMessage)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.red)
-                }
-            }
-            .padding(.init(top: 12, leading: 14, bottom: 12, trailing: 14))
-        }
-    }
-
     @MainActor private func applyIncomingPairingLink(_ pairingLink: SpacesMobilePairingLink?) {
         guard let pairingLink else { return }
-        pairingLinkText = pairingLink.absoluteString
         pendingPairingLink = pairingLink
         errorMessage = nil
         isConfirmingPairing = true
         onPairingLinkConsumed()
     }
 
-    @MainActor private func confirmPastedPairingLink() {
+    @MainActor private func handleScannedPayload(_ payload: String) {
         do {
-            pendingPairingLink = try SpacesMobilePairingLink.parse(pairingLinkText)
+            pendingPairingLink = try SpacesMobilePairingLink.parse(payload)
             errorMessage = nil
             isConfirmingPairing = true
         } catch {
@@ -262,7 +202,6 @@ struct ConnectionSettingsView: View {
             await commandChannel.close()
             pairedSettings.authToken = issuedAuthToken
             settings = pairedSettings
-            pairingLinkText = ""
             pendingPairingLink = nil
             errorMessage = nil
             onSave(pairedSettings)
