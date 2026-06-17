@@ -6,11 +6,6 @@ app_root="$(cd "$script_dir/.." && pwd)"
 repo_root="$(cd "$app_root/../.." && pwd)"
 source "$repo_root/scripts/spaces-e2e-env.sh"
 
-artifact_id="spacesd-ubuntu-24.04-x86_64"
-archive_name="$artifact_id.tar.gz"
-archive_path="$repo_root/dist/linux/$archive_name"
-remote_install_root=".spaces/e2e-tools"
-remote_upload_dir="$remote_install_root/.uploads"
 git_common_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)"
 linux_cache_root="$app_root/.build/linux-e2e-cache"
 zig_cache_root="$linux_cache_root/zig"
@@ -39,9 +34,73 @@ if [[ -n "$remote_port" ]]; then
   scp_args+=(-P "$remote_port")
 fi
 
-echo "==> Building $artifact_id with Swift 6.2 Noble Docker"
+normalize_arch() {
+  case "$1" in
+    amd64|x64) printf 'x86_64\n' ;;
+    aarch64) printf 'arm64\n' ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+probe_output="$(
+  ssh "${ssh_args[@]}" "$ssh_destination" 'set -eu
+    printf "os=%s\n" "$(uname -s)"
+    printf "arch=%s\n" "$(uname -m)"
+    if [ "$(uname -s)" = "Linux" ] && [ -r /etc/os-release ]; then
+      . /etc/os-release
+      printf "linux_id=%s\n" "${ID:-}"
+      printf "linux_version_id=%s\n" "${VERSION_ID:-}"
+    fi'
+)"
+
+os_name=""
+arch_raw=""
+linux_id=""
+linux_version_id=""
+while IFS='=' read -r key value; do
+  case "$key" in
+    os) os_name="$value" ;;
+    arch) arch_raw="$value" ;;
+    linux_id) linux_id="$value" ;;
+    linux_version_id) linux_version_id="$value" ;;
+  esac
+done <<<"$probe_output"
+
+if [[ "$os_name" != "Linux" ]]; then
+  echo "Remote E2E artifact helper only supports Linux remotes. Found $os_name." >&2
+  exit 1
+fi
+if [[ "$linux_id" != "ubuntu" || "$linux_version_id" != "24.04" ]]; then
+  echo "Remote E2E artifact helper requires Ubuntu 24.04. Found id=$linux_id version=$linux_version_id." >&2
+  exit 1
+fi
+
+arch="$(normalize_arch "$arch_raw")"
+case "$arch" in
+  x86_64)
+    artifact_id="spacesd-ubuntu-24.04-x86_64"
+    docker_platform="linux/amd64"
+    ;;
+  arm64)
+    artifact_id="spacesd-ubuntu-24.04-arm64"
+    docker_platform="linux/arm64"
+    ;;
+  *)
+    echo "Unsupported remote Linux architecture: $arch_raw" >&2
+    exit 1
+    ;;
+esac
+
+archive_name="$artifact_id.tar.gz"
+archive_path="$repo_root/dist/linux/$archive_name"
+remote_upload_dir=".spaces/remote-artifact-e2e"
+remote_home="$(ssh "${ssh_args[@]}" "$ssh_destination" 'printf "%s" "$HOME"')"
+remote_archive_dir="$remote_home/$remote_upload_dir"
+remote_archive_path="$remote_archive_dir/$archive_name"
+
+echo "==> Building $artifact_id with Swift 6.2 Noble Docker" >&2
 mkdir -p "$zig_cache_root" "$swiftpm_cache_root"
-docker_args=(run --rm --platform linux/amd64)
+docker_args=(run --rm --platform "$docker_platform")
 if [[ "$git_common_dir" != "$repo_root/.git" ]]; then
   docker_args+=(-v "$git_common_dir:$git_common_dir")
 fi
@@ -57,72 +116,25 @@ docker "${docker_args[@]}" \
     apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils
     git config --global --add safe.directory /workspace
     git config --global --add safe.directory /workspace/apps/macos/vendor/ghostty
-    apps/macos/scripts/build_linux_spacesd_artifact.sh
-  '
+    apps/macos/scripts/build_linux_spacesd_artifact.sh --arch '"$arch"'
+  ' >&2
 
 if [[ ! -f "$archive_path" ]]; then
   echo "Linux spacesd artifact was not produced at $archive_path" >&2
   exit 1
 fi
 
-echo "==> Preparing remote upload directory on $ssh_destination"
-ssh "${ssh_args[@]}" "$ssh_destination" "mkdir -p '$remote_upload_dir'"
+archive_sha256="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
 
-echo "==> Uploading $archive_name"
-scp "${scp_args[@]}" "$archive_path" "$ssh_destination:$remote_upload_dir/$archive_name"
-if [[ -f "$archive_path.sha256" ]]; then
-  scp "${scp_args[@]}" "$archive_path.sha256" "$ssh_destination:$remote_upload_dir/$archive_name.sha256"
-fi
+echo "==> Preparing remote artifact directory on $ssh_destination" >&2
+ssh "${ssh_args[@]}" "$ssh_destination" "mkdir -p '$remote_archive_dir'"
 
-echo "==> Installing $artifact_id under ~/$remote_install_root"
-ssh "${ssh_args[@]}" "$ssh_destination" "ARTIFACT_ID='$artifact_id' ARCHIVE_NAME='$archive_name' INSTALL_ROOT='$remote_install_root' bash -s" <<'REMOTE_INSTALL'
-set -euo pipefail
+echo "==> Uploading $archive_name" >&2
+scp "${scp_args[@]}" "$archive_path" "$ssh_destination:$remote_archive_path" >/dev/null
 
-install_root="$HOME/$INSTALL_ROOT"
-upload_dir="$install_root/.uploads"
-archive_path="$upload_dir/$ARCHIVE_NAME"
-extract_root="$(mktemp -d "$install_root/.extract.XXXXXX")"
-backup_root="$install_root/$ARTIFACT_ID.previous"
+printf 'artifact_id=%q\n' "$artifact_id"
+printf 'artifact_url=%q\n' "file://$remote_archive_path"
+printf 'artifact_sha256=%q\n' "$archive_sha256"
+printf 'artifact_arch=%q\n' "$arch"
 
-cleanup() {
-  rm -rf "$extract_root"
-}
-trap cleanup EXIT
-
-tar -xzf "$archive_path" -C "$extract_root"
-test -x "$extract_root/$ARTIFACT_ID/bin/spacesd"
-test -x "$extract_root/$ARTIFACT_ID/bin/spaces"
-test -x "$extract_root/$ARTIFACT_ID/bin/spacesd-bin"
-
-(
-  cd "$extract_root/$ARTIFACT_ID"
-  sha256sum -c SHA256SUMS >/dev/null
-)
-
-rm -rf "$backup_root"
-if [ -e "$install_root/$ARTIFACT_ID" ]; then
-  mv "$install_root/$ARTIFACT_ID" "$backup_root"
-fi
-mv "$extract_root/$ARTIFACT_ID" "$install_root/$ARTIFACT_ID"
-
-mkdir -p "$HOME/bin"
-ln -sfn "$install_root/$ARTIFACT_ID/bin/spacesd" "$HOME/bin/spacesd"
-ln -sfn "$install_root/$ARTIFACT_ID/bin/spaces" "$HOME/bin/spaces"
-
-fingerprint="$(SPACES_DB_PATH="$install_root/.deploy-smoke/spaces.db" \
-  SPACES_RUNTIME_DIR="$install_root/.deploy-smoke/runtime" \
-  SPACESD_PRINT_CERTIFICATE_FINGERPRINT=1 "$HOME/bin/spacesd")"
-case "$fingerprint" in
-  SHA256:*) ;;
-  *)
-    echo "Installed spacesd did not print a certificate fingerprint." >&2
-    exit 1
-    ;;
-esac
-
-echo "installed=$install_root/$ARTIFACT_ID"
-echo "spacesd=$HOME/bin/spacesd"
-echo "fingerprint=$fingerprint"
-REMOTE_INSTALL
-
-echo "==> Remote Linux spacesd deploy complete"
+echo "==> Remote Linux E2E managed artifact ready" >&2

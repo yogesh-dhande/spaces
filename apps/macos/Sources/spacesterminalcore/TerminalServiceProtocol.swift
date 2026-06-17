@@ -454,6 +454,20 @@ public struct TerminalServiceSessionSummary: Codable, Sendable, Equatable, Ident
     }
 }
 
+public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
+    public let version: String
+    public let artifactVersion: String?
+    public let certificateFingerprint: String?
+    public let activeSessionCount: Int
+
+    public init(version: String, artifactVersion: String?, certificateFingerprint: String?, activeSessionCount: Int) {
+        self.version = version
+        self.artifactVersion = artifactVersion
+        self.certificateFingerprint = certificateFingerprint
+        self.activeSessionCount = activeSessionCount
+    }
+}
+
 public struct TerminalServiceResponse: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case ok
@@ -470,6 +484,7 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
         case profile
         case mobileCredentialToken
         case mobileCredentials
+        case daemonStatus
     }
 
     public let ok: Bool
@@ -486,6 +501,7 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
     public let profile: TerminalServiceProfileCommandResponse?
     public let mobileCredentialToken: String?
     public let mobileCredentials: [TerminalServiceMobileCredential]?
+    public let daemonStatus: TerminalServiceDaemonStatus?
     let streamSocketPath: String?
 
     public init(
@@ -494,7 +510,7 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
         controlResponse: TerminalControlResponse? = nil, terminalLinkMetadata: TerminalServiceTerminalLinkMetadata? = nil,
         terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil, agentSignals: [TerminalServiceAgentSignalEvent]? = nil,
         profile: TerminalServiceProfileCommandResponse? = nil, mobileCredentialToken: String? = nil,
-        mobileCredentials: [TerminalServiceMobileCredential]? = nil, streamSocketPath: String? = nil
+        mobileCredentials: [TerminalServiceMobileCredential]? = nil, daemonStatus: TerminalServiceDaemonStatus? = nil, streamSocketPath: String? = nil
     ) {
         self.ok = ok
         self.message = message
@@ -510,6 +526,7 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
         self.profile = profile
         self.mobileCredentialToken = mobileCredentialToken
         self.mobileCredentials = mobileCredentials
+        self.daemonStatus = daemonStatus
         self.streamSocketPath = streamSocketPath
     }
 
@@ -540,7 +557,8 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
             agentSignals: try container.decodeIfPresent([TerminalServiceAgentSignalEvent].self, forKey: .agentSignals),
             profile: try container.decodeIfPresent(TerminalServiceProfileCommandResponse.self, forKey: .profile),
             mobileCredentialToken: try container.decodeIfPresent(String.self, forKey: .mobileCredentialToken),
-            mobileCredentials: try container.decodeIfPresent([TerminalServiceMobileCredential].self, forKey: .mobileCredentials))
+            mobileCredentials: try container.decodeIfPresent([TerminalServiceMobileCredential].self, forKey: .mobileCredentials),
+            daemonStatus: try container.decodeIfPresent(TerminalServiceDaemonStatus.self, forKey: .daemonStatus))
     }
 }
 

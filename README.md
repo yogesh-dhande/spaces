@@ -66,6 +66,7 @@ Coding agents emit explicit `spaces agent signal` events from their terminals so
 - [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
 - Built-in process and ad hoc terminals run through `spacesd`, so sessions survive app quits and lifetime, takeover, and `spaces terminal` controls share one daemon-owned boundary.
 - Workspace identity is scoped to project, branch, and host. The local Mac is a first-class host, and remote hosts run pinned-TLS `spacesd` execution with each workspace storing its runtime path directly.
+- Remote Hosts installs signed `spacesd` release artifacts over strict known-host SSH for macOS 14+ and Ubuntu 24.04 remotes, then validates the daemon with pinned TLS before saving the host.
 - The first-party iOS client discovers the Mac bridge advertised by `spacesd`, pairs through a Mac-approved QR/deep link, browses live Spaces terminal sessions, auto-takes ownership when opening one for live rendering, and can ask the still-running daemon to launch the Mac app after an app quit or crash.
 - Browser sessions automate Google Chrome so you can quickly switch to view output without typing the URL or clicking through tabs.
 

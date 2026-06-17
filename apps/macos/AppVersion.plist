@@ -2,13 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>SUFeedURL</key>
-    <string>https://usespaces.dev/releases/appcast.xml</string>
-    <key>SUPublicEDKey</key>
-    <string>REPLACE_WITH_SPARKLE_PUBLIC_ED_KEY</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>SUFeedURL</key>
+	<string>https://usespaces.dev/releases/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>JnyOq/Dp/ylfUizbX5a5WwXWFEI3nmV1qQJWmtnlAH4=</string>
+	<key>SpacesRemoteArtifactPublicEd25519Key</key>
+	<string>R3qsBslT0G/A5YvsoqZu0s/lFrkSNf5zq+yuzAqmTMo=</string>
 </dict>
 </plist>

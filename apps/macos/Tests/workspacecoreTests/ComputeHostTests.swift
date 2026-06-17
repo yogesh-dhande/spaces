@@ -407,12 +407,49 @@ final class ComputeHostTests: XCTestCase {
         XCTAssertEqual(try store.computeHost(id: host.id), host)
     }
 
+    func testValidateComputeHostDeletionBlocksWhenWorkspaceIsAssignedToHost() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
+        let project = makeProjectRecord(id: "project-a", dir: try makeTempDirectory().path)
+        let workspace = WorkspaceRecord(
+            id: "workspace-a", projectID: project.id, hostID: host.id, title: "Feature", dir: try makeTempDirectory().path,
+            runtimePath: "/srv/spaces/project/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false, isRunning: false,
+            lastLaunchedAt: nil)
+        try orchestrator.upsertComputeHost(host)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        XCTAssertThrowsError(try orchestrator.validateComputeHostDeletion(id: host.id)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("assigned to that host"))
+        }
+        XCTAssertEqual(try store.computeHost(id: host.id), host)
+    }
+
     func testDeleteComputeHostRejectsLocalHost() throws {
         let orchestrator = WorkspaceOrchestrator(store: try makeTemporaryStore())
 
         XCTAssertThrowsError(try orchestrator.deleteComputeHost(id: ComputeHostRecord.localHostID)) { error in
             XCTAssertTrue(error.localizedDescription.contains("local host record cannot be removed"))
         }
+    }
+
+    func testValidateComputeHostDeletionRejectsLocalHost() throws {
+        let orchestrator = WorkspaceOrchestrator(store: try makeTemporaryStore())
+
+        XCTAssertThrowsError(try orchestrator.validateComputeHostDeletion(id: ComputeHostRecord.localHostID)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("local host record cannot be removed"))
+        }
+    }
+
+    func testValidateComputeHostDeletionAllowsUnassignedRemoteHost() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let host = makeComputeHostRecord(id: "test-host-\(UUID().uuidString)", name: "Builder A")
+        try orchestrator.upsertComputeHost(host)
+
+        XCTAssertNoThrow(try orchestrator.validateComputeHostDeletion(id: host.id))
+        XCTAssertEqual(try store.computeHost(id: host.id), host)
     }
 
     func testDeleteComputeHostDeletesUnassignedHostAndReportsCredentialCleanup() throws {

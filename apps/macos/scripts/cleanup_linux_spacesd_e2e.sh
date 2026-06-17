@@ -15,7 +15,8 @@ remote_host_id="${SPACES_E2E_REMOTE_HOST_ID:-keptune-remote-e2e}"
 remote_daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:-7443}"
 remote_workspace_root="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 remote_git_root="${SPACES_E2E_REMOTE_GIT_ROOT:-~/.spaces/e2e-git}"
-remote_install_root="${SPACES_E2E_REMOTE_INSTALL_ROOT:-~/.spaces/e2e-tools}"
+remote_install_root="${SPACES_E2E_REMOTE_INSTALL_ROOT:-~/.spaces/remote-artifact-e2e}"
+remote_legacy_install_root="~/.spaces/e2e-tools"
 
 if [[ -z "$remote_host" ]]; then
   echo "SPACES_E2E_REMOTE_SSH_HOST is required." >&2
@@ -89,6 +90,7 @@ ssh "${ssh_args[@]}" "$ssh_destination" \
    SPACES_E2E_REMOTE_WORKSPACE_ROOT='$remote_workspace_root' \
    SPACES_E2E_REMOTE_GIT_ROOT='$remote_git_root' \
    SPACES_E2E_REMOTE_INSTALL_ROOT='$remote_install_root' \
+   SPACES_E2E_REMOTE_LEGACY_INSTALL_ROOT='$remote_legacy_install_root' \
    bash -s" <<'REMOTE_CLEANUP'
 set -euo pipefail
 
@@ -106,9 +108,10 @@ daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:?}"
 workspace_root="$(expand_path "${SPACES_E2E_REMOTE_WORKSPACE_ROOT:?}")"
 git_root="$(expand_path "${SPACES_E2E_REMOTE_GIT_ROOT:?}")"
 install_root="$(expand_path "${SPACES_E2E_REMOTE_INSTALL_ROOT:?}")"
+legacy_install_root="$(expand_path "${SPACES_E2E_REMOTE_LEGACY_INSTALL_ROOT:?}")"
 profile_root="${HOME}/.spaces/compute-hosts/${host_id}"
 
-python3 - "$profile_root" "$workspace_root" "$git_root" "$install_root" <<'PY'
+python3 - "$profile_root" "$workspace_root" "$git_root" "$install_root" "$legacy_install_root" <<'PY'
 import os
 import signal
 import sys
@@ -197,17 +200,18 @@ for link in "${HOME}/bin/spacesd" "${HOME}/bin/spaces"; do
   if [ -L "$link" ]; then
     target="$(readlink "$link")"
     case "$target" in
-      "$install_root"/*) rm -f "$link" ;;
+      "$install_root"/*|"$legacy_install_root"/*) rm -f "$link" ;;
     esac
   fi
 done
 
-rm -rf "$profile_root" "$workspace_root" "$git_root" "$install_root"
+rm -rf "$profile_root" "$workspace_root" "$git_root" "$install_root" "$legacy_install_root"
 
 echo "removed profile=$profile_root"
 echo "removed workspace_root=$workspace_root"
 echo "removed git_root=$git_root"
 echo "removed install_root=$install_root"
+echo "removed legacy_install_root=$legacy_install_root"
 REMOTE_CLEANUP
 
 echo "==> Remote E2E cleanup complete"

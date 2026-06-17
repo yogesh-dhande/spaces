@@ -94,24 +94,38 @@ jobs:
   linux-spacesd-artifact:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            docker-platform: linux/amd64
+          - arch: arm64
+            docker-platform: linux/arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           submodules: recursive
 
+      - name: Set up QEMU for arm64 Docker build
+        if: ${{ matrix.docker-platform == 'linux/arm64' }}
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Build and smoke Linux spacesd artifact
         run: |
-          docker run --rm --platform linux/amd64 \
+          docker run --rm --platform ${{ matrix.docker-platform }} \
             -v "$PWD":/workspace \
             -w /workspace \
             swift:6.2-noble \
-            bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh'
+            bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch ${{ matrix.arch }}'
 
       - name: Upload Linux spacesd artifact
         uses: actions/upload-artifact@v4
         with:
-          name: spacesd-ubuntu-24.04-x86_64
+          name: spacesd-ubuntu-24.04-${{ matrix.arch }}
           path: |
-            dist/linux/spacesd-ubuntu-24.04-x86_64.tar.gz
-            dist/linux/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256
+            dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz
+            dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz.sha256

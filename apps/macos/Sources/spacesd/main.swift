@@ -67,6 +67,7 @@ import workspacecore
             remoteServerLoadError = error
             return nil
         }
+        remoteCertificateFingerprint = identity.certificateFingerprint
         writeStandardError("spacesd: remote listener fingerprint=\(identity.certificateFingerprint)\n")
         return TerminalServiceTLSServer(
             host: host, port: port, authToken: nil, identity: identity, queue: serverQueue,
@@ -85,6 +86,7 @@ import workspacecore
     }()
     private var remoteServerLoadError: (any Error)?
     private var remoteAdminAuthToken: String?
+    private var remoteCertificateFingerprint: String?
     private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
@@ -114,7 +116,8 @@ import workspacecore
 
     private func handle(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
         switch request.command {
-        case "ping": return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid())
+        case "ping": return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: daemonStatus())
+        case "shutdownIfIdle": return shutdownIfIdle()
         case "shutdown":
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(100))
@@ -156,6 +159,25 @@ import workspacecore
         case "readTerminalLinkChunk": return readTerminalLinkChunk(request)
         default: return TerminalServiceResponse(ok: false, message: "Unsupported spacesd command '\(request.command)'.")
         }
+    }
+
+    private func daemonStatus() -> TerminalServiceDaemonStatus {
+        TerminalServiceDaemonStatus(
+            version: AppVersion.current, artifactVersion: normalizedString(ProcessInfo.processInfo.environment["SPACESD_ARTIFACT_VERSION"]),
+            certificateFingerprint: remoteCertificateFingerprint, activeSessionCount: sessionCores.count)
+    }
+
+    private func shutdownIfIdle() -> TerminalServiceResponse {
+        let status = daemonStatus()
+        guard status.activeSessionCount == 0 else {
+            return TerminalServiceResponse(
+                ok: false, message: "spacesd has \(status.activeSessionCount) active session(s).", servicePID: getpid(), daemonStatus: status)
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(100))
+            Self.terminateProcess()
+        }
+        return TerminalServiceResponse(ok: true, message: "spacesd is shutting down.", servicePID: getpid(), daemonStatus: status)
     }
 
     private func authorizeRemoteRequest(_ request: TerminalServiceRequest) -> TerminalServiceResponse? {
@@ -477,7 +499,28 @@ import workspacecore
 
     private func makeProfileOrchestrator() throws -> WorkspaceOrchestrator {
         let store = try SQLiteStore(path: try DatabaseLocator.defaultPath())
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = WorkspaceOrchestrator(
+            store: store,
+            builtInTerminalSessionTerminator: { [weak self] sessionID in
+                Self.runOnMainActorSynchronously {
+                    guard let self else { return }
+                    _ = self.terminateSession(id: sessionID)
+                }
+            },
+            builtInTerminalSessionLauncher: { [weak self] launchConfiguration in
+                try Self.runOnMainActorSynchronously {
+                    Result {
+                        guard let self else { throw TerminalServiceError.requestFailed("spacesd is shutting down.") }
+                        let response = self.createSession(
+                            launchConfiguration, request: TerminalServiceRequest(command: "create", launchConfiguration: launchConfiguration))
+                        guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
+                        guard let session = response.session else {
+                            throw TerminalServiceError.requestFailed("spacesd did not return a session summary.")
+                        }
+                        return session
+                    }
+                }.get()
+            })
         _ = try orchestrator.syncConfig()
         return orchestrator
     }

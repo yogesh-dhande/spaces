@@ -313,7 +313,7 @@ export_remote_auth_token() {
   export "$key=$remote_auth_token"
 }
 
-deploy_remote_spacesd() {
+prepare_remote_managed_artifact() {
   require_remote_configuration
   "$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh"
 }
@@ -348,7 +348,16 @@ prepare_remote_git_origin() {
 configure_demo_compute_hosts() {
   require_remote_configuration
   export_remote_auth_token
-  deploy_remote_spacesd
+  local artifact_id artifact_url artifact_sha256 artifact_arch
+  local artifact_assignments
+  artifact_assignments="$(prepare_remote_managed_artifact)" || {
+    echo "Remote managed artifact preparation failed." >&2
+    exit 1
+  }
+  eval "$artifact_assignments" || {
+    echo "Remote managed artifact assignment parsing failed." >&2
+    exit 1
+  }
 
   local slug
   slug="$(basename "$temp_root" | tr -cd 'A-Za-z0-9_.-')"
@@ -367,6 +376,9 @@ configure_demo_compute_hosts() {
     --ssh-host "$remote_ssh_host"
     --workspace-root "$remote_workspace_root"
     --daemon-port "$remote_daemon_port"
+    --managed-artifact-id "$artifact_id"
+    --managed-artifact-url "$artifact_url"
+    --managed-artifact-sha256 "$artifact_sha256"
   )
   if [[ -n "$remote_ssh_user" ]]; then args+=(--ssh-user "$remote_ssh_user"); fi
   if [[ -n "$remote_ssh_port" ]]; then args+=(--ssh-port "$remote_ssh_port"); fi

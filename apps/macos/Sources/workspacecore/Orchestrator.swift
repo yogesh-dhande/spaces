@@ -78,7 +78,6 @@ public final class WorkspaceOrchestrator {
     }
 
     public static let terminalTrackingIDEnvVar = "SPACES_TERMINAL_TRACKING_ID"
-    public static let agentLabelEnvVar = "SPACES_AGENT_LABEL"
     private static let notificationAuthorizationCache = NotificationAuthorizationCache()
     private static let builtInTerminalSessionLauncherOverrideStore = BuiltInTerminalSessionLauncherOverrideStore()
     private static let builtInTerminalSessionTerminatorOverrideStore = BuiltInTerminalSessionTerminatorOverrideStore()
@@ -414,13 +413,18 @@ public final class WorkspaceOrchestrator {
 
     public func upsertComputeHost(_ host: ComputeHostRecord) throws { try store.upsert(computeHost: host) }
 
-    @discardableResult public func deleteComputeHost(id: String) throws -> ComputeHostDeletionResult {
+    public func validateComputeHostDeletion(id: String) throws {
         let hostID = normalizedComputeHostID(id) ?? id
         if hostID == ComputeHostRecord.localHostID { throw WorkspaceError.invalidArgument(message: "The local host record cannot be removed.") }
         let assignedWorkspaces = try workspacesResolving(toComputeHostID: hostID)
         if !assignedWorkspaces.isEmpty {
             throw computeHostChangeBlockedError(action: "remove compute host '\(hostID)'", workspaces: assignedWorkspaces)
         }
+    }
+
+    @discardableResult public func deleteComputeHost(id: String) throws -> ComputeHostDeletionResult {
+        let hostID = normalizedComputeHostID(id) ?? id
+        try validateComputeHostDeletion(id: hostID)
         let deletionResult = try computeHostDeletionResult(hostID: hostID)
         try store.deleteComputeHost(id: hostID)
         try ComputeHostCredentialStore.deleteAuthToken(hostID: hostID)
@@ -4666,7 +4670,9 @@ public final class WorkspaceOrchestrator {
             case .pending, .running:
                 if currentDate().timeIntervalSince(waitStartedAt) > 900 {
                     throw WorkspaceError.invalidArgument(
-                        message: "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run `spaces restart`.")
+                        message:
+                            "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run `spaces workspace restart --workspace \(workspaceID)`."
+                    )
                 }
                 Thread.sleep(forTimeInterval: 0.2)
             }
@@ -6734,9 +6740,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        var launchEnv = terminalLaunchEnvironment(
-            base: env.merging([Self.agentLabelEnvVar: launcher.name]) { _, new in new }, includeInheritedPath: false,
-            includeProfileEnvironment: !runtimePlan.selection.isRemote)
+        var launchEnv = terminalLaunchEnvironment(base: env, includeInheritedPath: false, includeProfileEnvironment: !runtimePlan.selection.isRemote)
         _ = background
         let agentSessionID = UUID().uuidString
         launchEnv[Self.terminalTrackingIDEnvVar] = agentSessionID

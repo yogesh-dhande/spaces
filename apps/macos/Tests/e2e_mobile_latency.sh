@@ -323,8 +323,11 @@ PY
 prepare_remote_workspace() {
   [[ "$TERMINAL_TARGETS" == *remote* ]] || return 0
   export_remote_auth_token
-  "$APP_ROOT/scripts/deploy_linux_spacesd_e2e.sh" \
-    || fail "Remote Linux spacesd deploy failed."
+  local artifact_id artifact_url artifact_sha256 artifact_arch
+  local artifact_assignments
+  artifact_assignments="$("$APP_ROOT/scripts/deploy_linux_spacesd_e2e.sh")" \
+    || fail "Remote managed artifact preparation failed."
+  eval "$artifact_assignments" || fail "Remote managed artifact assignment parsing failed."
   spaces_e2e_create_scout_fixture_repo "$FIXTURE_TEMPLATE_DIR" "$REMOTE_PROJECT_DIR"
   local slug
   slug="$(basename "$WORK_ROOT" | tr -cd 'A-Za-z0-9_.-')"
@@ -340,6 +343,9 @@ prepare_remote_workspace() {
     --ssh-host "$REMOTE_SSH_HOST"
     --workspace-root "$REMOTE_WORKSPACE_ROOT"
     --daemon-port "$REMOTE_DAEMON_PORT"
+    --managed-artifact-id "$artifact_id"
+    --managed-artifact-url "$artifact_url"
+    --managed-artifact-sha256 "$artifact_sha256"
   )
   if [[ -n "$REMOTE_SSH_USER" ]]; then args+=(--ssh-user "$REMOTE_SSH_USER"); fi
   if [[ -n "$REMOTE_SSH_PORT" ]]; then args+=(--ssh-port "$REMOTE_SSH_PORT"); fi

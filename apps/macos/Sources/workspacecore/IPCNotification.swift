@@ -9,6 +9,7 @@ public enum IPCNotification {
     public static let showWindowIssueModal = Notification.Name("spaces.ipc.show-window-issue-modal")
     public static let cycleWorkspaceWindow = Notification.Name("spaces.ipc.cycle-workspace-window")
     public static let openWorkspaceTerminal = Notification.Name("spaces.ipc.open-workspace-terminal")
+    public static let triggerComputeHostUpgrade = Notification.Name("spaces.ipc.trigger-compute-host-upgrade")
     public static let runWorkspaceProcess = Notification.Name("spaces.ipc.run-workspace-process")
     public static let stopWorkspaceProcess = Notification.Name("spaces.ipc.stop-workspace-process")
     public static let restartWorkspaceProcess = Notification.Name("spaces.ipc.restart-workspace-process")
@@ -19,6 +20,7 @@ public enum IPCNotification {
     public static let dumpTerminalSessionWindowState = Notification.Name("spaces.ipc.dump-terminal-session-window-state")
     public static let performTerminalSessionWindowShortcut = Notification.Name("spaces.ipc.perform-terminal-session-window-shortcut")
     public static let workspaceIDUserInfoKey = "workspace_id"
+    public static let computeHostIDUserInfoKey = "compute_host_id"
     public static let workspaceTargetNameUserInfoKey = "workspace_target_name"
     public static let titleUserInfoKey = "title"
     public static let detailUserInfoKey = "detail"

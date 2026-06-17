@@ -993,7 +993,7 @@ export_remote_auth_token() {
   export "$key=$REMOTE_AUTH_TOKEN"
 }
 
-deploy_remote_spacesd() {
+prepare_remote_managed_artifact() {
   require_remote_configuration
   "$ROOT_DIR/apps/macos/scripts/deploy_linux_spacesd_e2e.sh"
 }
@@ -1039,7 +1039,10 @@ configure_mixed_e2e_targets() {
   log_step "configuring mixed local/remote compute targets"
   require_remote_configuration
   export_remote_auth_token
-  deploy_remote_spacesd
+  local artifact_id artifact_url artifact_sha256 artifact_arch
+  local artifact_assignments
+  artifact_assignments="$(prepare_remote_managed_artifact)" || fail "Remote managed artifact preparation failed."
+  eval "$artifact_assignments" || fail "Remote managed artifact assignment parsing failed."
   prepare_remote_scout_git_origin \
     || fail "Remote git fixture setup failed. See $TMP_ROOT/remote-git-origin.log"
   local -a args=(
@@ -1050,6 +1053,9 @@ configure_mixed_e2e_targets() {
     --ssh-host "$REMOTE_SSH_HOST"
     --workspace-root "$REMOTE_WORKSPACE_ROOT"
     --daemon-port "$REMOTE_DAEMON_PORT"
+    --managed-artifact-id "$artifact_id"
+    --managed-artifact-url "$artifact_url"
+    --managed-artifact-sha256 "$artifact_sha256"
   )
   if [[ -n "$REMOTE_SSH_USER" ]]; then args+=(--ssh-user "$REMOTE_SSH_USER"); fi
   if [[ -n "$REMOTE_SSH_PORT" ]]; then args+=(--ssh-port "$REMOTE_SSH_PORT"); fi
@@ -4999,7 +5005,7 @@ PY
 
   if [[ "${INCLUDE_DEAD_PROCESS_RECOVERY:-0}" == "1" ]] && ! is_spaces_terminal_target "$host"; then
     begin_case "$host: dead process recovery"
-    # Kill one tracked process, then confirm `spaces start` revives only the
+    # Kill one tracked process, then confirm workspace start revives only the
     # dead runtime instead of forcing a full workspace restart.
     dump_workspace "$workspace_dir" "$dump_file"
     local frontend_pid

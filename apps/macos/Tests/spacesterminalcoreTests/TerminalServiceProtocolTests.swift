@@ -60,7 +60,9 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 TerminalServiceMobileCredential(
                     id: "credential-1", installationID: "installation-1", deviceName: "iPhone", platform: "ios", scopes: ["terminal"],
                     createdAt: "2026-06-14T00:00:00Z", lastUsedAt: nil, revokedAt: nil)
-            ])
+            ],
+            daemonStatus: TerminalServiceDaemonStatus(
+                version: "1.2.3", artifactVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2))
 
         let credentialRequest = TerminalServiceRequest(
             command: "mobileCredential",

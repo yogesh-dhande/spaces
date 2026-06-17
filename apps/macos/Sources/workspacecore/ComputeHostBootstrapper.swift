@@ -52,12 +52,27 @@ public enum ComputeHostBootstrapError: LocalizedError, Equatable {
 
 public struct ComputeHostBootstrapper {
     public typealias CommandRunner = @Sendable ([String], String, TimeInterval) throws -> String
+    public typealias ArtifactManifestProvider = @Sendable () throws -> RemoteSpacesArtifactManifest
+
+    private static let managedArtifactInstallTimeout: TimeInterval = 300
 
     private let runCommand: CommandRunner
+    private let artifactManifestProvider: ArtifactManifestProvider
 
-    public init() { self.runCommand = Self.defaultRunCommand }
+    public init() {
+        self.runCommand = Self.defaultRunCommand
+        self.artifactManifestProvider = Self.defaultArtifactManifestProvider
+    }
 
-    init(runCommand: @escaping CommandRunner) { self.runCommand = runCommand }
+    public init(artifactManifestProvider: @escaping ArtifactManifestProvider) {
+        self.runCommand = Self.defaultRunCommand
+        self.artifactManifestProvider = artifactManifestProvider
+    }
+
+    init(runCommand: @escaping CommandRunner, artifactManifestProvider: @escaping ArtifactManifestProvider = Self.defaultArtifactManifestProvider) {
+        self.runCommand = runCommand
+        self.artifactManifestProvider = artifactManifestProvider
+    }
 
     public func startSpacesDaemon(host: ComputeHostRecord, authToken: String, timeout: TimeInterval = 30, cleanExistingProfile: Bool = false) throws
         -> ComputeHostBootstrapOutcome
@@ -65,15 +80,39 @@ public struct ComputeHostBootstrapper {
         let token = authToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else { throw ComputeHostBootstrapError.missingAuthToken }
 
-        let output = try runCommand(
-            Self.sshCommand(host: host),
-            Self.remoteStartInput(host: host, authToken: token, selectsAvailablePort: false, cleanExistingProfile: cleanExistingProfile), timeout)
-        let parsed = try Self.parseBootstrapOutput(output)
+        let artifact = try prepareManagedArtifact(host: host, timeout: timeout, selectsAvailablePort: false)
+        let parsed = try runRemoteStartScript(
+            host: host, authToken: token, artifact: artifact, selectsAvailablePort: false, cleanExistingProfile: cleanExistingProfile,
+            timeout: max(timeout, Self.managedArtifactInstallTimeout))
         return ComputeHostBootstrapOutcome(
             certificateFingerprint: parsed.certificateFingerprint,
             workspaceRoot: parsed.workspaceRoot.isEmpty ? host.workspaceRoot : parsed.workspaceRoot,
             daemonHost: parsed.daemonHost.isEmpty ? host.daemonEndpoint.host : parsed.daemonHost,
             daemonPort: parsed.daemonPort == 0 ? host.daemonEndpoint.port : parsed.daemonPort, processID: parsed.processID, logPath: parsed.logPath)
+    }
+
+    public func upgradeManagedSpacesDaemon(host: ComputeHostRecord, authToken: String, timeout: TimeInterval = 30) throws
+        -> ComputeHostBootstrapOutcome
+    {
+        let token = authToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { throw ComputeHostBootstrapError.missingAuthToken }
+
+        let artifact = try prepareManagedArtifact(host: host, timeout: timeout, selectsAvailablePort: false)
+        let parsed = try runRemoteStartScript(
+            host: host, authToken: token, artifact: artifact, selectsAvailablePort: false, cleanExistingProfile: false,
+            timeout: max(timeout, Self.managedArtifactInstallTimeout))
+        return ComputeHostBootstrapOutcome(
+            certificateFingerprint: parsed.certificateFingerprint,
+            workspaceRoot: parsed.workspaceRoot.isEmpty ? host.workspaceRoot : parsed.workspaceRoot,
+            daemonHost: parsed.daemonHost.isEmpty ? host.daemonEndpoint.host : parsed.daemonHost,
+            daemonPort: parsed.daemonPort == 0 ? host.daemonEndpoint.port : parsed.daemonPort, processID: parsed.processID, logPath: parsed.logPath)
+    }
+
+    public func uninstallManagedSpacesDaemon(host: ComputeHostRecord, timeout: TimeInterval = 30) throws {
+        do { _ = try runCommand(Self.sshScriptCommand(host: host), Self.remoteUninstallScript(host: host), timeout) } catch {
+            let parsed = Self.parseSetupFailure(error)
+            throw setupError(host: host, failedCheck: parsed.checkID, command: parsed.command, detail: parsed.detail, fixHint: parsed.fixHint)
+        }
     }
 
     public func startSpacesDaemon(
@@ -84,10 +123,10 @@ public struct ComputeHostBootstrapper {
         let token = authToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else { throw ComputeHostBootstrapError.missingAuthToken }
 
-        let output = try runCommand(
-            Self.sshCommand(host: prepared.host),
-            Self.remoteStartInput(host: prepared.host, authToken: token, selectsAvailablePort: true, cleanExistingProfile: false), timeout)
-        let outcome = try Self.parseBootstrapOutput(output)
+        let artifact = try prepareManagedArtifact(host: prepared.host, timeout: timeout, selectsAvailablePort: true)
+        let outcome = try runRemoteStartScript(
+            host: prepared.host, authToken: token, artifact: artifact, selectsAvailablePort: true, cleanExistingProfile: false,
+            timeout: max(timeout, Self.managedArtifactInstallTimeout))
         var host = prepared.host
         host.workspaceRoot = outcome.workspaceRoot.isEmpty ? host.workspaceRoot : outcome.workspaceRoot
         host.daemonEndpoint = SpacesDaemonEndpoint(
@@ -107,71 +146,202 @@ public struct ComputeHostBootstrapper {
         return command
     }
 
-    static func remoteStartInput(host: ComputeHostRecord, authToken: String, selectsAvailablePort: Bool = false, cleanExistingProfile: Bool = false)
-        -> String
-    { "\(authToken)\n\(remoteStartScript(host: host, selectsAvailablePort: selectsAvailablePort, cleanExistingProfile: cleanExistingProfile))" }
+    static func sshScriptCommand(host: ComputeHostRecord) -> [String] {
+        var command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes"]
+        if let port = host.sshPort { command.append(contentsOf: ["-p", String(port)]) }
+        command.append(sshDestination(host: host))
+        command.append("bash -s")
+        return command
+    }
 
-    static func remoteStartScript(host: ComputeHostRecord, selectsAvailablePort: Bool = false, cleanExistingProfile: Bool = false) -> String {
+    public static func sshOpenCommand(host: ComputeHostRecord) -> String {
+        var parts = ["ssh"]
+        if let port = host.sshPort { parts.append(contentsOf: ["-p", String(port)]) }
+        parts.append(sshDestination(host: host))
+        return parts.map(shellArgument).joined(separator: " ")
+    }
+
+    static func remoteStartInput(
+        host: ComputeHostRecord, authToken: String, artifact: RemoteSpacesArtifact, selectsAvailablePort: Bool = false,
+        cleanExistingProfile: Bool = false
+    ) -> String {
+        "\(authToken)\n\(remoteStartScript(host: host, artifact: artifact, selectsAvailablePort: selectsAvailablePort, cleanExistingProfile: cleanExistingProfile))"
+    }
+
+    private func prepareManagedArtifact(host: ComputeHostRecord, timeout: TimeInterval, selectsAvailablePort: Bool) throws -> RemoteSpacesArtifact {
+        let releasePageURL =
+            (try? RemoteSpacesArtifactReleaseSource.githubReleasePageURL().absoluteString) ?? "https://github.com/yogesh-dhande/spaces/releases"
+        let probe: RemoteSpacesPlatformProbe
+        do {
+            let output = try runCommand(Self.sshScriptCommand(host: host), Self.remoteProbeScript(), timeout)
+            probe = RemoteSpacesPlatformProbe.parse(output)
+        } catch {
+            throw setupError(
+                host: host, failedCheck: .sshAccess, command: Self.sshOpenCommand(host: host),
+                detail: "Strict known-host SSH to \(Self.sshDestination(host: host)) failed. \(Self.errorDescription(error))",
+                fixHint: "Confirm the host is in known_hosts and that \(Self.sshOpenCommand(host: host)) works without prompts.")
+        }
+
+        do { _ = try RemoteSpacesArtifactSelector.artifactID(for: probe) } catch {
+            throw setupError(
+                host: host, failedCheck: .supportedPlatform, command: "uname -s; uname -m; sw_vers or /etc/os-release",
+                detail: Self.errorDescription(error), fixHint: "Use macOS 14+ or Ubuntu 24.04 on x86_64 or arm64.")
+        }
+
+        let manifest: RemoteSpacesArtifactManifest
+        do { manifest = try artifactManifestProvider() } catch {
+            throw setupError(
+                host: host, failedCheck: .artifactManifest, command: "Open \(releasePageURL)",
+                detail:
+                    "Spaces could not verify the managed remote artifacts for this build. Open \(releasePageURL). \(Self.errorDescription(error))",
+                fixHint: "Open \(releasePageURL) and confirm this build's managed remote artifacts are published and reachable, then reinstall.")
+        }
+
+        let artifact: RemoteSpacesArtifact
+        do { artifact = try RemoteSpacesArtifactSelector.select(manifest: manifest, for: probe) } catch {
+            throw setupError(
+                host: host, failedCheck: .supportedPlatform, command: "select exact artifact for \(probe.operatingSystem) \(probe.architecture)",
+                detail: Self.errorDescription(error),
+                fixHint: "Install a supported remote OS/architecture or publish the matching remote artifact to the current release.")
+        }
+
+        do {
+            _ = try runCommand(
+                Self.sshScriptCommand(host: host), Self.remotePreflightScript(host: host, selectsAvailablePort: selectsAvailablePort), timeout)
+        } catch {
+            let parsed = Self.parseSetupFailure(error)
+            throw setupError(host: host, failedCheck: parsed.checkID, command: parsed.command, detail: parsed.detail, fixHint: parsed.fixHint)
+        }
+
+        return artifact
+    }
+
+    private func runRemoteStartScript(
+        host: ComputeHostRecord, authToken: String, artifact: RemoteSpacesArtifact, selectsAvailablePort: Bool, cleanExistingProfile: Bool,
+        timeout: TimeInterval
+    ) throws -> ComputeHostBootstrapOutcome {
+        do {
+            let output = try runCommand(
+                Self.sshCommand(host: host),
+                Self.remoteStartInput(
+                    host: host, authToken: authToken, artifact: artifact, selectsAvailablePort: selectsAvailablePort,
+                    cleanExistingProfile: cleanExistingProfile), timeout)
+            return try Self.parseBootstrapOutput(output)
+        } catch let error as ComputeHostBootstrapError {
+            switch error {
+            case .invalidBootstrapOutput: throw error
+            default:
+                let parsed = Self.parseSetupFailure(error)
+                throw setupError(host: host, failedCheck: parsed.checkID, command: parsed.command, detail: parsed.detail, fixHint: parsed.fixHint)
+            }
+        } catch {
+            let parsed = Self.parseSetupFailure(error)
+            throw setupError(host: host, failedCheck: parsed.checkID, command: parsed.command, detail: parsed.detail, fixHint: parsed.fixHint)
+        }
+    }
+
+    private func setupError(host: ComputeHostRecord, failedCheck: ComputeHostSetupCheckID, command: String?, detail: String, fixHint: String?)
+        -> ComputeHostSetupError
+    {
+        let checklist = ComputeHostSetupChecklistBuilder.failure(
+            host: host, failedCheck: failedCheck, command: command, detail: detail, fixHint: fixHint)
+        return ComputeHostSetupError(checklist: checklist, underlyingDescription: detail)
+    }
+
+    static func remoteProbeScript() -> String {
+        """
+        set -eu
+        PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+        printf 'os=%s\\n' "$(uname -s)"
+        printf 'arch=%s\\n' "$(uname -m)"
+        if [ "$(uname -s)" = "Darwin" ]; then
+          printf 'macos_version=%s\\n' "$(sw_vers -productVersion 2>/dev/null || true)"
+        elif [ "$(uname -s)" = "Linux" ]; then
+          if [ -r /etc/os-release ]; then
+            . /etc/os-release
+            printf 'linux_id=%s\\n' "${ID:-}"
+            printf 'linux_version_id=%s\\n' "${VERSION_ID:-}"
+          fi
+        fi
+        """
+    }
+
+    static func remotePreflightScript(host: ComputeHostRecord, selectsAvailablePort: Bool = false) -> String {
+        let hostID = safePathComponent(host.id)
+        let workspaceRoot = shellSingleQuoted(host.workspaceRoot)
+        return """
+            set -eu
+            PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+            fail() {
+              echo "SPACES_SETUP_FAILED_CHECK=$1" >&2
+              echo "SPACES_SETUP_FAILED_COMMAND=$2" >&2
+              echo "SPACES_SETUP_FAILED_FIX=$3" >&2
+              echo "$4" >&2
+              exit 1
+            }
+            require_tool() {
+              command -v "$1" >/dev/null 2>&1 || fail requiredTools "command -v $1" "Install $1 on the remote host." "$1 is required on the remote host."
+            }
+            profile_root="${HOME}/.spaces/compute-hosts/\(hostID)"
+            daemon_root="${profile_root}/daemon"
+            requested_port=\(host.daemonEndpoint.port)
+            workspace_root_input=\(workspaceRoot)
+            case "${workspace_root_input}" in
+              '$HOME'|'$HOME/'*) workspace_root="${HOME}${workspace_root_input#\\$HOME}" ;;
+              '~'|'~/'*) workspace_root="${HOME}${workspace_root_input#\\~}" ;;
+              /*) workspace_root="${workspace_root_input}" ;;
+              *) workspace_root="${HOME}/${workspace_root_input}" ;;
+            esac
+            for tool in curl tar gzip lsof python3 git; do
+              require_tool "${tool}"
+            done
+            if command -v sha256sum >/dev/null 2>&1; then
+              :
+            elif command -v shasum >/dev/null 2>&1; then
+              :
+            else
+              fail requiredTools "command -v sha256sum || command -v shasum" "Install coreutils or Perl shasum on the remote host." "A SHA-256 checksum tool is required."
+            fi
+            mkdir -p "${profile_root}" "${daemon_root}/releases" "${profile_root}/uploads" "${profile_root}/runtime" "${profile_root}/bin" "${workspace_root}" \
+              || fail writableInstallRoot "mkdir -p ${profile_root}" "Make ~/.spaces writable for the SSH user." "Could not create the Spaces install root."
+            [ -w "${profile_root}" ] || fail writableInstallRoot "test -w ${profile_root}" "Make ~/.spaces writable for the SSH user." "The Spaces install root is not writable."
+            if [ "\(selectsAvailablePort ? "1" : "0")" = "1" ]; then
+              selected_port=""
+              port_candidate="${requested_port}"
+              last_port=$((requested_port + 9))
+              while [ "${port_candidate}" -le "${last_port}" ]; do
+                if ! lsof -nPiTCP:${port_candidate} -sTCP:LISTEN >/dev/null 2>&1; then
+                  selected_port="${port_candidate}"
+                  break
+                fi
+                port_candidate=$((port_candidate + 1))
+              done
+              [ -n "${selected_port}" ] || fail portAvailability "lsof -nPiTCP:${requested_port}-${last_port}" "Free a port in ${requested_port}-${last_port} or remove the conflicting listener." "No available spacesd port found in ${requested_port}-${last_port}."
+            fi
+            printf 'preflight=ok\\n'
+            """
+    }
+
+    static func remoteStartScript(
+        host: ComputeHostRecord, artifact: RemoteSpacesArtifact, selectsAvailablePort: Bool = false, cleanExistingProfile: Bool = false
+    ) -> String {
         let hostID = safePathComponent(host.id)
         let workspaceRoot = shellSingleQuoted(host.workspaceRoot)
         let port = host.daemonEndpoint.port
-        let cleanProfileScript: String
-        if cleanExistingProfile {
-            cleanProfileScript = """
-                lsof_path="$(command -v lsof || true)"
-                if [ -z "${lsof_path}" ]; then
-                  echo "lsof executable not found on remote host PATH." >&2
-                  exit 127
-                fi
-                port_pids="$("${lsof_path}" -tiTCP:${requested_port} -sTCP:LISTEN 2>/dev/null || true)"
-                if [ -n "${port_pids}" ]; then
-                  for pid in ${port_pids}; do
-                    kill "${pid}" >/dev/null 2>&1 || true
-                  done
-                  clean_attempt=0
-                  while [ "${clean_attempt}" -lt 40 ]; do
-                    if ! "${lsof_path}" -nPiTCP:${requested_port} -sTCP:LISTEN >/dev/null 2>&1; then
-                      break
-                    fi
-                    clean_attempt=$((clean_attempt + 1))
-                    sleep 0.25
-                  done
-                  if "${lsof_path}" -nPiTCP:${requested_port} -sTCP:LISTEN >/dev/null 2>&1; then
-                    for pid in $("${lsof_path}" -tiTCP:${requested_port} -sTCP:LISTEN 2>/dev/null || true); do
-                      kill -9 "${pid}" >/dev/null 2>&1 || true
-                    done
-                  fi
-                  clean_attempt=0
-                  while [ "${clean_attempt}" -lt 20 ]; do
-                    if ! "${lsof_path}" -nPiTCP:${requested_port} -sTCP:LISTEN >/dev/null 2>&1; then
-                      break
-                    fi
-                    clean_attempt=$((clean_attempt + 1))
-                    sleep 0.25
-                  done
-                  if "${lsof_path}" -nPiTCP:${requested_port} -sTCP:LISTEN >/dev/null 2>&1; then
-                    echo "remote E2E cleanup could not free spacesd port ${requested_port}." >&2
-                    exit 1
-                  fi
-                fi
-                rm -rf "${profile_root}"
-                """
-        } else {
-            cleanProfileScript = ""
-        }
+        let artifactID = shellSingleQuoted(artifact.id)
+        let artifactVersion = shellSingleQuoted(artifact.version)
+        let archiveURL = shellSingleQuoted(artifact.url)
+        let archiveSHA256 = shellSingleQuoted(artifact.sha256)
+        let archiveName = shellSingleQuoted(artifact.archiveName)
+        let cleanProfileScript = cleanExistingProfile ? #"rm -rf "${profile_root}""# : ""
         let portSelectionScript: String
         if selectsAvailablePort {
             portSelectionScript = """
-                lsof_path="$(command -v lsof || true)"
-                if [ -z "${lsof_path}" ]; then
-                  echo "lsof executable not found on remote host PATH." >&2
-                  exit 127
-                fi
                 selected_port=""
                 port_candidate="${requested_port}"
                 last_port=$((requested_port + 9))
                 while [ "${port_candidate}" -le "${last_port}" ]; do
-                  if ! "${lsof_path}" -nPiTCP:${port_candidate} -sTCP:LISTEN >/dev/null 2>&1; then
+                  if ! lsof -nPiTCP:${port_candidate} -sTCP:LISTEN >/dev/null 2>&1; then
                     selected_port="${port_candidate}"
                     break
                   fi
@@ -187,6 +357,11 @@ public struct ComputeHostBootstrapper {
                 selected_port="${requested_port}"
                 """
         }
+        let requiredPortAvailabilityScript = """
+            if lsof -nPiTCP:${selected_port} -sTCP:LISTEN >/dev/null 2>&1; then
+              fail portAvailability "lsof -nPiTCP:${selected_port} -sTCP:LISTEN" "Stop the listener on port ${selected_port}, then retry setup." "Port ${selected_port} is already in use."
+            fi
+            """
 
         return """
             if [ -z "${spacesd_auth_token}" ]; then
@@ -195,10 +370,38 @@ public struct ComputeHostBootstrapper {
             fi
             set -eu
             PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+            fail() {
+              echo "SPACES_SETUP_FAILED_CHECK=$1" >&2
+              echo "SPACES_SETUP_FAILED_COMMAND=$2" >&2
+              echo "SPACES_SETUP_FAILED_FIX=$3" >&2
+              echo "$4" >&2
+              exit 1
+            }
+            checksum_file() {
+              if command -v sha256sum >/dev/null 2>&1; then
+                sha256sum "$1" | awk '{print $1}'
+              else
+                shasum -a 256 "$1" | awk '{print $1}'
+              fi
+            }
+            check_sha256sums() {
+              if command -v sha256sum >/dev/null 2>&1; then
+                sha256sum -c SHA256SUMS
+              else
+                shasum -a 256 -c SHA256SUMS
+              fi
+            }
             profile_root="${HOME}/.spaces/compute-hosts/\(hostID)"
+            daemon_root="${profile_root}/daemon"
             runtime_root="${profile_root}/runtime"
+            pid_path="${runtime_root}/spacesd.pid"
             db_path="${profile_root}/spaces.db"
             requested_port=\(port)
+            artifact_id=\(artifactID)
+            artifact_version=\(artifactVersion)
+            archive_url=\(archiveURL)
+            archive_sha256=\(archiveSHA256)
+            archive_name=\(archiveName)
             workspace_root_input=\(workspaceRoot)
             case "${workspace_root_input}" in
               '$HOME'|'$HOME/'*) workspace_root="${HOME}${workspace_root_input#\\$HOME}" ;;
@@ -207,186 +410,105 @@ public struct ComputeHostBootstrapper {
               *) workspace_root="${HOME}/${workspace_root_input}" ;;
             esac
             \(cleanProfileScript)
-            mkdir -p "${profile_root}" "${runtime_root}" "${workspace_root}" "${profile_root}/bin"
-            cat >"${profile_root}/bin/spaces" <<'SPACES_REMOTE_HELPER'
-            #!/usr/bin/env bash
-            set -euo pipefail
-
-            usage() {
-              echo "usage: spaces agent signal --workspace <id> --session <terminal-session-id> <init|start|waiting|done|exit>" >&2
-              exit 64
-            }
-
-            if [ "${1:-}" != "agent" ] || [ "${2:-}" != "signal" ]; then
-              usage
+            mkdir -p "${profile_root}" "${daemon_root}/releases" "${profile_root}/uploads" "${runtime_root}" "${workspace_root}" "${profile_root}/bin"
+            release_root="${daemon_root}/releases/${artifact_version}"
+            if [ ! -x "${release_root}/bin/spacesd" ]; then
+              tmp_dir="$(mktemp -d "${profile_root}/uploads/spacesd.XXXXXX")"
+              archive_path="${tmp_dir}/${archive_name}"
+              curl -fL "${archive_url}" -o "${archive_path}" \
+                || fail archiveChecksum "curl -fL ${archive_url}" "Confirm this Mac can access the GitHub Release asset from the remote host." "Could not download the selected spacesd archive."
+              actual_sha="$(checksum_file "${archive_path}")"
+              [ "${actual_sha}" = "${archive_sha256}" ] \
+                || fail archiveChecksum "sha256 ${archive_path}" "Retry setup; if it still fails, the release asset does not match the signed manifest." "Archive SHA-256 mismatch. Expected ${archive_sha256}, got ${actual_sha}."
+              extract_root="${tmp_dir}/extract"
+              mkdir -p "${extract_root}"
+              tar -xzf "${archive_path}" -C "${extract_root}" \
+                || fail internalChecksums "tar -xzf ${archive_path}" "Retry setup or republish the remote artifact archive." "Could not extract the selected spacesd archive."
+              [ -d "${extract_root}/${artifact_id}" ] \
+                || fail internalChecksums "test -d ${artifact_id}" "Republish the remote artifact with the expected root directory." "Archive root ${artifact_id} was not found."
+              (cd "${extract_root}/${artifact_id}" && check_sha256sums >/dev/null) \
+                || fail internalChecksums "sha256sum -c SHA256SUMS" "Retry setup or republish the remote artifact archive." "Archive internal SHA256SUMS validation failed."
+              rm -rf "${release_root}.tmp"
+              mv "${extract_root}/${artifact_id}" "${release_root}.tmp"
+              rm -rf "${release_root}"
+              mv "${release_root}.tmp" "${release_root}"
+              rm -rf "${tmp_dir}"
             fi
-            shift 2
-
-            workspace_id=""
-            session_id=""
-            event_type=""
-            while [ "$#" -gt 0 ]; do
-              case "${1}" in
-                --workspace)
-                  [ "$#" -ge 2 ] || usage
-                  workspace_id="${2}"
-                  shift 2
-                  ;;
-                --workspace=*)
-                  workspace_id="${1#--workspace=}"
-                  shift
-                  ;;
-                --session)
-                  [ "$#" -ge 2 ] || usage
-                  session_id="${2}"
-                  shift 2
-                  ;;
-                --session=*)
-                  session_id="${1#--session=}"
-                  shift
-                  ;;
-                init|start|waiting|done|exit)
-                  [ -z "${event_type}" ] || usage
-                  event_type="${1}"
-                  shift
-                  ;;
-                *)
-                  usage
-                  ;;
-              esac
-            done
-            [ -n "${workspace_id}" ] || usage
-            [ -n "${session_id}" ] || usage
-            [ -n "${event_type}" ] || usage
-
-            python3 - "${workspace_id}" "${session_id}" "${event_type}" <<'PY'
-            import datetime
-            import json
-            import os
-            import socket
-            import sys
-            import uuid
-
-            workspace_id, session_id, event_type = [argument.strip() for argument in sys.argv[1:4]]
-            allowed = {"init", "start", "waiting", "done", "exit"}
-            if event_type not in allowed:
-                print(f"unsupported agent signal event: {event_type}", file=sys.stderr)
-                sys.exit(64)
-
-            runtime_root = os.environ.get("SPACES_RUNTIME_DIR", "").strip()
-            if not runtime_root:
-                print("SPACES_RUNTIME_DIR is required for remote spaces agent signal.", file=sys.stderr)
-                sys.exit(64)
-
-            def socket_path():
-                override = os.environ.get("SPACESD_SERVICE_SOCKET", "").strip()
-                if override:
-                    return override
-                terminal_root = os.path.abspath(os.path.join(runtime_root, "terminal"))
-                value = 5381
-                for byte in terminal_root.encode("utf-8"):
-                    value = (((value << 5) + value) + byte) & 0xFFFFFFFFFFFFFFFF
-                return f"/tmp/spaces-terminal-sockets/service-{value:016x}.sock"
-
-            def optional_env(name):
-                value = os.environ.get(name, "").strip()
-                return value or None
-
-            created_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-            event = {
-                "id": str(uuid.uuid4()),
-                "sessionID": session_id,
-                "workspaceID": workspace_id,
-                "workspacePath": optional_env("SPACES_WORKSPACE_DIR"),
-                "type": event_type,
-                "provider": "spaces",
-                "label": optional_env("SPACES_AGENT_LABEL"),
-                "terminalTrackingID": session_id,
-                "terminalNativeID": session_id,
-                "codexThreadID": optional_env("CODEX_THREAD_ID"),
-                "environmentKeys": sorted(os.environ.keys()),
-                "createdAt": created_at,
-            }
-            request = {"command": "agentSignal", "sessionID": session_id, "agentSignal": event}
-
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            try:
-                sock.connect(socket_path())
-                sock.sendall(json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\\n")
-                sock.shutdown(socket.SHUT_WR)
-                data = bytearray()
-                while True:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    data.extend(chunk)
-                    if b"\\n" in chunk:
-                        break
-            finally:
-                sock.close()
-
-            line = bytes(data).split(b"\\n", 1)[0]
-            response = json.loads(line.decode("utf-8"))
-            if not response.get("ok"):
-                print(response.get("message") or "remote spacesd rejected agent signal", file=sys.stderr)
-                sys.exit(1)
-
-            print(f"Agent {event_type}: queued remote signal\\tsession={session_id}")
-            PY
-            SPACES_REMOTE_HELPER
-            chmod +x "${profile_root}/bin/spaces"
-            spacesd_path=""
-            if [ -x "${HOME}/bin/spacesd" ]; then
-              spacesd_path="${HOME}/bin/spacesd"
-            else
-              spacesd_path="$(command -v spacesd || true)"
-            fi
-            if [ -z "${spacesd_path}" ]; then
-              echo "spacesd executable not found on remote host PATH." >&2
-              exit 127
-            fi
-            spacesd_bin_dir="$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "${spacesd_path}" 2>/dev/null || dirname "${spacesd_path}")"
-            PATH="${profile_root}/bin:${spacesd_bin_dir}:$PATH"
+            ln -sfn "releases/${artifact_version}" "${daemon_root}/current"
+            ln -sfn "${daemon_root}/current/bin" "${daemon_root}/bin"
+            ln -sfn "${daemon_root}/bin/spaces" "${profile_root}/bin/spaces"
+            spacesd_path="${daemon_root}/bin/spacesd"
+            [ -x "${spacesd_path}" ] || fail daemonLaunch "test -x ${spacesd_path}" "Retry setup or republish the remote artifact archive." "Managed spacesd is not executable after install."
+            PATH="${profile_root}/bin:${daemon_root}/bin:$PATH"
             fingerprint="$(SPACES_DB_PATH="${db_path}" SPACES_RUNTIME_DIR="${runtime_root}" SPACESD_PRINT_CERTIFICATE_FINGERPRINT=1 "${spacesd_path}")"
             if [ -z "${fingerprint}" ]; then
-              echo "spacesd did not print a certificate fingerprint." >&2
-              exit 1
+              fail certificateFingerprint "SPACESD_PRINT_CERTIFICATE_FINGERPRINT=1 ${spacesd_path}" "Check the managed spacesd log and retry setup." "spacesd did not print a certificate fingerprint."
             fi
             \(portSelectionScript)
+            \(requiredPortAvailabilityScript)
             log_path="${profile_root}/spacesd-${selected_port}.log"
-            daemon_pid=""
-            if [ -z "${lsof_path:-}" ]; then
-              lsof_path="$(command -v lsof || true)"
-            fi
-            if ! { [ -n "${lsof_path}" ] && "${lsof_path}" -nPiTCP:${selected_port} -sTCP:LISTEN >/dev/null 2>&1; }; then
-              nohup env PATH="${PATH}" SPACES_DB_PATH="${db_path}" SPACES_RUNTIME_DIR="${runtime_root}" SPACESD_LISTEN_PORT="${selected_port}" SPACESD_AUTH_TOKEN="${spacesd_auth_token}" "${spacesd_path}" >>"${log_path}" 2>&1 &
-              daemon_pid="$!"
-            fi
-            if [ -n "${lsof_path}" ]; then
-              ready_attempt=0
-              listener_ready=0
-              while [ "${ready_attempt}" -lt 100 ]; do
-                if "${lsof_path}" -nPiTCP:${selected_port} -sTCP:LISTEN >/dev/null 2>&1; then
-                  listener_ready=1
-                  break
-                fi
-                ready_attempt=$((ready_attempt + 1))
-                sleep 0.2
-              done
-              if [ "${listener_ready}" != "1" ]; then
-                echo "spacesd did not start listening on port ${selected_port}." >&2
-                if [ -f "${log_path}" ]; then tail -n 40 "${log_path}" >&2 || true; fi
-                exit 1
+            nohup env PATH="${PATH}" SPACES_DB_PATH="${db_path}" SPACES_RUNTIME_DIR="${runtime_root}" SPACESD_LISTEN_PORT="${selected_port}" SPACESD_AUTH_TOKEN="${spacesd_auth_token}" SPACESD_ARTIFACT_VERSION="${artifact_version}" "${spacesd_path}" >>"${log_path}" 2>&1 &
+            daemon_pid="$!"
+            printf '%s\\n' "${daemon_pid}" > "${pid_path}"
+            ready_attempt=0
+            listener_ready=0
+            while [ "${ready_attempt}" -lt 100 ]; do
+              if lsof -nPiTCP:${selected_port} -sTCP:LISTEN >/dev/null 2>&1; then
+                listener_ready=1
+                break
               fi
-            else
-              sleep 1
+              ready_attempt=$((ready_attempt + 1))
+              sleep 0.2
+            done
+            if [ "${listener_ready}" != "1" ]; then
+              if [ -f "${log_path}" ]; then tail -n 40 "${log_path}" >&2 || true; fi
+              fail daemonLaunch "SPACESD_LISTEN_PORT=${selected_port} ${spacesd_path}" "Inspect ${log_path} on \(host.sshHost) and retry setup." "spacesd did not start listening on port ${selected_port}."
             fi
             printf 'fingerprint=%s\\n' "${fingerprint}"
             printf 'workspace_root=%s\\n' "${workspace_root}"
             printf 'port=%s\\n' "${selected_port}"
             printf 'pid=%s\\n' "${daemon_pid}"
             printf 'log=%s\\n' "${log_path}"
+            printf 'artifact_id=%s\\n' "${artifact_id}"
+            printf 'artifact_version=%s\\n' "${artifact_version}"
+            """
+    }
+
+    static func remoteUninstallScript(host: ComputeHostRecord) -> String {
+        let hostID = safePathComponent(host.id)
+        let port = host.daemonEndpoint.port
+        return """
+            set -eu
+            PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+            fail() {
+              echo "SPACES_SETUP_FAILED_CHECK=$1" >&2
+              echo "SPACES_SETUP_FAILED_COMMAND=$2" >&2
+              echo "SPACES_SETUP_FAILED_FIX=$3" >&2
+              echo "$4" >&2
+              exit 1
+            }
+            profile_root="${HOME}/.spaces/compute-hosts/\(hostID)"
+            daemon_root="${profile_root}/daemon"
+            runtime_root="${profile_root}/runtime"
+            pid_path="${runtime_root}/spacesd.pid"
+            daemon_port=\(port)
+            command -v lsof >/dev/null 2>&1 || fail requiredTools "command -v lsof" "Install lsof on the remote host." "lsof is required to confirm spacesd has stopped."
+            if [ -f "${pid_path}" ]; then
+              old_pid="$(cat "${pid_path}" 2>/dev/null || true)"
+              if [ -n "${old_pid}" ] && kill -0 "${old_pid}" >/dev/null 2>&1; then
+                old_command="$(ps -p "${old_pid}" -o command= 2>/dev/null || true)"
+                case "${old_command}" in
+                  *"${profile_root}/daemon/"*) fail daemonLaunch "spacesd shutdownIfIdle" "Wait for the managed spacesd process ${old_pid} to exit, then retry uninstall." "Managed spacesd is still running." ;;
+                  *) fail daemonLaunch "ps -p ${old_pid} -o command=" "Stop the non-managed process recorded at ${pid_path}, then retry uninstall." "Recorded pid ${old_pid} is not the managed spacesd process." ;;
+                esac
+              fi
+            fi
+            if lsof -nPiTCP:${daemon_port} -sTCP:LISTEN >/dev/null 2>&1; then
+              fail daemonLaunch "lsof -nPiTCP:${daemon_port} -sTCP:LISTEN" "Wait for spacesd on port ${daemon_port} to exit, then retry uninstall." "spacesd is still listening on port ${daemon_port}."
+            fi
+            rm -rf "${daemon_root}" "${profile_root}/uploads"
+            rm -f "${profile_root}/bin/spaces" "${pid_path}"
+            printf 'uninstalled=1\\n'
             """
     }
 
@@ -432,6 +554,39 @@ public struct ComputeHostBootstrapper {
     }
 
     private static func shellSingleQuoted(_ value: String) -> String { "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'" }
+
+    private static func shellArgument(_ value: String) -> String {
+        guard !value.isEmpty else { return "''" }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+-./:@")
+        if value.unicodeScalars.allSatisfy({ allowed.contains($0) }) { return value }
+        return shellSingleQuoted(value)
+    }
+
+    private static func parseSetupFailure(_ error: Error) -> (checkID: ComputeHostSetupCheckID, command: String?, fixHint: String?, detail: String) {
+        let description = errorDescription(error)
+        var values: [String: String] = [:]
+        var details: [String] = []
+        for rawLine in description.split(whereSeparator: \.isNewline) {
+            let line = String(rawLine)
+            if line.hasPrefix("SPACES_SETUP_FAILED_") {
+                let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                if parts.count == 2 { values[String(parts[0])] = String(parts[1]) }
+            } else if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                details.append(line)
+            }
+        }
+        let checkID = values["SPACES_SETUP_FAILED_CHECK"].flatMap(ComputeHostSetupCheckID.init(rawValue:)) ?? .daemonLaunch
+        return (
+            checkID, values["SPACES_SETUP_FAILED_COMMAND"], values["SPACES_SETUP_FAILED_FIX"],
+            details.isEmpty ? description : details.joined(separator: "\n")
+        )
+    }
+
+    private static func errorDescription(_ error: Error) -> String { (error as? LocalizedError)?.errorDescription ?? error.localizedDescription }
+
+    private static func defaultArtifactManifestProvider() throws -> RemoteSpacesArtifactManifest {
+        try RemoteSpacesArtifactReleaseSource.githubRelease().loadManifest()
+    }
 
     private static func defaultRunCommand(_ command: [String], standardInput: String, timeout: TimeInterval) throws -> String {
         let process = Process()

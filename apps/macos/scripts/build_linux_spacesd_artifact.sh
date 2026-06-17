@@ -12,7 +12,14 @@ GHOSTTYVT_LIB_ROOT="$GHOSTTYVT_ROOT/lib"
 
 ZIG_VERSION="0.15.2"
 GHOSTTY_BUILD_OPTIMIZE="${SPACES_GHOSTTY_BUILD_OPTIMIZE:-ReleaseFast}"
-ARTIFACT_ID="spacesd-ubuntu-24.04-x86_64"
+host_arch="$(uname -m)"
+case "$host_arch" in
+    x86_64|amd64) DEFAULT_ARTIFACT_ARCH="x86_64" ;;
+    aarch64|arm64) DEFAULT_ARTIFACT_ARCH="arm64" ;;
+    *) DEFAULT_ARTIFACT_ARCH="$host_arch" ;;
+esac
+ARTIFACT_ARCH="${SPACES_LINUX_ARTIFACT_ARCH:-$DEFAULT_ARTIFACT_ARCH}"
+ARTIFACT_ID="spacesd-ubuntu-24.04-$ARTIFACT_ARCH"
 OUTPUT_DIR="$REPO_ROOT/dist/linux"
 BUILD_CONFIGURATION="release"
 BUILD_GHOSTTY_VT=1
@@ -20,16 +27,16 @@ SMOKE=1
 
 usage() {
     cat <<'EOF'
-Usage: apps/macos/scripts/build_linux_spacesd_artifact.sh [--output-dir DIR] [--debug] [--skip-ghostty-vt-build] [--skip-smoke]
+Usage: apps/macos/scripts/build_linux_spacesd_artifact.sh [--output-dir DIR] [--debug] [--arch x86_64|arm64] [--skip-ghostty-vt-build] [--skip-smoke]
 
-Builds the Ubuntu 24.04 x86_64 remote spacesd artifact. The archive contains:
-  spacesd-ubuntu-24.04-x86_64/bin/spaces
-  spacesd-ubuntu-24.04-x86_64/bin/spacesd
-  spacesd-ubuntu-24.04-x86_64/bin/spacesd-bin
-  spacesd-ubuntu-24.04-x86_64/bin/libghostty-vt.so*
-  spacesd-ubuntu-24.04-x86_64/lib/libswift*.so and related Swift runtime libraries
-  spacesd-ubuntu-24.04-x86_64/manifest.json
-  spacesd-ubuntu-24.04-x86_64/SHA256SUMS
+Builds the Ubuntu 24.04 remote spacesd artifact for the current host architecture. The archive contains:
+  spacesd-ubuntu-24.04-<arch>/bin/spaces
+  spacesd-ubuntu-24.04-<arch>/bin/spacesd
+  spacesd-ubuntu-24.04-<arch>/bin/spacesd-bin
+  spacesd-ubuntu-24.04-<arch>/bin/libghostty-vt.so*
+  spacesd-ubuntu-24.04-<arch>/lib/libswift*.so and related Swift runtime libraries
+  spacesd-ubuntu-24.04-<arch>/manifest.json
+  spacesd-ubuntu-24.04-<arch>/SHA256SUMS
 EOF
 }
 
@@ -48,6 +55,12 @@ while [[ "$#" -gt 0 ]]; do
         --debug)
             BUILD_CONFIGURATION="debug"
             shift
+            ;;
+        --arch)
+            [[ "$#" -ge 2 ]] || die "--arch requires x86_64 or arm64"
+            ARTIFACT_ARCH="$2"
+            ARTIFACT_ID="spacesd-ubuntu-24.04-$ARTIFACT_ARCH"
+            shift 2
             ;;
         --skip-ghostty-vt-build)
             BUILD_GHOSTTY_VT=0
@@ -75,9 +88,14 @@ require_command() {
     command_exists "$1" || die "required command not found: $1"
 }
 
-require_linux_x86_64() {
+require_linux_supported_arch() {
     [[ "$(uname -s)" == "Linux" ]] || die "Linux spacesd artifacts must be built on Linux"
-    [[ "$(uname -m)" == "x86_64" ]] || die "Linux spacesd artifacts must be built on x86_64"
+    local machine
+    machine="$(uname -m)"
+    case "$ARTIFACT_ARCH:$machine" in
+        x86_64:x86_64|x86_64:amd64|arm64:aarch64|arm64:arm64) ;;
+        *) die "Linux spacesd $ARTIFACT_ARCH artifacts must be built on matching Linux architecture; current machine is $machine" ;;
+    esac
 }
 
 resolve_ghostty_sha() {
@@ -131,7 +149,13 @@ ghostty_app_version() {
 }
 
 ensure_zig() {
-    local archive_name="zig-x86_64-linux-$ZIG_VERSION"
+    local zig_arch
+    case "$ARTIFACT_ARCH" in
+        x86_64) zig_arch="x86_64" ;;
+        arm64) zig_arch="aarch64" ;;
+        *) die "unsupported Linux spacesd artifact architecture: $ARTIFACT_ARCH" ;;
+    esac
+    local archive_name="zig-$zig_arch-linux-$ZIG_VERSION"
     local toolchain_root="$APP_ROOT/.local/linux-toolchain"
     local zig_install_root="$toolchain_root/$archive_name"
     local zig_bin="$zig_install_root/zig"
@@ -288,22 +312,59 @@ write_spaces_wrapper() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${1:-}" != "signal" ]]; then
-    echo "This remote Spaces helper only supports: spaces signal <event> [workspace-dir]" >&2
+usage() {
+    echo "usage: spaces agent signal --workspace <id> --session <terminal-session-id> <init|start|waiting|done|exit>" >&2
+}
+
+if [[ "${1:-}" != "agent" || "${2:-}" != "signal" ]]; then
+    usage
     exit 64
 fi
-shift
+shift 2
 
-event_type="${1:-}"
-if [[ -z "$event_type" ]]; then
-    echo "usage: spaces signal <event> [workspace-dir]" >&2
+workspace_id=""
+session_id=""
+event_type=""
+while [[ "$#" -gt 0 ]]; do
+    case "${1}" in
+        --workspace)
+            [[ "$#" -ge 2 ]] || { echo "missing --workspace value" >&2; exit 64; }
+            workspace_id="${2}"
+            shift 2
+            ;;
+        --workspace=*)
+            workspace_id="${1#--workspace=}"
+            shift
+            ;;
+        --session)
+            [[ "$#" -ge 2 ]] || { echo "missing --session value" >&2; exit 64; }
+            session_id="${2}"
+            shift 2
+            ;;
+        --session=*)
+            session_id="${1#--session=}"
+            shift
+            ;;
+        init|start|waiting|done|exit)
+            [[ -z "$event_type" ]] || { echo "duplicate event" >&2; exit 64; }
+            event_type="${1}"
+            shift
+            ;;
+        *)
+            usage
+            exit 64
+            ;;
+    esac
+done
+
+[[ -n "$workspace_id" && -n "$session_id" && -n "$event_type" ]] || {
+    usage
     exit 64
-fi
-shift || true
+}
 
-workspace_path="${1:-}"
+workspace_path="${SPACES_WORKSPACE_DIR:-}"
 
-python3 - "$event_type" "$workspace_path" <<'PY'
+python3 - "$event_type" "$workspace_id" "$session_id" "$workspace_path" <<'PY'
 import datetime
 import json
 import os
@@ -312,21 +373,13 @@ import sys
 import uuid
 
 event_type = sys.argv[1].strip()
-workspace_arg = sys.argv[2].strip()
+workspace_id = sys.argv[2].strip()
+session_id = sys.argv[3].strip()
+workspace_arg = sys.argv[4].strip()
 allowed = {"init", "start", "waiting", "done", "exit"}
 if event_type not in allowed:
     print(f"unsupported agent signal event: {event_type}", file=sys.stderr)
     sys.exit(64)
-
-terminal_host = os.environ.get("SPACES_TERMINAL_HOST", "").strip().lower()
-if terminal_host != "spaces":
-    print(f"Dropped agent event {event_type}: non-Spaces terminal")
-    sys.exit(0)
-
-session_id = os.environ.get("SPACES_TERMINAL_TRACKING_ID", "").strip()
-if not session_id:
-    print(f"Dropped agent event {event_type}: untracked Spaces terminal")
-    sys.exit(0)
 
 def socket_path():
     override = os.environ.get("SPACESD_SERVICE_SOCKET", "").strip()
@@ -334,7 +387,7 @@ def socket_path():
         return override
     runtime_root = os.environ.get("SPACES_RUNTIME_DIR", "").strip()
     if not runtime_root:
-        raise RuntimeError("SPACES_RUNTIME_DIR is required for remote spaces signal.")
+        raise RuntimeError("SPACES_RUNTIME_DIR is required for remote spaces agent signal.")
     terminal_root = os.path.abspath(os.path.join(runtime_root, "terminal"))
     value = 5381
     for byte in terminal_root.encode("utf-8"):
@@ -350,11 +403,10 @@ workspace_path = workspace_arg or optional_env("SPACES_WORKSPACE_DIR") or os.get
 event = {
     "id": str(uuid.uuid4()),
     "sessionID": session_id,
-    "workspaceID": optional_env("SPACES_WORKSPACE_ID"),
+    "workspaceID": workspace_id,
     "workspacePath": workspace_path,
     "type": event_type,
     "provider": "spaces",
-    "label": optional_env("SPACES_AGENT_LABEL"),
     "terminalTrackingID": session_id,
     "terminalNativeID": session_id,
     "codexThreadID": optional_env("CODEX_THREAD_ID"),
@@ -414,7 +466,7 @@ manifest = {
     "schema_version": 1,
     "artifact_id": artifact_id,
     "platform": "ubuntu-24.04",
-    "architecture": "x86_64",
+    "architecture": artifact_id.rsplit("-", 1)[-1],
     "configuration": configuration,
     "ghostty_sha": ghostty_sha,
     "git_sha": git_sha,
@@ -551,7 +603,8 @@ PY
         env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
             SPACES_TERMINAL_HOST=spaces SPACES_TERMINAL_TRACKING_ID=linux-artifact-smoke \
             SPACES_WORKSPACE_ID=artifact-workspace SPACES_WORKSPACE_DIR="$smoke_root/work" \
-            bin/spaces signal waiting "$smoke_root/work" >/tmp/spaces-linux-signal-smoke.log
+            bin/spaces agent signal --workspace artifact-workspace --session linux-artifact-smoke waiting >/tmp/spaces-linux-signal-smoke.log
+        bin/spaces signal waiting >/tmp/spaces-linux-signal-legacy-smoke.log 2>&1 && exit 1 || test "$?" -eq 64
         python3 - "$smoke_root" <<'PY'
 import json
 import os
@@ -589,7 +642,7 @@ PY
     rm -rf "$smoke_root"
 }
 
-require_linux_x86_64
+require_linux_supported_arch
 require_command git
 require_command python3
 require_command sha256sum

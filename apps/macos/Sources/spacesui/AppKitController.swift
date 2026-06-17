@@ -64,6 +64,31 @@ private final class CommandPalettePanel: NSPanel {
     }
 }
 
+private struct RemoteHostSetupRetryState {
+    let draft: ComputeHostDraft?
+    let existingHost: ComputeHostRecord?
+    let authToken: String
+}
+
+private struct RemoteHostUpgradeResult: Sendable {
+    let host: ComputeHostRecord
+    let authToken: String
+    let outcome: ComputeHostBootstrapOutcome?
+    let report: ComputeHostDaemonStatusReport
+    let alreadyCurrent: Bool
+}
+
+private struct RemoteHostActiveSessionsError: LocalizedError, Sendable {
+    let host: ComputeHostRecord
+    let action: String
+    let activeSessionCount: Int
+    let sessions: [TerminalServiceSessionSummary]
+
+    var errorDescription: String? {
+        "\(host.name) has \(activeSessionCount) active remote session\(activeSessionCount == 1 ? "" : "s"). Stop those sessions before \(action)."
+    }
+}
+
 protocol ProcessLifecyclePolicyController {
     func disableAutomaticTermination(_ reason: String)
     func disableSuddenTermination()
@@ -263,6 +288,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var remoteHostsPanel: NSPanel?
     private var remoteHostAdvancedVisible = false
     private var remoteHostStatusByID: [String: String] = [:]
+    private var remoteHostSetupByID: [String: ComputeHostSetupChecklist] = [:]
+    private var remoteHostSetupRetryByID: [String: RemoteHostSetupRetryState] = [:]
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private lazy var updaterController: SPUStandardUpdaterController? = {
@@ -276,6 +303,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var showWindowIssueModalIPCObserver: NSObjectProtocol?
     private var cycleWorkspaceWindowIPCObserver: NSObjectProtocol?
     private var openWorkspaceTerminalIPCObserver: NSObjectProtocol?
+    private var triggerComputeHostUpgradeIPCObserver: NSObjectProtocol?
     private var runWorkspaceProcessIPCObserver: NSObjectProtocol?
     private var stopWorkspaceProcessIPCObserver: NSObjectProtocol?
     private var restartWorkspaceProcessIPCObserver: NSObjectProtocol?
@@ -378,8 +406,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let takeoverMessage: String?
     }
 
-    struct TerminalRuntimeControlDescriptor: Equatable {
-        enum Kind: Equatable {
+    struct TerminalRuntimeControlDescriptor: Equatable, Sendable {
+        enum Kind: Equatable, Sendable {
             case process
             case codingAgent
             case workspaceTerminal
@@ -398,6 +426,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let canRun: Bool
         let canStop: Bool
         let canRestart: Bool
+    }
+
+    struct RemoteHostUpgradeSessionStopPlan: Equatable, Sendable {
+        enum LocalStop: Equatable, Sendable {
+            case process(workspaceID: String, processID: String)
+            case codingAgent(workspaceID: String, agentID: String)
+            case workspaceTerminal(workspaceID: String, sessionID: String)
+        }
+
+        let localStop: LocalStop?
+        let remoteSessionID: String
     }
 
     enum WindowFocusRequest: Sendable {
@@ -496,6 +535,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupCycleWorkspaceWindowIPCObserver()
         setupSelectWorkspaceDetailIPCObserver()
         setupOpenWorkspaceTerminalIPCObserver()
+        setupTriggerComputeHostUpgradeIPCObserver()
         setupRunWorkspaceProcessIPCObserver()
         setupStopWorkspaceProcessIPCObserver()
         setupRestartWorkspaceProcessIPCObserver()
@@ -623,6 +663,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             DistributedNotificationCenter.default().removeObserver(openWorkspaceTerminalIPCObserver)
             self.openWorkspaceTerminalIPCObserver = nil
         }
+        if let triggerComputeHostUpgradeIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(triggerComputeHostUpgradeIPCObserver)
+            self.triggerComputeHostUpgradeIPCObserver = nil
+        }
         if let runWorkspaceProcessIPCObserver {
             DistributedNotificationCenter.default().removeObserver(runWorkspaceProcessIPCObserver)
             self.runWorkspaceProcessIPCObserver = nil
@@ -730,6 +774,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             self, selector: #selector(handleOpenWorkspaceTerminalIPC(_:)), name: IPCNotification.openWorkspaceTerminal, object: nil,
             suspensionBehavior: .deliverImmediately)
         openWorkspaceTerminalIPCObserver = self
+    }
+
+    private func setupTriggerComputeHostUpgradeIPCObserver() {
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleTriggerComputeHostUpgradeIPC(_:)), name: IPCNotification.triggerComputeHostUpgrade, object: nil,
+            suspensionBehavior: .deliverImmediately)
+        triggerComputeHostUpgradeIPCObserver = self
     }
 
     private func setupRunWorkspaceProcessIPCObserver() {
@@ -896,6 +947,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self, object, workspaceID] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
             self.openWorkspaceTerminal(workspaceID: workspaceID, route: .ipc)
+        }
+    }
+
+    @objc private nonisolated func handleTriggerComputeHostUpgradeIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let hostID = notification.userInfo?[IPCNotification.computeHostIDUserInfoKey] as? String else { return }
+        Task { @MainActor [weak self, object, hostID] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            self.presentRemoteHostsPanel()
+            let sender = NSButton()
+            sender.identifier = NSUserInterfaceItemIdentifier(hostID)
+            self.upgradeSavedComputeHost(sender)
         }
     }
 
@@ -1442,6 +1505,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return TerminalRuntimeControlDescriptor(
             kind: .workspaceTerminal, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil, processTemplateID: nil,
             processKey: nil, agentID: nil, agentLauncherID: nil, agentLauncherName: nil, canRun: false, canStop: true, canRestart: false)
+    }
+
+    nonisolated static func remoteHostUpgradeSessionStopPlan(sessionID: String, descriptor: TerminalRuntimeControlDescriptor?)
+        -> RemoteHostUpgradeSessionStopPlan
+    {
+        var localStop: RemoteHostUpgradeSessionStopPlan.LocalStop?
+        if let descriptor {
+            switch descriptor.kind {
+            case .process: if let processID = descriptor.processID { localStop = .process(workspaceID: descriptor.workspaceID, processID: processID) }
+            case .codingAgent: if let agentID = descriptor.agentID { localStop = .codingAgent(workspaceID: descriptor.workspaceID, agentID: agentID) }
+            case .workspaceTerminal: localStop = .workspaceTerminal(workspaceID: descriptor.workspaceID, sessionID: descriptor.sessionID)
+            }
+        }
+        return RemoteHostUpgradeSessionStopPlan(localStop: localStop, remoteSessionID: sessionID)
     }
 
     private static func configuredProcessTemplate(for process: RunningProcessRecord, settings: WorkspaceSettings?) -> ProcessTemplate? {
@@ -4584,10 +4661,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             sender?.isEnabled = true
             guard let self else { return }
             switch result {
-            case .success:
-                remoteHostStatusByID[host.id] = "Reachable"
+            case .success(let report):
+                remoteHostStatusByID[host.id] = report.displayText
                 refreshVisibleRemoteHostsPanel()
-                showInfoMessage(title: "Remote host reachable", message: "\(host.name) responded over pinned TLS.")
+                showInfoMessage(title: "Remote host reachable", message: "\(host.name) responded over pinned TLS. \(report.displayText).")
             case .failure(let error):
                 remoteHostStatusByID[host.id] = "Unreachable"
                 refreshVisibleRemoteHostsPanel()
@@ -4596,14 +4673,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    nonisolated private static func testComputeHostConnection(host: ComputeHostRecord, authToken: String?) async -> Result<Void, Error> {
+    nonisolated private static func testComputeHostConnection(host: ComputeHostRecord, authToken: String?) async -> Result<
+        ComputeHostDaemonStatusReport, Error
+    > {
         await Task.detached(priority: .userInitiated) {
             do {
-                let response = try TerminalServiceClient.sendPinnedTLS(
-                    request: TerminalServiceRequest(command: "ping"), host: host.daemonEndpoint.host, port: host.daemonEndpoint.port,
-                    authToken: authToken, certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: 10)
+                let response = try remoteHostPingResponse(host: host, authToken: authToken)
                 guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-                return .success(())
+                return .success(remoteHostStatusReport(host: host, daemonStatus: response.daemonStatus))
             } catch { return .failure(error) }
         }.value
     }
@@ -4620,6 +4697,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     try orchestrator.upsertComputeHost(result.host)
                     try ComputeHostCredentialStore.saveAuthToken(authToken, hostID: result.host.id)
                     remoteHostStatusByID[result.host.id] = "Reachable"
+                    remoteHostSetupByID.removeValue(forKey: result.host.id)
+                    remoteHostSetupRetryByID.removeValue(forKey: result.host.id)
                     if let refs { clearComputeHostForm(refs) }
                     refreshVisibleRemoteHostsPanel()
                     let started = result.outcome.processID.map { " Started pid \($0)." } ?? ""
@@ -4629,14 +4708,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 } catch { showError(error) }
             case .failure(let error):
                 remoteHostStatusByID[host.id] = "Unreachable"
-                refreshVisibleRemoteHostsPanel()
-                showError(error)
+                if error is RemoteHostActiveSessionsError {
+                    remoteHostStatusByID[host.id] = "Reinstall blocked"
+                    refreshVisibleRemoteHostsPanel()
+                    showError(error)
+                } else {
+                    handleRemoteHostSetupFailure(
+                        error, fallbackHost: host, retryState: RemoteHostSetupRetryState(draft: nil, existingHost: host, authToken: authToken))
+                }
             }
         }
     }
 
     private func connectRemoteHost(
-        draft: ComputeHostDraft, existingHost: ComputeHostRecord?, authToken: String, sender: NSButton, refs: ComputeHostFormRefs
+        draft: ComputeHostDraft, existingHost: ComputeHostRecord?, authToken: String, sender: NSButton, refs: ComputeHostFormRefs?
     ) {
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
@@ -4649,16 +4734,46 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     try orchestrator.upsertComputeHost(result.host)
                     try ComputeHostCredentialStore.saveAuthToken(authToken, hostID: result.host.id)
                     remoteHostStatusByID[result.host.id] = "Reachable"
-                    clearComputeHostForm(refs)
+                    remoteHostSetupByID.removeValue(forKey: result.host.id)
+                    remoteHostSetupRetryByID.removeValue(forKey: result.host.id)
+                    if let refs { clearComputeHostForm(refs) }
                     refreshVisibleRemoteHostsPanel()
                     let started = result.outcome.processID.map { " Started pid \($0)." } ?? ""
                     showInfoMessage(
                         title: "Remote host ready", message: "\(result.host.name) responded over pinned TLS.\(started) Log: \(result.outcome.logPath)"
                     )
                 } catch { showError(error) }
-            case .failure(let error): showError(error)
+            case .failure(let error):
+                let fallbackHost =
+                    existingHost ?? (try? ComputeHostDraftBuilder.prepare(draft: draft, existing: existingHost, authToken: authToken))?.host
+                handleRemoteHostSetupFailure(
+                    error, fallbackHost: fallbackHost,
+                    retryState: RemoteHostSetupRetryState(draft: draft, existingHost: existingHost, authToken: authToken))
             }
         }
+    }
+
+    private func handleRemoteHostSetupFailure(_ error: Error, fallbackHost: ComputeHostRecord?, retryState: RemoteHostSetupRetryState) {
+        if let setupError = error as? ComputeHostSetupError {
+            remoteHostSetupByID[setupError.checklist.hostID] = setupError.checklist
+            remoteHostSetupRetryByID[setupError.checklist.hostID] = retryState
+            remoteHostStatusByID[setupError.checklist.hostID] = "Setup needed"
+            refreshVisibleRemoteHostsPanel()
+            return
+        }
+        if let fallbackHost {
+            let checklist = ComputeHostSetupChecklistBuilder.failure(
+                host: fallbackHost, failedCheck: .daemonLaunch, command: nil,
+                detail: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription,
+                fixHint: "Retry setup after fixing the remote host issue.")
+            remoteHostSetupByID[checklist.hostID] = checklist
+            remoteHostSetupRetryByID[checklist.hostID] = retryState
+            remoteHostStatusByID[checklist.hostID] = "Setup needed"
+            refreshVisibleRemoteHostsPanel()
+            return
+        }
+        refreshVisibleRemoteHostsPanel()
+        showError(error)
     }
 
     nonisolated private static func connectRemoteHost(draft: ComputeHostDraft, existingHost: ComputeHostRecord?, authToken: String) async -> Result<
@@ -4678,7 +4793,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ComputeHostBootstrapResult, Error
     > {
         await Task.detached(priority: .userInitiated) {
-            do { return .success(try startAndValidateComputeHost(host: host, authToken: authToken)) } catch { return .failure(error) }
+            do {
+                try shutdownRemoteHostIfReachableAndIdle(host: host, authToken: authToken, action: "reinstalling")
+                return .success(try startAndValidateComputeHost(host: host, authToken: authToken))
+            } catch { return .failure(error) }
         }.value
     }
 
@@ -4688,18 +4806,224 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         updatedHost.workspaceRoot = outcome.workspaceRoot
         updatedHost.daemonEndpoint = SpacesDaemonEndpoint(
             host: outcome.daemonHost, port: outcome.daemonPort, certificateFingerprint: outcome.certificateFingerprint)
+        try validatePinnedTLSAndMobile(host: updatedHost, authToken: authToken)
+        return ComputeHostBootstrapResult(host: updatedHost, authToken: authToken, outcome: outcome)
+    }
+
+    nonisolated private static func validatePinnedTLSAndMobile(host: ComputeHostRecord, authToken: String) throws {
         do {
-            let response = try TerminalServiceClient.sendPinnedTLS(
-                request: TerminalServiceRequest(command: "ping"), host: updatedHost.daemonEndpoint.host, port: updatedHost.daemonEndpoint.port,
-                authToken: authToken, certificateFingerprint: updatedHost.daemonEndpoint.certificateFingerprint, timeout: 10)
+            let response = try remoteHostPingResponse(host: host, authToken: authToken)
             guard response.ok else {
                 throw ComputeHostReachabilityError(
-                    host: updatedHost.daemonEndpoint.host, port: updatedHost.daemonEndpoint.port, underlyingDescription: response.message)
+                    host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, underlyingDescription: response.message)
             }
-        } catch let error as ComputeHostReachabilityError { throw error } catch {
-            throw ComputeHostReachabilityError(host: updatedHost.daemonEndpoint.host, port: updatedHost.daemonEndpoint.port, underlying: error)
+            try validateMobileCredentialProvisioning(host: host, authToken: authToken)
+        } catch let error as ComputeHostSetupError { throw error } catch let error as ComputeHostReachabilityError {
+            throw ComputeHostSetupError(
+                checklist: ComputeHostSetupChecklistBuilder.directTLSFailure(
+                    host: host, detail: error.errorDescription ?? error.localizedDescription), underlying: error)
+        } catch {
+            let reachability = ComputeHostReachabilityError(host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, underlying: error)
+            throw ComputeHostSetupError(
+                checklist: ComputeHostSetupChecklistBuilder.directTLSFailure(
+                    host: host, detail: reachability.errorDescription ?? reachability.localizedDescription), underlying: reachability)
         }
-        return ComputeHostBootstrapResult(host: updatedHost, authToken: authToken, outcome: outcome)
+    }
+
+    nonisolated private static func validateMobileCredentialProvisioning(host: ComputeHostRecord, authToken: String) throws {
+        let response = try TerminalServiceClient.sendPinnedTLS(
+            request: TerminalServiceRequest(
+                command: "mobileCredential", mobileCredentialRequest: TerminalServiceMobileCredentialRequest(operation: .list)),
+            host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: authToken,
+            certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: 10)
+        guard response.ok else {
+            let checklist = ComputeHostSetupChecklistBuilder.failure(
+                host: host, failedCheck: .mobileCredentialProvisioning, command: "mobileCredential list over pinned TLS", detail: response.message,
+                fixHint: "Relaunch the managed remote spacesd from this Spaces version and retry setup.")
+            throw ComputeHostSetupError(checklist: checklist, underlyingDescription: response.message)
+        }
+    }
+
+    nonisolated private static func remoteHostPingResponse(host: ComputeHostRecord, authToken: String?, timeout: TimeInterval = 10) throws
+        -> TerminalServiceResponse
+    {
+        try TerminalServiceClient.sendPinnedTLS(
+            request: TerminalServiceRequest(command: "ping"), host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: authToken,
+            certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: timeout)
+    }
+
+    nonisolated private static func remoteHostStatusReport(host: ComputeHostRecord, daemonStatus: TerminalServiceDaemonStatus?)
+        -> ComputeHostDaemonStatusReport
+    {
+        ComputeHostDaemonStatusReport(
+            daemonVersion: daemonStatus?.version, artifactVersion: daemonStatus?.artifactVersion,
+            certificateFingerprint: daemonStatus?.certificateFingerprint, activeSessionCount: daemonStatus?.activeSessionCount,
+            savedCertificateFingerprint: host.daemonEndpoint.certificateFingerprint)
+    }
+
+    nonisolated private static func remoteHostStatusReport(host: ComputeHostRecord, authToken: String?, timeout: TimeInterval = 10) throws
+        -> ComputeHostDaemonStatusReport
+    {
+        let response = try remoteHostPingResponse(host: host, authToken: authToken, timeout: timeout)
+        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+        return remoteHostStatusReport(host: host, daemonStatus: response.daemonStatus)
+    }
+
+    nonisolated private static func remoteHostSessionSummaries(host: ComputeHostRecord, authToken: String, timeout: TimeInterval = 10) throws
+        -> [TerminalServiceSessionSummary]
+    {
+        let response = try TerminalServiceClient.sendPinnedTLS(
+            request: TerminalServiceRequest(command: "list"), host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: authToken,
+            certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: timeout)
+        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+        return response.sessions ?? []
+    }
+
+    nonisolated private static func remoteHostSessionSummariesForUpgrade(host: ComputeHostRecord, authToken: String) async throws
+        -> [TerminalServiceSessionSummary]
+    { try await Task.detached(priority: .userInitiated) { try remoteHostSessionSummaries(host: host, authToken: authToken) }.value }
+
+    nonisolated private static func terminateRemoteHostSession(
+        host: ComputeHostRecord, authToken: String, sessionID: String, timeout: TimeInterval = 10
+    ) throws {
+        let response = try TerminalServiceClient.sendPinnedTLS(
+            request: TerminalServiceRequest(command: "terminate", sessionID: sessionID), host: host.daemonEndpoint.host,
+            port: host.daemonEndpoint.port, authToken: authToken, certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: timeout
+        )
+        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+    }
+
+    nonisolated private static func terminateRemoteHostSessionForUpgrade(host: ComputeHostRecord, authToken: String, sessionID: String) async throws {
+        try await Task.detached(priority: .userInitiated) { try terminateRemoteHostSession(host: host, authToken: authToken, sessionID: sessionID) }
+            .value
+    }
+
+    nonisolated private static func requireRemoteHostIdle(host: ComputeHostRecord, authToken: String, action: String) throws
+        -> ComputeHostDaemonStatusReport
+    { try requireRemoteHostIdle(host: host, authToken: authToken, action: action, report: remoteHostStatusReport(host: host, authToken: authToken)) }
+
+    nonisolated private static func requireRemoteHostIdle(
+        host: ComputeHostRecord, authToken: String, action: String, report: ComputeHostDaemonStatusReport
+    ) throws -> ComputeHostDaemonStatusReport {
+        guard let activeSessionCount = report.activeSessionCount else {
+            throw WorkspaceError.invalidArgument(
+                message: "\(host.name) did not report active session state. Stop remote sessions and the managed daemon before \(action).")
+        }
+        guard activeSessionCount == 0 else {
+            if let sessions = try? remoteHostSessionSummaries(host: host, authToken: authToken), !sessions.isEmpty {
+                throw RemoteHostActiveSessionsError(host: host, action: action, activeSessionCount: activeSessionCount, sessions: sessions)
+            }
+            throw WorkspaceError.invalidArgument(
+                message:
+                    "\(host.name) has \(activeSessionCount) active remote session\(activeSessionCount == 1 ? "" : "s"). Stop those sessions before \(action)."
+            )
+        }
+        return report
+    }
+
+    nonisolated private static func shutdownRemoteHostIfReachableAndIdle(host: ComputeHostRecord, authToken: String, action: String) throws {
+        guard let report = try? remoteHostStatusReport(host: host, authToken: authToken, timeout: 3) else { return }
+        _ = try requireRemoteHostIdle(host: host, authToken: authToken, action: action, report: report)
+        try shutdownRemoteHostIfIdle(host: host, authToken: authToken)
+    }
+
+    nonisolated private static func shutdownRemoteHostIfIdle(host: ComputeHostRecord, authToken: String) throws {
+        let response = try TerminalServiceClient.sendPinnedTLS(
+            request: TerminalServiceRequest(command: "shutdownIfIdle"), host: host.daemonEndpoint.host, port: host.daemonEndpoint.port,
+            authToken: authToken, certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: 10)
+        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+        guard waitForRemoteHostDaemonExit(ping: { _ = try remoteHostPingResponse(host: host, authToken: authToken, timeout: 1) }) else {
+            throw WorkspaceError.invalidArgument(
+                message:
+                    "\(host.name) accepted shutdown but is still reachable on \(host.daemonEndpoint.host):\(host.daemonEndpoint.port). Wait for the managed spacesd to exit, then retry."
+            )
+        }
+    }
+
+    nonisolated static func waitForRemoteHostDaemonExit(
+        attempts: Int = 50, pollInterval: TimeInterval = 0.2, sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+        ping: () throws -> Void
+    ) -> Bool {
+        let attemptCount = max(attempts, 1)
+        for attempt in 0..<attemptCount {
+            do { try ping() } catch { return true }
+            if attempt < attemptCount - 1 { sleep(pollInterval) }
+        }
+        return false
+    }
+
+    nonisolated static func shouldRequireRemoteHostIdleBeforeUpgrade(report: ComputeHostDaemonStatusReport) -> Bool {
+        report.upgradeState != .current
+    }
+
+    nonisolated private static func upgradeComputeHost(host: ComputeHostRecord, authToken: String) async -> Result<RemoteHostUpgradeResult, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let report = try remoteHostStatusReport(host: host, authToken: authToken)
+                if !shouldRequireRemoteHostIdleBeforeUpgrade(report: report) {
+                    return .success(RemoteHostUpgradeResult(host: host, authToken: authToken, outcome: nil, report: report, alreadyCurrent: true))
+                }
+                _ = try requireRemoteHostIdle(host: host, authToken: authToken, action: "upgrading", report: report)
+                try shutdownRemoteHostIfIdle(host: host, authToken: authToken)
+                let outcome = try ComputeHostBootstrapper().upgradeManagedSpacesDaemon(host: host, authToken: authToken)
+                var updatedHost = host
+                updatedHost.workspaceRoot = outcome.workspaceRoot
+                updatedHost.daemonEndpoint = SpacesDaemonEndpoint(
+                    host: outcome.daemonHost, port: outcome.daemonPort, certificateFingerprint: outcome.certificateFingerprint)
+                try validatePinnedTLSAndMobile(host: updatedHost, authToken: authToken)
+                let updatedResponse = try remoteHostPingResponse(host: updatedHost, authToken: authToken)
+                let updatedReport = remoteHostStatusReport(host: updatedHost, daemonStatus: updatedResponse.daemonStatus)
+                return .success(
+                    RemoteHostUpgradeResult(host: updatedHost, authToken: authToken, outcome: outcome, report: updatedReport, alreadyCurrent: false))
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func uninstallComputeHost(host: ComputeHostRecord, authToken: String?) async -> Result<Void, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                if let authToken, !authToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    try shutdownRemoteHostIfReachableAndIdle(host: host, authToken: authToken, action: "uninstalling")
+                }
+                try ComputeHostBootstrapper().uninstallManagedSpacesDaemon(host: host)
+                return .success(())
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated static func upgradeActiveRemoteSessionsAlertTitle(activeSessionCount: Int) -> String {
+        activeSessionCount == 1 ? "Stop Active Remote Session?" : "Stop Active Remote Sessions?"
+    }
+
+    nonisolated static func upgradeActiveRemoteSessionsActionTitle(activeSessionCount: Int) -> String {
+        activeSessionCount == 1 ? "Stop Session and Upgrade" : "Stop Sessions and Upgrade"
+    }
+
+    nonisolated static func upgradeActiveRemoteSessionsAlertDetail(
+        hostName: String, activeSessionCount: Int, sessions: [TerminalServiceSessionSummary]
+    ) -> String {
+        let shownSessions = Array(sessions.prefix(3))
+        let remainingCount = max(activeSessionCount, sessions.count) - shownSessions.count
+        var lines = ["\(hostName) has \(activeSessionCount) active remote session\(activeSessionCount == 1 ? "" : "s")."]
+        if !shownSessions.isEmpty {
+            lines.append("")
+            lines.append(contentsOf: shownSessions.map { "- \(upgradeActiveRemoteSessionSummary($0))" })
+            if remainingCount > 0 { lines.append("- \(remainingCount) more") }
+        }
+        lines.append("")
+        lines.append("Spaces can stop \(activeSessionCount == 1 ? "the session" : "these sessions") and continue upgrading, or you can cancel.")
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated private static func upgradeActiveRemoteSessionSummary(_ session: TerminalServiceSessionSummary) -> String {
+        let title = nonisolatedTrimmedNonEmpty(session.title) ?? "Terminal"
+        guard let workingDirectory = nonisolatedTrimmedNonEmpty(session.workingDirectory) else { return title }
+        return "\(title) (\(workingDirectory))"
+    }
+
+    nonisolated private static func nonisolatedTrimmedNonEmpty(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
     }
 
     private func buildShortcutRowsContainer() -> NSView {
@@ -7529,6 +7853,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(connectSection)
         constrainFormFieldToFillWidth(connectSection, in: stack)
 
+        for checklist in remoteHostSetupByID.values.sorted(by: { $0.hostName.localizedStandardCompare($1.hostName) == .orderedAscending })
+        where checklist.shouldShow {
+            let setupSection = remoteHostSetupSection(checklist)
+            stack.addArrangedSubview(setupSection)
+            constrainFormFieldToFillWidth(setupSection, in: stack)
+        }
+
         let savedSection = remoteHostSavedHostsSection()
         stack.addArrangedSubview(savedSection)
         constrainFormFieldToFillWidth(savedSection, in: stack)
@@ -7598,10 +7929,84 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func remoteHostSavedHostsSection() -> NSView {
-        let hosts = (try? orchestrator.listComputeHosts()) ?? []
+        let hosts = Self.savedRemoteHosts((try? orchestrator.listComputeHosts()) ?? [])
         let rows: [NSView]
         if hosts.isEmpty { rows = [helpTextLabel("No remote hosts are configured.")] } else { rows = hosts.map { remoteHostRow($0) } }
         return mobilePanelSection(icon: "externaldrive.badge.checkmark", title: "Saved Hosts", rows: rows)
+    }
+
+    private func remoteHostSetupSection(_ checklist: ComputeHostSetupChecklist) -> NSView {
+        var rows = checklist.rows.map { remoteHostSetupCheckRow($0) }
+        let retryButton = actionButton(
+            title: "Retry", symbol: "arrow.clockwise", tooltip: "Retry remote host setup", action: #selector(retryRemoteHostSetup(_:)), primary: true)
+        retryButton.identifier = NSUserInterfaceItemIdentifier(checklist.hostID)
+        retryButton.setAccessibilityIdentifier("remote-hosts-setup-retry-\(checklist.hostID)")
+
+        let copyButton = actionButton(
+            title: "Copy Diagnostics", symbol: "doc.on.doc", tooltip: "Copy setup diagnostics", action: #selector(copyRemoteHostSetupDiagnostics(_:)),
+            primary: false)
+        copyButton.identifier = NSUserInterfaceItemIdentifier(checklist.hostID)
+        copyButton.setAccessibilityIdentifier("remote-hosts-setup-copy-\(checklist.hostID)")
+
+        let sshButton = actionButton(
+            title: "Open SSH Command", symbol: "terminal", tooltip: "Open the SSH command for this host",
+            action: #selector(openRemoteHostSetupSSHCommand(_:)), primary: false)
+        sshButton.identifier = NSUserInterfaceItemIdentifier(checklist.hostID)
+        sshButton.setAccessibilityIdentifier("remote-hosts-setup-ssh-\(checklist.hostID)")
+
+        rows.append(mobilePanelButtonRow([retryButton, copyButton, sshButton]))
+        return mobilePanelSection(icon: "checklist", title: "Setup \(checklist.hostName)", rows: rows)
+    }
+
+    private func remoteHostSetupCheckRow(_ row: ComputeHostSetupCheckRow) -> NSView {
+        let symbol: String
+        let color: NSColor
+        switch row.status {
+        case .passed:
+            symbol = "checkmark.circle.fill"
+            color = .systemGreen
+        case .failed:
+            symbol = "exclamationmark.triangle.fill"
+            color = .systemOrange
+        case .skipped:
+            symbol = "minus.circle"
+            color = .tertiaryLabelColor
+        case .pending:
+            symbol = "circle"
+            color = .tertiaryLabelColor
+        }
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: row.status.rawValue)
+        icon.contentTintColor = color
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 14), icon.heightAnchor.constraint(equalToConstant: 14)])
+
+        let titleLabel = NSTextField(labelWithString: row.title)
+        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        titleLabel.textColor = row.status == .failed ? .labelColor : .secondaryLabelColor
+
+        let detailParts = [row.detail, row.command.map { "Check: \($0)" }, row.fixHint.map { "Fix: \($0)" }].compactMap { value -> String? in
+            guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return value
+        }
+        let detailLabel = helpTextLabel(detailParts.joined(separator: "\n"))
+
+        let textStack = NSStackView()
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.addArrangedSubview(titleLabel)
+        textStack.addArrangedSubview(detailLabel)
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let rowView = NSStackView()
+        rowView.orientation = .horizontal
+        rowView.alignment = .top
+        rowView.spacing = 8
+        rowView.addArrangedSubview(icon)
+        rowView.addArrangedSubview(textStack)
+        return rowView
     }
 
     private func remoteHostRow(_ host: ComputeHostRecord) -> NSView {
@@ -7632,20 +8037,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         checkButton.setAccessibilityIdentifier("remote-hosts-check-\(host.id)")
 
         let reconnectButton = actionButton(
-            title: "Reconnect", symbol: "arrow.triangle.2.circlepath", tooltip: "Reconnect over SSH and validate spacesd access",
+            title: "Reinstall", symbol: "arrow.triangle.2.circlepath", tooltip: "Reinstall over SSH and validate spacesd access",
             action: #selector(startSavedComputeHost(_:)), primary: false)
         reconnectButton.identifier = NSUserInterfaceItemIdentifier(host.id)
-        reconnectButton.setAccessibilityIdentifier("remote-hosts-reconnect-\(host.id)")
+        reconnectButton.setAccessibilityIdentifier("remote-hosts-reinstall-\(host.id)")
+
+        let upgradeButton = actionButton(
+            title: "Upgrade", symbol: "arrow.up.circle", tooltip: "Upgrade the managed spacesd when no remote sessions are active",
+            action: #selector(upgradeSavedComputeHost(_:)), primary: false)
+        upgradeButton.identifier = NSUserInterfaceItemIdentifier(host.id)
+        upgradeButton.setAccessibilityIdentifier("remote-hosts-upgrade-\(host.id)")
 
         let editButton = actionButton(
             title: "Edit", symbol: "pencil", tooltip: "Edit this remote host", action: #selector(editComputeHost(_:)), primary: false)
         editButton.identifier = NSUserInterfaceItemIdentifier(host.id)
         editButton.setAccessibilityIdentifier("remote-hosts-edit-\(host.id)")
 
-        let removeButton = actionButton(
-            title: "Remove", symbol: "trash", tooltip: "Remove this remote host", action: #selector(removeSavedComputeHost(_:)), primary: false)
-        removeButton.identifier = NSUserInterfaceItemIdentifier(host.id)
-        removeButton.setAccessibilityIdentifier("remote-hosts-remove-\(host.id)")
+        let uninstallButton = actionButton(
+            title: "Uninstall", symbol: "trash", tooltip: "Uninstall managed spacesd and remove this host",
+            action: #selector(removeSavedComputeHost(_:)), primary: false)
+        uninstallButton.identifier = NSUserInterfaceItemIdentifier(host.id)
+        uninstallButton.setAccessibilityIdentifier("remote-hosts-uninstall-\(host.id)")
 
         let row = NSStackView()
         row.orientation = .horizontal
@@ -7654,8 +8066,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         row.addArrangedSubview(textStack)
         row.addArrangedSubview(checkButton)
         row.addArrangedSubview(reconnectButton)
+        row.addArrangedSubview(upgradeButton)
         row.addArrangedSubview(editButton)
-        row.addArrangedSubview(removeButton)
+        row.addArrangedSubview(uninstallButton)
         return row
     }
 
@@ -7664,6 +8077,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let sshPort = host.sshPort else { return authority.isEmpty ? host.sshHost : authority }
         return "\(authority.isEmpty ? host.sshHost : authority):\(sshPort)"
     }
+
+    private func remoteHostSSHURL(for sshCommand: String) -> URL? {
+        let parts = sshCommand.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let authority = parts.last, authority != "ssh" else { return nil }
+        var components = URLComponents()
+        components.scheme = "ssh"
+        let userAndHost = authority.split(separator: "@", maxSplits: 1).map(String.init)
+        if userAndHost.count == 2 {
+            components.user = userAndHost[0]
+            components.host = userAndHost[1]
+        } else {
+            components.host = authority
+        }
+        if let portIndex = parts.firstIndex(of: "-p"), parts.indices.contains(portIndex + 1), let port = Int(parts[portIndex + 1]) {
+            components.port = port
+        }
+        return components.url
+    }
+
+    nonisolated static func savedRemoteHosts(_ hosts: [ComputeHostRecord]) -> [ComputeHostRecord] { hosts.filter { !$0.isLocal } }
 
     @objc private func toggleRemoteHostAdvanced() {
         remoteHostAdvancedVisible.toggle()
@@ -8191,7 +8624,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let draft = try computeHostDraft(from: refs)
             let existingHost = try refs.editingHostID.flatMap { try orchestrator.store.computeHost(id: $0) }
             let token =
-                try existingHost.flatMap { try ComputeHostCredentialStore.authToken(hostID: $0.id) } ?? ComputeHostCredentialStore.generateAuthToken()
+                try existingHost.flatMap { try ComputeHostCredentialStore.resolvedAuthToken(hostID: $0.id) }
+                ?? ComputeHostCredentialStore.generateAuthToken()
             connectRemoteHost(draft: draft, existingHost: existingHost, authToken: token, sender: sender, refs: refs)
         } catch { showError(error) }
     }
@@ -8202,7 +8636,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let host = try orchestrator.store.computeHost(id: hostID) else {
                 throw WorkspaceError.invalidArgument(message: "Compute host not found.")
             }
-            testComputeHostConnection(host: host, authToken: try ComputeHostCredentialStore.authToken(hostID: host.id), sender: sender)
+            testComputeHostConnection(host: host, authToken: try ComputeHostCredentialStore.resolvedAuthToken(hostID: host.id), sender: sender)
         } catch { showError(error) }
     }
 
@@ -8212,9 +8646,144 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let host = try orchestrator.store.computeHost(id: hostID) else {
                 throw WorkspaceError.invalidArgument(message: "Compute host not found.")
             }
-            let token = try ComputeHostCredentialStore.authToken(hostID: host.id) ?? ComputeHostCredentialStore.generateAuthToken()
+            let token = try ComputeHostCredentialStore.resolvedAuthToken(hostID: host.id) ?? ComputeHostCredentialStore.generateAuthToken()
             startComputeHostConnection(host: host, authToken: token, sender: sender, refs: nil)
         } catch { showError(error) }
+    }
+
+    @objc private func upgradeSavedComputeHost(_ sender: NSButton) {
+        guard let hostID = sender.identifier?.rawValue else { return }
+        do {
+            guard let host = try orchestrator.store.computeHost(id: hostID) else {
+                throw WorkspaceError.invalidArgument(message: "Compute host not found.")
+            }
+            let token = try resolvedSavedComputeHostAuthToken(host: host)
+            performSavedComputeHostUpgrade(host: host, authToken: token, sender: sender, stopActiveSessions: false)
+        } catch { showError(error) }
+    }
+
+    private func resolvedSavedComputeHostAuthToken(host: ComputeHostRecord) throws -> String {
+        guard let token = try ComputeHostCredentialStore.resolvedAuthToken(hostID: host.id) else {
+            throw WorkspaceError.invalidArgument(message: "Saved daemon token not found for \(host.name). Reinstall the host first.")
+        }
+        return token
+    }
+
+    private func performSavedComputeHostUpgrade(host: ComputeHostRecord, authToken: String, sender: NSButton?, stopActiveSessions: Bool) {
+        sender?.isEnabled = false
+        Task { @MainActor [weak self, weak sender] in
+            guard let self else {
+                sender?.isEnabled = true
+                return
+            }
+            if stopActiveSessions {
+                do { try await stopRemoteHostSessionsForUpgrade(host: host, authToken: authToken) } catch {
+                    sender?.isEnabled = true
+                    showError(error)
+                    return
+                }
+            }
+            let result = await Self.upgradeComputeHost(host: host, authToken: authToken)
+            sender?.isEnabled = true
+            switch result {
+            case .success(let result):
+                do {
+                    try orchestrator.upsertComputeHost(result.host)
+                    try ComputeHostCredentialStore.saveAuthToken(result.authToken, hostID: result.host.id)
+                    remoteHostStatusByID[result.host.id] = result.report.displayText
+                    remoteHostSetupByID.removeValue(forKey: result.host.id)
+                    remoteHostSetupRetryByID.removeValue(forKey: result.host.id)
+                    refreshVisibleRemoteHostsPanel()
+                    if result.alreadyCurrent {
+                        showInfoMessage(
+                            title: "Remote host current", message: "\(result.host.name) is already running the current managed spacesd artifact.")
+                    } else {
+                        let started = result.outcome?.processID.map { " Started pid \($0)." } ?? ""
+                        showInfoMessage(
+                            title: "Remote host upgraded", message: "\(result.host.name) upgraded and responded over pinned TLS.\(started)")
+                    }
+                } catch { showError(error) }
+            case .failure(let error):
+                remoteHostStatusByID[host.id] = "Upgrade blocked"
+                if !stopActiveSessions, let activeSessionsError = error as? RemoteHostActiveSessionsError {
+                    presentUpgradeActiveSessionsAlert(host: host, authToken: authToken, error: activeSessionsError, sender: sender)
+                } else if error is ComputeHostSetupError {
+                    handleRemoteHostSetupFailure(
+                        error, fallbackHost: host, retryState: RemoteHostSetupRetryState(draft: nil, existingHost: host, authToken: authToken))
+                } else {
+                    refreshVisibleRemoteHostsPanel()
+                    showError(error)
+                }
+            }
+        }
+    }
+
+    private func presentUpgradeActiveSessionsAlert(
+        host: ComputeHostRecord, authToken: String, error: RemoteHostActiveSessionsError, sender: NSButton?
+    ) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = Self.upgradeActiveRemoteSessionsAlertTitle(activeSessionCount: error.activeSessionCount)
+        alert.informativeText = Self.upgradeActiveRemoteSessionsAlertDetail(
+            hostName: host.name, activeSessionCount: error.activeSessionCount, sessions: error.sessions)
+        alert.addButton(withTitle: Self.upgradeActiveRemoteSessionsActionTitle(activeSessionCount: error.activeSessionCount))
+        let cancelButton = alert.addButton(withTitle: "Cancel")
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.keyEquivalentModifierMask = []
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            refreshVisibleRemoteHostsPanel()
+            return
+        }
+        performSavedComputeHostUpgrade(host: host, authToken: authToken, sender: sender, stopActiveSessions: true)
+    }
+
+    private func stopRemoteHostSessionsForUpgrade(host: ComputeHostRecord, authToken: String) async throws {
+        var stoppedSessionIDs = Set<String>()
+        for session in try await Self.remoteHostSessionSummariesForUpgrade(host: host, authToken: authToken) {
+            guard stoppedSessionIDs.insert(session.id).inserted else { continue }
+            let plan = Self.remoteHostUpgradeSessionStopPlan(
+                sessionID: session.id, descriptor: terminalRuntimeControlDescriptor(forSessionID: session.id))
+            try stopLocalRemoteHostSessionForUpgrade(plan.localStop)
+            try await Self.terminateRemoteHostSessionForUpgrade(host: host, authToken: authToken, sessionID: plan.remoteSessionID)
+        }
+        reloadData()
+    }
+
+    private func stopLocalRemoteHostSessionForUpgrade(_ localStop: RemoteHostUpgradeSessionStopPlan.LocalStop?) throws {
+        guard let localStop else { return }
+        switch localStop {
+        case .process(let workspaceID, let processID): try orchestrator.stopWorkspaceProcess(workspaceID: workspaceID, processID: processID)
+        case .codingAgent(let workspaceID, let agentID): try orchestrator.stopCodingAgent(workspaceID: workspaceID, agentID: agentID)
+        case .workspaceTerminal(let workspaceID, let sessionID):
+            _ = try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID)
+        }
+    }
+
+    @objc private func retryRemoteHostSetup(_ sender: NSButton) {
+        guard let hostID = sender.identifier?.rawValue, let retry = remoteHostSetupRetryByID[hostID] else { return }
+        sender.isEnabled = false
+        if let draft = retry.draft {
+            connectRemoteHost(draft: draft, existingHost: retry.existingHost, authToken: retry.authToken, sender: sender, refs: nil)
+        } else if let host = retry.existingHost {
+            startComputeHostConnection(host: host, authToken: retry.authToken, sender: sender, refs: nil)
+        } else {
+            sender.isEnabled = true
+        }
+    }
+
+    @objc private func copyRemoteHostSetupDiagnostics(_ sender: NSButton) {
+        guard let hostID = sender.identifier?.rawValue, let checklist = remoteHostSetupByID[hostID] else { return }
+        copyToPasteboard(checklist.diagnosticsText)
+    }
+
+    @objc private func openRemoteHostSetupSSHCommand(_ sender: NSButton) {
+        guard let hostID = sender.identifier?.rawValue, let checklist = remoteHostSetupByID[hostID] else { return }
+        copyToPasteboard(checklist.sshCommand)
+        if let url = remoteHostSSHURL(for: checklist.sshCommand) {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app", isDirectory: true))
+        }
     }
 
     @objc private func removeSavedComputeHost(_ sender: NSButton) {
@@ -8223,13 +8792,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let host = try orchestrator.store.computeHost(id: hostID) else {
                 throw WorkspaceError.invalidArgument(message: "Compute host not found.")
             }
+            try orchestrator.validateComputeHostDeletion(id: hostID)
             presentComputeHostRemoveConfirmation(host: host) { [weak self] confirmed in
                 guard confirmed, let self else { return }
-                do {
-                    try orchestrator.deleteComputeHost(id: hostID)
-                    remoteHostStatusByID.removeValue(forKey: hostID)
-                    refreshVisibleRemoteHostsPanel()
-                } catch { showError(error) }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    do {
+                        try orchestrator.validateComputeHostDeletion(id: hostID)
+                        let token = try ComputeHostCredentialStore.resolvedAuthToken(hostID: host.id)
+                        let result = await Self.uninstallComputeHost(host: host, authToken: token)
+                        if case .failure(let error) = result { throw error }
+                        try orchestrator.deleteComputeHost(id: hostID)
+                        remoteHostStatusByID.removeValue(forKey: hostID)
+                        remoteHostSetupByID.removeValue(forKey: hostID)
+                        remoteHostSetupRetryByID.removeValue(forKey: hostID)
+                        refreshVisibleRemoteHostsPanel()
+                    } catch { showError(error) }
+                }
             }
         } catch { showError(error) }
     }
@@ -11337,11 +11916,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func presentComputeHostRemoveConfirmation(host: ComputeHostRecord, confirm: @escaping (Bool) -> Void) {
         let alert = NSAlert()
-        alert.messageText = "Remove \(host.name)?"
+        alert.messageText = "Uninstall \(host.name)?"
         alert.informativeText =
-            "This removes the remote host and deletes its saved daemon token. Workspaces assigned to the host must be removed first."
+            "This stops an idle managed spacesd, removes managed daemon binaries and uploads, and deletes the saved host and daemon token. Workspace roots and remote worktrees are preserved. Workspaces assigned to this host must be removed first."
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Uninstall")
         alert.addButton(withTitle: "Cancel")
         confirm(alert.runModal() == .alertFirstButtonReturn)
     }

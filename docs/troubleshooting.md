@@ -26,14 +26,15 @@ yabai -m query --windows --window
 
 ## spaces Diagnostics
 
-Register the current directory as a workspace:
+List projects and create an explicit workspace:
 ```bash
-spaces import --title "debug" --notes "Local troubleshooting session"
+spaces project list
+spaces workspace create --project <project-id> --branch debug --host local --title "debug"
 ```
 
 Force a clean runtime restart:
 ```bash
-spaces restart
+spaces workspace restart --workspace <workspace-id>
 ```
 
 ## Runtime Logs

@@ -19,12 +19,12 @@ struct SpacesE2ECommand: ParsableCommand {
         commandName: "spacese2e", abstract: "Manual real-system test helpers for Spaces.",
         subcommands: [
             SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
-            ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, SelectWorkspaceDetailCommand.self,
-            OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self, RestartWorkspaceProcessCommand.self,
-            LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
-            HideWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self,
-            SetWorkspaceAgentLaunchersCommand.self, ClearWorkspaceAgentWindowsCommand.self, SetWorkspaceStopScriptCommand.self,
-            AddWorkspaceProcessCommand.self, RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self,
+            ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, TriggerComputeHostUpgradeCommand.self,
+            SelectWorkspaceDetailCommand.self, OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self,
+            RestartWorkspaceProcessCommand.self, LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self,
+            ArchiveWorkspaceCommand.self, HideWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self,
+            SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self, ClearWorkspaceAgentWindowsCommand.self,
+            SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self, RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self,
             FocusWorkspaceWindowIndexCommand.self, CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self,
             RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self,
             CloseTerminalSessionWindowCommand.self, FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
@@ -173,6 +173,20 @@ private struct ShowWindowIssueModalCommand: ParsableCommand {
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.showWindowIssueModal, object: try IPCNotification.currentObject(), userInfo: userInfo, options: [.deliverImmediately])
         try emitJSON(["success": true])
+    }
+}
+
+private struct TriggerComputeHostUpgradeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "trigger-compute-host-upgrade")
+
+    @Option(name: .long) var hostID: String
+
+    func run() throws {
+        let trimmedHostID = try required(hostID, label: "host-id")
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.triggerComputeHostUpgrade, object: try IPCNotification.currentObject(),
+            userInfo: [IPCNotification.computeHostIDUserInfoKey: trimmedHostID], options: [.deliverImmediately])
+        try emitJSON(["success": "true", "hostID": trimmedHostID])
     }
 }
 
@@ -1047,6 +1061,9 @@ private struct RemoteComputeHostSmokeCommand: ParsableCommand {
     @Option(name: .long) var daemonHost: String?
     @Option(name: .long) var daemonPort: Int = ComputeHostDraftBuilder.defaultDaemonPort
     @Option(name: .long) var authToken: String?
+    @Option(name: .long) var managedArtifactID: String?
+    @Option(name: .long) var managedArtifactURL: String?
+    @Option(name: .long) var managedArtifactSHA256: String?
     @Option(name: .long) var timeoutSeconds: Double = 45
 
     func run() throws {
@@ -1060,8 +1077,7 @@ private struct RemoteComputeHostSmokeCommand: ParsableCommand {
         let host = try initialHost(orchestrator: orchestrator)
         let explicitToken = normalizedOptional(authToken)
         let token = explicitToken ?? ComputeHostCredentialStore.generateAuthToken()
-        let outcome = try ComputeHostBootstrapper().startSpacesDaemon(
-            host: host, authToken: token, timeout: timeoutSeconds, cleanExistingProfile: true)
+        let outcome = try bootstrapper().startSpacesDaemon(host: host, authToken: token, timeout: timeoutSeconds, cleanExistingProfile: true)
         let readyHost = host.updatedForBootstrap(outcome)
         let status = try ping(host: readyHost, authToken: token)
         try orchestrator.upsertComputeHost(readyHost)
@@ -1106,6 +1122,34 @@ private struct RemoteComputeHostSmokeCommand: ParsableCommand {
             daemonEndpoint: SpacesDaemonEndpoint(
                 host: endpointHost, port: try validPort(daemonPort, label: "daemon-port"),
                 certificateFingerprint: existing?.daemonEndpoint.certificateFingerprint ?? ""), createdAt: existing?.createdAt ?? now, updatedAt: now)
+    }
+
+    private func bootstrapper() throws -> ComputeHostBootstrapper {
+        let artifactID = normalizedOptional(managedArtifactID)
+        let artifactURL = normalizedOptional(managedArtifactURL)
+        let artifactSHA256 = normalizedOptional(managedArtifactSHA256)
+        let providedValues = [artifactID, artifactURL, artifactSHA256].compactMap { $0 }
+        guard providedValues.count == 0 || providedValues.count == 3 else {
+            throw ValidationError(
+                "Provide --managed-artifact-id, --managed-artifact-url, and --managed-artifact-sha256 together to override the remote artifact source."
+            )
+        }
+        guard let artifactID, let artifactURL, let artifactSHA256 else { return ComputeHostBootstrapper() }
+
+        let archiveName = {
+            guard let lastPathComponent = URL(string: artifactURL)?.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines),
+                !lastPathComponent.isEmpty
+            else { return "\(artifactID).tar.gz" }
+            return lastPathComponent
+        }()
+        let manifest = RemoteSpacesArtifactManifest(
+            appVersion: AppVersion.current, releaseTag: "v\(AppVersion.current)",
+            artifacts: [
+                RemoteSpacesArtifact(
+                    id: artifactID, version: AppVersion.current, platform: "", architecture: "", archiveName: archiveName, url: artifactURL,
+                    sha256: artifactSHA256)
+            ])
+        return ComputeHostBootstrapper(artifactManifestProvider: { manifest })
     }
 
     private func ping(host: ComputeHostRecord, authToken: String) throws -> TerminalServiceResponse {

@@ -59,7 +59,7 @@ export default function WorkspaceLifecycleDocsPage() {
           <li>• Restart is stop followed by launch.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          For scripts and coding agents, <code>spaces start</code> is the idempotent way to make sure a workspace is running: it launches when stopped and restarts any exited processes when already running. Use <code>spaces restart</code> to stop and relaunch unconditionally; use the Mac app to foreground tracked workspace windows.
+          For scripts and coding agents, <code>spaces workspace start --workspace &lt;id&gt;</code> is the idempotent way to make sure a workspace is running: it launches when stopped and restarts any exited processes when already running. Use <code>spaces workspace restart --workspace &lt;id&gt;</code> to stop and relaunch unconditionally; use the Mac app to foreground tracked workspace windows.
         </p>
       </article>
 

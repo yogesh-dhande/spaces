@@ -116,7 +116,7 @@ When the app launches built-in Spaces terminals itself, `spacesd` owns the sessi
 - Launch a coding agent from the workspace detail pane.
 
 Close one of those owner windows and reopen it from the app. Quit and relaunch `SpacesApp`, then reopen the same session from the app. The shell or long-running process should stay attached to the same service-owned Ghostty session without restarting.
-CLI-created sessions such as `spaces terminal command` and CLI-managed `spaces start` use the same daemon-owned render-frame stream. The service publishes live Ghostty render frames to native client windows over the per-session subscription socket, while `output.log` remains the `spaces terminal tail` source.
+CLI-created sessions such as `spaces terminal command` and CLI-managed `spaces workspace start --workspace <id>` use the same daemon-owned render-frame stream. The service publishes live Ghostty render frames to native client windows over the per-session subscription socket, while `output.log` remains the `spaces terminal tail` source.
 For scripted real-system checks against the running app, `spacese2e` exposes `open-workspace-terminal`, `run-workspace-process`, and `launch-workspace-agent` so the manual harness can exercise the same app launch path without accessibility scripting.
 
 To verify the embedded Ghostty backend on an isolated database root:
@@ -153,21 +153,21 @@ apps/macos/Tests/e2e_mobile.sh
 
 The mobile suite builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack with a local Beacon workspace and a remote Scout workspace, and then runs selected scenarios against the local project and remote-compatible scenarios against the remote project. Codex-backed scenarios run on the local target because they use the local signed-in Codex CLI and generated Codex home. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, `--keep-root` to preserve the shared demo root, and `--port <port>` to pin the daemon bridge port. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again. The `app-recovery` scenario kills only the current-profile `SpacesApp` owner, sends `launchSpacesApp` through the authenticated daemon bridge, and verifies the spacesd daemon PID and live session remain stable.
 
-The mobile E2E suite requires remote compute-host configuration. The macOS and mobile E2E scripts load `.env` by default before reading remote settings; use `SPACES_ENV_FILE=<path>` for another env file or `SPACES_SKIP_ENV_FILE=1` to ignore it. Set `SPACES_E2E_REMOTE_SSH_HOST`, optional `SPACES_E2E_REMOTE_SSH_USER`, optional `SPACES_E2E_REMOTE_SSH_PORT`, `SPACES_E2E_REMOTE_DAEMON_HOST`, optional `SPACES_E2E_REMOTE_DAEMON_PORT`, optional `SPACES_E2E_REMOTE_AUTH_TOKEN`, optional `SPACES_E2E_REMOTE_WORKSPACE_ROOT`, optional `SPACES_E2E_REMOTE_GIT_ROOT`, optional `SPACES_E2E_REMOTE_HOST_ID`, and optional `SPACES_E2E_REMOTE_NAME` when running against a real host. The shared demo deploys the Linux `spacesd` E2E artifact to the remote host, prepares the remote Git origin, registers the compute host through `spacese2e remote-compute-host-smoke`, and keeps both companion sessions live while scenario-specific sessions are created and cleaned up.
+The mobile E2E suite requires remote compute-host configuration. The macOS and mobile E2E scripts load `.env` by default before reading remote settings; use `SPACES_ENV_FILE=<path>` for another env file or `SPACES_SKIP_ENV_FILE=1` to ignore it. Set `SPACES_E2E_REMOTE_SSH_HOST`, optional `SPACES_E2E_REMOTE_SSH_USER`, optional `SPACES_E2E_REMOTE_SSH_PORT`, `SPACES_E2E_REMOTE_DAEMON_HOST`, optional `SPACES_E2E_REMOTE_DAEMON_PORT`, optional `SPACES_E2E_REMOTE_AUTH_TOKEN`, optional `SPACES_E2E_REMOTE_WORKSPACE_ROOT`, optional `SPACES_E2E_REMOTE_GIT_ROOT`, optional `SPACES_E2E_REMOTE_HOST_ID`, and optional `SPACES_E2E_REMOTE_NAME` when running against a real host. The shared demo prepares the matching managed Linux `spacesd` artifact, uploads it to the remote host, prepares the remote Git origin, registers the compute host through `spacese2e remote-compute-host-smoke`, and keeps both companion sessions live while scenario-specific sessions are created and cleaned up.
 
 Remote mobile terminal latency sweeps use `spacese2e terminal-service-tls-session` for direct daemon commands so input and scroll samples reuse one pinned-TLS command connection while a separate direct subscribe stream observes render visibility. The sweep reports `direct_command_request` for the direct daemon round trip and validates that each direct command receives the expected response shape before recording the sample.
 
 The daemon-hosted mobile bridge is the first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spacese2e mobile-serve` is available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spacese2e mobile-request` so local scripts use the same TLS-PSK transport as the iOS app. Standalone bridge processes reject daemon-only recovery commands such as `launchSpacesApp`.
 
-Remote compute-host E2E coverage uses a reachable host where the suite can install the matching Linux `spacesd` artifact over SSH. App-level remote E2E uses the Ubuntu 24.04 x86_64 daemon artifact named `spacesd-ubuntu-24.04-x86_64.tar.gz`. Compute-host bootstrap, status, and test automation belongs in `spacese2e` so the product `spaces` CLI remains workspace-oriented. Use `upsert-compute-host` and `list-compute-hosts` to seed and inspect host records, `remote-compute-host-smoke` to exercise a configured host, and `plan-workspace-runtime` to inspect the workspace's immutable host binding, daemon target, Remote SSH URI, and runtime manifest.
+Remote compute-host E2E coverage uses a reachable Ubuntu 24.04 host where the suite can upload the matching Linux `spacesd` artifact over SSH. App-level remote E2E supports the managed daemon artifacts `spacesd-ubuntu-24.04-x86_64.tar.gz` and `spacesd-ubuntu-24.04-arm64.tar.gz`, selected from the remote host's probed architecture. Compute-host bootstrap, status, and test automation belongs in `spacese2e` so the product `spaces` CLI remains workspace-oriented. Use `upsert-compute-host` and `list-compute-hosts` to seed and inspect host records, `remote-compute-host-smoke` to exercise a configured host, and `plan-workspace-runtime` to inspect the workspace's immutable host binding, daemon target, Remote SSH URI, and runtime manifest.
 
-Build and install the Linux daemon artifact on the configured remote E2E host:
+Prepare the managed Linux daemon artifact for the configured remote E2E host:
 
 ```bash
 apps/macos/scripts/deploy_linux_spacesd_e2e.sh
 ```
 
-The deploy script loads the same `.env` remote settings used by the E2E suites, builds the Ubuntu 24.04 x86_64 artifact in the Swift Noble Docker image, uploads it over SSH, installs it under `~/.spaces/e2e-tools/spacesd-ubuntu-24.04-x86_64`, and points `~/bin/spacesd` plus `~/bin/spaces` at that install. Remote-capable E2E scripts run this deploy step before remote compute-host provisioning.
+The deploy script loads the same `.env` remote settings used by the E2E suites, probes the remote Ubuntu 24.04 architecture, builds the matching artifact in the Swift Noble Docker image, uploads it over SSH to `~/.spaces/remote-artifact-e2e/`, and prints `artifact_*=` shell exports that the E2E suites feed into `spacese2e remote-compute-host-smoke`. Remote-capable E2E scripts run this preparation step before remote compute-host provisioning.
 
 Clean up the configured remote E2E host:
 
@@ -175,7 +175,7 @@ Clean up the configured remote E2E host:
 apps/macos/scripts/cleanup_linux_spacesd_e2e.sh
 ```
 
-The cleanup script stops E2E-owned remote `spacesd` and workspace processes, stops the configured daemon-port listener when it belongs to the E2E install/profile, removes the `~/bin/spacesd` and `~/bin/spaces` symlinks when they point into the E2E install root, and removes the configured E2E profile, workspace, Git, and tool roots. Remote-capable E2E scripts run this cleanup step from their exit traps.
+The cleanup script stops E2E-owned remote `spacesd` and workspace processes, stops the configured daemon-port listener when it belongs to the E2E managed host/profile, removes uploaded E2E artifacts plus legacy `~/bin/spacesd` and `~/bin/spaces` symlinks when they point into an E2E root, and removes the configured E2E profile, workspace, and Git roots. Remote-capable E2E scripts run this cleanup step from their exit traps.
 
 The lower-level Linux artifact build command is:
 
@@ -184,17 +184,10 @@ docker run --rm --platform linux/amd64 \
   -v "$PWD":/workspace \
   -w /workspace \
   swift:6.2-noble \
-  bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh'
+  bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch x86_64'
 ```
 
-The archive contains `bin/spacesd`, the Swift `bin/spaces` CLI, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. System-level installs can extract the archive and put its `bin` directory on the SSH PATH:
-
-```bash
-sudo tar -xzf spacesd-ubuntu-24.04-x86_64.tar.gz -C /opt
-sudo ln -sfn /opt/spacesd-ubuntu-24.04-x86_64 /opt/spacesd
-sudo ln -sfn /opt/spacesd/bin/spacesd /usr/local/bin/spacesd
-sudo ln -sfn /opt/spacesd/bin/spaces /usr/local/bin/spaces
-```
+Use `--platform linux/arm64` with `--arch arm64` for the Ubuntu arm64 artifact. The archive contains `bin/spacesd`, `bin/spaces`, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. Release builds publish these archives through the signed remote artifact manifest; product setup installs them under `~/.spaces/compute-hosts/<host-id>/daemon/releases/<version>/` through the managed bootstrapper.
 
 For a real SSH smoke that exercises bootstrap, pinned-TLS status, runtime planning, remote terminal launch, and workspace stop through production orchestration:
 
@@ -242,7 +235,9 @@ apps/macos/.build/debug/spacese2e upsert-compute-host \
   --certificate-fingerprint 'SHA256:<fingerprint-hex>'
 ```
 
-The Mac-side host record can be created through the app. Open Remote Hosts from the sidebar, enter the SSH host and SSH user, optionally set a display name, and use Advanced only for SSH port. The remote Mac must accept non-interactive SSH from the Mac with a pinned known-host entry and have `spacesd` discoverable on the SSH PATH. Connect resolves the SSH host, feeds bootstrap input over SSH stdin with strict host checking, has a remote shell wrapper read the token from the first stdin line, creates a stable remote profile under `~/.spaces/compute-hosts/<host-id>`, creates the workspace root, starts the remote listener with an internally selected port, stores the auth token in Keychain, saves the returned certificate fingerprint, and verifies the direct pinned-TLS endpoint before saving the host. Workspaces choose a host at creation time, and that host assignment is immutable. Manual workspace root, daemon host, daemon port, and certificate fingerprint fields are available only through `spacese2e` setup commands.
+The Mac-side host record can be created through the app. Open Remote Hosts from the sidebar, enter the SSH host and SSH user, optionally set a display name, and use Advanced only for SSH port. The remote host must accept non-interactive SSH from the Mac with a pinned known-host entry and provide the required setup tools (`curl`, `tar`, `gzip`, `lsof`, `python3`, `git`, and `sha256sum` or `shasum`). Connect probes the remote platform, verifies the signed remote artifact manifest for the current release, installs the exact matching managed daemon artifact, starts the remote listener with an internally selected port, stores the auth token in Keychain, saves the returned certificate fingerprint, verifies direct pinned-TLS reachability, and checks scoped mobile credential readiness before saving the host. Saved hosts expose Check for daemon status and upgrade state, Reinstall to rerun managed setup for the current build after an idle reachable daemon exits or when SSH setup finds the saved port free, Upgrade for idle managed-daemon replacement, and Uninstall for managed daemon cleanup plus saved host/token removal after idle shutdown or already-unreachable daemon cleanup. Workspaces choose a host at creation time, and that host assignment is immutable. Manual workspace root, daemon host, daemon port, and certificate fingerprint fields are available only through `spacese2e` setup commands.
+
+For real-system automation of the running app's upgrade flow, `spacese2e trigger-compute-host-upgrade --host-id <id>` posts the same UI-controller path used by the Remote Hosts Upgrade button, including the active-session confirmation dialog when the daemon is busy.
 
 For focused terminal latency probes:
 
@@ -534,7 +529,7 @@ apps/macos/Tests/e2e_macos_app.sh
 
 Before the suite launches its isolated app instance, it waits for desktop-global control. A timeout from that wait is an environment-contention result and should be retried without killing unrelated running Spaces instances.
 
-The macOS E2E suite requires remote compute-host configuration. It seeds the shared Beacon, Scout, and Prism fixture repositories, pins Beacon and Prism to the local Mac, deploys the Linux `spacesd` E2E artifact to the remote host, prepares a remote Git origin for Scout, registers the remote host through `spacese2e remote-compute-host-smoke`, and runs the app-level launch, focus, cycling, mixed-workspace, and agent-status assertions with local Beacon and remote Scout workspaces active together.
+The macOS E2E suite requires remote compute-host configuration. It seeds the shared Beacon, Scout, and Prism fixture repositories, pins Beacon and Prism to the local Mac, prepares and uploads the matching managed Linux `spacesd` E2E artifact to the remote host, prepares a remote Git origin for Scout, registers the remote host through `spacese2e remote-compute-host-smoke`, and runs the app-level launch, focus, cycling, mixed-workspace, and agent-status assertions with local Beacon and remote Scout workspaces active together.
 
 To capture a product-demo video from the same suite, record the run with the native `ScreenCaptureKit` helper and optionally add short editing-friendly pauses between visible transitions:
 
@@ -596,18 +591,24 @@ Publish macOS releases to GitHub Releases with:
 scripts/release-and-deploy.sh <version> [build-number]
 ```
 
+Local release runs the Ubuntu remote daemon artifact builds inside Docker for `linux/amd64` and `linux/arm64`, so Docker must be available before running the script.
+
 This workflow:
 - syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
 - builds universal `arm64` + `x86_64` release binaries for the app, CLI, and `spacesd`
+- builds and smoke-tests Ubuntu 24.04 `x86_64` and `arm64` remote daemon artifacts
 - code-signs the app, CLI, and spacesd daemon
+- packages the signed macOS universal remote daemon artifact
 - creates a signed manual-download DMG
 - creates a Sparkle-served `Spaces.app` zip archive
+- signs `spaces-remote-artifacts.json` with the remote artifact Ed25519 key
 - updates `dist/updates/stable/appcast.xml` plus any Sparkle delta files
 - stages the Sparkle feed and Sparkle archives into `apps/web/public/releases`
 - builds the static site so Firebase can serve `https://usespaces.dev/releases/*`
 - optionally notarizes the DMG when `NOTARIZE=1`
 - verifies the final DMG signature plus the bundled installer, app, CLI, and spacesd daemon before publish
 - publishes the DMG to GitHub Releases
+- publishes `spacesd-macos-universal.tar.gz`, `spacesd-ubuntu-24.04-x86_64.tar.gz`, `spacesd-ubuntu-24.04-arm64.tar.gz`, their `.sha256` checksum files, `spaces-remote-artifacts.json`, and `spaces-remote-artifacts.json.sig` to the same GitHub Release
 
 Important environment variables:
 - `CODESIGN_IDENTITY`
@@ -615,6 +616,8 @@ Important environment variables:
 - `CODESIGN_CERTIFICATE_PASSWORD`
 - `SPARKLE_PUBLIC_ED_KEY`
 - `SPARKLE_PRIVATE_ED_KEY`
+- `REMOTE_ARTIFACT_PUBLIC_ED25519_KEY`
+- `REMOTE_ARTIFACT_PRIVATE_ED25519_KEY`
 - `SPARKLE_FEED_URL`
 - `SPARKLE_DOWNLOAD_URL_PREFIX`
 - `NOTARIZE`
