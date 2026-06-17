@@ -35,4 +35,9 @@ final class SidebarOutlineView: NSOutlineView {
         if onArrowNavigation?(1) == true { return }
         super.moveDown(sender)
     }
+
+    // Hide the built-in disclosure triangle while keeping the expand/collapse cell alive
+    // so that collapseItem/expandItem continue to work. The right-side chevron in each row
+    // cell serves as the visible indicator instead.
+    override func frameOfOutlineCell(atRow row: Int) -> NSRect { .zero }
 }

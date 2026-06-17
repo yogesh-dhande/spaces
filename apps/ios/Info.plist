@@ -37,6 +37,8 @@
 	<array>
 		<string>_spaces-mobile._tcp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Spaces uses the camera to scan the QR code from your Mac for pairing.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Spaces connects to your Mac's first-party terminal bridge.</string>
 	<key>UILaunchScreen</key>

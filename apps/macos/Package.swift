@@ -118,6 +118,8 @@ let appTargets: [Target] = [
             "spacesterminalcore",
             "spacesterminalghostty",
             "systembridge",
+            "spacesmobilebridge",
+            "spacesmobilecore",
             .product(name: "ArgumentParser", package: "swift-argument-parser")
         ]
     ),
