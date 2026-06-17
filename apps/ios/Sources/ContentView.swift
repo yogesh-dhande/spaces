@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var pendingAuthenticationMessage: String?
     @State private var terminalListRefreshGeneration = 0
     @State private var isShowingFilters = false
+    @State private var workspaceCreateProjectID: String?
     let model: SpacesMobileAppModel
 
     var body: some View {
@@ -52,14 +53,17 @@ struct ContentView: View {
                 initialSettings: model.settings,
                 initialPairingLink: model.pendingPairingLink,
                 noticeMessage: model.connectionNotice,
-                onPairingLinkConsumed: { model.clearPendingPairingLink() }
+                onPairingLinkConsumed: { model.clearPendingPairingLink() },
+                onLaunchSpaces: { await model.launchSpacesAppIfNeeded() }
             ) { settings in
                 model.applyConnectionSettings(settings)
                 Task { await model.refresh() }
             }
         }
-        .sheet(isPresented: workspaceCreateSheetBinding) {
-            WorkspaceCreateSheet(model: model)
+        .sheet(isPresented: workspaceCreateSheetBinding, onDismiss: { workspaceCreateProjectID = nil }) {
+            if let projectID = workspaceCreateProjectID {
+                WorkspaceCreateSheet(model: model, projectID: projectID)
+            }
         }
         .alert(
             "Connection Error",
@@ -166,9 +170,9 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 12) {
+                    LazyVStack(spacing: 16) {
                         homeControls
-                        if model.workspaceGroups.isEmpty {
+                        if projectGroups.isEmpty {
                             ContentUnavailableView(
                                 "No Workspaces",
                                 systemImage: "rectangle.stack",
@@ -176,8 +180,13 @@ struct ContentView: View {
                             )
                             .frame(maxWidth: .infinity, minHeight: 360)
                         } else {
-                            ForEach(model.workspaceGroups) { group in
-                                workspaceCard(group)
+                            ForEach(projectGroups) { pg in
+                                VStack(spacing: 8) {
+                                    projectHeader(pg)
+                                    ForEach(pg.workspaceGroups) { group in
+                                        workspaceCard(group)
+                                    }
+                                }
                             }
                         }
                     }
@@ -193,6 +202,45 @@ struct ContentView: View {
             }
         }
         .background(Theme.bg.ignoresSafeArea())
+    }
+
+    private var projectGroups: [ProjectGroup] {
+        var dict: [String: (name: String, groups: [SpacesMobileWorkspaceGroup])] = [:]
+        var order: [String] = []
+        for g in model.workspaceGroups {
+            let pid = g.workspace.projectID
+            if dict[pid] == nil {
+                dict[pid] = (g.workspace.projectName, [])
+                order.append(pid)
+            }
+            dict[pid]!.groups.append(g)
+        }
+        return order.compactMap { pid in
+            guard let entry = dict[pid] else { return nil }
+            return ProjectGroup(projectID: pid, projectName: entry.name, workspaceGroups: entry.groups)
+        }
+    }
+
+    private func projectHeader(_ pg: ProjectGroup) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(pg.projectName.uppercased())
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.mutedSecondary)
+                .tracking(0.4)
+            Spacer(minLength: 0)
+            Button {
+                workspaceCreateProjectID = pg.projectID
+                model.isShowingWorkspaceCreateSheet = true
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.isMutating)
+            .accessibilityLabel("New Workspace in \(pg.projectName)")
+        }
+        .padding(.horizontal, 4)
     }
 
     private var homeControls: some View {
@@ -265,6 +313,25 @@ struct ContentView: View {
                     .foregroundStyle(Theme.muted)
                     .padding(.init(top: 10, leading: 14, bottom: 10, trailing: 14))
             }
+            RowDivider(inset: 0)
+            Button {
+                pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.accent)
+                    Text("New Terminal")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.accent)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.plain)
+            .disabled(model.isMutating)
+            .accessibilityLabel("New Terminal")
         }
     }
 
@@ -275,27 +342,6 @@ struct ContentView: View {
 
     @ToolbarContentBuilder private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
-            Button {
-                Task { await model.launchSpacesAppIfNeeded() }
-            } label: {
-                if model.isLaunchingSpacesApp {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Label("Launch Spaces on Mac", systemImage: "macwindow")
-                }
-            }
-            .disabled(!model.settings.isPaired || model.isLaunchingSpacesApp)
-            .accessibilityLabel("Launch Spaces on Mac")
-            .accessibilityIdentifier("toolbar.launchSpacesApp")
-
-            Button {
-                model.isShowingWorkspaceCreateSheet = true
-            } label: {
-                Label("New Workspace", systemImage: "plus")
-            }
-            .disabled(model.overview?.projects.isEmpty ?? true)
-
             Button {
                 Task { await model.refresh() }
             } label: {
@@ -316,33 +362,18 @@ struct ContentView: View {
     }
 
     private func workspaceHeader(_ group: SpacesMobileWorkspaceGroup) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(group.workspace.projectName.uppercased())
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.mutedSecondary)
-                    .tracking(0.4)
-                Text(group.workspace.title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1)
-                Text(group.workspace.dir)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Theme.mutedSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer(minLength: 0)
-            Button {
-                pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace)
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 13, weight: .semibold))
-            }
-            .buttonStyle(.borderless)
-            .disabled(model.isMutating)
-            .accessibilityLabel("Open Workspace Terminal")
+        VStack(alignment: .leading, spacing: 2) {
+            Text(group.workspace.title)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+            Text(group.workspace.dir)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Theme.mutedSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.init(top: 12, leading: 14, bottom: 12, trailing: 14))
     }
 
@@ -615,87 +646,39 @@ private struct TerminalLaunchPendingView: View {
 }
 
 private struct WorkspaceCreateSheet: View {
-    private enum BranchMode: String, CaseIterable, Identifiable {
-        case create
-        case existing
-
-        var id: String { rawValue }
-
-        var label: String {
-            switch self {
-            case .create: "Create"
-            case .existing: "Existing"
-            }
-        }
-    }
-
     @Environment(\.dismiss) private var dismiss
     let model: SpacesMobileAppModel
+    let projectID: String
 
-    @State private var selectedProjectID = ""
-    @State private var title = ""
-    @State private var branchMode: BranchMode = .create
     @State private var branch = ""
-    @State private var targetBranch = ""
-    @State private var directoryName = ""
+    @State private var name = ""
 
-    private var projects: [SpacesMobileProjectSummary] {
-        let optionProjects = model.workspaceCreateOptions?.projects ?? []
-        return optionProjects.isEmpty ? (model.overview?.projects ?? []) : optionProjects
+    private var project: SpacesMobileProjectSummary? {
+        let projects = model.workspaceCreateOptions?.projects ?? model.overview?.projects ?? []
+        return projects.first(where: { $0.id == projectID })
     }
 
-    private var selectedProject: SpacesMobileProjectSummary? {
-        projects.first(where: { $0.id == selectedProjectID }) ?? projects.first
-    }
-
-    private var branchOptions: [String] { model.workspaceCreateOptions?.branchOptions ?? [] }
+    private var isGitRepo: Bool { project?.isGitRepo == true }
 
     private var canCreate: Bool {
-        guard selectedProject != nil, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        guard selectedProject?.isGitRepo == true else { return true }
-        return !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !targetBranch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if isGitRepo {
+            return !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    Picker("Project", selection: $selectedProjectID) {
-                        ForEach(projects) { project in
-                            Text(project.name).tag(project.id)
-                        }
-                    }
-                    TextField("Title", text: $title)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                }
-
-                if selectedProject?.isGitRepo == true {
-                    Section {
-                        Picker("Branch", selection: $branchMode) {
-                            ForEach(BranchMode.allCases) { mode in
-                                Text(mode.label).tag(mode)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-
-                        if branchMode == .existing, !branchOptions.isEmpty {
-                            Picker("Existing branch", selection: $branch) {
-                                ForEach(branchOptions, id: \.self) { option in
-                                    Text(option).tag(option)
-                                }
-                            }
-                        } else {
-                            TextField(branchMode == .existing ? "Existing branch" : "Branch name", text: $branch)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                        }
-
-                        TextField("Target branch", text: $targetBranch)
+                if isGitRepo {
+                    Section("Branch") {
+                        TextField("new branch name", text: $branch)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                        TextField("Directory name", text: $directoryName)
+                    }
+                } else {
+                    Section("Name") {
+                        TextField("workspace name", text: $name)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                     }
@@ -709,54 +692,31 @@ private struct WorkspaceCreateSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button(model.isMutating ? "Creating..." : "Create") {
                         Task {
+                            let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
                             await model.createWorkspace(
-                                projectID: selectedProject?.id ?? selectedProjectID,
-                                title: title,
-                                branch: selectedProject?.isGitRepo == true ? trimmed(branch) : nil,
-                                targetBranch: selectedProject?.isGitRepo == true ? trimmed(targetBranch) : nil,
-                                directoryName: selectedProject?.isGitRepo == true ? trimmed(directoryName) : nil,
-                                allowExistingBranchReuse: branchMode == .existing)
+                                projectID: projectID,
+                                title: isGitRepo ? trimmedBranch : trimmedName,
+                                branch: isGitRepo ? trimmedBranch : nil,
+                                targetBranch: isGitRepo ? project?.defaultBranch : nil,
+                                directoryName: nil,
+                                allowExistingBranchReuse: false
+                            )
                         }
                     }
                     .disabled(!canCreate || model.isMutating)
                 }
             }
             .task {
-                if selectedProjectID.isEmpty {
-                    selectedProjectID = model.overview?.projects.first?.id ?? ""
-                }
-                await model.loadWorkspaceCreateOptions(projectID: selectedProjectID.isEmpty ? nil : selectedProjectID)
-                applyProjectDefaults()
+                await model.loadWorkspaceCreateOptions(projectID: projectID)
             }
-            .onChange(of: selectedProjectID) { _, newValue in
-                Task {
-                    await model.loadWorkspaceCreateOptions(projectID: newValue)
-                    applyProjectDefaults()
-                }
-            }
-            .onChange(of: branchMode) { _, _ in applyBranchModeDefaults() }
         }
     }
+}
 
-    private func applyProjectDefaults() {
-        if selectedProjectID.isEmpty {
-            selectedProjectID = projects.first?.id ?? ""
-        }
-        if targetBranch.isEmpty {
-            targetBranch = selectedProject?.defaultBranch ?? branchOptions.first ?? ""
-        }
-        applyBranchModeDefaults()
-    }
-
-    private func applyBranchModeDefaults() {
-        guard selectedProject?.isGitRepo == true else { return }
-        if branchMode == .existing, branch.isEmpty {
-            branch = branchOptions.first ?? ""
-        }
-    }
-
-    private func trimmed(_ value: String) -> String? {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
+private struct ProjectGroup: Identifiable {
+    let projectID: String
+    let projectName: String
+    let workspaceGroups: [SpacesMobileWorkspaceGroup]
+    var id: String { projectID }
 }

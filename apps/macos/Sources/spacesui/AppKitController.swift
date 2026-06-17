@@ -227,6 +227,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var visibleWorkspaceDetailRefreshWorkspaceID: String?
     private var workspaceSetupDetailRefreshTimer: Timer?
     private var workspaceSetupDetailRefreshWorkspaceID: String?
+    private weak var workspaceSetupLogTextView: NSTextView?
     private var commandPalettePanel: NSPanel?
     private var commandPaletteSearchField: NSSearchField?
     private var commandPaletteTableView: NSTableView?
@@ -2730,6 +2731,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         for (offset, target) in targets.enumerated() {
             let index = offset + 1
+            guard index <= 10 else { break }
             switch target.kind {
             case .browser: if let targetURL = target.targetURL, !targetURL.isEmpty { browserSessionsByURL[targetURL] = index }
             case .process:
@@ -2995,8 +2997,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
             sectionHeader.topAnchor.constraint(equalTo: alertsRow.bottomAnchor, constant: 10),
 
-            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
-            scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
+            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
             scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
@@ -3284,8 +3285,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 itemsStack.translatesAutoresizingMaskIntoConstraints = false
 
                 for entry in group.items {
-                    let shortcut = shortcutCounter <= 9 ? windowShortcutBadgeText(index: shortcutCounter) : ""
-                    if shortcutCounter <= 9, let focusRequest = entry.focusRequest { alertsFocusRequestMap[shortcutCounter] = focusRequest }
+                    let shortcut = shortcutCounter <= 10 ? windowShortcutBadgeText(index: shortcutCounter) : ""
+                    if shortcutCounter <= 10, let focusRequest = entry.focusRequest { alertsFocusRequestMap[shortcutCounter] = focusRequest }
                     shortcutCounter += 1
                     let cardAction: (() async -> Void)?
                     if let focusRequest = entry.focusRequest {
@@ -3643,6 +3644,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return
         }
         if setupState.status != .running { stopWorkspaceSetupDetailRefreshTimer() }
+        // While still running and the detail view is already on screen, update only the log text in-place
+        // to avoid rebuilding the full view hierarchy (which causes flickering and resets scroll position).
+        if setupState.status == .running, let logTextView = workspaceSetupLogTextView {
+            let text = setupState.logPath.flatMap { Self.workspaceSetupLogTail(path: $0, maxBytes: 16_384) } ?? ""
+            let scrollView = logTextView.enclosingScrollView
+            let nearBottom =
+                scrollView.map { sv in
+                    let docHeight = sv.documentView?.frame.height ?? 0
+                    return sv.contentView.bounds.maxY >= docHeight - 40
+                } ?? true
+            logTextView.string = text.isEmpty ? "No setup log output." : text
+            if nearBottom { Task { @MainActor [weak logTextView] in logTextView?.scrollToEndOfDocument(nil) } }
+            return
+        }
         prepareWorkspaceDetailContainer(workspaceID: workspace.id)
         showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState)
     }
@@ -4754,12 +4769,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         headerRow.addArrangedSubview(headerIcon)
         headerRow.addArrangedSubview(headerTitle)
 
-        let headerSubtitle = NSTextField(labelWithString: "Create a new workspace for \(project.name).")
-        headerSubtitle.font = .systemFont(ofSize: 12)
-        headerSubtitle.textColor = .secondaryLabelColor
-
         stack.addArrangedSubview(headerRow)
-        stack.addArrangedSubview(headerSubtitle)
 
         // --- Fields ---
         let nameField = NSTextField(string: "")
@@ -4886,12 +4896,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             customizeStack = customStack
         }
 
-        let card = formSectionCard(
-            icon: "plus.rectangle.on.folder", title: "Workspace",
-            subtitle: project.isGitRepo ? "Configure branch, title, and directory for your new workspace." : "Title your new workspace.",
-            contentViews: [contentStack])
-        stack.addArrangedSubview(card)
-        constrainFormFieldToFillWidth(card, in: stack)
+        stack.addArrangedSubview(contentStack)
+        constrainFormFieldToFillWidth(contentStack, in: stack)
 
         // --- Buttons ---
         let createButton = actionButton(
@@ -4966,6 +4972,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showingAlerts = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
+        workspaceSetupLogTextView = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
@@ -5379,7 +5386,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let text = path.flatMap { Self.workspaceSetupLogTail(path: $0, maxBytes: 16_384) } ?? ""
         textView.string = text.isEmpty ? "No setup log output." : text
         textView.setAccessibilityIdentifier("workspace-setup-log-tail")
-        let scrollView = scrollableTextView(textView, height: 160)
+        workspaceSetupLogTextView = textView
+        let scrollView = scrollableTextView(textView, height: 240)
         Task { @MainActor [weak textView] in textView?.scrollToEndOfDocument(nil) }
         return scrollView
     }
@@ -7040,11 +7048,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let window = pairingWindow, window.expiresAt > Date() {
             rows.append(mobilePairingInstructionLabel("Scan this QR code with the Spaces app on your phone to pair it."))
             rows.append(mobileQRCodeView(link: window.linkString))
-            rows.append(mobilePairingCodeRow(code: window.code, expiresAt: window.expiresAt))
-            let newCodeButton = actionButton(
-                title: "New Code", symbol: "arrow.clockwise", tooltip: "Replace the current code with a fresh one",
-                action: #selector(openMobilePairingWindow), primary: false)
-            rows.append(mobilePanelButtonRow([newCodeButton]))
+            let countdownLabel = NSTextField(labelWithString: mobileCountdownText(expiresAt: window.expiresAt))
+            countdownLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+            countdownLabel.textColor = .secondaryLabelColor
+            let refreshButton = NSButton(title: "", target: self, action: #selector(openMobilePairingWindow))
+            refreshButton.bezelStyle = .texturedRounded
+            refreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "New Code")
+            refreshButton.imagePosition = .imageOnly
+            refreshButton.toolTip = "Replace the current code with a fresh one"
+            let timerRow = NSStackView(views: [countdownLabel, refreshButton])
+            timerRow.orientation = .horizontal
+            timerRow.alignment = .centerY
+            timerRow.spacing = 6
+            timerRow.translatesAutoresizingMaskIntoConstraints = false
+            let timerContainer = NSView()
+            timerContainer.translatesAutoresizingMaskIntoConstraints = false
+            timerContainer.addSubview(timerRow)
+            NSLayoutConstraint.activate([
+                timerRow.centerXAnchor.constraint(equalTo: timerContainer.centerXAnchor),
+                timerRow.topAnchor.constraint(equalTo: timerContainer.topAnchor),
+                timerRow.bottomAnchor.constraint(equalTo: timerContainer.bottomAnchor),
+            ])
+            rows.append(timerContainer)
         } else {
             rows.append(mobilePairingInstructionLabel("Start pairing to show a QR code you can scan with the Spaces app on your phone."))
             let pairButton = actionButton(
@@ -7064,24 +7089,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         label.textColor = .secondaryLabelColor
         label.maximumNumberOfLines = 0
         return label
-    }
-
-    private func mobilePairingCodeRow(code: String, expiresAt: Date) -> NSView {
-        let codeLabel = NSTextField(labelWithString: code)
-        codeLabel.font = .monospacedSystemFont(ofSize: 15, weight: .medium)
-        codeLabel.textColor = Theme.text
-
-        let expiresLabel = NSTextField(labelWithString: "Expires in \(mobileCountdownText(expiresAt: expiresAt))")
-        expiresLabel.font = .systemFont(ofSize: 11)
-        expiresLabel.textColor = .secondaryLabelColor
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 2
-        stack.addArrangedSubview(codeLabel)
-        stack.addArrangedSubview(expiresLabel)
-        return stack
     }
 
     private func mobileQRCodeView(link: String) -> NSView {
@@ -9218,14 +9225,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard eventModifierCarbonFlags(event) == spec.modifiersCarbon else { return nil }
         let keyMap: [UInt16: Int] = [
             UInt16(kVK_ANSI_1): 1, UInt16(kVK_ANSI_2): 2, UInt16(kVK_ANSI_3): 3, UInt16(kVK_ANSI_4): 4, UInt16(kVK_ANSI_5): 5, UInt16(kVK_ANSI_6): 6,
-            UInt16(kVK_ANSI_7): 7, UInt16(kVK_ANSI_8): 8, UInt16(kVK_ANSI_9): 9,
+            UInt16(kVK_ANSI_7): 7, UInt16(kVK_ANSI_8): 8, UInt16(kVK_ANSI_9): 9, UInt16(kVK_ANSI_0): 10,
         ]
         return keyMap[event.keyCode]
     }
 
     private func windowShortcutBadgeText(index: Int) -> String {
-        guard let windowShortcutSpec else { return "⌘\(index)" }
-        return displayShortcut(windowShortcutSpec, keyText: String(index))
+        let keyText = index == 10 ? "0" : String(index)
+        guard let windowShortcutSpec else { return "⌘\(keyText)" }
+        return displayShortcut(windowShortcutSpec, keyText: keyText)
     }
 
     private func selectNextVisibleWorkspace() {
@@ -9765,14 +9773,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let ref = item as? OutlineItemRef else { return nil }
         switch ref.item {
-        case .project(let project): return projectRowCell(project: project, isSelected: selectedProjectID == project.id && selectedWorkspaceID == nil)
-        case .hiddenWorkspaces: return sidebarSectionRowCell(title: "Hidden", isSelected: false)
+        case .project(let project):
+            return projectRowCell(
+                project: project, isSelected: selectedProjectID == project.id && selectedWorkspaceID == nil,
+                isExpanded: outlineView.isItemExpanded(ref))
+        case .hiddenWorkspaces: return sidebarSectionRowCell(title: "Hidden", isSelected: false, isExpanded: outlineView.isItemExpanded(ref))
         case .workspace(let project, let workspace):
             return workspaceRowCell(project: project, workspace: workspace, isSelected: selectedWorkspaceID == workspace.id)
         }
     }
 
-    private func sidebarSectionRowCell(title: String, isSelected: Bool) -> NSTableCellView {
+    private func sidebarSectionRowCell(title: String, isSelected: Bool, isExpanded: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
 
         let rowBackground = NSView()
@@ -9787,24 +9798,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected, isArchived: false)
         titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        rowBackground.addSubview(titleLabel)
+        let chevron = NSImageView()
+        chevron.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+        chevron.contentTintColor = .tertiaryLabelColor
+        chevron.setContentHuggingPriority(.required, for: .horizontal)
+
+        let contentRow = NSStackView()
+        contentRow.orientation = .horizontal
+        contentRow.alignment = .centerY
+        contentRow.spacing = 6
+        contentRow.translatesAutoresizingMaskIntoConstraints = false
+        contentRow.addArrangedSubview(titleLabel)
+        contentRow.addArrangedSubview(NSView())
+        contentRow.addArrangedSubview(chevron)
+
+        rowBackground.addSubview(contentRow)
         cell.addSubview(rowBackground)
         NSLayoutConstraint.activate([
-            rowBackground.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+            rowBackground.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
             rowBackground.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
-            rowBackground.topAnchor.constraint(equalTo: cell.topAnchor, constant: 3),
-            rowBackground.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -3),
+            rowBackground.topAnchor.constraint(equalTo: cell.topAnchor, constant: 2),
+            rowBackground.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -2),
 
-            titleLabel.leadingAnchor.constraint(equalTo: rowBackground.leadingAnchor, constant: 10),
-            titleLabel.trailingAnchor.constraint(equalTo: rowBackground.trailingAnchor, constant: -10),
-            titleLabel.centerYAnchor.constraint(equalTo: rowBackground.centerYAnchor),
+            contentRow.leadingAnchor.constraint(equalTo: rowBackground.leadingAnchor, constant: 10),
+            contentRow.trailingAnchor.constraint(equalTo: rowBackground.trailingAnchor, constant: -10),
+            contentRow.centerYAnchor.constraint(equalTo: rowBackground.centerYAnchor),
         ])
         return cell
     }
 
-    private func projectRowCell(project: ProjectSummary, isSelected: Bool) -> NSTableCellView {
+    private func projectRowCell(project: ProjectSummary, isSelected: Bool, isExpanded: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
 
         let rowBackground = NSView()
@@ -9841,6 +9866,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         settingsButton.setAccessibilityIdentifier("sidebar-project-settings-\(project.id)")
         accessoryStack.addArrangedSubview(settingsButton)
 
+        let chevron = NSImageView()
+        chevron.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+        chevron.contentTintColor = .tertiaryLabelColor
+        chevron.setContentHuggingPriority(.required, for: .horizontal)
+
         let contentRow = NSStackView()
         contentRow.orientation = .horizontal
         contentRow.alignment = .centerY
@@ -9849,19 +9880,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         contentRow.addArrangedSubview(leadingStack)
         contentRow.addArrangedSubview(NSView())
         contentRow.addArrangedSubview(accessoryStack)
+        contentRow.addArrangedSubview(chevron)
 
         rowBackground.addSubview(contentRow)
         cell.addSubview(rowBackground)
         NSLayoutConstraint.activate([
-            rowBackground.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+            rowBackground.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
             rowBackground.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
-            rowBackground.topAnchor.constraint(equalTo: cell.topAnchor, constant: 3),
-            rowBackground.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -3),
+            rowBackground.topAnchor.constraint(equalTo: cell.topAnchor, constant: 2),
+            rowBackground.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -2),
 
             contentRow.leadingAnchor.constraint(equalTo: rowBackground.leadingAnchor, constant: 10),
             contentRow.trailingAnchor.constraint(equalTo: rowBackground.trailingAnchor, constant: -10),
-            contentRow.topAnchor.constraint(equalTo: rowBackground.topAnchor, constant: 5),
-            contentRow.bottomAnchor.constraint(equalTo: rowBackground.bottomAnchor, constant: -5),
+            contentRow.topAnchor.constraint(equalTo: rowBackground.topAnchor, constant: 3),
+            contentRow.bottomAnchor.constraint(equalTo: rowBackground.bottomAnchor, constant: -3),
         ])
         if project.isGitRepo {
             let addButton = sidebarRowIconButton(symbol: "plus", tooltip: "New workspace in \(project.name)", action: #selector(addWorkspace(_:)))
@@ -9970,8 +10002,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
             contentStack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 12),
             contentStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
-            contentStack.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 7),
-            contentStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -7),
+            contentStack.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 5),
+            contentStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -5),
         ])
 
         return cell
@@ -10063,9 +10095,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
         guard let ref = item as? OutlineItemRef else { return 24 }
         switch ref.item {
-        case .project(let project): return selectedProjectID == project.id && selectedWorkspaceID == nil ? 38 : 36
-        case .hiddenWorkspaces: return 32
-        case .workspace(_, let workspace): return workspace.isHidden ? 66 : 52
+        case .project(let project): return selectedProjectID == project.id && selectedWorkspaceID == nil ? 32 : 30
+        case .hiddenWorkspaces: return 28
+        case .workspace(_, let workspace): return workspace.isHidden ? 58 : 44
         }
     }
 
@@ -10209,7 +10241,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func toggleProjectExpanded(projectID: String) {
         guard let row = rowIndex(forProjectID: projectID), let item = outlineView.item(atRow: row) else { return }
-        let isCollapsed = outlineView.isItemExpanded(item)
+        // true when currently expanded (want to collapse); false when currently collapsed (want to expand).
+        // Uses in-memory state instead of isItemExpanded, which may be unreliable when the outline
+        // cell is hidden by indentationPerLevel = 0.
+        let isCollapsed = !(projects.first(where: { $0.id == projectID })?.isCollapsed ?? false)
         let previousProjectID = selectedProjectID
         let previousWorkspaceID = selectedWorkspaceID
         do {
@@ -10384,7 +10419,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }()
 
         let item = commandPaletteFilteredItems[row]
-        let shortcutText = row < 9 ? windowShortcutBadgeText(index: row + 1) : nil
+        let shortcutText = row < 10 ? windowShortcutBadgeText(index: row + 1) : nil
         cell.update(item: item, isSelected: row == commandPaletteSelectedIndex, shortcutText: shortcutText) { [weak self] in
             self?.commandPaletteSelectedIndex = row
             self?.executeSelectedCommandPaletteItem()
